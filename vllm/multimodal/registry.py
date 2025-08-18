@@ -12,8 +12,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer,
                                                cached_tokenizer_from_config)
 from vllm.utils import ClassRegistry
 
-from .cache import (CachedMultiModalInputExchanger,
-                    CachedMultiModalInputReceiver)
+from .cache import BaseMultiModalProcessorCache, MultiModalProcessorOnlyCache
 from .processing import BaseMultiModalProcessor, BaseProcessingInfo
 from .profiling import (BaseDummyInputsBuilder, DummyDecoderData,
                         DummyEncoderData, MultiModalProfiler)
@@ -65,7 +64,7 @@ class MultiModalProcessorFactory(Protocol[_I]):
         info: _I,
         dummy_inputs: BaseDummyInputsBuilder[_I],
         *,
-        cache: Optional[CachedMultiModalInputExchanger] = None,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> BaseMultiModalProcessor[_I]:
         ...
 
@@ -80,7 +79,7 @@ class _ProcessorFactories(Generic[_I]):
         self,
         ctx: InputProcessingContext,
         *,
-        cache: Optional[CachedMultiModalInputExchanger] = None,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ):
         info = self.info(ctx)
         dummy_inputs_builder = self.dummy_inputs(info)
@@ -95,19 +94,6 @@ class MultiModalRegistry:
     def __init__(self) -> None:
         self._processor_factories = ClassRegistry[nn.Module,
                                                   _ProcessorFactories]()
-
-    def enable_mm_input_cache(self, model_config: "ModelConfig") -> bool:
-        """Whether the multi-modal input cache should be enabled.
-        NOTE: This is put under MultiModalRegistry on purpose to respect 
-        text-only mode for multimodal models.
-        """
-
-        if not self.supports_multimodal_inputs(model_config):
-            return False
-
-        mm_config = model_config.get_multimodal_config()
-
-        return mm_config.mm_processor_cache_gb > 0
 
     def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
         """
@@ -139,7 +125,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         *,
-        cache: Optional[CachedMultiModalInputExchanger] = None,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> Mapping[str, int]:
         """
         Get the maximum number of tokens per data item from each modality based
@@ -166,7 +152,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         *,
-        cache: Optional[CachedMultiModalInputExchanger] = None,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> Mapping[str, int]:
         """
         Get the maximum number of tokens per data item from each modality based
@@ -198,7 +184,7 @@ class MultiModalRegistry:
         Get the maximum number of tokens from each modality
         for profiling the memory usage of a model.
         """
-        cache = CachedMultiModalInputReceiver(model_config)
+        cache = MultiModalProcessorOnlyCache(model_config)
         mm_limits = self.get_mm_limits_per_prompt(model_config, cache=cache)
         max_tokens_per_item = self.get_max_tokens_per_item_by_modality(
             model_config,
@@ -222,7 +208,7 @@ class MultiModalRegistry:
         self,
         model_config: "ModelConfig",
         *,
-        cache: Optional[CachedMultiModalInputExchanger] = None,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> Mapping[str, int]:
         """
         Get the maximum number of multi-modal input instances for each modality
@@ -299,7 +285,7 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
         *,
         tokenizer: Optional[AnyTokenizer] = None,
-        cache: Optional[CachedMultiModalInputExchanger] = None,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> BaseMultiModalProcessor[BaseProcessingInfo]:
         """
         Create a multi-modal processor for a specific model and tokenizer.
@@ -320,7 +306,7 @@ class MultiModalRegistry:
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
         *,
-        cache: Optional[CachedMultiModalInputExchanger] = None,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> DummyDecoderData:
         """
         Create dummy data for profiling the memory usage of a model.
@@ -346,7 +332,7 @@ class MultiModalRegistry:
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
         *,
-        cache: Optional[CachedMultiModalInputExchanger] = None,
+        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> DummyEncoderData:
         """
         Create dummy data for profiling the memory usage of a model.

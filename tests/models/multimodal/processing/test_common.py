@@ -14,7 +14,7 @@ from PIL import Image
 from vllm.config import ModelConfig
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
-from vllm.multimodal.cache import CachedMultiModalInputReceiver
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
@@ -74,7 +74,7 @@ def _test_processing_correctness(
         model_config,
         tokenizer=cached_tokenizer_from_config(model_config),
     )
-    cache = CachedMultiModalInputReceiver(model_config)
+    cache = MultiModalProcessorOnlyCache(model_config)
 
     processing_info = factories.info(ctx)
     supported_mm_limits = processing_info.get_supported_mm_limits()

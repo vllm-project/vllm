@@ -24,7 +24,7 @@ from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                      MultiModalFieldConfig, MultiModalInputs,
                      MultiModalKwargsItem, MultiModalKwargsItems,
-                     PlaceholderRange)
+                     MultiModalKwargsOptionalItems, PlaceholderRange)
 from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
                     MultiModalDataParser)
 
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
-    from .cache import CachedMultiModalInputExchanger
+    from .cache import BaseMultiModalProcessorCache
     from .profiling import BaseDummyInputsBuilder
 
 logger = init_logger(__name__)
@@ -982,7 +982,7 @@ A collection of prompt updates with a similar structure as
 
 
 class MultiModalProcessingInfo(NamedTuple):
-    kwargs: MultiModalKwargsItems
+    kwargs: MultiModalKwargsOptionalItems
     hashes: Optional[MultiModalHashes]
     prompt_updates: MultiModalPromptUpdates
 
@@ -999,7 +999,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         info: _I,
         dummy_inputs: "BaseDummyInputsBuilder[_I]",
         *,
-        cache: Optional["CachedMultiModalInputExchanger"] = None,
+        cache: Optional["BaseMultiModalProcessorCache"] = None,
     ) -> None:
         super().__init__()
 
@@ -1120,6 +1120,20 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         for each multi-modal item.
         """
         raise NotImplementedError
+
+    def _get_mm_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> MultiModalPromptUpdates:
+        unbound_prompt_updates = self._get_prompt_updates(
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            out_mm_kwargs=out_mm_kwargs,
+        )
+
+        return self._bind_and_group_updates(unbound_prompt_updates)
 
     def _find_mm_placeholders(
         self,
@@ -1341,10 +1355,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _get_cache_missing_items(
         self,
-        cache: "CachedMultiModalInputExchanger",
+        cache: "BaseMultiModalProcessorCache",
         mm_data_items: MultiModalDataItems,
         mm_hashes: MultiModalHashes,
-    ) -> tuple[dict[str, list[bool]], MultiModalDataItems]:
+    ) -> MultiModalDataItems:
         mm_is_cached = {
             modality: cache.is_cached(hashes)
             for modality, hashes in mm_hashes.items()
@@ -1362,35 +1376,42 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for modality, idxs in mm_missing_idxs.items()
         }
 
-        return mm_is_cached, self._to_mm_items(mm_missing_data)
+        return self._to_mm_items(mm_missing_data)
 
     def _merge_mm_kwargs(
         self,
-        cache: "CachedMultiModalInputExchanger",
+        cache: "BaseMultiModalProcessorCache",
         mm_hashes: MultiModalHashes,
-        mm_is_cached: dict[str, list[bool]],
         mm_missing_kwargs: MultiModalKwargsItems,
-    ) -> MultiModalKwargsItems:
+        mm_missing_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[MultiModalKwargsOptionalItems, MultiModalPromptUpdates]:
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
-        merged_items = defaultdict[str,
-                                   list[Optional[MultiModalKwargsItem]]](list)
-        for modality, items_is_cached in mm_is_cached.items():
-            for i, item_is_cached in enumerate(items_is_cached):
-                if not item_is_cached:
-                    kw_item = mm_missing_kwargs[modality][
+        merged_kwargs = defaultdict[str,
+                                    list[Optional[MultiModalKwargsItem]]](list)
+        merged_prompt_updates = defaultdict[str, list[BoundPromptUpdate]](list)
+        for modality, hashes in mm_hashes.items():
+            for i, hash in enumerate(hashes):
+                item: Optional[tuple[MultiModalKwargsItem, BoundPromptUpdate]]
+                if not cache.is_cached_item(hash):
+                    kwargs = mm_missing_kwargs[modality][
+                        mm_missing_next_idx[modality]]
+                    prompt_update = mm_missing_prompt_updates[modality][
                         mm_missing_next_idx[modality]]
                     mm_missing_next_idx[modality] += 1
+
+                    item = kwargs, prompt_update
                 else:
-                    kw_item = None
+                    item = None
 
-                kw_item = cache.get_and_update_item(
-                    kw_item,
-                    mm_hashes[modality][i],
-                )
-                merged_items[modality].append(kw_item)
+                kwargs, prompt_update = cache.get_and_update_item(item, hash)
+                merged_kwargs[modality].append(kwargs)
+                merged_prompt_updates[modality].append(prompt_update)
 
-        return MultiModalKwargsItems(merged_items)
+        mm_kwargs = MultiModalKwargsItems(merged_kwargs)
+        mm_prompt_updates = MultiModalPromptUpdates(merged_prompt_updates)
+
+        return mm_kwargs, mm_prompt_updates
 
     def _apply_hf_processor(
         self,
@@ -1423,13 +1444,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                                          tokenization_kwargs)
                      if return_mm_hashes else None)
 
-        unbound_prompt_updates = self._get_prompt_updates(
+        mm_prompt_updates = self._get_mm_prompt_updates(
             mm_data_items,
             hf_processor_mm_kwargs,
             mm_kwargs,
         )
-        mm_prompt_updates = self._bind_and_group_updates(
-            unbound_prompt_updates)
 
         mm_info = MultiModalProcessingInfo(
             kwargs=mm_kwargs,
@@ -1467,7 +1486,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_hashes = self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
                                         tokenization_kwargs)
 
-        mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
+        mm_missing_data_items = self._get_cache_missing_items(
             cache=cache,
             mm_data_items=mm_data_items,
             mm_hashes=mm_hashes,
@@ -1496,20 +1515,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                                        hf_processor_mm_kwargs),
         )
 
-        mm_kwargs = self._merge_mm_kwargs(
-            cache,
-            mm_hashes=mm_hashes,
-            mm_is_cached=mm_is_cached,
-            mm_missing_kwargs=mm_missing_kwargs,
+        mm_missing_prompt_updates = self._get_mm_prompt_updates(
+            mm_missing_data_items,
+            hf_processor_mm_kwargs,
+            mm_missing_kwargs,
         )
 
-        unbound_prompt_updates = self._get_prompt_updates(
-            mm_data_items,
-            hf_processor_mm_kwargs,
-            mm_kwargs,
+        mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
+            cache,
+            mm_hashes=mm_hashes,
+            mm_missing_kwargs=mm_missing_kwargs,
+            mm_missing_prompt_updates=mm_missing_prompt_updates,
         )
-        mm_prompt_updates = self._bind_and_group_updates(
-            unbound_prompt_updates)
 
         mm_info = MultiModalProcessingInfo(
             kwargs=mm_kwargs,
@@ -1617,7 +1634,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _validate_mm_kwargs(
         self,
-        mm_kwargs: MultiModalKwargsItems,
+        mm_kwargs: MultiModalKwargsOptionalItems,
         mm_item_counts: Mapping[str, int],
     ) -> None:
         for modality, item_count in mm_item_counts.items():
@@ -1658,7 +1675,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_items: MultiModalDataItems,
         prompt_ids: list[int],
-        mm_kwargs: MultiModalKwargsItems,
+        mm_kwargs: MultiModalKwargsOptionalItems,
         mm_prompt_updates: MultiModalPromptUpdates,
         is_update_applied: bool,
     ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:

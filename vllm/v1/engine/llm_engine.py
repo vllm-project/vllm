@@ -271,7 +271,7 @@ class LLMEngine:
         self.engine_core.profile(False)
 
     def reset_mm_cache(self):
-        self.processor.mm_input_cache.clear_cache()
+        self.processor.mm_processor_cache.clear_cache()
         self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(self, device: Optional[Device] = None):

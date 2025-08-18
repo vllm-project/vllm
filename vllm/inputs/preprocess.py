@@ -11,7 +11,7 @@ from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.cache import CachedMultiModalInputExchanger
+from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                                     MultiModalInputs)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -33,14 +33,14 @@ class InputPreprocessor:
         model_config: ModelConfig,
         tokenizer: Optional[TokenizerGroup],
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
-        mm_input_cache: Optional[CachedMultiModalInputExchanger] = None,
+        mm_processor_cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> None:
         super().__init__()
 
         self.model_config = model_config
         self.tokenizer = tokenizer
         self.mm_registry = mm_registry
-        self.mm_input_cache = mm_input_cache
+        self.mm_processor_cache = mm_processor_cache
 
     def get_tokenizer_group(self) -> TokenizerGroup:
         if self.tokenizer is None:
@@ -268,7 +268,7 @@ class InputPreprocessor:
         mm_processor = self.mm_registry.create_processor(
             self.model_config,
             tokenizer=tokenizer,
-            cache=self.mm_input_cache,
+            cache=self.mm_processor_cache,
         )
 
         if mm_processor_kwargs is None:
@@ -298,7 +298,7 @@ class InputPreprocessor:
         mm_processor = self.mm_registry.create_processor(
             self.model_config,
             tokenizer=tokenizer,
-            cache=self.mm_input_cache,
+            cache=self.mm_processor_cache,
         )
 
         if mm_processor_kwargs is None:

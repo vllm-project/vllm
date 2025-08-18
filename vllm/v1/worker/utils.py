@@ -10,7 +10,7 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import ModelConfig, SchedulerConfig
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.multimodal.cache import CachedMultiModalInputExchanger
+from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
@@ -29,7 +29,7 @@ class MultiModalBudget:
         scheduler_config: SchedulerConfig,
         mm_registry: MultiModalRegistry,
         *,
-        cache: Optional[CachedMultiModalInputExchanger],
+        cache: Optional[BaseMultiModalProcessorCache],
     ) -> None:
         super().__init__()
 

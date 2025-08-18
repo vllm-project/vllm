@@ -11,8 +11,7 @@ from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.cache import (CachedMultiModalInputDisabled,
-                                   CachedMultiModalInputExchanger)
+from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
@@ -48,14 +47,14 @@ class Processor:
             self.model_config.try_get_generation_config())
 
         self.mm_registry = mm_registry
-        self.mm_input_cache = CachedMultiModalInputExchanger.for_p0(
+        self.mm_processor_cache = processor_cache_from_config(
             vllm_config, mm_registry)
 
         self.input_preprocessor = InputPreprocessor(
             self.model_config,
             self.tokenizer,
             mm_registry,
-            mm_input_cache=self.mm_input_cache,
+            mm_processor_cache=self.mm_processor_cache,
         )
 
     def _validate_logprobs(
@@ -254,9 +253,8 @@ class Processor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
-        return_mm_hashes = (
-            not isinstance(self.mm_input_cache, CachedMultiModalInputDisabled)
-            or bool(self.cache_config.enable_prefix_caching))
+        return_mm_hashes = (self.mm_processor_cache is not None
+                            or bool(self.cache_config.enable_prefix_caching))
         processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
             prompt,
             tokenization_kwargs=tokenization_kwargs,

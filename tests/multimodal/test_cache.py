@@ -1,20 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Optional, cast
 
 import numpy as np
 import pytest
 import torch
 
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
-from vllm.multimodal.cache import (CachedMultiModalInputExchanger,
-                                   MultiModalCache,
-                                   MultiModalCacheItemMetadata)
+from vllm.multimodal.cache import (MultiModalCache,
+                                   processor_cache_from_config,
+                                   receiver_cache_from_config)
 from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargsItem,
+                                    MultiModalKwargsItemProxy,
                                     MultiModalKwargsItems,
                                     MultiModalSharedField)
+from vllm.multimodal.processing import PromptInsertion
 from vllm.multimodal.registry import MultiModalRegistry
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 def _dummy_elem(
@@ -77,7 +80,12 @@ def test_cache_item_size(item, expected_size):
     cache[""] = item
     assert cache.currsize == expected_size
 
-    cache[""] = MultiModalCacheItemMetadata.wraps(item)
+    # Should not be used since there is nothing to convert to text
+    mock_tokenizer = cast(AnyTokenizer, object())
+    prompt_update = PromptInsertion("dummy", "target", "insertion") \
+        .bind(mock_tokenizer)
+
+    cache[""] = MultiModalKwargsItemProxy.from_item(item, prompt_update)
     assert cache.currsize == expected_size
 
 
@@ -105,10 +113,10 @@ def _compare_caches(
     seed: int = 0,
 ):
     mm_registry = MultiModalRegistry()
-    cache_0_p0 = CachedMultiModalInputExchanger.for_p0(config_0, mm_registry)
-    cache_0_p1 = CachedMultiModalInputExchanger.for_p1(config_0, mm_registry)
-    cache_1_p0 = CachedMultiModalInputExchanger.for_p0(config_1, mm_registry)
-    cache_1_p1 = CachedMultiModalInputExchanger.for_p1(config_1, mm_registry)
+    cache_0_p0 = processor_cache_from_config(config_0, mm_registry)
+    cache_0_p1 = receiver_cache_from_config(config_0, mm_registry)
+    cache_1_p0 = processor_cache_from_config(config_1, mm_registry)
+    cache_1_p1 = receiver_cache_from_config(config_1, mm_registry)
 
     cache_size_gb = max(
         config_0.model_config.mm_processor_cache_gb,
@@ -126,6 +134,11 @@ def _compare_caches(
         for item in all_items
     ]
 
+    # Should not be used since there is nothing to convert to text
+    mock_tokenizer = cast(AnyTokenizer, object())
+    prompt_update = PromptInsertion("dummy", "target", "insertion") \
+        .bind(mock_tokenizer)
+
     for it in range(n_iter):
         num_items_to_select = rng.randint(0, max_items_per_iter)
         item_idxs_to_select = rng.choice(len(all_items), num_items_to_select)
@@ -133,21 +146,36 @@ def _compare_caches(
         selected_items = [all_items[idx] for idx in item_idxs_to_select]
         selected_hashes = [all_hashes[idx] for idx in item_idxs_to_select]
 
-        for _ in range(is_cached_calls_per_iter):
-            cache_0_p0.is_cached(selected_hashes)
-        cache_0_p0_out = cache_0_p0.get_and_update(selected_items,
+        if cache_0_p0 is None:
+            cache_0_p0_out = selected_items
+        else:
+            for _ in range(is_cached_calls_per_iter):
+                cache_0_p0.is_cached(selected_hashes)
+            cache_0_p0_out = [
+                item for item, _ in cache_0_p0.get_and_update(
+                    [(item, prompt_update) for item in selected_items],
+                    selected_hashes,
+                )
+            ]
+
+        if cache_1_p0 is None:
+            cache_1_p0_out = selected_items
+        else:
+            for _ in range(is_cached_calls_per_iter):
+                cache_1_p0.is_cached(selected_hashes)
+            cache_1_p0_out = [
+                item for item, _ in cache_1_p0.get_and_update(
+                    [(item, prompt_update) for item in selected_items],
+                    selected_hashes,
+                )
+            ]
+
+        cache_0_p1_out = cache_0_p1.get_and_update(cache_0_p0_out,
                                                    selected_hashes)
-        cache_1_p0_out = cache_1_p0.get_and_update(cache_0_p0_out,
+        cache_1_p1_out = cache_1_p1.get_and_update(cache_1_p0_out,
                                                    selected_hashes)
 
-        for _ in range(is_cached_calls_per_iter):
-            cache_0_p1.is_cached(selected_hashes)
-        cache_0_p1_out = cache_0_p1.get_and_update(selected_items,
-                                                   selected_hashes)
-        cache_1_p1_out = cache_1_p1.get_and_update(cache_0_p1_out,
-                                                   selected_hashes)
-
-        assert cache_1_p0_out == cache_1_p1_out, f"Failed at {it=}"
+        assert cache_0_p1_out == cache_1_p1_out, f"Failed at {it=}"
 
 
 @pytest.mark.parametrize("is_cached_calls_per_iter", [1, 2, 3])

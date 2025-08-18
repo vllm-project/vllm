@@ -43,8 +43,8 @@ from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import (CachedMultiModalInputExchanger,
-                                   CachedMultiModalInputReceiver)
+from vllm.multimodal.cache import (BaseMultiModalProcessorCache,
+                                   MultiModalProcessorOnlyCache)
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
                                     PlaceholderRange)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
@@ -343,7 +343,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.model_config,
             self.scheduler_config,
             self.mm_registry,
-            cache=CachedMultiModalInputReceiver(self.model_config),
+            cache=MultiModalProcessorOnlyCache(self.model_config),
         ) if self.supports_mm_inputs else None)
         self.reorder_batch_threshold: Optional[int] = None
 
@@ -2212,7 +2212,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         modality: str,
         max_items_per_batch: int,
         *,
-        cache: Optional[CachedMultiModalInputExchanger],
+        cache: Optional[BaseMultiModalProcessorCache],
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
         dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(

@@ -36,7 +36,7 @@ from vllm.logits_process import get_bad_words_logits_processors
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.multimodal.cache import CachedMultiModalInputReceiver
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
@@ -255,7 +255,7 @@ class LLMEngine:
             self.model_config,
             self.tokenizer,
             mm_registry,
-            mm_input_cache=CachedMultiModalInputReceiver(self.model_config),
+            mm_processor_cache=MultiModalProcessorOnlyCache(self.model_config),
         )
 
         self.model_executor = executor_class(vllm_config=vllm_config)

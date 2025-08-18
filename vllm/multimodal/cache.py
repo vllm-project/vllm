@@ -3,43 +3,35 @@
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Generic, Optional, Union
+from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union
 
 import torch
-from typing_extensions import TypeVar, override
+from typing_extensions import override
 
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, LRUCache
 from vllm.utils.jsontree import json_map_leaves, json_reduce_leaves
 
 from .inputs import (MultiModalFieldElem, MultiModalKwargs,
-                     MultiModalKwargsItem, MultiModalKwargsItems,
-                     NestedTensors)
+                     MultiModalKwargsItem, MultiModalKwargsItemProxy,
+                     MultiModalKwargsItems, NestedTensors)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
 
+    from .processing import BoundPromptUpdate
     from .registry import MultiModalRegistry
 
 logger = init_logger(__name__)
 
-
-@dataclass
-class MultiModalCacheItemMetadata:
-    size: int
-
-    @classmethod
-    def wraps(cls, value: "MultiModalCacheValue"):
-        return cls(size=MultiModalCache.get_item_size(value))
-
-
 MultiModalCacheValue = Union[
     MultiModalKwargsItems,
     MultiModalKwargsItem,
+    MultiModalKwargsItemProxy,
     MultiModalKwargs,
     Mapping[str, NestedTensors],
-    MultiModalCacheItemMetadata,
+    "BoundPromptUpdate",
+    tuple[MultiModalKwargsItem, "BoundPromptUpdate"],
 ]
 
 _V = TypeVar("_V", bound=MultiModalCacheValue)
@@ -54,9 +46,6 @@ class MultiModalCache:
         *,
         debug: bool = False,
     ) -> int:
-        if isinstance(leaf, MultiModalFieldElem):
-            return cls.get_item_size(leaf.data)  # type: ignore
-
         # These are not subclasses of dict
         if isinstance(leaf, MultiModalKwargsItems):
             return cls.get_item_size(leaf.data)  # type: ignore
@@ -65,12 +54,20 @@ class MultiModalCache:
         if isinstance(leaf, MultiModalKwargs):
             return cls.get_item_size(leaf.data)  # type: ignore
 
+        if isinstance(leaf, MultiModalFieldElem):
+            return cls.get_item_size(leaf.data)  # type: ignore
+
+        from .processing import BoundPromptUpdate
+
+        if isinstance(leaf, BoundPromptUpdate):
+            return cls.get_leaf_size(leaf.content)
+
+        if isinstance(leaf, MultiModalKwargsItemProxy):
+            return leaf.cache_size
+
         # sys.getsizeof doesn't work for tensors
         if isinstance(leaf, torch.Tensor):
             return leaf.nbytes
-
-        if isinstance(leaf, MultiModalCacheItemMetadata):
-            return leaf.size
 
         return sys.getsizeof(leaf)
 
@@ -107,16 +104,11 @@ class MultiModalCache:
         )
 
 
-_O = TypeVar(
-    "_O",
-    MultiModalKwargsItem,
-    Optional[MultiModalKwargsItem],
-    covariant=True,
-    default=Optional[MultiModalKwargsItem],
-)
+_I = TypeVar("_I", contravariant=True)
+_O = TypeVar("_O", covariant=True)
 
 
-class CachedMultiModalInputExchanger(ABC, Generic[_O]):
+class BaseMultiModalCache(ABC, Generic[_I, _O]):
     """
     Abstract base class to read/write multi-modal items from cache.
 
@@ -141,53 +133,64 @@ class CachedMultiModalInputExchanger(ABC, Generic[_O]):
     up the P0 cache, without having to communicate with P1.
     """
 
-    @staticmethod
-    def for_p0(
-        vllm_config: "VllmConfig",
-        mm_registry: "MultiModalRegistry",
-    ) -> "CachedMultiModalInputExchanger[Optional[MultiModalKwargsItem]]":
-        model_config = vllm_config.model_config
+    @abstractmethod
+    def get_and_update_item(
+        self,
+        mm_item: _I,
+        mm_hash: str,
+    ) -> _O:
+        """
+        Possibly update a multi-modal item based on whether it is
+        in the underlying cache.
+        
+        This update is done out-of-place and updates the cache eviction order.
 
-        if not mm_registry.supports_multimodal_inputs(model_config):
-            return CachedMultiModalInputDisabled()
+        Args:
+            mm_item: The multi-modal item to update.
+            mm_hash: The hash of `mm_item`.
 
-        mm_config = model_config.get_multimodal_config()
-        if mm_config.mm_processor_cache_gb == 0:
-            return CachedMultiModalInputDisabled()
+        Returns:
+            The update multi-modal item.
+        """
+        raise NotImplementedError
 
-        parallel_config = vllm_config.parallel_config
-        supports_ipc_cache = (parallel_config.data_parallel_size == 1
-                              or parallel_config.data_parallel_external_lb)
-        if not supports_ipc_cache:
-            return CachedMultiModalInputReceiver(model_config)
+    def get_and_update(
+        self,
+        mm_items: Sequence[_I],
+        mm_hashes: list[str],
+    ) -> list[_O]:
+        """
+        Possibly update a sequence of multi-modal items based on whether they
+        are in the underlying cache.
 
-        if mm_registry.create_processor(model_config).requires_out_mm_kwargs:
-            # The processed data must be cached inside P0
-            return CachedMultiModalInputReceiver(model_config)
+        This update is done out-of-place and updates the cache eviction order.
 
-        return CachedMultiModalInputSender(model_config)
+        Args:
+            mm_items: The multi-modal items to update.
+            mm_hashes: The hash of each item in `mm_items`.
 
-    @staticmethod
-    def for_p1(
-        vllm_config: "VllmConfig",
-        mm_registry: "MultiModalRegistry",
-    ) -> "CachedMultiModalInputExchanger[MultiModalKwargsItem]":
-        model_config = vllm_config.model_config
+        Returns:
+            A new list of updated multi-modal items.
+        """
+        assert len(mm_items) == len(mm_hashes)
 
-        if not mm_registry.supports_multimodal_inputs(model_config):
-            return CachedMultiModalInputDisabled()
+        return [
+            self.get_and_update_item(mm_item, mm_hash)
+            for mm_item, mm_hash in zip(mm_items, mm_hashes)
+        ]
 
-        mm_config = model_config.get_multimodal_config()
-        if mm_config.mm_processor_cache_gb == 0:
-            return CachedMultiModalInputDisabled()
+    @abstractmethod
+    def clear_cache(self) -> None:
+        """Clear the underlying cache."""
+        raise NotImplementedError
 
-        parallel_config = vllm_config.parallel_config
-        supports_ipc_cache = (parallel_config.data_parallel_size == 1
-                              or parallel_config.data_parallel_external_lb)
-        if not supports_ipc_cache:
-            return CachedMultiModalInputDisabled()
 
-        return CachedMultiModalInputReceiver(model_config)
+class BaseMultiModalProcessorCache(
+        BaseMultiModalCache[
+            Optional[tuple[MultiModalKwargsItem, "BoundPromptUpdate"]],
+            tuple[Optional[MultiModalKwargsItem], "BoundPromptUpdate"],
+        ], ):
+    """The required interface for caches on P0."""
 
     @abstractmethod
     def is_cached_item(self, mm_hash: str) -> bool:
@@ -220,69 +223,59 @@ class CachedMultiModalInputExchanger(ABC, Generic[_O]):
         """
         return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
 
-    @abstractmethod
+
+class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
+    """
+    How to update each item:
+
+    - If the item is in the cache, put the cached data into the item.
+    - If the item is not in the cache, store the data into the cache.
+    """
+
+    def __init__(self, model_config: "ModelConfig") -> None:
+        super().__init__()
+
+        mm_config = model_config.get_multimodal_config()
+
+        self._cache = MultiModalCache.get_lru_cache(
+            mm_config.mm_processor_cache_gb,
+            tuple[MultiModalKwargsItem, "BoundPromptUpdate"],
+        )
+
+    @override
+    def is_cached_item(self, mm_hash: str) -> bool:
+        return mm_hash in self._cache
+
+    @override
     def get_and_update_item(
         self,
-        mm_item: Optional[MultiModalKwargsItem],
+        mm_item: Optional[tuple[MultiModalKwargsItem, "BoundPromptUpdate"]],
         mm_hash: str,
-    ) -> _O:
-        """
-        Possibly update a multi-modal item based on whether it is
-        in the underlying cache.
-        
-        This update is done out-of-place and updates the cache eviction order.
+    ) -> tuple[Optional[MultiModalKwargsItem], "BoundPromptUpdate"]:
+        if (cached_item := self._cache.get(mm_hash)) is not None:
+            return cached_item
 
-        Args:
-            mm_item: The multi-modal item to update.
-            mm_hash: The hash of `mm_item`.
+        assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
-        Returns:
-            The update multi-modal item.
-        """
-        raise NotImplementedError
+        self._cache[mm_hash] = mm_item
 
-    def get_and_update(
-        self,
-        mm_items: Sequence[Optional[MultiModalKwargsItem]],
-        mm_hashes: list[str],
-    ) -> list[_O]:
-        """
-        Possibly update a sequence of multi-modal items based on whether they
-        are in the underlying cache.
+        return mm_item
 
-        This update is done out-of-place and updates the cache eviction order.
-
-        Args:
-            mm_items: The multi-modal items to update.
-            mm_hashes: The hash of each item in `mm_items`.
-
-        Returns:
-            A new list of updated multi-modal items.
-        """
-        assert len(mm_items) == len(mm_hashes)
-
-        return [
-            self.get_and_update_item(mm_item, mm_hash)
-            for mm_item, mm_hash in zip(mm_items, mm_hashes)
-        ]
-
-    @abstractmethod
+    @override
     def clear_cache(self) -> None:
-        """Clear the underlying cache."""
-        raise NotImplementedError
+        self._cache.clear()
 
 
-class CachedMultiModalInputSender(
-        CachedMultiModalInputExchanger[Optional[MultiModalKwargsItem]]):
+class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
     """
     How to update each item:
 
     - If the item is already in the cache, clear the data in that item to avoid
       unnecessary IPC.
 
-    - If the item is not in the cache, store the size metadata of that item so
+    - If the item is not in the cache, store the metadata of that item so
       that the eviction policy remains the same as the cache on P1.
-      By only storing the size metadata, we avoid keeping the data itself in
+      By only storing the metadata, we avoid keeping the data itself in
       memory inside P0.
     """
 
@@ -293,7 +286,7 @@ class CachedMultiModalInputSender(
 
         self._cache = MultiModalCache.get_lru_cache(
             mm_config.mm_processor_cache_gb,
-            MultiModalCacheItemMetadata,
+            MultiModalKwargsItemProxy,
         )
 
     @override
@@ -303,13 +296,16 @@ class CachedMultiModalInputSender(
     @override
     def get_and_update_item(
         self,
-        mm_item: Optional[MultiModalKwargsItem],
+        mm_item: Optional[tuple[MultiModalKwargsItem, "BoundPromptUpdate"]],
         mm_hash: str,
-    ) -> Optional[MultiModalKwargsItem]:
-        if self._cache.get(mm_hash) is not None or mm_item is None:
-            return None
+    ) -> tuple[Optional[MultiModalKwargsItem], "BoundPromptUpdate"]:
+        if (cached_item := self._cache.get(mm_hash)) is not None:
+            return None, cached_item.prompt_update
 
-        self._cache[mm_hash] = MultiModalCacheItemMetadata.wraps(mm_item)
+        assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
+
+        self._cache[mm_hash] = MultiModalKwargsItemProxy.from_item(*mm_item)
+
         return mm_item
 
     @override
@@ -317,8 +313,58 @@ class CachedMultiModalInputSender(
         self._cache.clear()
 
 
-class CachedMultiModalInputReceiver(
-        CachedMultiModalInputExchanger[MultiModalKwargsItem]):
+def processor_cache_from_config(
+    vllm_config: "VllmConfig",
+    mm_registry: "MultiModalRegistry",
+) -> Optional[BaseMultiModalProcessorCache]:
+    model_config = vllm_config.model_config
+
+    if not mm_registry.supports_multimodal_inputs(model_config):
+        return None
+
+    mm_config = model_config.get_multimodal_config()
+    if mm_config.mm_processor_cache_gb == 0:
+        return None
+
+    parallel_config = vllm_config.parallel_config
+    supports_ipc_cache = (parallel_config.data_parallel_size == 1
+                          or parallel_config.data_parallel_external_lb)
+    if not supports_ipc_cache:
+        return MultiModalProcessorOnlyCache(model_config)
+
+    if mm_registry.create_processor(model_config).requires_out_mm_kwargs:
+        # The processed data must be cached inside P0
+        return MultiModalProcessorOnlyCache(model_config)
+
+    return MultiModalProcessorSenderCache(model_config)
+
+
+class BaseMultiModalReceiverCache(
+        BaseMultiModalCache[Optional[MultiModalKwargsItem],
+                            MultiModalKwargsItem]):
+    """The required interface for caches on P1."""
+
+
+class MultiModalReceiverDisabledCache(BaseMultiModalReceiverCache):
+    """Return the passed items without applying any caching."""
+
+    @override
+    def get_and_update_item(
+        self,
+        mm_item: Optional[MultiModalKwargsItem],
+        mm_hash: str,
+    ) -> MultiModalKwargsItem:
+        assert mm_item is not None, ("MultiModalProcessorSenderCache should "
+                                     "not be used when caching is disabled")
+
+        return mm_item
+
+    @override
+    def clear_cache(self) -> None:
+        pass
+
+
+class MultiModalReceiverCache(BaseMultiModalReceiverCache):
     """
     How to update each item:
 
@@ -337,10 +383,6 @@ class CachedMultiModalInputReceiver(
         )
 
     @override
-    def is_cached_item(self, mm_hash: str) -> bool:
-        return mm_hash in self._cache
-
-    @override
     def get_and_update_item(
         self,
         mm_item: Optional[MultiModalKwargsItem],
@@ -349,7 +391,7 @@ class CachedMultiModalInputReceiver(
         if (cached_item := self._cache.get(mm_hash)) is not None:
             return cached_item
 
-        assert mm_item is not None, f"Expected an item from P0 for {mm_hash=}"
+        assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
         self._cache[mm_hash] = mm_item
         return mm_item
@@ -359,25 +401,23 @@ class CachedMultiModalInputReceiver(
         self._cache.clear()
 
 
-class CachedMultiModalInputDisabled(
-        CachedMultiModalInputExchanger[MultiModalKwargsItem]):
-    """Return the passed items without applying any caching."""
+def receiver_cache_from_config(
+    vllm_config: "VllmConfig",
+    mm_registry: "MultiModalRegistry",
+) -> BaseMultiModalReceiverCache:
+    model_config = vllm_config.model_config
 
-    @override
-    def is_cached_item(self, mm_hash: str) -> bool:
-        return False
+    if not mm_registry.supports_multimodal_inputs(model_config):
+        return MultiModalReceiverDisabledCache()
 
-    @override
-    def get_and_update_item(
-        self,
-        mm_item: Optional[MultiModalKwargsItem],
-        mm_hash: str,
-    ) -> MultiModalKwargsItem:
-        assert mm_item is not None, ("CachedMultiModalInputSender should not "
-                                     "be used when caching is disabled")
+    mm_config = model_config.get_multimodal_config()
+    if mm_config.mm_processor_cache_gb == 0:
+        return MultiModalReceiverDisabledCache()
 
-        return mm_item
+    parallel_config = vllm_config.parallel_config
+    supports_ipc_cache = (parallel_config.data_parallel_size == 1
+                          or parallel_config.data_parallel_external_lb)
+    if not supports_ipc_cache:
+        return MultiModalReceiverDisabledCache()
 
-    @override
-    def clear_cache(self) -> None:
-        pass
+    return MultiModalReceiverCache(model_config)
