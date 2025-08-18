@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
+from collections import Counter
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional, Union
 
@@ -129,8 +130,9 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_request_counts(self) -> tuple[int, int]:
-        """Returns (num_running_reqs, num_waiting_reqs)."""
+    def get_request_counts(self) -> tuple[int, int, Counter[int]]:
+        """Returns (num_running_reqs, num_waiting_reqs, 
+        num_waiting_reqs_by_priority)."""
         raise NotImplementedError
 
     @abstractmethod
