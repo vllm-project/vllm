@@ -1339,12 +1339,12 @@ class OpenAIServingChat(OpenAIServing):
                 output_text = ""
                 if choice.message.content:
                     output_text = choice.message.content
-                elif choice.message.tool_calls:
+                elif choice.message.tool_calls:  # type: ignore
                     # For tool calls, log the function name and arguments
                     tool_call_descriptions = []
                     for tool_call in choice.message.tool_calls:
-                        if hasattr(tool_call.function, "name") and \
-                                hasattr(tool_call.function, "arguments"): # noqa
+                        if hasattr(tool_call.function, "name") and hasattr(
+                                tool_call.function, "arguments"):
                             tool_call_descriptions.append(
                                 f"{tool_call.function.name}({tool_call.function.arguments})"
                             )
