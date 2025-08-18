@@ -212,7 +212,7 @@ class GPUTrace2Graph:
                 'nsys stats for %.2f MB file expected to take %.2f min',
                 file_size_mb, file_size_mb / 240)
             try:
-                subprocess.run(cmd)
+                subprocess.run(cmd, check=True)
             except Exception:
                 logger.error("%s failed; Use --nsys_cmd to specify nsys path",
                              cmd_str)
