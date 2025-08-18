@@ -319,38 +319,6 @@ def apply_repetition_penalties(logits: torch.Tensor, prompt_mask: torch.Tensor,
                                          repetition_penalties)
 
 
-def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,
-                           input_tokens: torch.Tensor,
-                           sampled_token_ids: torch.Tensor,
-                           input_positions: torch.Tensor,
-                           seq_lens: torch.Tensor, slot_mapping: torch.Tensor,
-                           block_tables: torch.Tensor) -> None:
-    """Advance a step on GPU for existing inputs for a multi-step runner"""
-    return torch.ops._C.advance_step_flashattn(num_seqs, num_queries,
-                                               block_size, input_tokens,
-                                               sampled_token_ids,
-                                               input_positions, seq_lens,
-                                               slot_mapping, block_tables)
-
-
-def advance_step_flashinfer(num_seqs: int, num_queries: int, block_size: int,
-                            input_tokens: torch.Tensor,
-                            sampled_token_ids: torch.Tensor,
-                            input_positions: torch.Tensor,
-                            seq_lens: torch.Tensor, slot_mapping: torch.Tensor,
-                            block_tables: torch.Tensor,
-                            paged_kv_indices: torch.Tensor,
-                            paged_kv_indptr: torch.Tensor,
-                            paged_kv_last_page_len: torch.Tensor,
-                            block_table_bound: torch.Tensor) -> None:
-
-    return torch.ops._C.advance_step_flashinfer(
-        num_seqs, num_queries, block_size, input_tokens, sampled_token_ids,
-        input_positions, seq_lens, slot_mapping, block_tables,
-        paged_kv_indices, paged_kv_indptr, paged_kv_last_page_len,
-        block_table_bound)
-
-
 # fused quant layer norm ops
 def rms_norm_dynamic_per_token_quant(
     input: torch.Tensor,
@@ -507,32 +475,6 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         return torch.empty((split_k_iters, num_in_feats, qweight.size(1) * 8),
                            dtype=input.dtype,
                            device=input.device).sum(0)
-
-    @register_fake("_C::aqlm_gemm")
-    def _aqlm_gemm_fake(input: torch.Tensor, codes: torch.Tensor,
-                        codebooks: torch.Tensor, scales: torch.Tensor,
-                        codebook_partition_sizes: list[int],
-                        bias: Optional[torch.Tensor]) -> torch.Tensor:
-        out_features = codes.size(0) * codebooks.size(2)
-        flat_input = input.reshape((-1, input.size(-1)))
-        flat_output = torch.empty((flat_input.size(0), out_features),
-                                  dtype=input.dtype,
-                                  device=input.device)
-
-        output_sizes = list(input.shape)
-        output_sizes.pop()
-        output_sizes.append(-1)
-        return flat_output.reshape(tuple(output_sizes))
-
-    @register_fake("_C::aqlm_dequant")
-    def _aqlm_dequant_fake(
-            codes: torch.Tensor, codebooks: torch.Tensor,
-            codebook_partition_sizes: list[int]) -> torch.Tensor:
-        in_features = codes.size(1) * 8
-        out_features = codes.size(0)
-        return torch.empty((out_features, in_features),
-                           dtype=codebooks.dtype,
-                           device=codebooks.device)
 
     @register_fake("_C::machete_mm")
     def machete_mm_fake(
@@ -987,21 +929,6 @@ def cutlass_fp4_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor,
                                              a_scales, b_scales, alphas,
                                              problem_sizes, expert_offsets,
                                              sf_offsets)
-
-
-# aqlm
-def aqlm_gemm(input: torch.Tensor, codes: torch.Tensor,
-              codebooks: torch.Tensor, scales: torch.Tensor,
-              codebook_partition_sizes: list[int],
-              bias: Optional[torch.Tensor]) -> torch.Tensor:
-    return torch.ops._C.aqlm_gemm(input, codes, codebooks, scales,
-                                  codebook_partition_sizes, bias)
-
-
-def aqlm_dequant(codes: torch.Tensor, codebooks: torch.Tensor,
-                 codebook_partition_sizes: list[int]) -> torch.Tensor:
-    return torch.ops._C.aqlm_dequant(codes, codebooks,
-                                     codebook_partition_sizes)
 
 
 # gptq_marlin
