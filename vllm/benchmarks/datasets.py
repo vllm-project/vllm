@@ -507,6 +507,7 @@ class RandomMultiModalDataset(RandomDataset):
     DEFAULT_HEIGHT = 224
     DEFAULT_WIDTH = 224
     DEFAULT_NUM_IMAGES = 1
+    DEFAULT_LIMIT_IMAGES_PER_PROMPT = 255
     DEFAULT_NUM_IMAGES_RANGE_RATIO = 0.0
     DEFAULT_DIMENSION_RANGE_RATIO = 0.0
     DEFAULT_ENABLE_MULTIMODAL_CHAT = False
@@ -528,6 +529,7 @@ class RandomMultiModalDataset(RandomDataset):
     def get_image_sampling_params(
         self,
         num_images_range_ratio: float,
+        limit_images_per_prompt: int,
         dimension_range_ratio: float,
         width: int,
         height: int,
@@ -541,18 +543,33 @@ class RandomMultiModalDataset(RandomDataset):
             "num_images_range_ratio must be < 1.0 to ensure a valid sampling "
             "range"
         )
-        max_num_images = int(num_images * (1 + num_images_range_ratio))
+        max_num_images = min(int(num_images * (1 + num_images_range_ratio)),
+                             limit_images_per_prompt)
         # ensure min num images is zero
         min_num_images = max(int(num_images * (1 - num_images_range_ratio)), 0)
+        # assert min_num_images <= max_num_images
+        assert min_num_images <= max_num_images, (
+            "min_num_images must be <= max_num_images"
+        )
         # Enforce dimension_range_ratio < 1
         assert dimension_range_ratio < 1.0, (
             "dimension_range_ratio must be < 1.0 to ensure a valid sampling "
             "range"
         )
-        min_width = int(width * (1 - dimension_range_ratio))
+        # Ensure min_width and min_height are at least 1 to prevent
+        # sampling 0-sized images.
+        min_width = max(1, int(width * (1 - dimension_range_ratio)))
         max_width = int(width * (1 + dimension_range_ratio))
-        min_height = int(height * (1 - dimension_range_ratio))
+        min_height = max(1, int(height * (1 - dimension_range_ratio)))
         max_height = int(height * (1 + dimension_range_ratio))
+
+        logger.info(
+            "Sampling number of images from [%s, %s] and image dimensions from "
+            "[%s, %s]x[%s, %s]",
+            min_num_images, max_num_images, min_width, max_width, min_height,
+            max_height,
+        )
+
         return (
             min_num_images,
             max_num_images,
@@ -593,6 +610,7 @@ class RandomMultiModalDataset(RandomDataset):
         input_len: int = RandomDataset.DEFAULT_INPUT_LEN,
         output_len: int = RandomDataset.DEFAULT_OUTPUT_LEN,
         num_images: int = DEFAULT_NUM_IMAGES,
+        limit_images_per_prompt: int = DEFAULT_LIMIT_IMAGES_PER_PROMPT,
         num_images_range_ratio: float = DEFAULT_NUM_IMAGES_RANGE_RATIO,
         width: int = DEFAULT_WIDTH,
         height: int = DEFAULT_HEIGHT,
@@ -614,6 +632,7 @@ class RandomMultiModalDataset(RandomDataset):
             height: Image height in pixels
             num_images_range_ratio: Relative half-width of the sampling
                 interval for number of images.
+            limit_images_per_prompt: Maximum number of images per request
             dimension_range_ratio: Relative half-width of the sampling
                 interval for image dimensions.
             enable_multimodal_chat: Whether to apply multimodal chat
@@ -641,6 +660,7 @@ class RandomMultiModalDataset(RandomDataset):
             max_height,
         ) = self.get_image_sampling_params(
             num_images_range_ratio,
+            limit_images_per_prompt,
             dimension_range_ratio,
             width,
             height,
@@ -680,19 +700,27 @@ class RandomMultiModalDataset(RandomDataset):
                 )
                 for width, height in image_dimensions_iterator
             ])
-            # Avoid changing the type of `prompt` from str to list[dict]
-            request_prompt: Any = prompt
+
             if enable_multimodal_chat:
-                request_prompt = self.apply_multimodal_chat_transformation(
+                # NOTE: This option is only provided for completeness given 
+                # that the serve.py benchmark currently does not use it.
+                mm_chat_prompt: Any = prompt
+                mm_chat_prompt = self.apply_multimodal_chat_transformation(
                     prompt, mm_content)
-            mm_requests.append(
-                SampleRequest(
-                    prompt=request_prompt,
+                sample_request = SampleRequest(
+                    prompt=mm_chat_prompt,
+                    prompt_len=total_input_len,
+                    expected_output_len=int(output_lens[i]),
+                    multi_modal_data=None,
+                )
+            else:
+                sample_request = SampleRequest(
+                    prompt=prompt,
                     prompt_len=total_input_len,
                     expected_output_len=int(output_lens[i]),
                     multi_modal_data=mm_content,
                 )
-            )
+            mm_requests.append(sample_request)
         return mm_requests
 
 # -----------------------------------------------------------------------------
@@ -902,6 +930,12 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         type=int,
         default=RandomMultiModalDataset.DEFAULT_NUM_IMAGES,
         help="Number of images per request for random-mm dataset.",
+    )
+    random_mm_group.add_argument(
+        "--random-mm-limit-images-per-request",
+        type=int,
+        default=RandomMultiModalDataset.DEFAULT_LIMIT_IMAGES_PER_PROMPT,
+        help="Maximum number of images per request for random-mm dataset.",
     )
     random_mm_group.add_argument(
         "--random-mm-width",
@@ -1119,6 +1153,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
                 num_images=args.random_mm_images_per_request,
+                limit_images_per_prompt=args.random_mm_limit_images_per_request,
                 width=args.random_mm_width,
                 height=args.random_mm_height,
                 num_images_range_ratio=args.random_mm_images_per_request_range_ratio,
