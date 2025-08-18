@@ -11,7 +11,7 @@ from typing import (TYPE_CHECKING, Any, Literal, Optional, TypedDict, TypeVar,
                     Union, cast, final)
 
 import numpy as np
-from typing_extensions import NotRequired, TypeAlias
+from typing_extensions import NotRequired, TypeAlias, deprecated
 
 from vllm.utils import LazyLoader, full_groupby, is_list_of
 from vllm.utils.jsontree import JSONTree, json_map_leaves
@@ -740,6 +740,31 @@ class MultiModalKwargs(UserDict[str, NestedTensors]):
     A dictionary that represents the keyword arguments to
     [`torch.nn.Module.forward`][].
     """
+
+    @staticmethod
+    @deprecated("`MultiModalKwargs.from_hf_inputs` is deprecated and "
+                "will be removed in v0.13. "
+                "Please use `MultiModalKwargsItems.from_hf_inputs` and "
+                "access the tensor data using `.get_data()`.")
+    def from_hf_inputs(
+        hf_inputs: "BatchFeature",
+        config_by_key: Mapping[str, MultiModalFieldConfig],
+    ):
+        return MultiModalKwargsItems.from_hf_inputs(hf_inputs, config_by_key) \
+            .get_data()
+
+    @staticmethod
+    @deprecated("`MultiModalKwargs.from_items` is deprecated and "
+                "will be removed in v0.13. "
+                "Please use `MultiModalKwargsItems.from_seq` and "
+                "access the tensor data using `.get_data()`.")
+    def from_items(
+        items: Sequence[MultiModalKwargsItem],
+        *,
+        pin_memory: bool = False,
+    ):
+        return MultiModalKwargsItems.from_seq(items) \
+            .get_data(pin_memory=pin_memory)
 
     @staticmethod
     def _try_stack(nested_tensors: NestedTensors,
