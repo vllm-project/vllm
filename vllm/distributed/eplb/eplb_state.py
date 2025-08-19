@@ -409,42 +409,6 @@ class EplbState:
             self.expert_rearrangement_step = 0
             self.rearrange(model)
 
-    def _update_expert_tensors_size(self, model: MixtureOfExperts) -> None:
-        """
-        Update the size of expert-related tensors to match
-        model.num_physical_experts. This ensures tensors are properly sized
-        when the number of physical experts changes.
-
-        Args:
-            model: The MoE model instance
-        """
-        current_size = self.expert_load_pass.size(-1)
-        target_size = model.num_physical_experts
-
-        if current_size != target_size:
-            logger.debug("Updating expert_load_pass tensor size from %d to %d",
-                         current_size, target_size)
-
-            # Resize expert_load_pass tensor
-            if current_size < target_size:
-                # Expand tensor by padding with zeros
-                padding_needed = target_size - current_size
-                self.expert_load_pass = torch.nn.functional.pad(
-                    self.expert_load_pass, (0, padding_needed))
-            else:
-                # Truncate tensor to target size
-                self.expert_load_pass = self.expert_load_pass[
-                    ..., :target_size]
-
-            # Update expert load view in the model if supported
-            if hasattr(model, 'update_expert_load_view'):
-                logger.debug("Calling model.update_expert_load_view with "
-                             "resized expert_load_pass tensor")
-                model.update_expert_load_view(self.expert_load_pass)
-            else:
-                logger.warning("Model does not support "
-                               "update_expert_load_view interface")
-
     def rearrange(self,
                   model: MixtureOfExperts,
                   is_profile: bool = False,
@@ -467,10 +431,6 @@ class EplbState:
                         "(profile)" if is_profile else "")
 
         if global_expert_load is None:
-            # Update expert_load_pass tensor size to match
-            # model.num_physical_experts
-            self._update_expert_tensors_size(model)
-
             # This mapping is only used here, so we do not store it in the
             # state
             if self.physical_to_logical_map.size(
@@ -488,8 +448,6 @@ class EplbState:
             else:
                 local_physical_to_logical_map = (self.physical_to_logical_map[
                     ..., :model.num_physical_experts])
-                self.expert_load_window = self.expert_load_window[
-                    ..., :model.num_physical_experts]
 
             # Map the local physical expert load to global logical experts
             logical_expert_load_window = torch.zeros(
@@ -598,6 +556,24 @@ class EplbState:
             )
             self.logical_to_physical_map.copy_(new_logical_to_physical_map)
             self.logical_replica_count.copy_(new_logical_replica_count)
+
+            num_physical_experts = self.physical_to_logical_map.shape[-1]
+            if num_physical_experts < self.expert_load_window.shape[-1]:
+                self.expert_load_window = self.expert_load_window[
+                    ..., :num_physical_experts]
+
+            # Update expert_load_pass tensor size to match
+            # model.num_physical_experts
+            current_num_experts = self.expert_load_pass.size(-1)
+            if model.num_physical_experts > current_num_experts:
+                padding_needed = (model.num_physical_experts -
+                                  current_num_experts)
+                self.expert_load_pass = torch.nn.functional.pad(
+                    self.expert_load_pass, (0, padding_needed))
+            elif model.num_physical_experts < current_num_experts:
+                self.expert_load_pass = self.expert_load_pass[
+                    ..., :model.num_physical_experts]
+            model.update_expert_load_view(self.expert_load_pass)
 
         if is_main_rank:
             assert time_start is not None
