@@ -168,9 +168,11 @@ class ModelImpl(str, enum.Enum):
     VLLM = "vllm"
     TRANSFORMERS = "transformers"
 
+
 def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     import os
     import sys
+
     from vllm import __version__
     from vllm.envs import VLLM_CACHE_ROOT
 
@@ -210,6 +212,7 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
         json.dump(get_attr_docs.caches, fp)
 
     return out
+
 
 def _get_attr_docs(cls: type[Any]) -> dict[str, str]:
     """
