@@ -81,7 +81,7 @@ def test_chunked_prefill_recompute(
             disable_log_stats=False,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-        assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
+        assert (vllm_model.llm.llm_engine.scheduler[0].artificial_preempt_cnt
                 < ARTIFICIAL_PREEMPTION_MAX_CNT)
 
     for i in range(len(example_prompts)):
@@ -118,10 +118,10 @@ def test_preemption(
             distributed_executor_backend=distributed_executor_backend,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
-        assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
+        assert (vllm_model.llm.llm_engine.scheduler[0].artificial_preempt_cnt
                 < ARTIFICIAL_PREEMPTION_MAX_CNT)
         total_preemption = (
-            vllm_model.model.llm_engine.scheduler[0].num_cumulative_preemption)
+            vllm_model.llm.llm_engine.scheduler[0].num_cumulative_preemption)
 
     check_outputs_equal(
         outputs_0_lst=hf_outputs,
@@ -174,12 +174,12 @@ def test_preemption_infeasible(
     ) as vllm_model:
         sampling_params = SamplingParams(max_tokens=max_tokens,
                                          ignore_eos=True)
-        req_outputs = vllm_model.model.generate(
+        req_outputs = vllm_model.llm.generate(
             example_prompts,
             sampling_params=sampling_params,
         )
 
-        assert (vllm_model.model.llm_engine.scheduler[0].artificial_preempt_cnt
+        assert (vllm_model.llm.llm_engine.scheduler[0].artificial_preempt_cnt
                 < ARTIFICIAL_PREEMPTION_MAX_CNT)
 
     # Verify the request is ignored and not hang.

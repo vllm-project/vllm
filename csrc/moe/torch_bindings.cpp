@@ -35,7 +35,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   m.def(
       "moe_wna16_marlin_gemm(Tensor! a, Tensor? c_or_none,"
-      "Tensor! b_q_weight, Tensor! b_scales, Tensor? global_scale, Tensor? "
+      "Tensor! b_q_weight, Tensor? b_bias_or_none,"
+      "Tensor! b_scales, Tensor? global_scale, Tensor? "
       "b_zeros_or_none,"
       "Tensor? g_idx_or_none, Tensor? perm_or_none, Tensor! workspace,"
       "Tensor sorted_token_ids,"
@@ -56,18 +57,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       " -> Tensor");
 
   m.def(
-      "moe_permute(Tensor input, Tensor topk_weight, Tensor! topk_ids,"
+      "moe_permute(Tensor input, Tensor topk_ids,"
       "Tensor token_expert_indices, Tensor? expert_map, int n_expert,"
       "int n_local_expert,"
       "int topk, int? align_block_size,Tensor! permuted_input, Tensor! "
-      "expert_first_token_offset, Tensor! src_row_id2dst_row_id_map, Tensor! "
-      "m_indices)->()");
+      "expert_first_token_offset, Tensor! inv_permuted_idx, Tensor! "
+      "permuted_idx, Tensor! m_indices)->()");
 
   m.def(
       "moe_unpermute(Tensor permuted_hidden_states, Tensor topk_weights,"
-      "Tensor topk_ids,Tensor src_row_id2dst_row_id_map, Tensor "
-      "expert_first_token_offset, int n_expert, int n_local_expert,int "
-      "topk, Tensor! hidden_states)->()");
+      "Tensor inv_permuted_idx, Tensor? expert_first_token_offset, "
+      "int topk, Tensor! hidden_states)->()");
 
   m.def("moe_permute_unpermute_supported() -> bool");
   m.impl("moe_permute_unpermute_supported", &moe_permute_unpermute_supported);

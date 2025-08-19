@@ -140,11 +140,12 @@ The core vLLM production stack configuration is managed with YAML. Here is the e
     ```
 
 In this YAML configuration:
+
 * **`modelSpec`** includes:
-  * `name`: A nickname that you prefer to call the model.
-  * `repository`: Docker repository of vLLM.
-  * `tag`: Docker image tag.
-  * `modelURL`: The LLM model that you want to use.
+    * `name`: A nickname that you prefer to call the model.
+    * `repository`: Docker repository of vLLM.
+    * `tag`: Docker image tag.
+    * `modelURL`: The LLM model that you want to use.
 * **`replicaCount`**: Number of replicas.
 * **`requestCPU` and `requestMemory`**: Specifies the CPU and memory resource requests for the pod.
 * **`requestGPU`**: Specifies the number of GPUs required.

@@ -160,9 +160,13 @@ class FusedMoEPrepareAndFinalize(ABC):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
-               Optional[ExpertTokensMetadata], Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+    ) -> tuple[
+            torch.Tensor,
+            Optional[torch.Tensor],
+            Optional[ExpertTokensMetadata],
+            Optional[torch.Tensor],
+            Optional[torch.Tensor],
+    ]:
         """
         Perform any quantization (and/or) dispatching needed
         for this kernel.
@@ -460,21 +464,28 @@ class FusedMoEModularKernel(torch.nn.Module):
                 f"{fused_experts.__class__.__name__}."
                 f"{fused_experts.activation_formats[0]}")
 
-    def _do_fused_experts(self, fused_out: Optional[torch.Tensor],
-                          a1: torch.Tensor, a1q: torch.Tensor,
-                          w1: torch.Tensor, w2: torch.Tensor,
-                          topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                          activation: str, global_num_experts: int,
-                          local_num_experts: int,
-                          expert_map: Optional[torch.Tensor],
-                          w1_scale: Optional[torch.Tensor],
-                          w2_scale: Optional[torch.Tensor],
-                          w1_zp: Optional[torch.Tensor],
-                          w2_zp: Optional[torch.Tensor],
-                          a1q_scale: Optional[torch.Tensor],
-                          a2_scale: Optional[torch.Tensor],
-                          expert_tokens_meta: Optional[ExpertTokensMetadata],
-                          apply_router_weight_on_input: bool) -> torch.Tensor:
+    def _do_fused_experts(
+        self,
+        fused_out: Optional[torch.Tensor],
+        a1: torch.Tensor,
+        a1q: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_map: Optional[torch.Tensor],
+        w1_scale: Optional[torch.Tensor],
+        w2_scale: Optional[torch.Tensor],
+        w1_zp: Optional[torch.Tensor],
+        w2_zp: Optional[torch.Tensor],
+        a1q_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        expert_tokens_meta: Optional[ExpertTokensMetadata],
+        apply_router_weight_on_input: bool,
+    ) -> torch.Tensor:
 
         _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
 
@@ -517,7 +528,8 @@ class FusedMoEModularKernel(torch.nn.Module):
             workspace13=workspace13,
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,
-            apply_router_weight_on_input=apply_router_weight_on_input)
+            apply_router_weight_on_input=apply_router_weight_on_input,
+        )
 
         return fused_out
 
@@ -548,6 +560,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
         num_chunks = cdiv(M, CHUNK_SIZE)
 
+        # TODO(bnell): get rid of one level here, update slice functions
+        # to nops on num_chunks==1
+
         if not self.fused_experts.supports_chunking() or num_chunks == 1:
             return self._do_fused_experts(
                 fused_out=None,
@@ -568,7 +583,8 @@ class FusedMoEModularKernel(torch.nn.Module):
                 a1q_scale=a1q_scale,
                 a2_scale=a2_scale,
                 expert_tokens_meta=expert_tokens_meta,
-                apply_router_weight_on_input=apply_router_weight_on_input)
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
 
         # Chunking required case
         assert num_chunks > 1
@@ -653,7 +669,8 @@ class FusedMoEModularKernel(torch.nn.Module):
                 a1q_scale=c_a1q_scale,
                 a2_scale=c_a2_scale,
                 expert_tokens_meta=c_expert_tokens_meta,
-                apply_router_weight_on_input=apply_router_weight_on_input)
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
 
         return fused_out
 
@@ -766,11 +783,16 @@ class FusedMoEModularKernel(torch.nn.Module):
                 a1q_scale=a1q_scale,
                 a2_scale=a2_scale,
                 expert_tokens_meta=expert_tokens_meta,
-                apply_router_weight_on_input=apply_router_weight_on_input)
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
 
         self.prepare_finalize.finalize(
-            output, fused_out, topk_weights, topk_ids,
+            output,
+            fused_out,
+            topk_weights,
+            topk_ids,
             apply_router_weight_on_input,
-            self.fused_experts.finalize_weight_and_reduce_impl())
+            self.fused_experts.finalize_weight_and_reduce_impl(),
+        )
 
         return output

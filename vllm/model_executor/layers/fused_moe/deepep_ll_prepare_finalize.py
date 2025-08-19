@@ -40,7 +40,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     # DeepEP low-latency kernels are compiled only for certain
     # specific hidden sizes.
-    SUPPORTED_HIDDEN_SIZES = [2048, 2560, 4096, 5120, 7168]
+    SUPPORTED_HIDDEN_SIZES = [2048, 2560, 4096, 5120, 6144, 7168]
 
     def __init__(self,
                  buffer: deep_ep.Buffer,
@@ -77,7 +77,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         a1_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         a1_dtype: torch.dtype,
-        quant_dtype: Optional[torch.dtype],
+        quant_dtype: Union[torch.dtype, str, None],
         per_act_token_quant: bool,
         block_shape: Optional[list[int]],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -166,10 +166,15 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         return (expert_x, expert_x_scale, expert_tokens_meta, None, None)
 
-    def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
-                 topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 apply_router_weight_on_input: bool,
-                 weight_and_reduce_impl: mk.TopKWeightAndReduce) -> None:
+    def finalize(
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+    ) -> None:
         assert isinstance(
             weight_and_reduce_impl, TopKWeightAndReduceDelegate
         ), ("Weight application and reduction happens in the combine kernel.")

@@ -12,7 +12,9 @@ def parse_args():
     parser = EngineArgs.add_cli_args(parser)
     # Set example specific arguments
     parser.set_defaults(
-        model="BAAI/bge-reranker-v2-m3", task="score", enforce_eager=True
+        model="BAAI/bge-reranker-v2-m3",
+        runner="pooling",
+        enforce_eager=True,
     )
     return parser.parse_args()
 
@@ -26,11 +28,11 @@ def main(args: Namespace):
     ]
 
     # Create an LLM.
-    # You should pass task="score" for cross-encoder models
-    model = LLM(**vars(args))
+    # You should pass runner="pooling" for cross-encoder models
+    llm = LLM(**vars(args))
 
     # Generate scores. The output is a list of ScoringRequestOutputs.
-    outputs = model.score(text_1, texts_2)
+    outputs = llm.score(text_1, texts_2)
 
     # Print the outputs.
     print("\nGenerated Outputs:\n" + "-" * 60)
