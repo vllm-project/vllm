@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple, List, Dict, Any
+from typing import Optional, Tuple, List
 from vllm.sequence import IntermediateTensors
 from vllm.worker.model_runner_base import ModelRunnerWrapperBase
 from vllm.logger import init_logger
@@ -27,7 +27,6 @@ class EarlyExitModelRunner(ModelRunnerWrapperBase):
         attn_metadata,
         sampling_metadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-        **kwargs
     ) -> Tuple[torch.Tensor, Optional[IntermediateTensors]]:
         """Forward pass that exits early at specified layer."""
         model = self.model
@@ -92,21 +91,10 @@ class EarlyExitModelRunner(ModelRunnerWrapperBase):
 
 def load_lsq_head(path: str, layer: int, device: torch.device, 
                   dtype: torch.dtype) -> Optional[nn.Module]:
-    """Load LSQ projection head for early exit layer.
-    
-    Args:
-        path: Directory containing h{layer}.pt files
-        layer: Which layer's projection head to load
-        device: Target device for the head
-        dtype: Target dtype for the head
-        
-    Returns:
-        nn.Linear module with loaded weights, or None if not found
-    """
+    """Load LSQ projection head for early exit layer."""
     if not path:
         return None
     
-    import os
     from pathlib import Path
     
     head_file = Path(path) / f"h{layer}.pt"
@@ -221,7 +209,7 @@ class EarlyExitModule(nn.Module):
             return getattr(self._base_model, name)
 
     def forward(self, input_ids: torch.Tensor = None, positions: torch.Tensor = None,
-                kv_caches = None, attn_metadata=None, **kwargs) -> torch.Tensor:
+                kv_caches = None, attn_metadata=None) -> torch.Tensor:
         """Run layers [0..exit_layer] inclusive and return final hidden states."""
         x = self.embed_tokens(input_ids)
 
