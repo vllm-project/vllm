@@ -44,15 +44,14 @@ class ResolvedPoolingConfig:
     task: PoolingTask
 
     @classmethod
-    def from_config_with_defaults(
+    def from_config(
         cls,
         task: PoolingTask,
         pooler_config: PoolerConfig,
-        pooling_type: PoolingType,
     ) -> "ResolvedPoolingConfig":
+        assert pooler_config.pooling_type is not None
         return cls(task=task,
-                   pooling_type=PoolingType[pooler_config.pooling_type]
-                   if pooler_config.pooling_type is not None else pooling_type)
+                   pooling_type=PoolingType[pooler_config.pooling_type])
 
 
 @dataclass(frozen=True)
@@ -68,32 +67,20 @@ class Pooler(nn.Module, ABC):
     """The interface required for all poolers used in pooling models in vLLM."""
 
     @staticmethod
-    def for_encode(
-        pooler_config: PoolerConfig,
-        *,
-        default_pooling_type: PoolingType = PoolingType.ALL,
-    ):
-        resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
-            task="encode",
-            pooler_config=pooler_config,
-            pooling_type=default_pooling_type,
-        )
-
-        if resolved_config.pooling_type == PoolingType.STEP:
+    def for_encode(pooler_config: PoolerConfig):
+        if pooler_config.pooling_type == "STEP":
             return StepPooler()
+
+        resolved_config = ResolvedPoolingConfig(task="encode",
+                                                pooling_type=PoolingType.ALL)
 
         return SimplePooler.from_config(resolved_config)
 
     @staticmethod
-    def for_embed(
-        pooler_config: PoolerConfig,
-        *,
-        default_pooling_type: PoolingType = PoolingType.LAST,
-    ):
-        resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
+    def for_embed(pooler_config: PoolerConfig):
+        resolved_config = ResolvedPoolingConfig.from_config(
             task="embed",
             pooler_config=pooler_config,
-            pooling_type=default_pooling_type,
         )
 
         return SimplePooler.from_config(resolved_config)
@@ -102,13 +89,10 @@ class Pooler(nn.Module, ABC):
     def for_classify(
         pooler_config: PoolerConfig,
         classifier: Optional[ClassifierFn],
-        *,
-        default_pooling_type: PoolingType = PoolingType.LAST,
     ):
-        resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
+        resolved_config = ResolvedPoolingConfig.from_config(
             task="classify",
             pooler_config=pooler_config,
-            pooling_type=default_pooling_type,
         )
 
         pooling = PoolingMethod.from_pooling_type(resolved_config.pooling_type)
@@ -188,6 +172,15 @@ def get_tasks(pooling_metadata: PoolingMetadata) -> list[PoolingTask]:
 
 
 def get_classification_activation_function(config: PretrainedConfig):
+    # Implement alignment with transformers ForSequenceClassificationLoss
+    # https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92
+    problem_type = getattr(config, "problem_type", "")
+    if problem_type == "regression":
+        return PoolerIdentity()
+    if problem_type == "single_label_classification":
+        return PoolerClassify()
+    if problem_type == "multi_label_classification":
+        return PoolerMultiLabelClassify()
     return PoolerClassify()
 
 
@@ -423,6 +416,12 @@ class PoolerNormalize(PoolerActivation):
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         x = F.normalize(pooled_data.float(), p=2, dim=-1)
         return x.to(pooled_data.dtype)
+
+
+class PoolerMultiLabelClassify(PoolerActivation):
+
+    def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
+        return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
 
 
 class PoolerClassify(PoolerActivation):

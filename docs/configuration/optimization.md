@@ -48,7 +48,7 @@ You can tune the performance by adjusting `max_num_batched_tokens`:
 
 - Smaller values (e.g., 2048) achieve better inter-token latency (ITL) because there are fewer prefills slowing down decodes.
 - Higher values achieve better time to first token (TTFT) as you can process more prefill tokens in a batch.
-- For optimal throughput, we recommend setting `max_num_batched_tokens > 8096` especially for smaller models on large GPUs.
+- For optimal throughput, we recommend setting `max_num_batched_tokens > 8192` especially for smaller models on large GPUs.
 - If `max_num_batched_tokens` is the same as `max_model_len`, that's almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).
 
 ```python
@@ -161,12 +161,18 @@ By default, the multi-modal processor cache is enabled to avoid repeatedly proce
 the same multi-modal inputs via Hugging Face `AutoProcessor`,
 which commonly occurs in multi-turn conversations.
 
-You can adjust the size of the cache via `VLLM_MM_INPUT_CACHE_GIB` environment variable
+You can adjust the size of the cache by setting the value of `mm_processor_cache_gb`
 (default 4 GiB per API process + 4 GiB per engine core process).
+If you do not benefit much from the cache, you can disable it completely via `mm_processor_cache_gb=0`.
 
-If you do not benefit much from the cache, you can disable it completely via `disable_mm_preprocessor_cache`:
+Examples:
 
 ```python
+# Use a larger cache
 llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
-          disable_mm_preprocessor_cache=True)
+          mm_processor_cache_gb=8)
+
+# Disable the cache
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          mm_processor_cache_gb=0)
 ```
