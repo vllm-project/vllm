@@ -337,6 +337,18 @@ def process_image(image: Any) -> Mapping[str, Any]:
 
 
 class RandomDataset(BenchmarkDataset):
+    """
+    Synthetic text-only dataset for serving/throughput benchmarks.
+
+    Strategy:
+    - Sample input/output token lengths per request from integer-uniform ranges
+      around configured means (controlled by range_ratio).
+    - Prepend a fixed random prefix of length prefix_len.
+    - Generate the remaining tokens as a reproducible sequence:
+      (offset + index + arange(input_len)) % vocab_size.
+    - Decode then re-encode/truncate to ensure prompt token counts match.
+    - Uses numpy.default_rng seeded with random_seed for reproducible sampling.
+    """
     # Default values copied from benchmark_serving.py for the random dataset.
     DEFAULT_PREFIX_LEN = 0
     DEFAULT_RANGE_RATIO = 0.0
@@ -469,6 +481,15 @@ class RandomDataset(BenchmarkDataset):
     ) -> tuple[str, int]:
         """
         Returns (prompt, total_input_len).
+
+        NOTE: After decoding the prompt we have to encode and decode it again.
+        This is done because in some cases N consecutive tokens
+        give a string tokenized into != N number of tokens.
+        For example for GPT2Tokenizer:
+        [6880, 6881] -> ['Ġcalls', 'here'] ->
+        [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
+        To avoid uncontrolled change of the prompt length,
+        the encoded sequence is truncated before being decode again.
         """
         # Build the inner sequence by sampling sequentially from the vocab
         inner_seq = ((offset + index + np.arange(input_len)) 
@@ -494,13 +515,18 @@ class RandomDataset(BenchmarkDataset):
 
 class RandomMultiModalDataset(RandomDataset):
     """
-    Random multimodal dataset that generates synthetic images with random
-    text.
-    This class is used for generating requests with random dimensions and
-    number of images. Images are in base64 format; `multi_modal_data` is a
-    list of dicts. It shouldn't be used for generating requests on the fly,
-    but rather for generating a dataset. Hence, it is not optimized for
-    speed, but rather for ease of use.
+    Synthetic multimodal dataset (text + images) extending RandomDataset.
+
+    Strategy:
+    - Per request, sample image count uniformly within
+      [num_images*(1 - num_images_range_ratio), num_images*(1 + ...)],
+      capped by limit_images_per_prompt.
+    - For each image, sample width/height uniformly around base values using
+      dimension_range_ratio (min size 1).
+    - Create RGB images with iid random pixels; encode to base64 data URLs via
+      process_image and attach as OpenAI Chat-compatible `multi_modal_data`.
+    - Optional `enable_multimodal_chat` formats prompt/content into chat style.
+    - Reuses the seeded RNG for reproducible text and image sampling.
     """
 
     IS_MULTIMODAL = True

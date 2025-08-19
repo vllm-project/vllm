@@ -55,7 +55,7 @@ become available.
       <td><strong>Random (multi-modal)</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
-      <td><code>synthetic</code> (images generated on-the-fly)</td>
+      <td><code>synthetic</code> (text + images)</td>
     </tr>
     <tr>
       <td><strong>Prefix Repetition</strong></td>
@@ -702,6 +702,7 @@ python benchmarks/benchmark_serving.py \
 Generate synthetic image inputs and random text prompts, useful to stress-test vision models without external datasets.
 
 Notes:
+
 - Currently works only with the OpenAI Chat-compatible backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
 - To avoid bad request errors, set `--limit-mm-per-prompt` according to your model config.
 
@@ -714,7 +715,6 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
   --limit-mm-per-prompt '{"image": 3, "video": 0}' \
   --mm-processor-kwargs max_pixels=1003520
 ```
-
 
 Fixed number of images and dimensions:
 
@@ -739,7 +739,7 @@ vllm bench serve \
   --seed 42
 ```
 
-For variable number of images and dimensions per request set the flag 
+For variable number of images and dimensions per request set the flag
 
 ```bash
   --random-mm-images-per-request-range-ratio 0.5 \
@@ -747,6 +747,7 @@ For variable number of images and dimensions per request set the flag
 ```
 
 Flags specific to `random-mm`:
+
 - `--random-mm-images-per-request`: base number of images per request.
 - `--random-mm-limit-images-per-request`: hard cap per request.
 - `--random-mm-width`, `--random-mm-height`: base image dimensions.
