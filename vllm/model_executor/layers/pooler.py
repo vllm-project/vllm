@@ -172,9 +172,15 @@ def get_tasks(pooling_metadata: PoolingMetadata) -> list[PoolingTask]:
 
 
 def get_classification_activation_function(config: PretrainedConfig):
-    if getattr(config, "problem_type", "") == "multi_label_classification":
+    # Implement alignment with transformers ForSequenceClassificationLoss
+    # https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92
+    problem_type = getattr(config, "problem_type", "")
+    if problem_type == "regression":
+        return PoolerIdentity()
+    elif problem_type == "single_label_classification":
+        return PoolerClassify()
+    elif problem_type == "multi_label_classification":
         return PoolerMultiLabelClassify()
-
     return PoolerClassify()
 
 
