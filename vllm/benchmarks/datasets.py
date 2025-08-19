@@ -359,7 +359,9 @@ class RandomDataset(BenchmarkDataset):
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         # Use numpy's default_rng for deterministic sampling
-        self._np_rng = np.random.default_rng(self.random_seed)
+        # Do not use random.seed() or np.random.seed() elsewhere in this class.
+        # This ensures that the RNG is isolated from global RNG state.
+        self._rng = np.random.default_rng(self.random_seed)
 
     def sample(
         self,
@@ -408,7 +410,7 @@ class RandomDataset(BenchmarkDataset):
         Get the prefix for the dataset.
         """
         return (
-            self._np_rng.integers(
+            self._rng.integers(
                 0, tokenizer.vocab_size, size=prefix_len).tolist()
             if prefix_len > 0
             else []
@@ -459,11 +461,11 @@ class RandomDataset(BenchmarkDataset):
             output_high,
         )
 
-        input_lens = self._np_rng.integers(input_low, input_high + 1,
+        input_lens = self._rng.integers(input_low, input_high + 1,
                                            size=num_requests)
-        output_lens = self._np_rng.integers(output_low, output_high + 1,
+        output_lens = self._rng.integers(output_low, output_high + 1,
                                             size=num_requests)
-        offsets = self._np_rng.integers(0, tokenizer.vocab_size, 
+        offsets = self._rng.integers(0, tokenizer.vocab_size, 
                                         size=num_requests)
         return input_lens, output_lens, offsets
 
@@ -544,7 +546,7 @@ class RandomMultiModalDataset(RandomDataset):
 
     def generate_synthetic_image(self, width: int, height: int) -> Image.Image:
         """Generate synthetic PIL image with random RGB values."""
-        random_pixels = self._np_rng.integers(
+        random_pixels = self._rng.integers(
             0,
             256,
             (height, width, 3),
@@ -620,12 +622,12 @@ class RandomMultiModalDataset(RandomDataset):
         whose size is between min_num_images and max_num_images.
         """
         request_num_images = int(
-            self._np_rng.integers(min_num_images, max_num_images + 1)
+            self._rng.integers(min_num_images, max_num_images + 1)
         )
         for _ in range(request_num_images):
             yield (
-                int(self._np_rng.integers(min_width, max_width + 1)),
-                int(self._np_rng.integers(min_height, max_height + 1)),
+                int(self._rng.integers(min_width, max_width + 1)),
+                int(self._rng.integers(min_height, max_height + 1)),
             )
 
     def sample(

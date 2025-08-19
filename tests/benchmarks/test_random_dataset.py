@@ -79,7 +79,9 @@ def test_random_dataset_same_seed(
 
     # Perturb global RNG state to ensure isolation
     random.seed(999)
+    _ = [random.random() for _ in range(100)]
     np.random.seed(888)
+    _ = [np.random.random() for _ in range(100)]
 
     b = _collect_samples(dataset_b,
                          hf_tokenizer,
