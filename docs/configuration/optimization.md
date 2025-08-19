@@ -131,7 +131,7 @@ Note that MoE layers will be sharded according to the product of the tensor para
 
 ### Intra-request DP for Multi-Modal Encoders
 
-Normally, TP is used to shard the weights of multi-modal encoders just like for language decoders,
+By default, TP is used to shard the weights of multi-modal encoders just like for language decoders,
 in order to reduce the memory and compute load on each GPU.
 
 However, since the size of multi-modal encoders is very small compared to language decoders,
@@ -158,7 +158,9 @@ llm = LLM(
     model="Qwen/Qwen2.5-VL-72B-Instruct",
     tensor_parallel_size=4,
     data_parallel_size=2,
-    mm_encoder_tp_mode="data",  # This uses TP=4 (not DP=2) to split the input data
+    # The vision encoder uses TP=4 (not DP=2) to shard the input data
+    # The language decoder uses TP=4 to shard the weights as usual
+    mm_encoder_tp_mode="data",
 )
 ```
 
