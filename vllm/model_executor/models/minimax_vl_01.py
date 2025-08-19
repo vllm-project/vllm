@@ -349,24 +349,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_sizes = image_input.get("image_sizes")
         return self.pack_image_features(image_embeds, image_sizes)
 
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        h = w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-
-        for x in data:
-            actual_dims = x.shape[1:]
-            if len(actual_dims) != len(expected_dims) or actual_dims[
-                    0] != expected_dims[0] or any(
-                        actual_dims[i] > expected_dims[i]
-                        for i in range(1, 3)):
-                expected_expr = ("batch_size", *map(str, expected_dims))
-                actual_expr = ("batch_size", *map(str, tuple(actual_dims)))
-                raise ValueError(
-                    f"The expected shape of pixel values is {expected_expr}. "
-                    f"You supplied {actual_expr}.")
-
-        return data
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[MiniMaxVL01ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
