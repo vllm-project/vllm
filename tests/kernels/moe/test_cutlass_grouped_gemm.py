@@ -9,25 +9,12 @@ import random
 import pytest
 import torch
 
+from tests.kernels.moe.utils import per_token_cast_to_fp8
 from tests.kernels.utils import baseline_scaled_mm
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
-
-
-def per_token_cast_to_fp8(
-        x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    assert x.dim() == 2
-    m, n = x.shape
-    pad_size = (128 - (n % 128)) % 128
-    x = torch.nn.functional.pad(x,
-                                (0, pad_size), value=0) if pad_size > 0 else x
-    x_view = x.view(m, -1, 128)
-    x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
-    fp8_data = (x_view *
-                (448.0 / x_amax.unsqueeze(2))).to(dtype=torch.float8_e4m3fn)
-    return fp8_data.view(m, n + pad_size)[:, :n], (x_amax / 448.0).view(m, -1)
 
 
 @pytest.mark.parametrize("num_groups, expected_m_per_group, k, n", [
@@ -76,7 +63,7 @@ def test_cutlass_grouped_gemm(
                          device=device,
                          dtype=torch.float))
     for i in range(num_groups):
-        y_fp8[0][i], y_fp8[1][i] = per_block_cast_to_fp8(y[i])
+        y_fp8[0][i], y_fp8[1][i] = per_block_cast_to_fp8(y[i], [128, 128])
 
     for i in range(num_groups):
         a = x_fp8[0][ep_offset[i]:ep_offset[i + 1]]

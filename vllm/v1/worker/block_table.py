@@ -91,8 +91,7 @@ class BlockTable:
         # block_size.
         block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                positions // self.block_size)
-        block_table_cpu = self.get_cpu_tensor()
-        block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
+        block_numbers = self.block_table_np.ravel()[block_table_indices]
         block_offsets = positions % self.block_size
         np.add(block_numbers * self.block_size,
                block_offsets,
