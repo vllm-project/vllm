@@ -202,13 +202,20 @@ class UnquantizedLinearMethod(LinearMethodBase):
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
+<<<<<<< HEAD
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
 <<<<<<< HEAD
 =======
+=======
+>>>>>>> c64fb0d81 (apparently  is not guaranteed to call)
         # required by torch.compile
         layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
+<<<<<<< HEAD
 >>>>>>> 32f2edfcc (special bias weight loader)
+=======
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+>>>>>>> c64fb0d81 (apparently  is not guaranteed to call)
         # special postprocessing for CPU SGL
         if current_platform.is_cpu() and envs.VLLM_CPU_SGL_KERNEL:
             from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
