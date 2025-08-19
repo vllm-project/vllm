@@ -429,25 +429,6 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                is_zp_float: bool = False) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
 
-    @register_fake("_C::marlin_qqq_gemm")
-    def _marlin_qqq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
-                              s_tok: torch.Tensor, s_ch: torch.Tensor,
-                              s_group: torch.Tensor, workspace: torch.Tensor,
-                              size_m: torch.SymInt, size_n: torch.SymInt,
-                              size_k: torch.SymInt) -> torch.Tensor:
-        return torch.empty((size_m, size_n),
-                           dtype=torch.float16,
-                           device=a.device)
-
-    @register_fake("_C::marlin_gemm")
-    def _marlin_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
-                          b_scales: torch.Tensor, workspace: torch.Tensor,
-                          size_m: torch.SymInt, size_n: torch.SymInt,
-                          size_k: torch.SymInt) -> torch.Tensor:
-        return torch.empty((size_m, size_n),
-                           dtype=torch.float16,
-                           device=a.device)
-
     @register_fake("_C::awq_dequantize")
     def _awq_dequantize_fake(qweight: torch.Tensor, scales: torch.Tensor,
                              zeros: torch.Tensor, split_k_iters: torch.SymInt,
@@ -1316,15 +1297,6 @@ def scaled_int8_quant(
     torch.ops._C.dynamic_scaled_int8_quant(output, input.contiguous(),
                                            input_scales, input_azp)
     return output, input_scales, input_azp
-
-
-# qqq ops
-def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                    s_tok: torch.Tensor, s_ch: torch.Tensor,
-                    s_group: torch.Tensor, workspace: torch.Tensor,
-                    size_m: int, size_n: int, size_k: int) -> torch.Tensor:
-    return torch.ops._C.marlin_qqq_gemm(a, b_q_weight, s_tok, s_ch, s_group,
-                                        workspace, size_m, size_n, size_k)
 
 
 # gguf

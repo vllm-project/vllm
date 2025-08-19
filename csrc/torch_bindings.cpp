@@ -345,15 +345,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("ggml_moe_get_block_size", &ggml_moe_get_block_size);
 
 #ifndef USE_ROCM
-  // marlin_qqq_gemm for QQQ.
-  ops.def(
-      "marlin_qqq_gemm(Tensor a, Tensor b_q_weight, "
-      "Tensor s_tok, Tensor s_ch, Tensor s_group, "
-      "Tensor! workspace, SymInt size_m, SymInt size_n, "
-      "SymInt size_k) -> Tensor",
-      {stride_tag});
-  // conditionally compiled so impl registration is in source file
-
   // CUTLASS nvfp4 block scaled GEMM
   ops.def(
       "cutlass_scaled_fp4_mm(Tensor! out, Tensor a, Tensor b,"

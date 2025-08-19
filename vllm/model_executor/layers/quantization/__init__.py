@@ -24,7 +24,6 @@ QuantizationMethods = Literal[
     "gptq",
     "compressed-tensors",
     "bitsandbytes",
-    "qqq",
     "hqq",
     "experts_int8",
     "neuron_quant",
@@ -110,7 +109,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .mxfp4 import Mxfp4Config
     from .neuron_quant import NeuronQuantConfig
     from .ptpc_fp8 import PTPCFp8Config
-    from .qqq import QQQConfig
     from .rtn import RTNConfig
     from .torchao import TorchAOConfig
     from .tpu_int8 import Int8TpuConfig
@@ -133,7 +131,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
         "ptpc_fp8": PTPCFp8Config,
-        "qqq": QQQConfig,
         "hqq": HQQMarlinConfig,
         "experts_int8": ExpertsInt8Config,
         "neuron_quant": NeuronQuantConfig,
