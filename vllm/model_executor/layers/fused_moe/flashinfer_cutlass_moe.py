@@ -7,6 +7,8 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
+    FlashInferCutlassMoEPrepareAndFinalize)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP)
 from vllm.utils.flashinfer import (flashinfer_cutlass_fused_moe,
@@ -181,3 +183,50 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             ep_rank=self.ep_rank,
             output=output,
         )
+
+
+def flashinfer_cutlass_moe_fp4(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    g1_alphas: torch.Tensor,
+    g2_alphas: torch.Tensor,
+    a1_gscale: torch.Tensor,
+    a2_gscale: torch.Tensor,
+    inplace: bool = False,
+    activation: str = "silu",
+    global_num_experts: int = -1,
+    expert_map: Optional[torch.Tensor] = None,
+    apply_router_weight_on_input: bool = False,
+) -> torch.Tensor:
+
+    fused_experts = mk.FusedMoEModularKernel(
+        FlashInferCutlassMoEPrepareAndFinalize(use_dp=False,
+                                               a1_gscale=a1_gscale),
+        FlashInferExperts(
+            g1_alphas=g1_alphas,
+            g2_alphas=g2_alphas,
+            a1_gscale=a1_gscale,
+            a2_gscale=a2_gscale,
+            out_dtype=hidden_states.dtype,
+            quant_dtype="nvfp4",
+        ))
+
+    return fused_experts(
+        hidden_states=hidden_states,
+        w1=w1,
+        w2=w2,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        inplace=inplace,
+        activation=activation,
+        global_num_experts=global_num_experts,
+        expert_map=expert_map,
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+    )
