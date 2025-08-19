@@ -10,6 +10,7 @@ from torch.distributed import ProcessGroup
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.tpu import USE_TPU_COMMONS
 
 from .base_device_communicator import DeviceCommunicatorBase
 
@@ -18,16 +19,17 @@ USE_RAY = parallel_config = get_current_vllm_config(
 
 logger = init_logger(__name__)
 
-if current_platform.is_tpu():
-    import torch_xla
-    import torch_xla.core.xla_model as xm
-    import torch_xla.runtime as xr
-    from torch_xla._internal import pjrt
-    from torch_xla.distributed.xla_multiprocessing import (
-        create_optimized_replica_groups)
-
-    if USE_RAY:
-        from vllm.executor import ray_utils
+if not USE_TPU_COMMONS:
+    logger.info("tpu_commons not found, using vLLM's TpuCommunicator")
+    if current_platform.is_tpu():
+        import torch_xla
+        import torch_xla.core.xla_model as xm
+        import torch_xla.runtime as xr
+        from torch_xla._internal import pjrt
+        from torch_xla.distributed.xla_multiprocessing import (
+            create_optimized_replica_groups)
+        if USE_RAY:
+            from vllm.executor import ray_utils
 
 
 class TpuCommunicator(DeviceCommunicatorBase):
@@ -94,10 +96,7 @@ class TpuCommunicator(DeviceCommunicatorBase):
         return xm.all_gather(input_, dim=dim)
 
 
-try:
+if USE_TPU_COMMONS:
     from tpu_commons.distributed.device_communicators import (
         TpuCommunicator as TpuCommonsCommunicator)
     TpuCommunicator = TpuCommonsCommunicator  # type: ignore
-except ImportError:
-    logger.info("tpu_commons not found, using vLLM's TpuCommunicator")
-    pass
