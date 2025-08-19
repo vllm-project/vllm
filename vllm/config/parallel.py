@@ -30,9 +30,9 @@ else:
 logger = init_logger(__name__)
 
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
-DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
+DistributedExecutorBackend = Literal["ray", "mp", "mp_distributed", "uni",
+                                     "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
-
 
 @config
 @dataclass
@@ -64,6 +64,14 @@ class EPLBConfig:
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
+    distributed_master_ip: str = "127.0.0.1"
+    """distributed master ip for multi-node distributed inference."""
+    distributed_master_port: int = 0
+    """distributed master port """
+    distributed_node_rank: int = 0
+    """distributed node rank """
+    distributed_node_size: int = 1
+    """distributed node size """
     pipeline_parallel_size: int = 1
     """Number of pipeline parallel groups."""
     tensor_parallel_size: int = 1
@@ -484,10 +492,11 @@ class ParallelConfig:
             ray_found = ray_utils.ray_is_available()
             if current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
                 backend = "uni"
-            elif (
-                current_platform.is_cuda()
-                and cuda_device_count_stateless() < self.world_size
-            ):
+            elif current_platform.is_cuda() and self.distributed_node_size > 1:
+                backend = "mp_distributed"
+            elif (current_platform.is_cuda()
+                  and cuda_device_count_stateless() < self.world_size
+                  and self.distributed_node_size == 1):
                 if not ray_found:
                     raise ValueError(
                         "Unable to load Ray: "

@@ -556,12 +556,39 @@ class MessageQueue:
         else:
             return self.dequeue()
 
+    def create_from_process_group_single_reader(pg: ProcessGroup,
+                                                max_chunk_bytes,
+                                                max_chunks,
+                                                reader_rank: int = 0,
+                                                blocking: bool = False):
+        """Create a message queue from ranks.
+        """
+        # We assume same size acrsso groups
+        local_size = torch.cuda.device_count()
+        group_rank = dist.get_rank(pg)
+        same_node = group_rank // local_size == reader_rank // local_size
+        buffer_io = MessageQueue(
+            n_reader=1,
+            n_local_reader=1 if same_node else 0,
+            max_chunk_bytes=max_chunk_bytes,
+            max_chunks=max_chunks,
+        )
+        handle = buffer_io.export_handle()
+        handles = [None] * dist.get_world_size(
+            pg) if group_rank == reader_rank else None
+        dist.gather_object(handle, handles, dst=reader_rank, group=pg)
+        if blocking:
+            buffer_io.wait_until_ready()
+        return (buffer_io, handles if handles is not None else [])
+
     @staticmethod
     def create_from_process_group(
         pg: Union[ProcessGroup, StatelessProcessGroup],
         max_chunk_bytes,
         max_chunks,
-        writer_rank=0,
+        writer_rank: int = 0,
+        extra_writer_handler=None,
+        blocking: bool = True,
     ) -> "MessageQueue":
         if isinstance(pg, ProcessGroup):
             group_rank = dist.get_rank(pg)
@@ -571,7 +598,6 @@ class MessageQueue:
             group_rank = pg.rank
             group_world_size = pg.world_size
             global_ranks = list(range(pg.world_size))
-
         from vllm.distributed.parallel_state import in_the_same_node_as
 
         status = in_the_same_node_as(pg, source_rank=writer_rank)
@@ -579,15 +605,22 @@ class MessageQueue:
         n_reader = group_world_size - 1
         n_local_reader = len(same_node_ranks) - 1
         local_reader_ranks = [i for i in same_node_ranks if i != writer_rank]
+        if extra_writer_handler is not None:
+            n_reader = group_world_size
+            n_local_reader = len(same_node_ranks)
         buffer_io: MessageQueue
         if group_rank == writer_rank:
-            buffer_io = MessageQueue(
-                n_reader=n_reader,
-                n_local_reader=n_local_reader,
-                local_reader_ranks=local_reader_ranks,
-                max_chunk_bytes=max_chunk_bytes,
-                max_chunks=max_chunks,
-            )
+            if extra_writer_handler is not None:
+                buffer_io = MessageQueue.create_from_handle(
+                    extra_writer_handler, group_rank)
+            else:
+                buffer_io = MessageQueue(
+                    n_reader=n_reader,
+                    n_local_reader=n_local_reader,
+                    local_reader_ranks=local_reader_ranks,
+                    max_chunk_bytes=max_chunk_bytes,
+                    max_chunks=max_chunks,
+                )
             handle = buffer_io.export_handle()
             if isinstance(pg, ProcessGroup):
                 dist.broadcast_object_list(
@@ -605,5 +638,6 @@ class MessageQueue:
             else:
                 handle = pg.broadcast_obj(None, writer_rank)
             buffer_io = MessageQueue.create_from_handle(handle, group_rank)
-        buffer_io.wait_until_ready()
+        if blocking:
+            buffer_io.wait_until_ready()
         return buffer_io

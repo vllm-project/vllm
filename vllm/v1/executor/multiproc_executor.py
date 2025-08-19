@@ -56,6 +56,27 @@ logger = init_logger(__name__)
 class MultiprocExecutor(Executor):
     supports_pp: bool = True
 
+    def get_worker_proc_cls(self) -> type["WorkerProc"]:
+        return WorkerProc
+
+    def init_workers(self,
+                     unready_workers: list["UnreadyWorkerProcHandle"]) -> None:
+        self.workers = WorkerProc.wait_for_ready(unready_workers)
+
+    def init_response_mqs(self) -> None:
+        reponse_mqs = []
+        for w in self.workers:
+            assert w.worker_response_mq is not None
+            reponse_mqs.append(w.worker_response_mq)
+        self.response_mqs = reponse_mqs
+
+    def init_request_rpc_mq(self) -> None:
+        max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
+        self.rpc_broadcast_mq = MessageQueue(self.world_size,
+                                             self.world_size,
+                                             max_chunk_bytes=max_chunk_bytes)
+        self.scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
+
     def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
         # and ensure workers will be terminated.
@@ -66,6 +87,14 @@ class MultiprocExecutor(Executor):
         self.io_thread_pool: Optional[ThreadPoolExecutor] = None
 
         self.world_size = self.parallel_config.world_size
+        assert self.parallel_config.world_size \
+            % self.parallel_config.distributed_node_size == 0, (
+            f"world_size ({self.parallel_config.world_size}) must be "
+            f"divisible by distributed_node_size "
+            f"({self.parallel_config.distributed_node_size}). "
+        )
+        self.local_world_size = self.parallel_config.world_size \
+            // self.parallel_config.distributed_node_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
         pp_parallel_size = self.parallel_config.pipeline_parallel_size
         assert self.world_size == tensor_parallel_size * pp_parallel_size, (
@@ -86,40 +115,39 @@ class MultiprocExecutor(Executor):
 
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
-        max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
-        self.rpc_broadcast_mq = MessageQueue(
-            self.world_size, self.world_size, max_chunk_bytes=max_chunk_bytes
-        )
-        scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
+        self.init_request_rpc_mq()
 
         # Create workers
         context = get_mp_context()
         shared_worker_lock = context.Lock()
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
+        worker_proc_cls = self.get_worker_proc_cls()
         try:
-            for rank in range(self.world_size):
+            for local_rank in range(self.local_world_size):
+                global_rank = self.local_world_size * \
+                    self.parallel_config.distributed_node_rank + local_rank
                 unready_workers.append(
-                    WorkerProc.make_worker_process(
+                    worker_proc_cls.make_worker_process(
                         vllm_config=self.vllm_config,
-                        local_rank=rank,
-                        rank=rank,
+                        local_rank=local_rank,
+                        rank=global_rank,
                         distributed_init_method=distributed_init_method,
-                        input_shm_handle=scheduler_output_handle,
+                        input_shm_handle=self.scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
                     )
                 )
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
-            self.workers = WorkerProc.wait_for_ready(unready_workers)
-
+            self.init_workers(unready_workers)
+            self.init_response_mqs()
             # Ensure message queues are ready. Will deadlock if re-ordered
             # Must be kept consistent with the WorkerProc.
-            self.rpc_broadcast_mq.wait_until_ready()
-            for w in self.workers:
-                w.worker_response_mq.wait_until_ready()
-
+            if self.rpc_broadcast_mq is not None:
+                self.rpc_broadcast_mq.wait_until_ready()
+            for response_mq in self.response_mqs:
+                response_mq.wait_until_ready()
             self.start_worker_monitor()
             success = True
         finally:
@@ -217,6 +245,19 @@ class MultiprocExecutor(Executor):
         )
         return outputs[0]
 
+    def get_message_queues(
+            self,
+            unique_reply_rank: Optional[int] = None) -> list[MessageQueue]:
+        if unique_reply_rank is not None:
+            mq = self.workers[unique_reply_rank].worker_response_mq
+            assert mq is not None
+            return [mq]
+        message_queues = []
+        for rank in range(self.world_size):
+            assert self.workers[rank].worker_response_mq is not None
+            message_queues.append(self.workers[rank].worker_response_mq)
+        return message_queues
+
     def collective_rpc(
         self,
         method: Union[str, Callable],
@@ -243,24 +284,15 @@ class MultiprocExecutor(Executor):
                     method, protocol=pickle.HIGHEST_PROTOCOL
                 )
             self.rpc_broadcast_mq.enqueue(
-                (send_method, args, kwargs, unique_reply_rank)
-            )
-
-            workers = (
-                (self.workers[unique_reply_rank],)
-                if unique_reply_rank is not None
-                else self.workers
-            )
+                (send_method, args, kwargs, unique_reply_rank))
+            message_queues = self.get_message_queues(unique_reply_rank)
             responses = []
 
-            def get_response(
-                w: WorkerProcHandle,
-                dequeue_timeout: Optional[float] = None,
-                cancel_event: Optional[threading.Event] = None,
-            ):
-                status, result = w.worker_response_mq.dequeue(
-                    timeout=dequeue_timeout, cancel=cancel_event
-                )
+            def get_response(mq: MessageQueue,
+                             dequeue_timeout: Optional[float] = None,
+                             cancel_event: Optional[threading.Event] = None):
+                status, result = mq.dequeue(timeout=dequeue_timeout,
+                                            cancel=cancel_event)
 
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     raise RuntimeError(
@@ -269,20 +301,20 @@ class MultiprocExecutor(Executor):
                     )
                 return result
 
-            for w in workers:
-                dequeue_timeout = (
-                    None if deadline is None else (deadline - time.monotonic())
-                )
+            for mq in message_queues:
+                dequeue_timeout = None if deadline is None else (
+                    deadline - time.monotonic())
 
                 if self.io_thread_pool is not None:
                     # We must consume worker_response_mq from a single thread.
                     result = self.io_thread_pool.submit(  # type: ignore
-                        get_response, w, dequeue_timeout, self.shutdown_event
+                        get_response, mq, dequeue_timeout, self.shutdown_event
                     )
                     if not non_block:
                         result = result.result()
                 elif not non_block:
-                    result = get_response(w, dequeue_timeout, self.shutdown_event)
+                    result = get_response(mq, dequeue_timeout,
+                                          self.shutdown_event)
                 else:
                     raise RuntimeError(
                         "non_block can only be used when max_concurrent_batches > 1"
@@ -380,13 +412,14 @@ class UnreadyWorkerProcHandle:
 class WorkerProcHandle:
     proc: BaseProcess
     rank: int
-    worker_response_mq: MessageQueue  # The worker process writes to this MQ
+    worker_response_mq: Optional[
+        MessageQueue] = None  # The worker process writes to this MQ
     death_writer: Optional[Connection] = None
 
     @classmethod
-    def from_unready_handle(
-        cls, unready_handle: UnreadyWorkerProcHandle, worker_response_mq: MessageQueue
-    ) -> "WorkerProcHandle":
+    def from_unready_handle(cls, unready_handle: UnreadyWorkerProcHandle,
+                            worker_response_mq: Optional[MessageQueue],
+                            **kwargs) -> "WorkerProcHandle":
         return cls(
             proc=unready_handle.proc,
             rank=unready_handle.rank,
@@ -400,6 +433,16 @@ class WorkerProc:
 
     READY_STR = "READY"
 
+    def init_message_queues(self, input_shm_handle: Handle,
+                            vllm_config: VllmConfig) -> None:
+
+        # Initialize MessageQueue for receiving SchedulerOutput
+        self.rpc_broadcast_mq = MessageQueue.create_from_handle(
+            input_shm_handle, self.worker.rank)
+
+        # Initializes a message queue for sending the model output
+        self.worker_response_mq: MessageQueue = MessageQueue(1, 1)
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -410,13 +453,15 @@ class WorkerProc:
         shared_worker_lock: LockType,
     ):
         self.rank = rank
-        wrapper = WorkerWrapperBase(vllm_config=vllm_config, rpc_rank=rank)
+        wrapper = WorkerWrapperBase(vllm_config=vllm_config,
+                                    rpc_rank=local_rank,
+                                    global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
         all_kwargs: list[dict] = [
             {} for _ in range(vllm_config.parallel_config.world_size)
         ]
         is_driver_worker = rank % vllm_config.parallel_config.tensor_parallel_size == 0
-        all_kwargs[rank] = {
+        all_kwargs[local_rank] = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
             "rank": rank,
@@ -425,14 +470,6 @@ class WorkerProc:
         }
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
-
-        # Initialize MessageQueue for receiving SchedulerOutput
-        self.rpc_broadcast_mq = MessageQueue.create_from_handle(
-            input_shm_handle, self.worker.rank
-        )
-
-        # Initializes a message queue for sending the model output
-        self.worker_response_mq = MessageQueue(1, 1)
 
         scheduler_config = vllm_config.scheduler_config
         self.use_async_scheduling = scheduler_config.async_scheduling
@@ -459,10 +496,12 @@ class WorkerProc:
         )
 
         # Load model
+        self.init_message_queues(input_shm_handle, vllm_config)
         self.worker.load_model()
 
-    @staticmethod
+    @classmethod
     def make_worker_process(
+        cls,
         vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
@@ -489,7 +528,7 @@ class WorkerProc:
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
-            target=WorkerProc.worker_main,
+            target=cls.worker_main,
             kwargs=process_kwargs,
             name=f"VllmWorker-{rank}",
             daemon=True,
@@ -501,9 +540,18 @@ class WorkerProc:
         # death_reader in child will get EOFError
         return UnreadyWorkerProcHandle(proc, rank, reader, death_writer)
 
-    @staticmethod
+    @classmethod
+    def wait_for_response_handle_ready(
+            cls, handles: dict[str, Any],
+            proc_handle: UnreadyWorkerProcHandle) -> WorkerProcHandle:
+        worker_response_mq = MessageQueue.create_from_handle(
+            handles["handle"], 0)
+        return WorkerProcHandle.from_unready_handle(proc_handle,
+                                                    worker_response_mq)
+
+    @classmethod
     def wait_for_ready(
-        unready_proc_handles: list[UnreadyWorkerProcHandle],
+        cls, unready_proc_handles: list[UnreadyWorkerProcHandle]
     ) -> list[WorkerProcHandle]:
         e = Exception(
             "WorkerProc initialization failed due to "
@@ -526,16 +574,10 @@ class WorkerProc:
                     if response["status"] != "READY":
                         raise e
 
-                    # Extract the message queue handle.
-                    worker_response_mq = MessageQueue.create_from_handle(
-                        response["handle"], 0
-                    )
-                    ready_proc_handles[unready_proc_handle.rank] = (
-                        WorkerProcHandle.from_unready_handle(
-                            unready_proc_handle, worker_response_mq
-                        )
-                    )
-
+                    idx = unready_proc_handle.rank % len(ready_proc_handles)
+                    ready_proc_handles[
+                        idx] = cls.wait_for_response_handle_ready(
+                            response, unready_proc_handle)
                 except EOFError:
                     e.__suppress_context__ = True
                     raise e from None
@@ -553,10 +595,17 @@ class WorkerProc:
         destroy_model_parallel()
         destroy_distributed_environment()
 
-    @staticmethod
-    def worker_main(*args, **kwargs):
-        """Worker initialization and execution loops.
-        This runs a background process"""
+    @classmethod
+    def get_ready_proc_handles(cls, worker: "WorkerProc") -> dict[str, Any]:
+        return {
+            "status": WorkerProc.READY_STR,
+            "handle": worker.worker_response_mq.export_handle(),
+        }
+
+    @classmethod
+    def worker_main(cls, *args, **kwargs):
+        """ Worker initialization and execution loops.
+        This runs a background process """
 
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
@@ -600,19 +649,15 @@ class WorkerProc:
 
         try:
             reader.close()
-            worker = WorkerProc(*args, **kwargs)
+            worker = cls(*args, **kwargs)
 
             # Send READY once we know everything is loaded
-            ready_writer.send(
-                {
-                    "status": WorkerProc.READY_STR,
-                    "handle": worker.worker_response_mq.export_handle(),
-                }
-            )
+            ready_writer.send(cls.get_ready_proc_handles(worker))
 
             # Ensure message queues are ready. Will deadlock if re-ordered.
             # Must be kept consistent with the Executor
-            worker.rpc_broadcast_mq.wait_until_ready()
+            if worker.rpc_broadcast_mq is not None:
+                worker.rpc_broadcast_mq.wait_until_ready()
             worker.worker_response_mq.wait_until_ready()
             ready_writer.close()
             ready_writer = None
