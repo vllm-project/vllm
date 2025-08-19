@@ -13,7 +13,7 @@ Subclass `vllm.v1.sample.logits_processor.LogitsProcessor` and override the foll
 * `apply(self, logits: torch.Tensor)`
     * `logits`: a $num\_reqs \times vocab\_size$ tensor representing the unprocessed token probability distribution for each request. 
 
-The contrived example below implements a 
+The contrived example below implements a custom logits processor which masks out all tokens except for one (`target_token`) with `float(-inf)`.
 
 ??? code "Example custom logits processor definition"
 
