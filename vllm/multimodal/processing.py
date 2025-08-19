@@ -1424,8 +1424,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     "no longer compatible with caching. Please open an issue "
                     "on GitHub if your model needs this.")
 
-            (missing_prompt_update, ) = missing_prompt_updates
-
             # Usually, the prompt content is expressed as a function
             # `(item_idx: int) -> PromptUpdateInfo`.
             # To avoid keeping the scope of that function in memory
@@ -1433,15 +1431,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             # we resolve the prompt content early by calling
             # `_resolve_prompt_update_content` and replacing the old prompt
             # content with the indexer of `resolved_contents`.
+            new_prompt_updates = list[BoundPromptUpdate]()
             resolved_contents = list[_BoundPromptContent]()
             for item_idx, hash_ in enumerate(hashes):
                 item: Optional[tuple[MultiModalKwargsItem, BoundPromptUpdate]]
                 if not cache.is_cached_item(hash_):
                     missing_next_idx = mm_missing_next_idx[modality]
                     kwargs = missing_kwargs[missing_next_idx]
-                    prompt_update = missing_prompt_update.with_content(
+                    prompt_update = missing_prompt_updates[0].with_content(
                         self._resolve_prompt_update_content(
-                            missing_prompt_update,
+                            missing_prompt_updates[0],
                             missing_next_idx,
                         ))
                     mm_missing_next_idx[modality] += 1
@@ -1455,11 +1454,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 new_content = new_prompt_update.get_content(item_idx)
 
                 merged_kwargs[modality].append(new_kwargs)
+                new_prompt_updates.append(new_prompt_update)
                 resolved_contents.append(new_content)
 
-            new_prompt_update = missing_prompt_update.with_content(
-                resolved_contents.__getitem__)
-            merged_prompt_updates[modality] = [new_prompt_update]
+            merged_prompt_updates[modality] = [
+                new_prompt_update.with_content(resolved_contents.__getitem__)
+                for new_prompt_update in new_prompt_updates
+            ]
 
         mm_kwargs = MultiModalKwargsItems(merged_kwargs)
         mm_prompt_updates = MultiModalPromptUpdates(merged_prompt_updates)
