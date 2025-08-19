@@ -180,6 +180,7 @@ def test_eagle_correctness(
     '''
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
+        m.setenv("VLLM_MLA_DISABLE", "1")
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
         if (attn_backend == "TRITON_ATTN_VLLM_V1"
