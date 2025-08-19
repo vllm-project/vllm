@@ -18,7 +18,7 @@ vLLM supports the following hardware platforms:
 ## Hardware Plugins
 
 The backends below live **outside** the main `vllm` repository and follow the
-[Hardware-Pluggable RFC](../design/plugin_system.md).
+[Hardware-Pluggable RFC](../../design/plugin_system.md).
 
 | Accelerator | PyPI / package | Repository |
 |-------------|----------------|------------|
