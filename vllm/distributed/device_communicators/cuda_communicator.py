@@ -16,15 +16,13 @@ from .base_device_communicator import DeviceCommunicatorBase
 logger = init_logger(__name__)
 
 
-def register_nccl_symmetric_ops():
-    from vllm.distributed.device_communicators.pynccl import (
-            PyNcclCommunicator)
+def register_nccl_symmetric_ops(pynccl_comm):
     from vllm.distributed.device_communicators.pynccl_allocator import (
         use_symmetric_memory)
     from vllm.utils import direct_register_custom_op
 
     def all_reduce_symmetric_with_copy_impl(
-        input_tensor: torch.Tensor, pynccl_comm: PyNcclCommunicator
+        input_tensor: torch.Tensor
     ) -> torch.Tensor:
         with use_symmetric_memory(pynccl_comm):
             symm_input = torch.empty_like(input_tensor)
@@ -35,7 +33,7 @@ def register_nccl_symmetric_ops():
 
 
     def all_reduce_symmetric_with_copy_fake(
-        input_tensor: torch.Tensor, pynccl_comm: PyNcclCommunicator
+        input_tensor: torch.Tensor
     ) -> torch.Tensor:
         return torch.empty_like(input_tensor)
 
@@ -85,7 +83,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 group=self.cpu_group,
                 device=self.device,
             )
-            register_nccl_symmetric_ops()
+            register_nccl_symmetric_ops(self.pynccl_comm)
 
         self.ca_comm: Optional[CustomAllreduce] = None
         self.qr_comm: Optional[QuickAllReduce] = None
