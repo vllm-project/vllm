@@ -740,10 +740,11 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 "openai-chat",
                 "openai-audio",
         ]:
-            # multi-modal benchmark is only available on OpenAI Chat backend.
+            # multi-modal benchmark is only available on OpenAI Chat
+            # endpoint-type.
             raise ValueError(
                 "Multi-modal content is only supported on 'openai-chat' and "
-                "'openai-audio' backend.")
+                "'openai-audio' endpoint-type.")
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
