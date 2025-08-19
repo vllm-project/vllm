@@ -13,6 +13,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclRedOpTypeEnum, ncclUniqueId)
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
+from vllm.utils import current_stream
 
 
 logger = init_logger(__name__)
