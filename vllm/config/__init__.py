@@ -195,7 +195,7 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
 
     cls_key = f"{cls.__module__}.{cls.__name__}"
     if cls_key in get_attr_docs.caches and get_attr_docs.caches[cls_key][
-        'hash'] == file_hash:
+            'hash'] == file_hash:
         return get_attr_docs.caches[cls_key]['docs']
 
     out = _get_attr_docs(cls)
