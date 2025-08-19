@@ -10,19 +10,9 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_standard_kv_cache_spec,
                                       create_vllm_config,
                                       get_attention_backend)
-from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
-
-try:
-    from vllm.vllm_flash_attn import flash_attn_varlen_func
-    is_vllm_fa = True
-except ImportError:
-    # For rocm use upstream flash attention
-    if current_platform.is_rocm():
-        from flash_attn import flash_attn_varlen_func
-    is_vllm_fa = False
 
 BACKENDS_TO_TEST = [
     _Backend.CUTLASS_MLA, _Backend.FLASHMLA_VLLM_V1,
@@ -418,52 +408,30 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
             k_pe_full_expanded = k_pe_full.expand(-1, num_q_heads, -1)
             k_full = torch.cat([k_nope_full, k_pe_full_expanded], dim=-1)
 
-            # Pad v_full to match k_full head dimension for FlashAttention
-            # if necessary
-            total_head_dim = qk_nope_head_dim + qk_rope_head_dim
-            if v_head_dim < total_head_dim:
-                v_full = torch.nn.functional.pad(
-                    v_full, [0, total_head_dim - v_head_dim], value=0)
+            # Create custom attention mask:
+            # - Query tokens can attend to all context tokens
+            # - Query tokens can only attend to query tokens up to their pos
+            attn_mask = torch.ones(q_len,
+                                   s_len,
+                                   dtype=torch.bool,
+                                   device=device)
+            # Apply causal mask only to the query portion (context_len onwards)
+            causal_mask = torch.tril(torch.ones(q_len, q_len, device=device))
+            attn_mask[:, context_len:] = causal_mask
 
-            cu_seqlens_q = torch.tensor([0, q_len],
-                                        dtype=torch.int32,
-                                        device=device)
-            cu_seqlens_kv = torch.tensor([0, s_len],
-                                         dtype=torch.int32,
-                                         device=device)
+            # SDPA expects (N, H, L, D)
+            q_sdpa_in = q_mha.unsqueeze(0).transpose(1, 2)
+            k_sdpa_in = k_full.unsqueeze(0).transpose(1, 2)
+            v_sdpa_in = v_full.unsqueeze(0).transpose(1, 2)
 
-            # Single causal attention call for the full sequence
-            if is_vllm_fa:
-                sdpa_out_i, _ = flash_attn_varlen_func(
-                    q=q_mha,
-                    k=k_full,
-                    v=v_full,
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_k=cu_seqlens_kv,
-                    max_seqlen_q=q_len,
-                    max_seqlen_k=s_len,
-                    causal=True,
-                    softmax_scale=scale,
-                    return_softmax_lse=True)
-            else:
-                sdpa_out_i, _ = flash_attn_varlen_func(
-                    q=q_mha,
-                    k=k_full,
-                    v=v_full,
-                    cu_seqlens_q=cu_seqlens_q,
-                    cu_seqlens_k=cu_seqlens_kv,
-                    max_seqlen_q=q_len,
-                    max_seqlen_k=s_len,
-                    causal=True,
-                    softmax_scale=scale,
-                    return_attn_probs=True)
-
-            # Unpad output back to original v_head_dim if we padded
-            if v_head_dim < total_head_dim:
-                sdpa_out_i = sdpa_out_i[..., :v_head_dim]
-
-            # sdpa_out_i is now [q_len, num_heads, v_head_dim], flatten last two
-            # dims
+            # Single attention call with custom mask
+            sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
+                q_sdpa_in,
+                k_sdpa_in,
+                v_sdpa_in,
+                attn_mask=attn_mask,
+                scale=scale)
+            sdpa_out_i = sdpa_out_i.transpose(1, 2).squeeze(0)
             sdpa_out_i = sdpa_out_i.flatten(start_dim=-2)
 
         all_sdpa_outputs.append(sdpa_out_i)
@@ -548,11 +516,12 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                                    atol=atol)
 
         if not all_close:
-            print(f"[{backend_name}] output differs from SDPA baseline. "
-                  f"Max diff: {max_diff:.6f} (rel: {max_rel_diff:.6f})")
+            print(
+                f"[{backend_name}] output differs from SDPA baseline. "
+                f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})")
             print(f"[{backend_name}] output: {backend_output}")
             print(f"[{backend_name}] SDPA baseline: {sdpa_output}")
 
         assert all_close, (
             f"[{backend_name}] output differs from SDPA baseline. "
-            f"Max diff: {max_diff:.6f} (rel: {max_rel_diff:.6f})")
+            f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})")
