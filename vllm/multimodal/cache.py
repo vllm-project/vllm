@@ -26,7 +26,13 @@ logger = init_logger(__name__)
 
 
 class MultiModalProcessorCacheItem:
-    """Used for `MultiModalProcessorSenderCache`."""
+    """
+    The data to store inside `MultiModalProcessorSenderCache`.
+
+    Args:
+        item: The processed tensor data corresponding to a multi-modal item.
+        prompt_update: The prompt update information for that item.
+    """
 
     def __init__(
         self,
@@ -39,12 +45,18 @@ class MultiModalProcessorCacheItem:
         self.prompt_update = prompt_update
 
 
-class MultiModalProcessorCacheItemProxy:
+class MultiModalProcessorCacheItemMetadata:
     """
-    Used for `MultiModalProcessorOnlyCache`.
+    The metadata to store inside `MultiModalProcessorOnlyCache`.
 
-    By only storing the metadata, we avoid keeping the data itself in
-    memory inside P0.
+    Args:
+        item: The processed tensor data corresponding to a multi-modal item.
+            Since P1 already stores the tensor data, we only store its size
+            metadata in P0 to reduce memory usage.
+        prompt_update: The prompt update information for that item.
+            This needs to stay on P0 because for some models, the processor
+            cannot regenerate the prompt update if the processed tensor data
+            is not available.
     """
 
     def __init__(
@@ -60,7 +72,7 @@ class MultiModalProcessorCacheItemProxy:
 
 MultiModalCacheValue = Union[
     MultiModalProcessorCacheItem,
-    MultiModalProcessorCacheItemProxy,
+    MultiModalProcessorCacheItemMetadata,
     MultiModalKwargsItems,
     MultiModalKwargsItem,
     MultiModalKwargs,
@@ -81,7 +93,7 @@ class MultiModalCache:
     ) -> int:
         if isinstance(leaf, MultiModalProcessorCacheItem):
             return cls.get_leaf_size(leaf.item)
-        if isinstance(leaf, MultiModalProcessorCacheItemProxy):
+        if isinstance(leaf, MultiModalProcessorCacheItemMetadata):
             return leaf.item_size
 
         # These are not subclasses of dict
@@ -315,7 +327,7 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
 
         self._cache = MultiModalCache.get_lru_cache(
             mm_config.mm_processor_cache_gb,
-            MultiModalProcessorCacheItemProxy,
+            MultiModalProcessorCacheItemMetadata,
         )
 
     @override
@@ -333,7 +345,7 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
-        self._cache[mm_hash] = MultiModalProcessorCacheItemProxy(*mm_item)
+        self._cache[mm_hash] = MultiModalProcessorCacheItemMetadata(*mm_item)
 
         return mm_item
 

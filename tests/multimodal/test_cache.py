@@ -8,7 +8,7 @@ import torch
 
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.multimodal.cache import (MultiModalCache,
-                                   MultiModalProcessorCacheItemProxy,
+                                   MultiModalProcessorCacheItemMetadata,
                                    processor_cache_from_config,
                                    receiver_cache_from_config)
 from vllm.multimodal.hasher import MultiModalHasher
@@ -85,7 +85,7 @@ def test_cache_item_size(item, expected_size):
     prompt_update = PromptInsertion("dummy", "target", "insertion") \
         .bind(mock_tokenizer)
 
-    cache[""] = MultiModalProcessorCacheItemProxy(item, prompt_update)
+    cache[""] = MultiModalProcessorCacheItemMetadata(item, prompt_update)
     assert cache.currsize == expected_size
 
 
