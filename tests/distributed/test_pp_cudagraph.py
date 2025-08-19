@@ -17,7 +17,6 @@ if TYPE_CHECKING:
 ])
 @pytest.mark.parametrize("ATTN_BACKEND", [
     "FLASH_ATTN",
-    "FLASHINFER",
 ])
 @create_new_process_for_each_test()
 def test_pp_cudagraph(

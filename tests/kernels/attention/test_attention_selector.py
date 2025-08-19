@@ -81,6 +81,9 @@ def test_env(
         m.setenv(STR_BACKEND_ENV_VAR, name)
         m.setenv("VLLM_MLA_DISABLE", "1" if use_mla else "0")
 
+        if name == "FLASHINFER" and not use_v1:
+            pytest.skip("FlashInfer backend is only available on V1 engine")
+
         if device == "cpu":
             if not use_v1:
                 pytest.skip("CPU backend only supports V1")
