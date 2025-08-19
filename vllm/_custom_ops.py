@@ -1260,7 +1260,8 @@ def scaled_fp8_quant(
         else:
             scale = torch.zeros(1, device=input.device, dtype=torch.float32)
             if current_platform.is_xpu():
-                torch.ops.torch_ipex.dynamic_scaled_fp8_quant(output, input, scale)
+                torch.ops.torch_ipex.dynamic_scaled_fp8_quant(
+                    output, input, scale)
             else:
                 torch.ops._C.dynamic_scaled_fp8_quant(output, input, scale)
     else:
