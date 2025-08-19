@@ -265,7 +265,8 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
 
 @pytest.mark.parametrize("batch_spec_name", [
     "small_decode", "small_prefill", "mixed_small", "medium_decode",
-    "medium_prefill", "mixed_medium"
+    "medium_prefill", "mixed_medium", "large_decode", "large_prefill",
+    "single_decode", "single_prefill"
 ])
 @pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-V2-Lite-Chat"])
 def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
