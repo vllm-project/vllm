@@ -457,7 +457,10 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
     return vision_embeddings
 
 
-def get_load_balance_assignment(sizes: list[int], num_gpus: int = 2):
+def get_load_balance_assignment(
+    sizes: list[int],
+    num_gpus: int = 2,
+) -> tuple[list[int], list[int], list[int]]:
     """
     Generate load balancing assignment and metadata 
     for distributing data across GPUs.
@@ -477,9 +480,10 @@ def get_load_balance_assignment(sizes: list[int], num_gpus: int = 2):
             Total size assigned to each GPU
     
     Example:
-    
+        ```
         sizes = [1000, 100, 200, 50]
         num_gpus=2
+        ```
 
     """
 
@@ -526,7 +530,7 @@ def run_dp_sharded_mrope_vision_model(
     vision_model: torch.nn.Module,
     pixel_values: torch.Tensor,
     grid_thw_list: list[list[int]],
-) -> torch.Tensor:
+) -> tuple[torch.Tensor]:
     """Run a vision model with data parallelism (DP) sharding. 
     The function will shard the input image tensor on the 
     first dimension and run the vision model.
@@ -540,13 +544,13 @@ def run_dp_sharded_mrope_vision_model(
         torch.Tensor: Output image embeddings
 
     Example:
-
+        ```
         vision_model.out_hidden_size = 64
         vision_model.spatial_merge_size = 2
-        pixel_values.shape = (1350,  channel)
+        pixel_values.shape = (1350, channel)
         grid_thw_list = [[1, 10, 100], [1, 10, 10], [1, 10, 20], [1, 50]]
         tp_size=2
-    
+        ```
 
     """
     tp_size = get_tensor_model_parallel_world_size()
@@ -628,7 +632,7 @@ def run_dp_sharded_mrope_vision_model(
         image_embeds_local_padded, dim=0)
 
     # Remove padding and reconstruct per-rank embeddings
-    rank_embeddings = []
+    rank_embeddings = list[torch.Tensor]()
     for rank in range(tp_size):
         start_idx = rank * max_len_per_rank
         end_idx = start_idx + (grouped_pixel_values_len[rank] //
