@@ -4,7 +4,7 @@ import tempfile
 import torch
 from torch.cuda.memory import CUDAPluggableAllocator
 
-from vllm.config import ParallelConfig
+from vllm import envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
 
@@ -37,7 +37,7 @@ _graph_pool_id = None
 _nccl_allocator_disabled = False
 
 def is_symmetric_memory_enabled():
-    return ParallelConfig.enable_nccl_symm_mem
+    return envs.VLLM_USE_NCCL_SYMM_MEM
 
 def is_symmetric_memory_tensor(tensor: torch.Tensor):
     return tensor.untyped_storage().data_ptr() in _registered_tensor_addrs

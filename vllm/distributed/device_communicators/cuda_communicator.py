@@ -130,9 +130,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm is not None
             and is_symmetric_memory_enabled()
         ):
+            print("using symmetric all-reduce",is_symmetric_memory_enabled())
             out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out
+        else:
+            print("not using symmetric all-reduce",is_symmetric_memory_enabled())
 
         # always try quick reduce first, then custom allreduce,
         # and then pynccl. (quick reduce just for ROCM MI3*)

@@ -141,6 +141,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 120
     VLLM_USE_CUDNN_PREFILL: bool = False
     VLLM_LOOPBACK_IP: str = ""
+    VLLM_USE_NCCL_SYMM_MEM: bool = False
 
 
 def get_default_cache_root():
@@ -974,6 +975,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Used to force set up loopback IP
     "VLLM_LOOPBACK_IP":
     lambda: os.getenv("VLLM_LOOPBACK_IP", ""),
+
+    # Flag to enable NCCL symmetric memory allocation and registration
+    "VLLM_USE_NCCL_SYMM_MEM":
+    lambda: bool(int(os.getenv("VLLM_USE_NCCL_SYMM_MEM", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
