@@ -572,13 +572,15 @@ class ColumnParallelLinear(LinearBase):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-    def weight_loader_v2(self, param: Parameter, loaded_weight: torch.Tensor):
+    def weight_loader_v2(self, param: BasevLLMParameter,
+                         loaded_weight: torch.Tensor):
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
         if len(loaded_weight.shape) == 0:
             assert loaded_weight.numel() == 1
             loaded_weight = loaded_weight.reshape(1)
-        param.load_column_parallel_weight(loaded_weight=loaded_weight)
+        param.load_column_parallel_weight(loaded_weight=loaded_weight,
+                                          tp_rank=self.tp_rank)
 
     def forward(
         self, input_
@@ -878,7 +880,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         param.load_merged_column_weight(loaded_weight=loaded_weight,
                                         shard_id=loaded_shard_id,
                                         shard_offset=shard_offset,
-                                        shard_size=shard_size)
+                                        shard_size=shard_size,
+                                        tp_rank=self.tp_rank)
 
 
 class QKVParallelLinear(ColumnParallelLinear):
@@ -1020,10 +1023,13 @@ class QKVParallelLinear(ColumnParallelLinear):
                          loaded_shard_id: Optional[str] = None):
         if loaded_shard_id is None:  # special case for certain models
             if isinstance(param, PerTensorScaleParameter):
-                param.load_qkv_weight(loaded_weight=loaded_weight, shard_id=0)
+                param.load_qkv_weight(loaded_weight=loaded_weight,
+                                      shard_id=0,
+                                      tp_rank=self.tp_rank)
                 return
             elif type(param) in (RowvLLMParameter, BasevLLMParameter):
-                param.load_qkv_weight(loaded_weight=loaded_weight)
+                param.load_qkv_weight(loaded_weight=loaded_weight,
+                                      tp_rank=self.tp_rank)
                 return
             # TODO: @dsikka - move to parameter.py
             self._load_fused_module_from_checkpoint(param, loaded_weight)
@@ -1047,7 +1053,8 @@ class QKVParallelLinear(ColumnParallelLinear):
                               num_heads=self.num_kv_head_replicas,
                               shard_id=loaded_shard_id,
                               shard_offset=shard_offset,
-                              shard_size=shard_size)
+                              shard_size=shard_size,
+                              tp_rank=self.tp_rank)
 
     def weight_loader(self,
                       param: Parameter,
@@ -1363,7 +1370,8 @@ class RowParallelLinear(LinearBase):
             assert loaded_weight.numel() == 1
             loaded_weight = loaded_weight.reshape(1)
 
-        param.load_row_parallel_weight(loaded_weight=loaded_weight)
+        param.load_row_parallel_weight(loaded_weight=loaded_weight,
+                                       tp_rank=self.tp_rank)
 
     def forward(
         self, input_
@@ -1371,11 +1379,9 @@ class RowParallelLinear(LinearBase):
         if self.input_is_parallel:
             input_parallel = input_
         else:
-            tp_rank = (get_tensor_model_parallel_rank()
-                       if not self.disable_tp else 0)
             splitted_input = split_tensor_along_last_dim(
                 input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[tp_rank].contiguous()
+            input_parallel = splitted_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
         assert self.quant_method is not None
