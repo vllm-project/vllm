@@ -720,6 +720,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 text.replace(
                     f"{im_start}{missing_item_idx}{im_end}",
                     f"{im_start}{item_idx}{im_end}",
+                    1,
                 ),
                 "<unk>",
             )

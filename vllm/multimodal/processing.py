@@ -1409,6 +1409,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_missing_kwargs: MultiModalKwargsItems,
         mm_missing_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[MultiModalKwargsOptionalItems, MultiModalPromptUpdates]:
+        # Need to calculate this at the beginning to avoid skipping cache logic
+        # for subsequently repeated items in the same modality
+        mm_is_cached = {
+            modality: cache.is_cached(hashes)
+            for modality, hashes in mm_hashes.items()
+        }
+
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
         merged_kwargs = defaultdict[str,
@@ -1430,7 +1437,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
             for item_idx, item_hash in enumerate(hashes):
                 item: MultiModalProcessorCacheInItem
-                if not cache.is_cached_item(item_hash):
+                if not mm_is_cached[modality][item_idx]:
                     missing_next_idx = mm_missing_next_idx[modality]
                     kwargs = missing_kwargs[missing_next_idx]
                     prompt_updates = [
@@ -1467,9 +1474,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             resolved_contents_per_update = zip(*resolved_contents_per_item)
 
             merged_prompt_updates[modality] = [
-                new_prompt_update.with_content(resolved_contents.__getitem__)
-                for new_prompt_update, resolved_contents in zip(
-                    new_prompt_updates, resolved_contents_per_update)
+                prompt_update.with_content(resolved_contents.__getitem__)
+                for prompt_update, resolved_contents in zip(
+                    missing_prompt_updates, resolved_contents_per_update)
             ]
 
         mm_kwargs = MultiModalKwargsItems(merged_kwargs)
