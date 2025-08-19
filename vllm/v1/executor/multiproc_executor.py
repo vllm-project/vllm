@@ -18,7 +18,6 @@ from threading import Thread
 from typing import Any, Callable, Optional, Union, cast
 
 import cloudpickle
-import setproctitle
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -27,8 +26,8 @@ from vllm.distributed import (destroy_distributed_environment,
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
-from vllm.distributed.parallel_state import (get_ep_group, get_pp_group,
-                                             get_tp_group)
+from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
+                                             get_pp_group, get_tp_group)
 from vllm.executor.multiproc_worker_utils import (
     set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
@@ -359,7 +358,6 @@ class WorkerProc:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        dp_rank_str: str,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
@@ -394,37 +392,11 @@ class WorkerProc:
         self.worker.init_device()
 
         # Set process title and log prefix
-        pp_size = get_pp_group().world_size
-        pp_rank = get_pp_group().rank_in_group
-        tp_size = get_tp_group().world_size
-        tp_rank = get_tp_group().rank_in_group
-        process_name = "Worker"
-        if dp_rank_str:
-            process_name += f"_{dp_rank_str}"
-        if pp_size > 1:
-            process_name += f"_PP{pp_rank}"
-        if tp_size > 1:
-            process_name += f"_TP{tp_rank}"
-        if vllm_config.parallel_config.enable_expert_parallel:
-            ep_rank = get_ep_group().rank_in_group
-            process_name += f"_EP{ep_rank}"
-        set_process_title(name=process_name)
-        decorate_logs(process_name)
+        self.setup_proc_title_and_log_prefix(
+            enable_ep=vllm_config.parallel_config.enable_expert_parallel)
 
         # Load model
         self.worker.load_model()
-
-    @staticmethod
-    def get_worker_name(vllm_config: VllmConfig, rank: int) -> str:
-        pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-        pp_str = f"PP{rank // tp_size}" if pp_size > 1 else ""
-        tp_str = f"TP{rank % tp_size}" if tp_size > 1 else ""
-        suffix = f"{pp_str}{'_' if pp_str and tp_str else ''}{tp_str}"
-        process_name = "Worker"
-        if suffix:
-            process_name = f"{process_name}_{suffix}"
-        return process_name
 
     @staticmethod
     def make_worker_process(
@@ -441,12 +413,8 @@ class WorkerProc:
         # Create death pipe to detect parent process exit
         death_reader, death_writer = context.Pipe(duplex=False)
 
-        dp_rank_str = ""
-        if vllm_config.parallel_config.data_parallel_size_local > 1:
-            dp_rank_str = setproctitle.getproctitle().split("_")[-1]
         process_kwargs = {
             "vllm_config": vllm_config,
-            "dp_rank_str": dp_rank_str,
             "local_rank": local_rank,
             "rank": rank,
             "distributed_init_method": distributed_init_method,
@@ -633,3 +601,24 @@ class WorkerProc:
             if output_rank is None or self.rank == output_rank:
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.SUCCESS, output))
+
+    @staticmethod
+    def setup_proc_title_and_log_prefix(enable_ep: bool) -> None:
+        dp_size = get_dp_group().world_size
+        dp_rank = get_dp_group().rank_in_group
+        pp_size = get_pp_group().world_size
+        pp_rank = get_pp_group().rank_in_group
+        tp_size = get_tp_group().world_size
+        tp_rank = get_tp_group().rank_in_group
+        process_name = "Worker"
+        if dp_size > 1:
+            process_name += f"_DP{dp_rank}"
+        if pp_size > 1:
+            process_name += f"_PP{pp_rank}"
+        if tp_size > 1:
+            process_name += f"_TP{tp_rank}"
+        if enable_ep:
+            ep_rank = get_ep_group().rank_in_group
+            process_name += f"_EP{ep_rank}"
+        set_process_title(name=process_name)
+        decorate_logs(process_name)

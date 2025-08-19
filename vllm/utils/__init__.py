@@ -3340,8 +3340,7 @@ def set_process_title(name: str,
     """
     if suffix:
         name = f"{name}_{suffix}"
-    name = f"{prefix}::{name}"
-    setproctitle.setproctitle(name)
+    setproctitle.setproctitle(f"{prefix}::{name}")
 
 
 def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
