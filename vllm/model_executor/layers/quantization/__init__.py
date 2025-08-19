@@ -15,7 +15,6 @@ QuantizationMethods = Literal[
     "fbgemm_fp8",
     "modelopt",
     "modelopt_fp4",
-    "marlin",
     "bitblas",
     "gguf",
     "gptq_marlin_24",
@@ -106,7 +105,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .hqq_marlin import HQQMarlinConfig
     from .inc import INCConfig
     from .ipex_quant import IPEXConfig
-    from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
@@ -125,7 +123,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "fbgemm_fp8": FBGEMMFp8Config,
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
-        "marlin": MarlinConfig,
         "bitblas": BitBLASConfig,
         "gguf": GGUFConfig,
         "gptq_marlin_24": GPTQMarlin24Config,
