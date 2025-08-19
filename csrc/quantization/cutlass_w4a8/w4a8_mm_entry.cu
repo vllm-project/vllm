@@ -1,9 +1,11 @@
-#include <iostream>
+//
+// Based off of:
+//   https://github.com/NVIDIA/cutlass/blob/main/examples/55_hopper_mixed_dtype_gemm/55_hopper_int4_fp8_gemm.cu
+//
+
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
-#include "core/scalar_type.hpp"
 #include <torch/all.h>
-#include <Python.h>
 #include "cutlass_extensions/torch_utils.hpp"
 
 #include "core/registration.h"
@@ -11,22 +13,12 @@
 #include "cutlass/cutlass.h"
 
 #include "cute/tensor.hpp"
-#include "cutlass/tensor_ref.h"
-#include "cutlass/epilogue/collective/default_epilogue.hpp"
-#include "cutlass/epilogue/thread/linear_combination.h"
-#include "cutlass/gemm/dispatch_policy.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
 #include "cutlass/gemm/kernel/gemm_universal.hpp"
 
-#include "cutlass/util/command_line.h"
-#include "cutlass/util/distribution.h"
-#include "cutlass/util/host_tensor.h"
 #include "cutlass/util/packed_stride.hpp"
-#include "cutlass/util/tensor_view_io.h"
-#include "cutlass/util/reference/device/tensor_fill.h"
-#include "cutlass/util/reference/device/tensor_compare.h"
 #include "cutlass/util/mixed_dtype_utils.hpp"
 
 #include "cutlass_extensions/common.hpp"
@@ -42,7 +34,9 @@ using namespace cute;
 using MmaType = cutlass::float_e4m3_t;  // A/scale element type
 using QuantType = cutlass::int4b_t;     // B element type (packed int4)
 
-constexpr int TileShapeK = 128 * 8 / sizeof_bits<MmaType>::value;
+static int constexpr TileShapeK = 128 * 8 / sizeof_bits<MmaType>::value;
+static int constexpr ScalePackSize = 8; // pack 8 scale elements together
+static int constexpr PackFactor = 8;    // 8 4-bit packed into int32
 
 // A matrix configuration
 using ElementA = MmaType;                   // Element type for A matrix operand
@@ -114,11 +108,11 @@ using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
 // Kernel template — Tile/Cluster shapes
 // ----------------------------------------------------------------------------
 template<
-    class TileShape_MNK,
+    class TileShape_MN,
     class ClusterShape_MNK
 >
 struct W4A8GemmKernel {
-    using TileShape = TileShape_MNK;
+    using TileShape = decltype(cute::append(TileShape_MN{}, cute::Int<TileShapeK>{}));
     using ClusterShape = ClusterShape_MNK;
 
     // Epilogue per-tok, per-chan scales
@@ -148,7 +142,7 @@ struct W4A8GemmKernel {
     using CollectiveMainloopShuffled =
         typename cutlass::gemm::collective::CollectiveBuilder<
             ArchTag, OperatorClass,
-            cute::tuple<ElementB, cutlass::Array<ElementScale, 8>>,
+            cute::tuple<ElementB, cutlass::Array<ElementScale, ScalePackSize>>,
             LayoutB_Reordered, AlignmentB, ElementA, LayoutA_Transpose, AlignmentA,
             ElementAccumulator, TileShape, ClusterShape,
             cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
@@ -191,7 +185,7 @@ struct W4A8GemmKernel {
         auto B_ptr = static_cast<QuantType const*>(B.const_data_ptr());
         auto D_ptr = static_cast<ElementD*>(D.data_ptr());
         // can we avoid harcode the 8 here
-        auto S_ptr = static_cast<cutlass::Array<ElementScale, 8> const*>(
+        auto S_ptr = static_cast<cutlass::Array<ElementScale, ScalePackSize> const*>(
             group_scales.const_data_ptr());
         
         // runtime layout for B
@@ -253,52 +247,19 @@ struct W4A8GemmKernel {
 
 };
 
-torch::Tensor pack_scale_fp8(torch::Tensor const& scales) {
-  TORCH_CHECK(scales.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(scales.is_contiguous());
-  TORCH_CHECK(scales.is_cuda());
-  auto packed_scales =
-      torch::empty({scales.numel() * 8}, // TODO: dont hardcode
-                   torch::TensorOptions()
-                       .dtype(scales.dtype())
-                       .device(scales.device()));
-  auto scales_ptr = static_cast<MmaType const*>(scales.const_data_ptr());
-  auto packed_scales_ptr =
-      static_cast<cutlass::Array<ElementScale, 8>*>(packed_scales.data_ptr());
-  cutlass::pack_scale_fp8(scales_ptr, packed_scales_ptr, scales.numel());
-  return packed_scales;
-}
-
-torch::Tensor encode_and_reorder_int4b(torch::Tensor const& B) {
-  TORCH_CHECK(B.dtype() == torch::kInt32);
-  TORCH_CHECK(B.dim() == 2);
-  int k = B.size(0) * 8; // logical k
-  int n = B.size(1);
-  torch::Tensor B_packed = torch::empty_like(B);
-  auto B_ptr = static_cast<QuantType const*>(B.const_data_ptr());
-  auto B_packed_ptr = static_cast<QuantType*>(B_packed.data_ptr());
-  // encode
-  cutlass::unified_encode_int4b(B_ptr, B_packed_ptr, n * k);
-  // reorder
-  auto shape_B = cute::make_shape(n, k, 1);
-  LayoutB_Reordered layout_B_reordered = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
-  // layoutright/row major
-  auto layout_B = make_layout(shape_B, LayoutRight{});
-  cutlass::reorder_tensor(B_packed_ptr, layout_B, layout_B_reordered);
-  return B_packed;
-}
-
-// kernels
-using Kernel_256x128_1x1x1 = W4A8GemmKernel<Shape<_256, _128, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
-using Kernel_256x64_1x1x1 = W4A8GemmKernel<Shape<_256, _64, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
-using Kernel_256x32_1x1x1 = W4A8GemmKernel<Shape<_256, _32, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
-using Kernel_256x16_1x1x1 = W4A8GemmKernel<Shape<_256, _16, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
-using Kernel_128x256_2x1x1 = W4A8GemmKernel<Shape<_128, _256, cute::Int<TileShapeK>>, Shape<_2, _1, _1>>;
-using Kernel_128x256_1x1x1 = W4A8GemmKernel<Shape<_128, _256, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
-using Kernel_128x128_1x1x1 = W4A8GemmKernel<Shape<_128, _128, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
-using Kernel_128x64_1x1x1 = W4A8GemmKernel<Shape<_128, _64, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
-using Kernel_128x32_1x1x1 = W4A8GemmKernel<Shape<_128, _32, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
-using Kernel_128x16_1x1x1 = W4A8GemmKernel<Shape<_128, _16, cute::Int<TileShapeK>>, Shape<_1, _1, _1>>;
+// ----------------------------------------------------------------------------
+// Kernel instantiations and dispatch logic
+// ----------------------------------------------------------------------------
+using Kernel_256x128_1x1x1 = W4A8GemmKernel<Shape<_256, _128>, Shape<_1, _1, _1>>;
+using Kernel_256x64_1x1x1 = W4A8GemmKernel<Shape<_256, _64>, Shape<_1, _1, _1>>;
+using Kernel_256x32_1x1x1 = W4A8GemmKernel<Shape<_256, _32>, Shape<_1, _1, _1>>;
+using Kernel_256x16_1x1x1 = W4A8GemmKernel<Shape<_256, _16>, Shape<_1, _1, _1>>;
+using Kernel_128x256_2x1x1 = W4A8GemmKernel<Shape<_128, _256>, Shape<_2, _1, _1>>;
+using Kernel_128x256_1x1x1 = W4A8GemmKernel<Shape<_128, _256>, Shape<_1, _1, _1>>;
+using Kernel_128x128_1x1x1 = W4A8GemmKernel<Shape<_128, _128>, Shape<_1, _1, _1>>;
+using Kernel_128x64_1x1x1 = W4A8GemmKernel<Shape<_128, _64>, Shape<_1, _1, _1>>;
+using Kernel_128x32_1x1x1 = W4A8GemmKernel<Shape<_128, _32>, Shape<_1, _1, _1>>;
+using Kernel_128x16_1x1x1 = W4A8GemmKernel<Shape<_128, _16>, Shape<_1, _1, _1>>;
 
 torch::Tensor mm_dispatch(torch::Tensor const& A,
                  torch::Tensor const& B,  // already packed
@@ -341,7 +302,6 @@ torch::Tensor mm_dispatch(torch::Tensor const& A,
     TORCH_CHECK(false, "Unknown W4A8 schedule: ", schedule);
     return {};
 }
-// end gen
 
 torch::Tensor mm(torch::Tensor const& A,
                  torch::Tensor const& B,  // already packed
@@ -387,6 +347,50 @@ torch::Tensor mm(torch::Tensor const& A,
         schedule = "128x256_2x1x1";
     }
     return mm_dispatch(A, B, group_scales, group_size, channel_scales, token_scales, maybe_out_type, schedule);
+}
+
+
+// ----------------------------------------------------------------------------
+// Pre-processing utils
+// ----------------------------------------------------------------------------
+torch::Tensor pack_scale_fp8(torch::Tensor const& scales) {
+  TORCH_CHECK(scales.dtype() == torch::kFloat8_e4m3fn);
+  TORCH_CHECK(scales.is_contiguous());
+  TORCH_CHECK(scales.is_cuda());
+
+  auto packed_scales =
+      torch::empty({scales.numel() * ScalePackSize},
+                   torch::TensorOptions()
+                       .dtype(scales.dtype())
+                       .device(scales.device()));
+  auto scales_ptr = static_cast<MmaType const*>(scales.const_data_ptr());
+  auto packed_scales_ptr =
+      static_cast<cutlass::Array<ElementScale, ScalePackSize>*>(packed_scales.data_ptr());
+
+  cutlass::pack_scale_fp8(scales_ptr, packed_scales_ptr, scales.numel());
+
+  return packed_scales;
+}
+
+torch::Tensor encode_and_reorder_int4b(torch::Tensor const& B) {
+  TORCH_CHECK(B.dtype() == torch::kInt32);
+  TORCH_CHECK(B.dim() == 2);
+
+  torch::Tensor B_packed = torch::empty_like(B);
+
+  int k = B.size(0) * PackFactor; // logical k
+  int n = B.size(1);
+  
+  auto B_ptr = static_cast<QuantType const*>(B.const_data_ptr());
+  auto B_packed_ptr = static_cast<QuantType*>(B_packed.data_ptr());
+  auto shape_B = cute::make_shape(n, k, 1);
+  auto layout_B = make_layout(shape_B, LayoutRight{});  // row major
+  LayoutB_Reordered layout_B_reordered = cute::tile_to_shape(LayoutAtomQuant{}, shape_B);
+
+  cutlass::unified_encode_int4b(B_ptr, B_packed_ptr, n * k);
+  cutlass::reorder_tensor(B_packed_ptr, layout_B, layout_B_reordered);
+
+  return B_packed;
 }
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {

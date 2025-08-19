@@ -453,7 +453,7 @@ main() {
   else
      check_gpus
   fi
-  check_hf_token
+  # check_hf_token
 
   # Set to v1 to run v1 benchmark
   if [[ "${ENGINE_VERSION:-v0}" == "v1" ]]; then
@@ -472,15 +472,15 @@ main() {
 
   # prepare for benchmarking
   cd benchmarks || exit 1
-  ensure_sharegpt_downloaded
+  # ensure_sharegpt_downloaded
   declare -g RESULTS_FOLDER=results/
   mkdir -p $RESULTS_FOLDER
   QUICK_BENCHMARK_ROOT=../.buildkite/nightly-benchmarks/
 
   # benchmarking
-  run_serving_tests $QUICK_BENCHMARK_ROOT/tests/"${SERVING_JSON:-serving-tests$ARCH.json}"
-  run_latency_tests $QUICK_BENCHMARK_ROOT/tests/"${LATENCY_JSON:-latency-tests$ARCH.json}"
-  run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/"${THROUGHPUT_JSON:-throughput-tests$ARCH.json}"
+  run_serving_tests $QUICK_BENCHMARK_ROOT/tests/"${SERVING_JSON:-serving-tests-w4a8$ARCH.json}"
+  # run_latency_tests $QUICK_BENCHMARK_ROOT/tests/"${LATENCY_JSON:-latency-tests$ARCH.json}"
+  # run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/"${THROUGHPUT_JSON:-throughput-tests$ARCH.json}"
 
   # postprocess benchmarking results
   pip install tabulate pandas

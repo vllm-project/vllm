@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import partial
 from typing import Optional
 
 import torch
@@ -12,14 +11,16 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
 
 class CutlassW4A8LinearKernel(MPLinearKernel):
-    # hack the fp8 quant op here
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # dynamic per-tok fp8 activation quantization
         self.quant_fp8 = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
 
     @classmethod
@@ -35,9 +36,8 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         if not current_platform.is_device_capability(90):
             return False, "CUTLASS W4A8 requires compute capability of 90 (Hopper)"
 
-        # TODO: figure out how to register the fp8 activation part
-        # if c.act_type != torch.float8_e4m3fn:
-        #     return False, "CUTLASS W4A8 only supports FP8 (e4m3) activations"
+        if c.act_type != torch.float8_e4m3fn:
+            return False, "CUTLASS W4A8 only supports FP8 (e4m3) activations"
 
         if c.has_g_idx:
             return False, "Act reordering currently not supported by CUTLASS W4A8"
@@ -45,14 +45,9 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         if c.zero_points:
             return False, "Zero points not currently supported by CUTLASS W4A8"
         
-        # TODO: enforce signed int4? The testing is with the existing w4a16 config
-        # and int4b8 weights converted to int4, but the config is the same so we
-        # expect int4b8 here.
-        # if c.weight_type not in query_machete_supported_quant_types(
-        #         c.zero_points):
-        #     return False, f"Quant type ({c.weight_type}) not supported by "\
-        #                    "Machete, supported types are: "\
-        #                    f"{query_machete_supported_quant_types(c.zero_points)}"
+        if c.weight_type != scalar_types.int4:
+            return False, f"Quant type ({c.weight_type}) not supported by "\
+                           "CUTLASS W4A8, only supported int4"
 
         # TODO: column-wise should work
         if c.group_size != 128:
@@ -67,7 +62,7 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module):
         c = self.config
 
-        # TODO: seems a bit slow/mem intensive
+        # TODO: optimize speed/mem usage
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
@@ -85,7 +80,7 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
-        # dummy channel scales
+        # TODO: support loading channel scales
         self.w_ch_s = torch.ones((c.partition_weight_shape[1],), dtype=torch.float32, device='cuda')
         
     def apply_weights(self,
@@ -94,23 +89,12 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         assert bias is None, "bias not supported by CUTLASS W4A8"
         c = self.config
-        w_q, w_s, w_zp, _ = self._get_weight_params(layer)
+        w_q, w_s, _, _ = self._get_weight_params(layer)
 
         x_2d = x.reshape(-1, x.shape[-1])
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1], )
 
-        if c.has_g_idx:
-            x_2d = self.act_perm(x_2d)
-
-        if c.zero_points:
-            assert w_zp is not None
-        else:
-            w_zp = None
-
-        # per-tok quant
-        x_2d, act_scales = self.quant_fp8(
-            x_2d,
-        )
+        x_2d, act_scales = self.quant_fp8(x_2d)
         output = ops.cutlass_w4a8_mm(a=x_2d,
                                      b_q=w_q,
                                      b_group_scales=w_s,
@@ -118,7 +102,5 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
                                      a_token_scales=act_scales,
                                      b_channel_scales=self.w_ch_s)
 
-        if bias is not None:
-            output.add_(bias)  # In-place add
 
         return output.reshape(out_shape)
