@@ -5,8 +5,6 @@ from functools import partial
 from typing import Optional
 
 import torch
-import os
-from safetensors.torch import save_file
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.machete_utils import (
@@ -20,43 +18,6 @@ from vllm.platforms import current_platform
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
-# czhu: on the fly dynamic fp8 quant
-def fp8_per_token(
-    x_bf16: torch.Tensor,
-    safety: float = 0.95,         # shrink range a bit to avoid infs
-    eps: float = 1e-12,
-    fake: bool = True
-):
-    """
-    Per-token 'fake' FP8 quantization of activations (row = token).
-    x_bf16: [M, K] BF16 tensor
-    Returns: (x_bf16_fake, scales_bf16) where x_bf16_fake is BF16 after FP8 Q/DQ
-    """
-
-    assert x_bf16.dim() == 2, "expected [M, K]"
-    assert x_bf16.dtype == torch.bfloat16, "input must be BF16"
-    fp8_dtype = torch.float8_e4m3fn
-
-    # Compute per-token amax in FP32 for stability
-    x_f32 = x_bf16.to(torch.float32)
-    amax = torch.amax(x_f32.abs(), dim=1)  # [M]
-
-    # Scale so that per-row max maps near FP8 max (with a safety margin)
-    alpha = torch.finfo(fp8_dtype).max  # FP8 max finite value
-    # avoid divide-by-zero; if a row is all zeros, set scale=1
-    scales = torch.where(amax > 0, amax / (alpha * safety), torch.ones_like(amax))
-
-    # Apply scaling, Q->DQ through FP8
-    inv_scales = (1.0 / (scales + eps)).to(torch.float32)      # [M]
-    x_scaled = x_f32 * inv_scales.unsqueeze(1)                  # [M, K]
-    x_fp8 = x_scaled.to(fp8_dtype)                              # quantize
-                        # dequantize to BF16
-    if fake:
-        x_dq = x_fp8.to(torch.bfloat16)         
-        # x_out = (x_dq * scales.to(torch.bfloat16).unsqueeze(1))     # re-apply scale
-        return x_dq, scales.to(torch.bfloat16)
-    else:
-        return x_fp8, scales.to(torch.bfloat16)
 
 class MacheteLinearKernel(MPLinearKernel):
 
@@ -149,7 +110,6 @@ class MacheteLinearKernel(MPLinearKernel):
         # Repack weights and scales for Machete
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
-
         if c.zero_points:
             self._transform_param(layer, self.w_zp_name, transform_w_zp)
 
@@ -157,7 +117,6 @@ class MacheteLinearKernel(MPLinearKernel):
                       layer: torch.nn.Module,
                       x: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        assert bias is None, "bias not supported by Machete"
         c = self.config
         w_q, w_s, w_zp, _ = self._get_weight_params(layer)
 
@@ -172,8 +131,7 @@ class MacheteLinearKernel(MPLinearKernel):
         else:
             w_zp = None
 
-        output = ops.machete_mm(
-                                a=x_2d,
+        output = ops.machete_mm(a=x_2d,
                                 b_q=w_q,
                                 b_type=c.weight_type,
                                 b_group_zeros=w_zp,
