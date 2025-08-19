@@ -36,8 +36,7 @@ profiling and analyzing nsys profile output.
 ## Notes
 
 - Make sure you have pandas installed.
-- Make sure nsys is installed, and specify the path to the `nsys` command with
-  `--nsys_cmd` if it is not in your PATH.
+- Make sure [nsys](https://developer.nvidia.com/nsight-systems/get-started) is installed, and specify the path to the `nsys` command with `--nsys_cmd` if it is not in your PATH.
 - For more details on available engines and models, see the help string in
   the script or run:
 
@@ -135,34 +134,31 @@ time which would cause a difference for the overall category.
 
 ## Example 3: add new classification for a new model
 
-Suppose there's a new model ABC that is available for engine DEF, and say there
-are 4 kernels to be classified into "gemm" and "attn", where the gemm kernels
-have names with "*H*" or "*I*" in them, and attn kernels have names with "*J*"
-or "*K*" in them, add a new entry like so:
+To create a new engine DEF with model ABC, just add another json file in the same directory as
+gputrc2graph.py with the same format as the other json files. The script will automatically pick up all the json files in the same directory as engine/model specifications.
 
-```python
-engine_model = {
-        'DEF': {
-            'ABC': { 
-                'layer_anno': {
-                    'Stage': {
-                        '.*': 'layer',
-                    },
-                    'Substage': {
-                        'H|I': 'gemm',
-                        'J|K': 'attn',
-                        'CUDA mem': 'non-gpu-H_D_memops',
-                        '.*': 'misc'
-                    }
-                }
-            },
-        }
-      'vllm': {...}
+Then, for this new model, suppose there are 4 kernels to be classified into "gemm" and "attn", where the gemm kernels
+have names with "*H*" or "*I*" in them, and attn kernels have names with "*J*"
+or "*K*" in them, just add another .json file in the same directory as
+gputrc2graph.py with the same format as the other json files, like the following:
+
+```json
+{
+  "DEF": {
+      "ABC": { 
+          "H|I": "gemm",
+          "J|K": "attn",
+          "CUDA mem": "non-gpu-H_D_memops",
+          ".*": "misc"
+      }
+  }
+}
 ```
 
-Basically Substage is a dictionary with a list of key/value pairs, where the
-keys are regex's of the kernel names to be classified, and values are the
-classification bins which one wishes to compare across engines/models.
+Each entry in the dictionary consists of:
+
+- key: a regex used to classify the kernels
+- value: the category to classify the kernels into.
 
 The last 2 entries are common for all engine/models, consisting of CUDA memory
 operations and a 'misc' for anything that's leftover and can't be classified.
@@ -173,3 +169,6 @@ like the following:
 ```bash
 --infile new.nsys-rep,DEF,ABC,<runtime>
 ```
+
+If the engine_DEF.json file already exists, just add the model as a new node in
+the existing engine file, after the other models.
