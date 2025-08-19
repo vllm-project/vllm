@@ -960,7 +960,7 @@ class EngineArgs:
             return None
         
         # Add layer skip fields if provided via CLI
-        if self.speculative_layer_skip:
+        if self.speculative_layer_skip is not None:
             self.speculative_config["layer_skip"] = self.speculative_layer_skip
             self.speculative_config["lsq_head_path"] = self.lsq_head_path
             self.speculative_config["num_speculative_tokens"] = self.speculative_config.get("num_speculative_tokens") or 5

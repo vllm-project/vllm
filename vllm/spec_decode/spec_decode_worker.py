@@ -172,41 +172,14 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         draft_parallel_config: ParallelConfig = draft_worker_kwargs[
             'vllm_config'].parallel_config
         if layer_skip_method:
-            from vllm.spec_decode.early_exit_model_runner import (
-                EarlyExitModelRunner, load_lsq_head)
-            from vllm.spec_decode.layer_skip_draft_worker import LayerSkipDraftWorker
+            # Use the same worker pattern as draft-model proposers
+            # This creates a separate model instance with its own KV cache
+            proposer_worker = MultiStepWorker(**draft_worker_kwargs)
             
-            # Extract configuration
-            exit_layer = layer_skip_config.layer_skip if layer_skip_config else 12
-            lsq_head_path = layer_skip_config.lsq_head_path if layer_skip_config else None
+            # Store layer skip configuration for init_device
+            proposer_worker._layer_skip_config = layer_skip_config
             
-            # Validate exit layer
-            num_layers = scorer_worker.model_config.hf_config.num_hidden_layers
-            if exit_layer >= num_layers:
-                logger.warning(f"exit_layer {exit_layer} >= num_layers {num_layers}, "
-                              f"using {num_layers - 1}")
-                exit_layer = num_layers - 1
-            
-            # Create the early exit model runner wrapping the scorer's runner
-            # LSQ head will be loaded later in init_device() when model is ready
-            draft_runner = EarlyExitModelRunner(
-                scorer_worker.model_runner, exit_layer, None)
-            
-            # Store config for later LSQ head loading
-            draft_runner._lsq_head_path = lsq_head_path
-            
-            # Create proposer worker using our draft worker and runner
-            # Pass LayerSkipDraftWorker as the worker_cls
-            proposer_worker = MultiStepWorker(
-                worker_cls=LayerSkipDraftWorker,
-                worker_kwargs=dict(
-                    model_runner=draft_runner
-                ),
-                **draft_worker_kwargs
-            )
-            
-            logger.info(f"[Layer Skip] Created early-exit proposer at layer {exit_layer} "
-                       f"(model has {num_layers} layers)")
+            logger.info("[Layer Skip] Created proposer worker (will wrap runner with early-exit)")
         elif ngram_prompt_lookup_max > 0:
             draft_worker_kwargs[
                 "device_type"] = scorer_worker.device_config.device.type
@@ -392,19 +365,47 @@ class SpecDecodeWorker(LoRANotSupportedWorkerBase):
         # NOTE(cade): load_model is not part of the WorkerBase interface.
         self.scorer_worker.load_model()
         self.proposer_worker.load_model()
-        # Load LSQ head for layer-skip if needed
-        if hasattr(self.proposer_worker, 'worker') and hasattr(self.proposer_worker.worker, 'model_runner'):
-            model_runner = self.proposer_worker.worker.model_runner
-            if hasattr(model_runner, '_lsq_head_path') and model_runner._lsq_head_path:
-                from vllm.spec_decode.early_exit_model_runner import load_lsq_head
-                model_dtype = next(self.scorer_worker.model_runner.model.parameters()).dtype
-                model_runner.lsq_head = load_lsq_head(
-                    model_runner._lsq_head_path, 
-                    model_runner.exit_layer,
-                    self.scorer_worker.device, 
-                    model_dtype
-                )
-                logger.info(f"Loaded LSQ head from {model_runner._lsq_head_path}")
+        # Setup early exit for layer-skip
+        if hasattr(self.proposer_worker, '_layer_skip_config') and self.proposer_worker._layer_skip_config:
+            from vllm.spec_decode.early_exit_model_runner import (
+                EarlyExitModelRunner, EarlyExitModule, load_lsq_head)
+            
+            config = self.proposer_worker._layer_skip_config
+            exit_layer = config.layer_skip if config.layer_skip is not None else None
+            
+            if exit_layer is None:
+                num_layers = self.scorer_worker.model_config.hf_config.num_hidden_layers
+                exit_layer = num_layers // 2
+            
+            num_layers = self.scorer_worker.model_config.hf_config.num_hidden_layers
+            if exit_layer >= num_layers:
+                logger.warning(f"exit_layer {exit_layer} >= num_layers {num_layers}, "
+                              f"using {num_layers - 1}")
+                exit_layer = num_layers - 1
+            
+            if hasattr(self.proposer_worker, 'worker'):
+                base_runner = self.proposer_worker.worker.model_runner
+            else:
+                base_runner = self.proposer_worker.model_runner
+            
+            wrapped = EarlyExitModelRunner(base_runner, exit_layer, lsq_head=None)
+            early_exit_module = EarlyExitModule(base_runner, exit_layer)
+            wrapped.model = early_exit_module
+            
+            lsq_head_path = getattr(config, 'lsq_head_path', None)
+            if lsq_head_path:
+                model_dtype = next(base_runner.model.parameters()).dtype
+                device = self.proposer_worker.device
+                wrapped.lsq_head = load_lsq_head(lsq_head_path, exit_layer, device, model_dtype)
+                logger.info(f"Loaded LSQ head from {lsq_head_path}")
+            
+            if hasattr(self.proposer_worker, 'worker'):
+                self.proposer_worker.worker.model_runner = wrapped
+            else:
+                self.proposer_worker.model_runner = wrapped
+                
+            logger.info(f"[Layer Skip] Proposer early-exit installed @ layer={exit_layer} "
+                       f"(proposer device={self.proposer_worker.device})")
 
         if self._enable_lm_head_weight_load:
             # NOTE(Shangming): gather lm_head weight when tp enabled

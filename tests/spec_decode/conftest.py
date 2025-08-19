@@ -113,12 +113,24 @@ def hf_hidden_at_k():
 # ------------- helper to reach proposer runner from LLM ----------------
 
 def get_proposer_runner_from_llm(llm) -> object:
-    """Return the proposer model runner (your EarlyExitModelRunner) from an LLM."""
+    """Return the proposer model runner (EarlyExitModelRunner) from an LLM."""
     eng = getattr(llm, "llm_engine", None)
-    spec = getattr(eng, "spec_worker", None)
-    prop = getattr(spec, "proposer_worker", None)
-    worker = getattr(prop, "worker", None)
-    runner = getattr(worker, "model_runner", None)
-    if runner is None:
-        raise RuntimeError("Could not locate proposer model_runner")
-    return runner
+    if not eng:
+        raise RuntimeError("Could not access llm_engine")
+    
+    model_executor = getattr(eng, "model_executor", None)
+    if not model_executor:
+        raise RuntimeError("Could not access model_executor")
+        
+    driver_worker = getattr(model_executor, "driver_worker", None)
+    if not driver_worker:
+        raise RuntimeError("Could not access driver_worker")
+        
+    if hasattr(driver_worker, "proposer_worker"):
+        prop = driver_worker.proposer_worker
+        if hasattr(prop, "worker") and hasattr(prop.worker, "model_runner"):
+            return prop.worker.model_runner
+        if hasattr(prop, "model_runner"):
+            return prop.model_runner
+    
+    raise RuntimeError("Could not locate proposer model_runner")
