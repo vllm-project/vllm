@@ -10,6 +10,14 @@ from packaging.version import parse
 from .flash_quantization import get_quantize_fn
 import sys 
 
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import Optional, List
+
+import torch
+import transformers
+from torch import nn
+
 # Set up logger
 logger = logging.getLogger(__name__)
 
@@ -47,8 +55,8 @@ def apply_patch():
         logger.debug(f"Patching vllm process_weights_after_loading... status: {process_weights_status}")
         
 
-        # patch_vllm_logprob_compute()
-        # logger.debug("patching vllm logprob works")
+        patch_vllm_logprob_compute()
+        logger.debug("patching vllm logprob works")
 
         # Patch the LLM class
         patch_status = patch_vllm_llm()
@@ -414,6 +422,144 @@ def load_flashrl_config(config):
 
     return config_data
 
+def process_weights_after_loading_subset(model: nn.Module, model_config,
+                                  target_device: torch.device, param_names: List[str]) -> None:
+    from vllm.model_executor.model_loader.utils import device_loading_context
+    from vllm.attention import Attention
+    from vllm.config import ModelConfig
+    from vllm.logger import init_logger
+    from vllm.model_executor.layers.linear import QKVCrossParallelLinear
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig, QuantizeMethodBase)
+
+    # HACK: begin
+    if model_config is None and target_device is None:
+        model_config = getattr(model, 'hacked_model_config', None)
+        target_device = getattr(model, 'hacked_target_device', None)
+    else:
+        setattr(model, 'hacked_model_config', model_config)
+        setattr(model, 'hacked_target_device', target_device)
+
+    if getattr(model, 'hacked_not_need_process_weights_after_loading', False):
+        logger.debug("vllm process_weights_after_loading already processed")
+        return
+
+    # print("Patched process_weights_after_loading function called")
+    
+    original_weights = dict(model.named_parameters())
+    
+    # this can be optimized for better memory usage, leave for future work...
+    if not hasattr(model, 'hacked_original_weights_rebuild_keys'):
+        model.hacked_original_weights_rebuild_keys = {}
+        for name, p in original_weights.items():
+            model.hacked_original_weights_rebuild_keys[name] = (p.shape, p.stride(), p.dtype, p.untyped_storage().nbytes())
+    
+    # record weight_loader 
+    recorded_loader = {k: dict() for k in recorded_loader_keys}
+    for name, p in original_weights.items():
+        for k in recorded_loader.keys():
+            if hasattr(p, k):
+                attr = getattr(p, k)
+                if not callable(attr):
+                    recorded_loader[k][name] = attr
+                elif p is attr.__self__:
+                    recorded_loader[k][name] = attr.__func__
+                else:
+                    recorded_loader[k][name] = attr
+    # HACK: end
+
+    requested_module_names = set(['.'.join(param_name.split(".")[:-1]) for param_name in param_names])
+    name_to_modules = dict(model.named_modules())
+    for module_name in requested_module_names:
+        if module_name not in name_to_modules:
+            raise RuntimeError(f"Module name {module_name} not found in actual modules")
+        module = name_to_modules[module_name]
+
+        if isinstance(module, QKVCrossParallelLinear):
+            # NOTE(Isotr0py): special case for cross QKV layer because
+            # q and kv proj aren't registered as submodules intentionally
+            module.process_weights_after_loading()
+            continue
+        quant_method = getattr(module, "quant_method", None)
+        # print("quant method: ", quant_method)
+        if isinstance(quant_method, QuantizeMethodBase):
+            # When quant methods need to process weights after loading
+            # (for repacking, quantizing, etc), they expect parameters
+            # to be on the global target device. This scope is for the
+            # case where cpu offloading is used, where we will move the
+            # parameters onto device for processing and back off after.
+            with device_loading_context(module, target_device):
+                quant_method.process_weights_after_loading(module)
+
+    # Currently only used by MLA.
+    # NOTE: This intentionally happens after other modules so we can easily
+    # decompress the weights for MLA.
+    for _, module in model.named_modules():
+        if isinstance(module, Attention) and \
+            hasattr(module, "process_weights_after_loading"):
+            # TODO(lucas): see if there is a way to unify the signatures
+            # of process_weights_after_loading
+            module.process_weights_after_loading(model_config.dtype)
+        
+    # HACK: begin
+    model.hacked_recorded_loader = recorded_loader
+    # HACK: end
+
+from collections import defaultdict
+import types
+
+def _build_hf_to_vllm_map_via_loader(model, weight_items, original_load_weights):
+    """
+    Returns: Dict[str, List[str]] mapping HF keys (as passed in weight_items)
+             to fully-qualified vLLM parameter names.
+    Does NOT modify parameter data (weight_loader is temporarily a recorder).
+    """
+    # 1) Snapshot params and their original loaders (if present)
+    params = dict(model.named_parameters())  # qualname -> Parameter
+    orig_loader_by_param = {}
+    for qn, p in params.items():
+        if hasattr(p, "weight_loader"):
+            orig_loader_by_param[p] = p.weight_loader
+        else:
+            orig_loader_by_param[p] = None  # would have used default_weight_loader
+
+    # 2) Tie tensors to their original HF keys so recorder can recover names
+    #    (ids are stable; handles nested/grouped iterators inside the loader)
+    items = list(weight_items)  # materialize once
+    hf_by_tid = {id(t): k for (k, t) in items}
+
+    # 3) Recorder: record hf->param_name without mutating the param
+    hf_to_vllm = {}
+
+    def make_recorder(param_qualname):
+        def recorder(param, tensor, shard_id=None):
+            hf_key = hf_by_tid.get(id(tensor))
+            if hf_key is not None:
+                if hf_key in hf_to_vllm:
+                    raise RuntimeError(
+                        f"HF key {hf_key} mapped to multiple params: "
+                        f"{hf_to_vllm[hf_key]} and {param_qualname}"
+                    )
+                hf_to_vllm[hf_key] = param_qualname
+        return recorder
+
+    # 4) Install recorders
+    for qn, p in params.items():
+        setattr(p, "weight_loader", make_recorder(qn))
+
+    # 5) Dry run the real loader (no writes because recorders are no-op)
+    try:
+        _ = original_load_weights(items)
+    finally:
+        # 6) Restore original loaders
+        for p, orig in orig_loader_by_param.items():
+            if orig is None and hasattr(p, "weight_loader"):
+                delattr(p, "weight_loader")
+            elif orig is not None:
+                setattr(p, "weight_loader", orig)
+
+    return dict(hf_to_vllm)
+
 def patch_load_weights(self: "Worker"):
     config = os.environ.get("FLASHRL_CONFIG", None)
     if not config: 
@@ -428,6 +574,8 @@ def patch_load_weights(self: "Worker"):
         self.flash_rl_module_attribute_to_preserve = []
     model = self.model_runner.model
     self.flash_rl_profile = None
+
+    from vllm.model_executor.utils import get_packed_modules_mapping
 
     if (not hasattr(model, 'beforeflashrl_load_weights')) and \
         (config_data.get('fn', 'int8') != 'bf16'):
@@ -452,16 +600,39 @@ def patch_load_weights(self: "Worker"):
                             # print(f"flash_rl reserving {attr} in module {module}")
                             setattr(module, f'hacked_{attr}', getattr(module, attr))
             
-            existing_params = dict(model.named_parameters())
-                        
+            requested_names = [tup[0] for tup in weights] # these are hf parameter naming
+            # print("original requested names: ", requested_names, flush=True)
+            
+            hf_to_vllm = _build_hf_to_vllm_map_via_loader(
+                model,
+                weights,                 # the incoming iterable of (hf_name, tensor)
+                original_load_weights    # the real model.load_weights you saved
+            )
+            # print("hf to vllm: ", hf_to_vllm)
+            requested_names_vllm = set()
+            for name in requested_names:
+                if name not in hf_to_vllm:
+                    logger.debug(f"requested param name: {name} not in mapping")
+                    continue
+                requested_names_vllm.add(hf_to_vllm[name])
+            alloc, total = torch.cuda.memory.mem_get_info()
+            print(f"BEFORE: torch memory allocated, {alloc / 1024 **2: .2f} MB, {total / 1024**2 : .2f} MB")
+
+            existing_params = dict(model.named_parameters()) # these are in vLLM's model parameter naming
+
             hacked_data_dict = {}
-            for name, p in existing_params.items():
+            for name in requested_names_vllm:
+                if name not in existing_params:
+                    raise KeyError(f"name {name} not in existing_params")
+                p = existing_params[name]
                 hacked_data_dict[name] = p.data
             
             assert hasattr(model, "hacked_original_weights_rebuild_keys")
             
+            # new storage allocation is needed because vllm will internally fuse qkv in fp8 for attn layers, but then the weights from trainer
+            # are unfused
             for name, (shape, stride, dtype, nbytes) in model.hacked_original_weights_rebuild_keys.items():
-                if name in existing_params:
+                if name in existing_params and name in requested_names_vllm:
                     existing_params[name].data = torch.empty(shape, dtype=dtype) 
             
             for k, loader_k in model.hacked_recorded_loader.items():
@@ -475,13 +646,15 @@ def patch_load_weights(self: "Worker"):
             
             if hasattr(model, 'hacked_model_config') and hasattr(model, 'hacked_target_device'):        
                 from vllm.model_executor.model_loader import utils
-                utils.process_weights_after_loading(model, None, None)
+                process_weights_after_loading_subset(model, None, None, param_names=requested_names_vllm)
                 setattr(model, 'hacked_not_need_process_weights_after_loading', True)
             else:
                 setattr(model, 'hacked_not_need_process_weights_after_loading', False)
             
             skipped_params = list()
             for name, p in model.named_parameters():
+                if name not in requested_names_vllm:
+                    continue
                 assert name in hacked_data_dict, f'param {name} is not in hacked_data dict'
                 assert hacked_data_dict[name].dtype == p.data.dtype, f'param {name} dtype mismatch: {hacked_data_dict[name].dtype} vs {p.data.dtype}'
                 assert hacked_data_dict[name].numel() == p.data.numel(), f'param {name} numel() mismatch: {hacked_data_dict[name].numel()} vs {p.data.numel()}'
@@ -495,8 +668,11 @@ def patch_load_weights(self: "Worker"):
                 tmp_data = p.data
                 p.data = hacked_data_dict[name]
                 del tmp_data
+
             
-            logger.debug(f"flash_rl load_weights skipped params (not accurate for `fp8-vllm`): {skipped_params}")
+            # logger.debug(f"flash_rl load_weights skipped params (not accurate for `fp8-vllm`): {skipped_params}")
+            alloc, total = torch.cuda.memory.mem_get_info()
+            # print(f"torch memory allocated, {alloc / 1024 **2: .2f} MB, {total / 1024**2 : .2f} MB")
             del skipped_params
             del hacked_data_dict
             del existing_params

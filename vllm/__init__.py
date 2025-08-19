@@ -68,6 +68,8 @@ else:
                 f'module {__package__} has no attribute {name}')
 
 
+# fanout_existing_imports()
+
 __all__ = [
     "__version__",
     "__version_tuple__",

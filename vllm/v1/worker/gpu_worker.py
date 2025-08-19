@@ -200,8 +200,9 @@ class Worker(WorkerBase):
         # from transformers import AutoModelForCausalLM
         # test_model = AutoModelForCausalLM.from_pretrained("LiyuanLucasLiu/Qwen2.5-0.5B-Instruct-VERL")
         # print("dump params: ", [name for name, _ in test_model.named_parameters()])
+        # full_weights = [(name, param.to(self.device)) for name, param in test_model.named_parameters()]
         # self.model_runner.model.load_weights(
-        #     weights=((name, param.to(self.device)) for name, param in test_model.named_parameters())
+        #     weights=full_weights[:2]
         # )
 
     @torch.inference_mode()
