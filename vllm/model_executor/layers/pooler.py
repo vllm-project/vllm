@@ -19,7 +19,7 @@ from vllm.model_executor.pooling_metadata import PoolingTensors
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
 from vllm.tasks import PoolingTask
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils import current_stream, resolve_obj_by_qualname
 from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
 
 PoolingMetadata = Union[V0PoolingMetadata, V1PoolingMetadata]
@@ -196,12 +196,12 @@ def get_cross_encoder_activation_function(config: PretrainedConfig):
 
 def build_output(
     all_data: Union[torch.Tensor, list[torch.Tensor]], ) -> PoolerOutput:
-    # Pooling models D2H occurs only here
+    # Pooling models D2H & synchronize occurs here
     if isinstance(all_data, list):
         all_data = [d.to("cpu", non_blocking=True) for d in all_data]
     else:
         all_data = all_data.to("cpu", non_blocking=True)
-    torch.cuda.synchronize()
+    current_stream().synchronize()
 
     all_outputs = [PoolingSequenceGroupOutput(data) for data in all_data]
     return PoolerOutput(outputs=all_outputs)
