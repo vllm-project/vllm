@@ -1012,7 +1012,7 @@ class OpenAIServing:
     @staticmethod
     def _load_prompt_embeds(
         prompt_embeds: Optional[Union[bytes, list[bytes]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     ) -> list[EmbedsPrompt]:
 
         def _load_and_validate_embed(embed: bytes) -> EmbedsPrompt:
