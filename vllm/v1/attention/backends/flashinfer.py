@@ -10,8 +10,7 @@ import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         BatchPrefillWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
-from flashinfer.decode import (_get_range_buf, get_seq_lens,
-                               trtllm_batch_decode_with_kv_cache)
+from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 
 import vllm.envs as envs
@@ -135,7 +134,7 @@ class FlashInferMetadata:
     # The number of entries in the last page of each request in
     # the paged kv cache, shape: [batch_size] (CPU for plan)
     paged_kv_last_page_len_cpu: torch.Tensor
-
+    seq_lens_cpu: torch.Tensor
     slot_mapping: torch.Tensor
 
     # For flashinfer trtllm batch decode
@@ -429,6 +428,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         self.paged_kv_indptr_cpu[:num_input_tokens + 1],
                         attn_metadata.paged_kv_indices,
                         self.paged_kv_last_page_len_cpu[:num_input_tokens],
+                        attn_metadata.seq_lens_cpu[:num_input_tokens],
                         self.num_qo_heads,
                         self.num_kv_heads,
                         self.head_dim,
@@ -536,6 +536,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len_cpu=self.
             paged_kv_last_page_len_cpu[:num_reqs],
+            seq_lens_cpu=seq_lens_cpu,
             slot_mapping=common_attn_metadata.slot_mapping,
             max_q_len=max_q_len,
             max_seq_len=max_seq_len,
@@ -834,6 +835,7 @@ def fast_plan_decode(
     indptr_cpu: torch.Tensor,
     indices: torch.Tensor,
     last_page_len_cpu: torch.Tensor,
+    seq_lens_cpu: torch.Tensor,
     num_qo_heads: int,
     num_kv_heads: int,
     head_dim: int,
@@ -911,9 +913,6 @@ def fast_plan_decode(
     kv_data_type = getattr(torch, kv_data_type) if isinstance(
         kv_data_type, str) else kv_data_type
 
-    if self.use_tensor_cores:
-        qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
-
     if batch_size != self._fixed_batch_size:
         raise ValueError(
             "The batch size should be fixed in cudagraph mode, the runtime "
@@ -930,12 +929,8 @@ def fast_plan_decode(
     self._paged_kv_last_page_len_buf.copy_(last_page_len_cpu,
                                            non_blocking=True)
 
-    indptr_host = indptr_cpu
-    last_page_len_host = last_page_len_cpu
-
     if self.use_tensor_cores:
-        kv_lens_arr_host = get_seq_lens(indptr_host, last_page_len_host,
-                                        page_size)
+        qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
 
         try:
             # Make sure we pass exactly 15 arguments for tensor core version
@@ -944,8 +939,8 @@ def fast_plan_decode(
                 self._int_workspace_buffer,
                 self._pin_memory_int_workspace_buffer,
                 qo_indptr_host,
-                indptr_host,
-                kv_lens_arr_host,
+                indptr_cpu,
+                seq_lens_cpu,
                 batch_size,  # total_num_rows
                 batch_size,
                 num_qo_heads,
@@ -965,7 +960,7 @@ def fast_plan_decode(
                 self._float_workspace_buffer,
                 self._int_workspace_buffer,
                 self._pin_memory_int_workspace_buffer,
-                indptr_host,
+                indptr_cpu,
                 batch_size,
                 num_qo_heads,
                 num_kv_heads,
