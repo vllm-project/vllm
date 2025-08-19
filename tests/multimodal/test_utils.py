@@ -454,8 +454,7 @@ def run_dp_sharded_vision_model_vs_direct(local_rank: int, world_size: int,
                                                ], "fewer samples than GPUs"),
 
         # Single GPU
-        ([100, 200, 300], 1, [2, 1, 0], [3], [600], "single GPU"
-         ),  # shuffle_indices order doesn't matter for single GPU
+        ([100, 200, 300], 1, [2, 1, 0], [3], [600], "single GPU"),
 
         # Balanced assignment
         ([100, 100, 100, 100
@@ -473,13 +472,11 @@ def test_get_load_balance_assignment_cases(sizes, num_gpus,
                                            test_description):
     """Test get_load_balance_assignment with various input cases."""
     result = get_load_balance_assignment(sizes, num_gpus=num_gpus)
-    (shuffle_indices, gpu_sample_counts, image_is_in_rank,
-     grouped_sizes_per_gpu) = result
+    (shuffle_indices, gpu_sample_counts, grouped_sizes_per_gpu) = result
 
     # Common assertions for all cases
     assert len(shuffle_indices) == len(sizes)
     assert len(gpu_sample_counts) == num_gpus
-    assert image_is_in_rank.shape == (num_gpus, len(sizes))
     assert len(grouped_sizes_per_gpu) == num_gpus
     assert sum(gpu_sample_counts) == len(sizes)
 
@@ -487,56 +484,6 @@ def test_get_load_balance_assignment_cases(sizes, num_gpus,
 
     assert gpu_sample_counts == expected_gpu_sample_counts
     assert grouped_sizes_per_gpu == expected_grouped_sizes_per_gpu
-
-    # Additional specific checks for certain cases
-    if test_description == "fewer samples than GPUs":
-        assert image_is_in_rank[1, 0]
-        assert image_is_in_rank[0, 1]
-    elif test_description == "single GPU":
-        assert torch.all(image_is_in_rank[0])
-
-
-def test_get_load_balance_assignment_consistency():
-    """Test that assignment matrix is consistent with shuffle indices."""
-    sizes = [100, 200, 300, 400, 500]
-    result = get_load_balance_assignment(sizes, num_gpus=3)
-    (shuffle_indices, gpu_sample_counts, image_is_in_rank,
-     grouped_sizes_per_gpu) = result
-
-    # Check that each sample is assigned to exactly one GPU
-    for sample_idx in range(len(sizes)):
-        assigned_gpus = image_is_in_rank[:, sample_idx].sum()
-        assert assigned_gpus == 1
-
-    # Check that shuffle_indices contains all original indices
-    assert set(shuffle_indices) == set(range(len(sizes)))
-
-    # Check that gpu_sample_counts sum to total samples
-    assert sum(gpu_sample_counts) == len(sizes)
-
-
-@pytest.mark.parametrize("num_gpus", [2, 3, 4])
-@pytest.mark.parametrize("num_samples", [1, 5, 10, 17])
-def test_get_load_balance_assignment_various_configurations(
-        num_gpus: int, num_samples: int):
-    """Test get_load_balance_assignment with various configurations."""
-    sizes = [100 + i * 50 for i in range(num_samples)]  # Varying sizes
-    result = get_load_balance_assignment(sizes, num_gpus=num_gpus)
-    (shuffle_indices, gpu_sample_counts, image_is_in_rank,
-     grouped_sizes_per_gpu) = result
-
-    # Basic consistency checks
-    assert len(shuffle_indices) == num_samples
-    assert len(gpu_sample_counts) == num_gpus
-    assert image_is_in_rank.shape == (num_gpus, num_samples)
-    assert len(grouped_sizes_per_gpu) == num_gpus
-
-    # Each sample assigned to exactly one GPU
-    for sample_idx in range(num_samples):
-        assert image_is_in_rank[:, sample_idx].sum() == 1
-
-    # All samples accounted for
-    assert sum(gpu_sample_counts) == num_samples
 
 
 class SimpleMRopeVisionModel(torch.nn.Module):
@@ -665,6 +612,7 @@ def run_dp_sharded_mrope_vision_model_vs_direct(local_rank: int,
     with torch.inference_mode():
         sharded_output = run_dp_sharded_mrope_vision_model(
             vision_model, pixel_values, grid_thw_list)
+        sharded_output = torch.cat(sharded_output, dim=0)
 
     # Check that the world size is setup correctly
     assert get_tensor_model_parallel_world_size() == world_size
@@ -720,8 +668,7 @@ def run_dp_sharded_mrope_vision_model_empty_input_worker(
         output = run_dp_sharded_mrope_vision_model(vision_model, pixel_values,
                                                    grid_thw_list)
 
-    assert output.shape[0] == 0
-    assert output.shape[1] == vision_model.out_hidden_size
+    assert len(output) == 0
 
 
 @multi_gpu_test(num_gpus=4)
@@ -772,16 +719,17 @@ def run_dp_sharded_mrope_vision_model_uneven_load_worker(
 
     # Should handle uneven distribution without errors
     with torch.inference_mode():
-        output = run_dp_sharded_mrope_vision_model(vision_model, pixel_values,
-                                                   grid_thw_list)
+        output_tuple = run_dp_sharded_mrope_vision_model(
+            vision_model, pixel_values, grid_thw_list)
 
     # Verify output shape is reasonable
-    expected_patches = sum(math.prod(grid_thw) for grid_thw in grid_thw_list)
     merge_factor = vision_model.spatial_merge_size**2
-    expected_output_patches = expected_patches // merge_factor
+    expected_output_patches = list(
+        math.prod(grid_thw) // merge_factor for grid_thw in grid_thw_list)
 
-    assert output.shape[0] == expected_output_patches
-    assert output.shape[1] == vision_model.out_hidden_size
+    for i, output in enumerate(output_tuple):
+        assert output.shape[0] == expected_output_patches[i]
+        assert output.shape[1] == vision_model.out_hidden_size
 
 
 @pytest.mark.parametrize("spatial_merge_size", [2, 4])
