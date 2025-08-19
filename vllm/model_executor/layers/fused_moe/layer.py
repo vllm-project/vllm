@@ -762,11 +762,11 @@ class FusedMoE(CustomOp):
         self.global_num_experts = num_experts + num_redundant_experts
 
         # we padding globally so EP buffer allocation works
-        if (quant_config and quant_config.get_name() == "mxfp4"
-                and (current_platform.is_rocm()
-                     or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                     or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16)):
-            hidden_size = round_up(hidden_size, 256)
+        if quant_config and quant_config.get_name() == "mxfp4":
+            from vllm.model_executor.layers.quantization.mxfp4 import (  # noqa: E501
+                should_use_flashinfer_mxfp4)
+            if current_platform.is_rocm() or should_use_flashinfer_mxfp4():
+                hidden_size = round_up(hidden_size, 256)
 
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
