@@ -178,21 +178,24 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
     get_attr_docs.files_hash = getattr(get_attr_docs, 'files_hash', {})
 
     # load cached attr docs
-    cache_path = os.path.join(VLLM_CACHE_ROOT, __version__, "config_attr_docs.json")
+    cache_path = os.path.join(VLLM_CACHE_ROOT, __version__,
+                              "config_attr_docs.json")
     if not get_attr_docs.caches and os.path.exists(cache_path):
-        with open(cache_path, 'r') as fp:
+        with open(cache_path) as fp:
             get_attr_docs.caches = json.load(fp)
 
     # calc `cls` file hash, if file updated, reload cache again
     file: str = sys.modules.get(cls.__module__).__file__
     if file not in get_attr_docs.files_hash:
-        with open(file, 'r') as fp:
-            get_attr_docs.files_hash[file] = hashlib.md5(fp.read().encode()).hexdigest()
+        with open(file) as fp:
+            get_attr_docs.files_hash[file] = hashlib.md5(
+                fp.read().encode()).hexdigest()
 
     file_hash: str = get_attr_docs.files_hash[file]
 
-    cls_key  = f"{cls.__module__}.{cls.__name__}"
-    if cls_key in get_attr_docs.caches and get_attr_docs.caches[cls_key]['hash'] == file_hash:
+    cls_key = f"{cls.__module__}.{cls.__name__}"
+    if cls_key in get_attr_docs.caches and get_attr_docs.caches[cls_key][
+        'hash'] == file_hash:
         return get_attr_docs.caches[cls_key]['docs']
 
     out = _get_attr_docs(cls)
