@@ -159,6 +159,7 @@ class MultiGroupBlockTable:
         query_start_loc: np.ndarray,
         positions: np.ndarray,
     ) -> None:
+        assert num_reqs > 0
         for block_table in self.block_tables:
             block_table.compute_slot_mapping(num_reqs, query_start_loc,
                                              positions)
