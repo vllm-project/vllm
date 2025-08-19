@@ -99,9 +99,7 @@ def test_random_dataset_different_seeds(
     """Different seeds should change outputs with overwhelming likelihood."""
     p = random_dataset_params
     seed_a = 0
-    seed_b = 1
     dataset_a = RandomDataset(random_seed=seed_a)
-    dataset_b = RandomDataset(random_seed=seed_b)
     a = _collect_samples(dataset_a,
                          hf_tokenizer,
                          num_requests=p.num_requests,
@@ -110,6 +108,8 @@ def test_random_dataset_different_seeds(
                          input_len=p.input_len,
                          output_len=p.output_len)
 
+    seed_b = 999
+    dataset_b = RandomDataset(random_seed=seed_b)
     # Perturb global RNG with same seed as dataset_a to ensure isolation
     random.seed(seed_a)
     np.random.seed(seed_a)
