@@ -9,7 +9,7 @@ from torch._subclasses.fake_tensor import (FakeTensorMode,
                                            unset_fake_temporarily)
 
 from vllm.attention import Attention
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -18,23 +18,32 @@ from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 
+FP8_DTYPE = current_platform.fp8_dtype()
+
 ATTN_OP = torch.ops.vllm.unified_attention_with_output.default
 RESHAPE_OP = torch.ops.aten.reshape.default
 
 
 class AttentionStaticQuantPattern:
+    """
+    Fusion for Attention+StaticQuant.
+
+    Only triggers when the attention implementation returns True in
+    `fused_output_quant_supported()`. If the pattern is found, the StaticQuant
+    op will be removed from the graph, and its scale will be passed into
+    Attention op as the `output_scale` argument.
+    """
 
     def __init__(
         self,
-        layer_name: str,
-        num_heads: int,
-        head_size: int,
+        layer: Attention,
         quant_dtype: torch.dtype,
         symmetric=True,
     ):
-        self.layer_name = layer_name
-        self.num_heads = num_heads
-        self.head_size = head_size
+        self.layer = layer
+        self.layer_name = layer.layer_name
+        self.num_heads = layer.num_heads
+        self.head_size = layer.head_size
         self.quant_dtype = quant_dtype
         self.quant_key = QuantKey(dtype=quant_dtype,
                                   static=True,
@@ -48,11 +57,10 @@ class AttentionStaticQuantPattern:
         kwargs = {'dtype': self.quant_dtype, 'device': "cuda", **kwargs}
         return torch.empty(*args, **kwargs)
 
-    def register_if_supported(self, pm_pass: PatternMatcherPass,
-                              layer: Attention):
-        if layer.impl.fused_output_quant_supported(self.quant_dtype,
-                                                   self.quant_key.static,
-                                                   self.quant_key.group_shape):
+    def register_if_supported(self, pm_pass: PatternMatcherPass):
+        if self.layer.impl.fused_output_quant_supported(
+                self.quant_dtype, self.quant_key.static,
+                self.quant_key.group_shape):
             self._register(pm_pass)
 
     def _register(self, pm_pass: PatternMatcherPass):
@@ -60,19 +68,15 @@ class AttentionStaticQuantPattern:
         def pattern(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                     output_attn: torch.Tensor, output_quant: torch.Tensor,
                     scale: torch.Tensor):
-            view_7 = RESHAPE_OP(output_attn,
-                                [-1, self.num_heads, self.head_size])
-
             at1 = auto_functionalized(ATTN_OP,
                                       query=q,
                                       key=k,
                                       value=v,
-                                      output=view_7,
+                                      output=output_attn,
                                       layer_name=self.layer_name,
                                       output_scale=None)
             attn_out_view = RESHAPE_OP(at1[1],
                                        [-1, self.num_heads * self.head_size])
-
             at2 = auto_functionalized(self.QUANT_OP,
                                       result=output_quant,
                                       input=attn_out_view,
@@ -82,17 +86,19 @@ class AttentionStaticQuantPattern:
         def replacement(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                         output_attn: torch.Tensor, output_quant: torch.Tensor,
                         scale: torch.Tensor):
-            view_7 = RESHAPE_OP(output_quant,
-                                [-1, self.num_heads, self.head_size])
-
+            # attn output in quant_dtype
+            output_attn = torch.ops.aten.full.default(
+                [q.shape[0], self.num_heads, self.head_size],
+                0.0,
+                dtype=self.quant_dtype,
+                device=q.device)
             at1 = auto_functionalized(ATTN_OP,
                                       query=q,
                                       key=k,
                                       value=v,
-                                      output=view_7,
+                                      output=output_attn,
                                       layer_name=self.layer_name,
                                       output_scale=scale)
-
             return RESHAPE_OP(at1[1], [-1, self.num_heads * self.head_size])
 
         # Need custom fake mode, otherwise tracing happens with real tensors.
@@ -102,7 +108,7 @@ class AttentionStaticQuantPattern:
                 empty_bf16(5, self.num_heads, self.head_size),  # q
                 empty_bf16(5, self.num_heads, self.head_size),  # k
                 empty_bf16(5, self.num_heads, self.head_size),  # v
-                empty_bf16(5, self.num_heads * self.head_size),  # attn_output
+                empty_bf16(5, self.num_heads, self.head_size),  # attn_output
                 self.empty_quant(5, self.num_heads *
                                  self.head_size),  # quant_output
                 empty_fp32(1, 1)  # scale
@@ -140,27 +146,30 @@ class AttnFusionPass(VllmInductorPass):
 
     def __init__(self, config: VllmConfig):
         super().__init__(config)
-        self.static_fwd_ctx = config.compilation_config.static_forward_context
 
         self.patterns = PatternMatcherPass(pass_name="attn_fusion_pass")
 
-        for key, layer in self.static_fwd_ctx.items():
-            pattern = AttentionStaticQuantPattern(key, layer.num_heads,
-                                                  layer.head_size,
-                                                  current_platform.fp8_dtype())
-            pattern.register_if_supported(self.patterns, layer)
-        if len(self.static_fwd_ctx) == 0:
+        attn_layers = get_layers_from_vllm_config(config, Attention)
+        for layer_name, layer in attn_layers.items():
+            pattern = AttentionStaticQuantPattern(layer, FP8_DTYPE)
+            pattern.register_if_supported(self.patterns)
+        if len(attn_layers) == 0:
             logger.warning(
-                "Attention + quant fusion is enabled, but "
-                "CompilationConfig.static_forward_context is empty. "
-                "Cannot access attention layers so no fusion "
-                "patterns were registered.")
+                "Attention + quant fusion is enabled, but no attention layers "
+                "were found in CompilationConfig.static_forward_context "
+                "so no fusion patterns were registered.")
 
     def __call__(self, graph: torch.fx.graph.Graph) -> None:
         self.begin()
         self.dump_graph(graph, "before_attn_fusion")
 
         count = self.patterns.apply(graph)
+
+        # TODO: Move this to pass_manager.py after the fx graph broken issue
+        # has been resolved.
+        # see https://github.com/vllm-project/vllm/issues/23091
+        graph.eliminate_dead_code()
+
         logger.debug("Fused quantization onto %s attention nodes", count)
         self.dump_graph(graph, "after_attn_fusion")
         self.end_and_log()
