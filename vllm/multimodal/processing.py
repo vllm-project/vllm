@@ -109,7 +109,7 @@ The token sequence or text to update.
 class PromptUpdateDetails(Generic[_S]):
     """Details about the token sequence or text that are part of the update."""
 
-    full: Union[_S, "_BoundPromptSequence"]
+    full: Union[_S, "_BoundPromptContent"]
     """The full content."""
 
     is_embed: Optional[Callable[["_BoundPromptSequence"], torch.Tensor]] = None
@@ -528,9 +528,8 @@ class BoundPromptUpdate:
 
         bound_content = content.full
         if not isinstance(bound_content, _BoundPromptContent):
-            if not isinstance(bound_content, _BoundPromptSequence):
-                bound_content = _BoundPromptSequence.from_seq(
-                    self.tokenizer, bound_content)
+            bound_content = _BoundPromptSequence.from_seq(
+                self.tokenizer, bound_content)
 
             bound_content = _BoundPromptContent(full=bound_content,
                                                 is_embed=content.is_embed)
