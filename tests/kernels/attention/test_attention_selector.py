@@ -81,6 +81,9 @@ def test_env(
         m.setenv(STR_BACKEND_ENV_VAR, name)
         m.setenv("VLLM_MLA_DISABLE", "1" if use_mla else "0")
 
+        if name == "FLASHINFER" and not use_v1:
+            pytest.skip("FlashInfer backend is only available on V1 engine")
+
         if device == "cpu":
             if not use_v1:
                 pytest.skip("CPU backend only supports V1")
@@ -218,13 +221,13 @@ def test_fp32_fallback(
             with patch("vllm.attention.selector.current_platform",
                        CudaPlatform()):
                 if use_v1:
-                    backend = get_attn_backend(16, torch.float32, torch.float32,
-                                               16, False)
+                    backend = get_attn_backend(16, torch.float32,
+                                               torch.float32, 16, False)
                     assert backend.get_name() == "FLEX_ATTENTION"
                 else:
                     with pytest.raises(ValueError):
-                        get_attn_backend(16, torch.float32, torch.float32,
-                                         16, False)
+                        get_attn_backend(16, torch.float32, torch.float32, 16,
+                                         False)
 
 
 def test_flash_attn(monkeypatch: pytest.MonkeyPatch):

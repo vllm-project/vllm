@@ -7,7 +7,6 @@ import pytest
 
 from tests.kernels.utils import override_backend_env_variable
 from vllm import LLM, SamplingParams
-from vllm.platforms import current_platform
 
 from .conftest import get_text_from_llm_generator
 
@@ -32,7 +31,7 @@ BLOCK_SIZE = 16
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [5])
 @pytest.mark.parametrize("seed", [1])
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 def test_sliding_window_retrieval(baseline_llm_generator, test_llm_generator,
                                   batch_size, seed, backend, monkeypatch):
     """
@@ -43,9 +42,6 @@ def test_sliding_window_retrieval(baseline_llm_generator, test_llm_generator,
 
     Additionally, we compare the results of the v1 and v2 managers.
     """
-    if backend == "FLASHINFER" and current_platform.is_rocm():
-        pytest.skip("Flashinfer does not support ROCm/HIP.")
-
     override_backend_env_variable(monkeypatch, backend)
 
     sampling_params = SamplingParams(
@@ -94,7 +90,7 @@ def test_sliding_window_retrieval(baseline_llm_generator, test_llm_generator,
 @pytest.mark.parametrize("test_llm_kwargs", [{"enable_chunked_prefill": True}])
 @pytest.mark.parametrize("batch_size", [5])
 @pytest.mark.parametrize("seed", [1])
-@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER"])
+@pytest.mark.parametrize("backend", ["FLASH_ATTN"])
 def test_sliding_window_chunked_prefill(test_llm_generator, batch_size, seed,
                                         backend, monkeypatch):
     """
@@ -105,8 +101,6 @@ def test_sliding_window_chunked_prefill(test_llm_generator, batch_size, seed,
     The results with and without chunked prefill are not the same due to
     numerical instabilities.
     """
-    if backend == "FLASHINFER" and current_platform.is_rocm():
-        pytest.skip("Flashinfer does not support ROCm/HIP.")
     override_backend_env_variable(monkeypatch, backend)
 
     sampling_params = SamplingParams(
