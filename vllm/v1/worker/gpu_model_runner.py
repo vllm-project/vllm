@@ -1489,7 +1489,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 raw_pooler_output, seq_lens, pooling_metadata.prompt_lens):
 
             if seq_len == prompt_len:
-                pooler_output.append(raw_output.data.cpu())
+                pooler_output.append(raw_output.data)
             else:
                 pooler_output.append(None)
 

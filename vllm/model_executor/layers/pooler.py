@@ -196,6 +196,13 @@ def get_cross_encoder_activation_function(config: PretrainedConfig):
 
 def build_output(
     all_data: Union[torch.Tensor, list[torch.Tensor]], ) -> PoolerOutput:
+    # Pooling models D2H occurs only here
+    if isinstance(all_data, list):
+        all_data = [d.to("cpu", non_blocking=True) for d in all_data]
+    else:
+        all_data = all_data.to("cpu", non_blocking=True)
+    torch.cuda.synchronize()
+
     all_outputs = [PoolingSequenceGroupOutput(data) for data in all_data]
     return PoolerOutput(outputs=all_outputs)
 
@@ -706,6 +713,7 @@ class DispatchPooler(Pooler):
             hidden_states_lst = hidden_states
         else:
             prompt_lens = get_prompt_lens(hidden_states, pooling_metadata)
+
             hidden_states_lst = list(hidden_states.split(prompt_lens.tolist()))
 
         outputs = list[PoolingSequenceGroupOutput]()
