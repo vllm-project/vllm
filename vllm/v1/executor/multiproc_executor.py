@@ -33,7 +33,7 @@ from vllm.utils import (decorate_logs, get_distributed_init_method,
                         get_loopback_ip, get_mp_context, get_open_port,
                         set_process_title)
 from vllm.v1.executor.abstract import Executor, FailureCallback
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -190,6 +190,12 @@ class MultiprocExecutor(Executor):
             return self.kv_output_aggregator.async_aggregate(
                 outputs, self.output_rank)
         return self.kv_output_aggregator.aggregate(outputs, self.output_rank)
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        # OPTIMIZATION: Get output only from a single worker (output_rank)
+        outputs = self.collective_rpc("take_draft_token_ids",
+                                      unique_reply_rank=self.output_rank)
+        return outputs[0]
 
     def collective_rpc(self,
                        method: Union[str, Callable],
