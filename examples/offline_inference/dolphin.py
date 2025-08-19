@@ -216,7 +216,6 @@ sampling_params = SamplingParams(
     skip_special_tokens=False,
 )
 
-print("Initializing vLLM engine...")
 processor = DonutProcessor.from_pretrained(model_id)
 llm = LLM(
     model=model_id,
@@ -225,7 +224,6 @@ llm = LLM(
     max_num_seqs=16,
     hf_overrides={"architectures": ["DonutForConditionalGeneration"]},
 )
-print("vLLM engine initialization complete.")
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
@@ -338,13 +336,13 @@ if args.task in ["full", "segment"]:
 
 elif args.task in ["text", "table"]:
     prompt_map = {
-        "text": "Read text in the document.",
-        "table": "Parse the tables in the document.",
+        "text": "Read text in the image.",
+        "table": "Parse the tables in the image.",
     }
     prompt = prompt_map[args.task]
     print(f'Using direct prompt: "{prompt}"')
 
-    decoder_prompt = f"<s>{prompt}<Answer/>"
+    decoder_prompt = f"<s>{prompt} <Answer/>"
     decoder_prompt_tokens = TokensPrompt(
         prompt_token_ids=processor.tokenizer(decoder_prompt, add_special_tokens=False)[
             "input_ids"
@@ -360,4 +358,4 @@ elif args.task in ["text", "table"]:
     result_text = outputs[0].outputs[0].text.strip()
 
     print("------" * 8)
-    print(result_text)
+    print("TEXT: ", result_text)
