@@ -7,7 +7,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from dataclasses import field
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 import msgspec
@@ -27,14 +27,15 @@ logger = init_logger(__name__)
 GET_META_MSG = b"get_meta_msg"
 
 
+@dataclass
 class NixlAgentMetadata(KVConnectorHandshakeMetadata):
-    engine_id: str = field()
-    agent_metadata: bytes = field()
-    kv_caches_base_addr: list[int] = field()
-    num_blocks: int = field()
-    block_len: int = field()
-    attn_backend_name: str = field()
-    kv_cache_layout: str = field()
+    engine_id: str
+    agent_metadata: bytes
+    kv_caches_base_addr: list[int]
+    num_blocks: int
+    block_len: int
+    attn_backend_name: str
+    kv_cache_layout: str
 
 
 class HandshakeStrategy(ABC):
