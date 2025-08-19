@@ -57,8 +57,10 @@ from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
                                    MultiModalDataItems, MultiModalDataParser,
                                    VideoItem, VideoProcessorItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate, PromptUpdateDetails)
+                                        BaseProcessingInfo, BoundPromptUpdate,
+                                        PromptReplacement, PromptUpdate,
+                                        PromptUpdateContent,
+                                        PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -689,6 +691,39 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         tokenization_kwargs: Mapping[str, object],
     ) -> bool:
         return False
+
+    def _resolve_prompt_update_content(
+        self,
+        missing_prompt_update: BoundPromptUpdate,
+        missing_item_idx: int,
+    ) -> PromptUpdateContent:
+        if missing_prompt_update.modality != "image":
+            return super()._resolve_prompt_update_content(
+                missing_prompt_update,
+                missing_item_idx,
+            )
+
+        missing_content = missing_prompt_update.get_content(missing_item_idx)
+        image_processor = self.info.get_image_processor()
+        version = self.info.get_model_version()
+
+        if version == (2, 0) or version == (2, 5):
+            im_start = image_processor.im_start_token
+            im_end = image_processor.im_end_token
+        else:
+            im_start = image_processor.im_id_start
+            im_end = image_processor.im_id_end
+
+        def get_image_replacement(item_idx: int):
+            return PromptUpdateDetails.select_text(
+                missing_content.full.text.replace(
+                    f"{im_start}{missing_item_idx}{im_end}",
+                    f"{im_start}{item_idx}{im_end}",
+                ),
+                "<unk>",
+            )
+
+        return get_image_replacement
 
     def _get_prompt_updates(
         self,

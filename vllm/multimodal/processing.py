@@ -461,12 +461,6 @@ class _BoundPromptContent:
     full: _BoundPromptSequence
     is_embed: Optional[Callable[["_BoundPromptSequence"], torch.Tensor]]
 
-    def as_prompt_update(self):
-        return PromptUpdateDetails(
-            full=self.full.token_ids,
-            is_embed=self.is_embed,
-        )
-
 
 @dataclass
 class BoundPromptUpdate:
@@ -1395,6 +1389,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return self._to_mm_items(mm_missing_data)
 
+    def _resolve_prompt_update_content(
+        self,
+        missing_prompt_update: BoundPromptUpdate,
+        missing_item_idx: int,
+    ) -> PromptUpdateContent:
+        """
+        Override this if the content needs to be further resolved later, e.g.,
+        because the replacement text depends on the index of the item in the
+        real input instead of that of the uncached input..
+        """
+        return missing_prompt_update.get_content(missing_item_idx)
+
     def _merge_mm_kwargs(
         self,
         cache: "BaseMultiModalProcessorCache",
@@ -1424,9 +1430,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             # `(item_idx: int) -> PromptUpdateInfo`.
             # To avoid keeping the scope of that function in memory
             # (which may include `out_mm_kwargs`),
-            # we resolve the prompt content early by calling `.get_content()`
-            # and replace the old prompt content with
-            # the indexer of `resolved_contents`.
+            # we resolve the prompt content early by calling
+            # `_resolve_prompt_update_content` and replacing the old prompt
+            # content with the indexer of `resolved_contents`.
             resolved_contents = list[_BoundPromptContent]()
             for item_idx, hash_ in enumerate(hashes):
                 item: Optional[tuple[MultiModalKwargsItem, BoundPromptUpdate]]
@@ -1434,8 +1440,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     missing_next_idx = mm_missing_next_idx[modality]
                     kwargs = missing_kwargs[missing_next_idx]
                     prompt_update = missing_prompt_update.with_content(
-                        missing_prompt_update.get_content(
-                            missing_next_idx).as_prompt_update())
+                        self._resolve_prompt_update_content(
+                            missing_prompt_update,
+                            missing_next_idx,
+                        ))
                     mm_missing_next_idx[modality] += 1
 
                     item = kwargs, prompt_update
