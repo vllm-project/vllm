@@ -735,7 +735,7 @@ class Step3VisionMLP(nn.Module):
                                      config.hidden_size,
                                      bias=True,
                                      quant_config=quant_config,
-                                     prefix=f"{prefix}.fcc",
+                                     prefix=f"{prefix}.fc2",
                                      disable_tp=use_data_parallel)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
