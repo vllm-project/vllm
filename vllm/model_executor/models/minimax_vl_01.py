@@ -6,6 +6,8 @@ from typing import Literal, Optional, TypedDict, Union, cast
 import torch
 import torch.nn as nn
 from transformers import BatchFeature, PretrainedConfig
+from transformers.models.llava_next.modeling_llava_next import (
+    get_anyres_image_grid_shape, unpad_image)
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
@@ -142,6 +144,7 @@ class MiniMaxVL01MultiModalProcessor(
     ) -> Mapping[str, MultiModalFieldConfig]:
         return {
             "pixel_values": MultiModalFieldConfig.batched("image"),
+            "image_sizes": MultiModalFieldConfig.batched("image"),
             "image_embeds": MultiModalFieldConfig.batched("image"),
         }
 
@@ -240,7 +243,7 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features = vision_tower(pixel_values)
+        image_features = tuple(vision_tower(p) for p in pixel_values)
 
         def select_features(leaf: torch.Tensor):
             return self._select_image_features(
@@ -253,6 +256,58 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
             json_map_leaves(select_features, image_features),
         )
 
+    # adapted from https://huggingface.co/MiniMaxAI/MiniMax-VL-01/blob/main/modeling_minimax_vl_01.py#L616-L631
+    def pack_image_features(self, image_features: list[torch.Tensor],
+                            image_sizes: torch.Tensor):
+        new_image_features = []
+        feature_lens = []
+        for image_idx, image_feature in enumerate(image_features):
+            if image_feature.shape[0] > 1:
+                base_image_feature = image_feature[0]
+                image_feature = image_feature[1:]
+                height = width = (self.config.vision_config.image_size //
+                                  self.config.vision_config.patch_size)
+                if height * width != base_image_feature.shape[0]:
+                    raise ValueError(
+                        "The number of patches is not consistent with "
+                        "the image size.")
+                num_patch_height, num_patch_width = get_anyres_image_grid_shape(
+                    image_sizes[image_idx],
+                    self.config.image_grid_pinpoints,
+                    self.config.vision_config.image_size,
+                )
+
+                image_feature = image_feature.view(num_patch_height,
+                                                   num_patch_width, height,
+                                                   width, -1)
+                image_feature = image_feature.permute(4, 0, 2, 1,
+                                                      3).contiguous()
+                image_feature = image_feature.flatten(1, 2).flatten(2, 3)
+                image_feature = unpad_image(image_feature,
+                                            image_sizes[image_idx])
+
+                image_feature = torch.cat(
+                    (
+                        image_feature,
+                        self.image_newline[:, None, None].expand(
+                            *image_feature.shape[:-1], 1).to(
+                                image_feature.dtype),
+                    ),
+                    dim=-1,
+                )
+                image_feature = image_feature.flatten(1, 2).transpose(0, 1)
+                image_feature = torch.cat((base_image_feature, image_feature),
+                                          dim=0)
+            else:
+                image_feature = image_feature[0]
+                image_feature = torch.cat(
+                    (image_feature,
+                     self.image_newline[None].to(image_feature)),
+                    dim=0)
+            new_image_features.append(image_feature)
+            feature_lens.append(image_feature.size(0))
+        return new_image_features
+
     def _process_image_pixels(
         self,
         inputs: MiniMaxVL01ImagePixelInputs,
@@ -260,7 +315,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
         assert self.vision_tower is not None
 
         pixel_values = inputs["pixel_values"]
-
         return self._image_pixels_to_features(self.vision_tower, pixel_values)
 
     def _process_image_input(
@@ -282,38 +336,50 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         image_embeds = self.multi_modal_projector(torch.cat(image_features))
         image_embeds = torch.split(image_embeds, feature_sizes)
-        return image_embeds
+        image_sizes = image_input.get("image_sizes")
+        return self.pack_image_features(image_embeds, image_sizes)
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
         expected_dims = (3, h, w)
-        actual_dims = tuple(data.shape[1:])
 
-        if actual_dims != expected_dims:
-            expected_expr = ("batch_size", *map(str, expected_dims))
-            raise ValueError(
-                f"The expected shape of pixel values is {expected_expr}. "
-                f"You supplied {tuple(data.shape)}.")
+        for x in data:
+            actual_dims = x.shape[1:]
+            if len(actual_dims) != len(expected_dims) or actual_dims[
+                    0] != expected_dims[0] or any(
+                        actual_dims[i] > expected_dims[i]
+                        for i in range(1, 3)):
+                expected_expr = ("batch_size", *map(str, expected_dims))
+                actual_expr = ("batch_size", *map(str, tuple(actual_dims)))
+                raise ValueError(
+                    f"The expected shape of pixel values is {expected_expr}. "
+                    f"You supplied {actual_expr}.")
 
         return data
 
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[MiniMaxVL01ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
+        image_sizes = kwargs.pop("image_sizes", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
         if pixel_values is None and image_embeds is None:
             return None
 
-        if pixel_values is not None:
+        if pixel_values is not None and image_sizes is not None:
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
 
+            if not isinstance(image_sizes, (torch.Tensor, list)):
+                raise ValueError("Incorrect type of image sizes. "
+                                 f"Got type: {type(image_sizes)}")
+
             return MiniMaxVL01ImagePixelInputs(
                 type="pixel_values",
                 pixel_values=self._validate_pixel_values(
-                    flatten_bn(flatten_bn(pixel_values), concat=True)),
+                    flatten_bn(pixel_values)),
+                image_sizes=flatten_bn(image_sizes, concat=True),
             )
 
         if image_embeds is not None:
