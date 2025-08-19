@@ -305,6 +305,10 @@ class EngineArgs:
         Type[ExecutorBase]]] = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
+    distributed_master_ip: str = ParallelConfig.distributed_master_ip
+    distributed_master_port: int = ParallelConfig.distributed_master_port
+    distributed_node_size: int = ParallelConfig.distributed_node_size
+    distributed_node_rank: int = ParallelConfig.distributed_node_rank
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     decode_context_parallel_size: int = \
         ParallelConfig.decode_context_parallel_size
@@ -632,6 +636,15 @@ class EngineArgs:
         parallel_group.add_argument(
             "--pipeline-parallel-size", "-pp",
             **parallel_kwargs["pipeline_parallel_size"])
+        parallel_group.add_argument("--distributed-master-ip",
+                                    **parallel_kwargs["distributed_master_ip"])
+        parallel_group.add_argument(
+            "--distributed-master-port",
+            **parallel_kwargs["distributed_master_port"])
+        parallel_group.add_argument("--distributed-node-size",
+                                    **parallel_kwargs["distributed_node_size"])
+        parallel_group.add_argument("--distributed-node-rank",
+                                    **parallel_kwargs["distributed_node_rank"])
         parallel_group.add_argument("--tensor-parallel-size", "-tp",
                                     **parallel_kwargs["tensor_parallel_size"])
         parallel_group.add_argument(
@@ -1302,6 +1315,10 @@ class EngineArgs:
             data_parallel_rank=self.data_parallel_rank or 0,
             data_parallel_external_lb=data_parallel_external_lb,
             data_parallel_size_local=data_parallel_size_local,
+            distributed_master_ip=self.distributed_master_ip,
+            distributed_master_port=self.distributed_master_port,
+            distributed_node_size=self.distributed_node_size,
+            distributed_node_rank=self.distributed_node_rank,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,

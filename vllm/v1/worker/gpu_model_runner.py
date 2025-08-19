@@ -131,7 +131,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
-        
+
         This function blocks until the copy is finished.
         """
         self._async_copy_ready_event.synchronize()
@@ -723,7 +723,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _prepare_input_ids(self, total_num_scheduled_tokens: int,
                            cu_num_tokens: np.ndarray) -> None:
         """Prepare the input IDs for the current batch.
-        
+
         Carefully handles the `prev_sampled_token_ids` which can be cached
         from the previous engine iteration, in which case those tokens on the
         GPU need to be copied into the corresponding slots into input_ids."""
@@ -2992,6 +2992,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # they are cached correctly, there will be different objects per
             # layer.
             for layer_name in layer_names:
+                if layer_name not in layers:
+                    continue
                 attn_backend = layers[layer_name].get_attn_backend()
 
                 if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
