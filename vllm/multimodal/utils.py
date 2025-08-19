@@ -530,7 +530,7 @@ def run_dp_sharded_mrope_vision_model(
     vision_model: torch.nn.Module,
     pixel_values: torch.Tensor,
     grid_thw_list: list[list[int]],
-) -> tuple[torch.Tensor]:
+) -> tuple[torch.Tensor, ...]:
     """Run a vision model with data parallelism (DP) sharding. 
     The function will shard the input image tensor on the 
     first dimension and run the vision model.
@@ -639,6 +639,9 @@ def run_dp_sharded_mrope_vision_model(
                                embed_dim_reduction_factor)
         rank_embeddings.append(gathered_embeds[start_idx:end_idx])
 
+    patches_per_output_image = [(patch_size // embed_dim_reduction_factor)
+                                for patch_size in patches_per_image]
+
     # Reconstruct embeddings in the original order
     original_order_embeddings = [None] * len(grid_thw_list)
     current_idx = 0
@@ -654,8 +657,7 @@ def run_dp_sharded_mrope_vision_model(
             # Split rank embeddings back to individual images
             embed_start = 0
             for img_idx in rank_images:
-                img_patches = (patches_per_image[img_idx] //
-                               embed_dim_reduction_factor)
+                img_patches = patches_per_output_image[img_idx]
                 original_order_embeddings[img_idx] = rank_embed[
                     embed_start:embed_start + img_patches]
                 embed_start += img_patches
