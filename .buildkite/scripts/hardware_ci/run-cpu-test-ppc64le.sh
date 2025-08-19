@@ -33,7 +33,9 @@ function cpu_tests() {
     set -evx
     pip install pytest pytest-asyncio einops peft Pillow soundfile transformers_stream_generator matplotlib
     pip install sentence-transformers datamodel_code_generator
-    pytest -v -s tests/models/language/generation/test_bart.py -m cpu_model
+
+    # Note: disable Bart until supports V1
+    # pytest -v -s tests/models/language/generation/test_bart.py -m cpu_model
     pytest -v -s tests/models/language/generation/test_common.py::test_models[False-5-32-openai-community/gpt2]
     pytest -v -s tests/models/language/generation/test_common.py::test_models[False-5-32-facebook/opt-125m]
     pytest -v -s tests/models/language/generation/test_common.py::test_models[False-5-32-google/gemma-1.1-2b-it]
