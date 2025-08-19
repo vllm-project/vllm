@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import sys
 
@@ -26,15 +27,13 @@ except ImportError:
 #  add to this list if absolutely necessary and after careful security review.
 ALLOWED_FILES = set([
     # pickle
-    'vllm/utils.py',
     'vllm/v1/serial_utils.py',
     'vllm/v1/executor/multiproc_executor.py',
     'vllm/multimodal/hasher.py',
     'vllm/transformers_utils/config.py',
     'vllm/model_executor/models/registry.py',
-    'tests/test_utils.py',
+    'tests/utils_/test_utils.py',
     'tests/tokenization/test_cached_tokenizer.py',
-    'tests/model_executor/test_guided_processors.py',
     'vllm/distributed/utils.py',
     'vllm/distributed/parallel_state.py',
     'vllm/engine/multiprocessing/client.py',
@@ -54,7 +53,7 @@ ALLOWED_FILES = set([
     'vllm/entrypoints/llm.py',
     'tests/utils.py',
     # pickle and cloudpickle
-    'vllm/utils.py',
+    'vllm/utils/__init__.py',
     'vllm/v1/serial_utils.py',
     'vllm/v1/executor/multiproc_executor.py',
     'vllm/transformers_utils/config.py',

@@ -138,28 +138,14 @@ void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void fatrelu_and_mul(torch::Tensor& out, torch::Tensor& input,
                      double threshold);
+void swigluoai_and_mul(torch::Tensor& out, torch::Tensor& input,
+                       double alpha = 1.702, double limit = 7.0);
 
 void gelu_new(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_quick(torch::Tensor& out, torch::Tensor& input);
-
-void advance_step_flashattn(int64_t num_seqs, int64_t num_queries,
-                            int64_t block_size, torch::Tensor& input_tokens,
-                            torch::Tensor& sampled_token_ids,
-                            torch::Tensor& input_positions,
-                            torch::Tensor& seq_lens,
-                            torch::Tensor& slot_mapping,
-                            torch::Tensor& block_tables);
-
-void advance_step_flashinfer(
-    int64_t num_seqs, int64_t num_queries, int64_t block_size,
-    torch::Tensor& input_tokens, torch::Tensor& sampled_token_ids,
-    torch::Tensor& input_positions, torch::Tensor& seq_lens,
-    torch::Tensor& slot_mapping, torch::Tensor& block_tables,
-    torch::Tensor& paged_kv_indices, torch::Tensor& paged_kv_indptr,
-    torch::Tensor& paged_kv_last_page_len, torch::Tensor& block_table_bounds);
 
 void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
                         torch::Tensor const& q_pe,
@@ -170,15 +156,6 @@ void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
 #ifndef USE_ROCM
-torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
-                        const torch::Tensor& codebooks,
-                        const torch::Tensor& scales,
-                        const std::vector<int64_t>& codebook_partition_sizes,
-                        const std::optional<torch::Tensor>& bias);
-
-torch::Tensor aqlm_dequant(
-    const torch::Tensor& codes, const torch::Tensor& codebooks,
-    const std::vector<int64_t>& codebook_partition_sizes);
 
 torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
                        torch::Tensor _scaling_factors, torch::Tensor _zeros,
@@ -287,6 +264,16 @@ void scaled_fp4_experts_quant(
     torch::Tensor const& input, torch::Tensor const& input_global_scale,
     torch::Tensor const& input_offset_by_experts,
     torch::Tensor const& output_scale_offset_by_experts);
+
+void per_token_group_quant_fp8(const torch::Tensor& input,
+                               torch::Tensor& output_q, torch::Tensor& output_s,
+                               int64_t group_size, double eps, double fp8_min,
+                               double fp8_max, bool scale_ue8m0);
+
+void per_token_group_quant_int8(const torch::Tensor& input,
+                                torch::Tensor& output_q,
+                                torch::Tensor& output_s, int64_t group_size,
+                                double eps, double int8_min, double int8_max);
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
@@ -325,22 +312,6 @@ void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const std::optional<torch::Tensor>& cache_indices,
                         const std::optional<torch::Tensor>& has_initial_state,
                         const torch::Tensor& ssm_states, int64_t pad_slot_id);
-
-void causal_conv1d_update(const at::Tensor& x, const at::Tensor& conv_state,
-                          const at::Tensor& weight,
-                          const std::optional<at::Tensor>& bias_,
-                          bool silu_activation,
-                          const std::optional<at::Tensor>& cache_seqlens_,
-                          const std::optional<at::Tensor>& conv_state_indices_,
-                          int64_t pad_slot_id);
-
-void causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
-                       const std::optional<at::Tensor>& bias_,
-                       const std::optional<at::Tensor>& conv_states,
-                       const std::optional<at::Tensor>& query_start_loc,
-                       const std::optional<at::Tensor>& cache_indices,
-                       const std::optional<at::Tensor>& has_initial_state,
-                       bool silu_activation, int64_t pad_slot_id);
 
 using fptr_t = int64_t;
 fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,

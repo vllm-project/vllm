@@ -27,6 +27,22 @@ pull_request_rules:
       add:
         - ci/build
 
+- name: label-deepseek
+  description: Automatically apply deepseek label
+  conditions:
+    - or:
+      - files~=^examples/.*deepseek.*\.py
+      - files~=^tests/.*deepseek.*\.py
+      - files~=^vllm/entrypoints/openai/tool_parsers/.*deepseek.*\.py
+      - files~=^vllm/model_executor/models/.*deepseek.*\.py
+      - files~=^vllm/reasoning/.*deepseek.*\.py
+      - files~=^vllm/transformers_utils/.*deepseek.*\.py
+      - title~=(?i)DeepSeek
+  actions:
+    label:
+      add:
+        - deepseek
+
 - name: label-frontend
   description: Automatically apply frontend label
   conditions:
@@ -58,13 +74,22 @@ pull_request_rules:
       - files~=^vllm/multimodal/
       - files~=^tests/multimodal/
       - files~=^tests/models/multimodal/
-      - files~=^tests/models/*/audio_language/
-      - files~=^tests/models/*/vision_language/
       - files=tests/models/test_vision.py
   actions:
     label:
       add:
         - multi-modality
+
+- name: label-new-model
+  description: Automatically apply new-model label
+  conditions:
+    - and:
+      - files~=^vllm/model_executor/models/
+      - files=vllm/model_executor/models/registry.py
+  actions:
+    label:
+      add:
+        - new-model
 
 - name: label-performance
   description: Automatically apply performance label
@@ -92,6 +117,20 @@ pull_request_rules:
     label:
       add:
         - qwen
+
+- name: label-gpt-oss
+  description: Automatically apply gpt-oss label
+  conditions:
+    - or:
+      - files~=^examples/.*gpt[-_]?oss.*\.py
+      - files~=^tests/.*gpt[-_]?oss.*\.py
+      - files~=^vllm/model_executor/models/.*gpt[-_]?oss.*\.py
+      - files~=^vllm/model_executor/layers/.*gpt[-_]?oss.*\.py
+      - title~=(?i)gpt[-_]?oss
+  actions:
+    label:
+      add:
+        - gpt-oss
 
 - name: label-rocm
   description: Automatically apply rocm label
@@ -124,9 +163,6 @@ pull_request_rules:
       - files=examples/offline_inference/structured_outputs.py
       - files=examples/online_serving/openai_chat_completion_structured_outputs.py
       - files=examples/online_serving/openai_chat_completion_structured_outputs_with_reasoning.py
-      - files~=^vllm/model_executor/guided_decoding/
-      - files=tests/model_executor/test_guided_processors.py
-      - files=tests/entrypoints/llm/test_guided_generate.py
       - files~=^tests/v1/structured_output/
       - files=tests/v1/entrypoints/llm/test_guided_generate.py
       - files~=^vllm/v1/structured_output/
@@ -139,9 +175,12 @@ pull_request_rules:
   description: Automatically apply speculative-decoding label
   conditions:
     - or:
-      - files~=^vllm/spec_decode/
-      - files=vllm/model_executor/layers/spec_decode_base_sampler.py
-      - files~=^tests/spec_decode/
+      - files~=^vllm/v1/spec_decode/
+      - files~=^tests/v1/spec_decode/
+      - files~=^examples/.*(spec_decode|mlpspeculator|eagle|speculation).*\.py
+      - files~=^vllm/model_executor/models/.*eagle.*\.py
+      - files=vllm/model_executor/models/mlp_speculator.py
+      - files~=^vllm/transformers_utils/configs/(eagle|medusa|mlp_speculator)\.py
   actions:
     label:
       add:

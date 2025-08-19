@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any, Callable, Optional, Union
 
 import filelock
-import gguf
 import huggingface_hub.constants
 import numpy as np
 import torch
@@ -39,6 +38,11 @@ except (ImportError, OSError):
         "runai_model_streamer")  # type: ignore[assignment]
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
         "SafetensorsStreamer")
+
+try:
+    import gguf
+except ImportError:
+    gguf = PlaceholderModule("gguf")
 
 try:
     from fastsafetensors import SafeTensorsFileLoader, SingleGroup
@@ -148,8 +152,8 @@ def get_quant_config(model_config: ModelConfig,
     quant_cls = get_quantization_config(model_config.quantization)
 
     # GGUF doesn't have config file
-    if model_config.quantization == "gguf":
-        return quant_cls.from_config({})
+    if model_config.quantization in ("gguf", "inc"):
+        return quant_cls()
 
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",
@@ -478,14 +482,20 @@ def runai_safetensors_weights_iterator(
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     with SafetensorsStreamer() as streamer:
-        for st_file in tqdm(
-                hf_weights_files,
-                desc="Loading safetensors using Runai Model Streamer",
-                disable=not enable_tqdm(use_tqdm_on_load),
-                bar_format=_BAR_FORMAT,
-        ):
-            streamer.stream_file(st_file)
-            yield from streamer.get_tensors()
+        streamer.stream_files(hf_weights_files)
+        total_tensors = sum(
+            len(tensors_meta)
+            for tensors_meta in streamer.files_to_tensors_metadata.values())
+
+        tensor_iter = tqdm(
+            streamer.get_tensors(),
+            total=total_tensors,
+            desc="Loading safetensors using Runai Model Streamer",
+            bar_format=_BAR_FORMAT,
+            disable=not enable_tqdm(use_tqdm_on_load),
+        )
+
+        yield from tensor_iter
 
 
 def fastsafetensors_weights_iterator(
@@ -754,29 +764,41 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
             return None
         return remapped_name
 
-    possible_scale_names = [".k_scale", ".v_scale"]
-    modelopt_scale_names = [
-        ".self_attn.k_proj.k_scale", ".self_attn.v_proj.v_scale"
+    # Define scale name mapping patterns in order of precedence
+    scale_mapping_patterns = [
+        # ModelOpt format: .self_attn.{k,v}_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (r"\.self_attn\.([kv])_proj\.([kv])_scale$",
+         r".self_attn.attn.\2_scale"),
+        # QKV proj format: .self_attn.qkv_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (r"\.self_attn\.qkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
+        # Qwen3 MoE format: .self_attn.qkqkv_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (r"\.self_attn\.qkqkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"
+         ),
+        # Default format: .{k,v}_scale -> .attn.{k,v}_scale
+        (r"\.([kv])_scale$", r".attn.\1_scale"),
     ]
-    for scale_name in possible_scale_names:
-        if name.endswith(scale_name):
-            if any(mo_scale_name in name
-                   for mo_scale_name in modelopt_scale_names):
-                remapped_name = name.replace(
-                    f".self_attn.{scale_name[1]}_proj{scale_name}",
-                    f".self_attn.attn{scale_name}")
-            else:
-                remapped_name = name.replace(scale_name, f".attn{scale_name}")
-            if remapped_name not in params_dict:
-                logger.warning_once(
-                    "Found %s in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). %s is not loaded.",  # noqa: E501
-                    scale_name,
-                    name,
-                    remapped_name,
-                    scale_name,
-                )
-                return None
-            return remapped_name
+
+    # Check if name ends with k_scale or v_scale
+    if name.endswith((".k_scale", ".v_scale")):
+        import regex as re
+
+        for pattern, replacement in scale_mapping_patterns:
+            if re.search(pattern, name):
+                remapped_name = re.sub(pattern, replacement, name)
+                if remapped_name not in params_dict:
+                    scale_type = name.split(".")[-1]
+                    logger.warning_once(
+                        "Found %s in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). %s is not loaded.",  # noqa: E501
+                        scale_type,
+                        name,
+                        remapped_name,
+                        scale_type,
+                    )
+                    return None
+                return remapped_name
 
     # If there were no matches, return the untouched param name
     return name

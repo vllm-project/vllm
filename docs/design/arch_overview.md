@@ -1,7 +1,4 @@
----
-title: Architecture Overview
----
-[](){ #arch-overview }
+# Architecture Overview
 
 This document provides an overview of the vLLM architecture.
 
@@ -22,7 +19,7 @@ server.
 
 Here is a sample of `LLM` class usage:
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM, SamplingParams
@@ -74,7 +71,7 @@ python -m vllm.entrypoints.openai.api_server --model <model>
 
 That code can be found in <gh-file:vllm/entrypoints/openai/api_server.py>.
 
-More details on the API server can be found in the [OpenAI-Compatible Server][openai-compatible-server] document.
+More details on the API server can be found in the [OpenAI-Compatible Server](../serving/openai_compatible_server.md) document.
 
 ## LLM Engine
 
@@ -132,7 +129,7 @@ input tensors and capturing cudagraphs.
 ## Model
 
 Every model runner object has one model object, which is the actual
-`torch.nn.Module` instance. See [huggingface_integration][huggingface-integration] for how various
+`torch.nn.Module` instance. See [huggingface_integration](huggingface_integration.md) for how various
 configurations affect the class we ultimately get.
 
 ## Class Hierarchy
@@ -180,7 +177,7 @@ vision-language model.
 
     To avoid accidentally passing incorrect arguments, the constructor is now keyword-only. This ensures that the constructor will raise an error if old configurations are passed. vLLM developers have already made this change for all models within vLLM. For out-of-tree registered models, developers need to update their models, for example by adding shim code to adapt the old constructor signature to the new one:
 
-    ??? Code
+    ??? code
 
         ```python
         class MyOldModel(nn.Module):
@@ -203,7 +200,8 @@ vision-language model.
                 lora_config = vllm_config.lora_config
                 super().__init__(config, cache_config, quant_config, lora_config, prefix)
 
-        if __version__ >= "0.6.4":
+        from packaging import version
+        if version.parse(__version__) >= version.parse("0.6.4"):
             MyModel = MyNewModel
         else:
             MyModel = MyOldModel

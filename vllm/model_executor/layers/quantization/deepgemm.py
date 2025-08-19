@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
 
 import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
-from vllm.utils import direct_register_custom_op, has_deep_gemm
-
-if has_deep_gemm():
-    import deep_gemm
+from vllm.utils import direct_register_custom_op
+from vllm.utils.deep_gemm import fp8_gemm_nt
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +55,7 @@ def w8a8_block_fp8_matmul_deepgemm(
                                                  output_dtype)
     # Deepgemm only supports output tensor type as bfloat16
     assert C.dtype == torch.bfloat16
-    deep_gemm.gemm_fp8_fp8_bf16_nt((A, As), (B, Bs), C)
+    fp8_gemm_nt((A, As), (B, Bs), C)
     return C
 
 

@@ -28,7 +28,7 @@ To verify that the Intel Gaudi software was correctly installed, run:
 hl-smi # verify that hl-smi is in your PATH and each Gaudi accelerator is visible
 apt list --installed | grep habana # verify that habanalabs-firmware-tools, habanalabs-graph, habanalabs-rdma-core, habanalabs-thunk and habanalabs-container-runtime are installed
 pip list | grep habana # verify that habana-torch-plugin, habana-torch-dataloader, habana-pyhlml and habana-media-loader are installed
-pip list | grep neural # verify that neural_compressor is installed
+pip list | grep neural # verify that neural_compressor_pt is installed
 ```
 
 Refer to [Intel Gaudi Software Stack Verification](https://docs.habana.ai/en/latest/Installation_Guide/SW_Verification.html#platform-upgrade)
@@ -109,8 +109,8 @@ docker run \
 
 ### Supported features
 
-- [Offline inference][offline-inference]
-- Online serving via [OpenAI-Compatible Server][openai-compatible-server]
+- [Offline inference](../../serving/offline_inference.md)
+- Online serving via [OpenAI-Compatible Server](../../serving/openai_compatible_server.md)
 - HPU autodetection - no need to manually select device within vLLM
 - Paged KV cache with algorithms enabled for Intel Gaudi accelerators
 - Custom Intel Gaudi implementations of Paged Attention, KV cache ops,
@@ -120,12 +120,13 @@ docker run \
 - Inference with [HPU Graphs](https://docs.habana.ai/en/latest/PyTorch/Inference_on_PyTorch/Inference_Using_HPU_Graphs.html)
   for accelerating low-batch latency and throughput
 - Attention with Linear Biases (ALiBi)
+- INC quantization
 
 ### Unsupported features
 
 - Beam search
 - LoRA adapters
-- Quantization
+- AWQ quantization
 - Prefill chunking (mixed-batch inferencing)
 
 ### Supported configurations
@@ -133,36 +134,20 @@ docker run \
 The following configurations have been validated to function with
 Gaudi2 devices. Configurations that are not listed may or may not work.
 
-- [meta-llama/Llama-2-7b](https://huggingface.co/meta-llama/Llama-2-7b)
-  on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
-  datatype with random or greedy sampling
-- [meta-llama/Llama-2-7b-chat-hf](https://huggingface.co/meta-llama/Llama-2-7b-chat-hf)
-  on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
-  datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B)
-  on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
-  datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct)
-  on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
-  datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3.1-8B](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B)
-  on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
-  datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct)
-  on single HPU, or with tensor parallelism on 2x and 8x HPU, BF16
-  datatype with random or greedy sampling
-- [meta-llama/Llama-2-70b](https://huggingface.co/meta-llama/Llama-2-70b)
-  with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
-- [meta-llama/Llama-2-70b-chat-hf](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf)
-  with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3-70B](https://huggingface.co/meta-llama/Meta-Llama-3-70B)
-  with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-70B-Instruct)
-  with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3.1-70B](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B)
-  with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
-- [meta-llama/Meta-Llama-3.1-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct)
-  with tensor parallelism on 8x HPU, BF16 datatype with random or greedy sampling
+| Model | TP Size| dtype | Sampling |
+|-------|--------|--------|----------|
+| [meta-llama/Llama-2-7b](https://huggingface.co/meta-llama/Llama-2-7b) | 1, 2, 8 | BF16 | Random / Greedy |
+| [meta-llama/Llama-2-7b-chat-hf](https://huggingface.co/meta-llama/Llama-2-7b-chat-hf) | 1, 2, 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3-8B](https://huggingface.co/meta-llama/Meta-Llama-3-8B) | 1, 2, 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-8B-Instruct) | 1, 2, 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3.1-8B](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B) | 1, 2, 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3.1-8B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct) | 1, 2, 8 | BF16 | Random / Greedy |
+| [meta-llama/Llama-2-70b](https://huggingface.co/meta-llama/Llama-2-70b) | 8 | BF16 | Random / Greedy |
+| [meta-llama/Llama-2-70b-chat-hf](https://huggingface.co/meta-llama/Llama-2-70b-chat-hf) | 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3-70B](https://huggingface.co/meta-llama/Meta-Llama-3-70B) | 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3-70B-Instruct) | 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3.1-70B](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B) | 8 | BF16 | Random / Greedy |
+| [meta-llama/Meta-Llama-3.1-70B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.1-70B-Instruct) | 8 | BF16 | Random / Greedy |
 
 ## Performance tuning
 
@@ -198,7 +183,12 @@ INFO 08-01 21:37:59 hpu_model_runner.py:504] Decode bucket config (min, step, ma
 INFO 08-01 21:37:59 hpu_model_runner.py:509] Generated 48 decode buckets: [(1, 128), (1, 256), (1, 384), (1, 512), (1, 640), (1, 768), (1, 896), (1, 1024), (1, 1152), (1, 1280), (1, 1408), (1, 1536), (1, 1664), (1, 1792), (1, 1920), (1, 2048), (2, 128), (2, 256), (2, 384), (2, 512), (2, 640), (2, 768), (2, 896), (2, 1024), (2, 1152), (2, 1280), (2, 1408), (2, 1536), (2, 1664), (2, 1792), (2, 1920), (2, 2048), (4, 128), (4, 256), (4, 384), (4, 512), (4, 640), (4, 768), (4, 896), (4, 1024), (4, 1152), (4, 1280), (4, 1408), (4, 1536), (4, 1664), (4, 1792), (4, 1920), (4, 2048)]
 ```
 
-`min` determines the lowest value of the bucket. `step` determines the interval between buckets, and `max` determines the upper bound of the bucket. Furthermore, interval between `min` and `step` has special handling -- `min` gets multiplied by consecutive powers of two, until `step` gets reached. We call this the ramp-up phase and it is used for handling lower batch sizes with minimum wastage, while allowing larger padding on larger batch sizes.
+| Parameter      | Description                                                                 |
+|----------------|-----------------------------------------------------------------------------|
+| `min`          | Determines the lowest value of the bucket.                                  |
+| `step`         | Determines the interval between buckets.                                     |
+| `max`          | Determines the upper bound of the bucket.                                    |
+| Ramp-up phase  | A special handling phase applied between `min` and `step`:<br/>- `min` is multiplied by consecutive powers of two until `step` is reached.<br/>- Minimizes resource wastage for small batch sizes.<br/>- Allows larger padding for larger batches. |
 
 Example (with ramp-up):
 
@@ -232,7 +222,7 @@ As an example, if a request of 3 sequences, with max sequence length of 412 come
 
 Warmup is an optional, but highly recommended step occurring before vLLM server starts listening. It executes a forward pass for each bucket with dummy data. The goal is to pre-compile all graphs and not incur any graph compilation overheads within bucket boundaries during server runtime. Each warmup step is logged during vLLM startup:
 
-??? Logs
+??? console "Logs"
 
     ```text
     INFO 08-01 22:26:47 hpu_model_runner.py:1066] [Warmup][Prompt][1/24] batch_size:4 seq_len:1024 free_mem:79.16 GiB
@@ -281,7 +271,7 @@ When there's large amount of requests pending, vLLM scheduler will attempt to fi
 
 Each described step is logged by vLLM server, as follows (negative values correspond to memory being released):
 
-??? Logs
+??? console "Logs"
 
     ```text
     INFO 08-02 17:37:44 hpu_model_runner.py:493] Prompt bucket config (min, step, max_warmup) bs:[1, 32, 4], seq:[128, 128, 1024]
@@ -349,28 +339,28 @@ Each described step is logged by vLLM server, as follows (negative values corres
 
 - `VLLM_{phase}_{dim}_BUCKET_{param}` - collection of 12 environment variables configuring ranges of bucketing mechanism
 
-  * `{phase}` is either `PROMPT` or `DECODE`
+    - `{phase}` is either `PROMPT` or `DECODE`
 
-  * `{dim}` is either `BS`, `SEQ` or `BLOCK`
+    - `{dim}` is either `BS`, `SEQ` or `BLOCK`
 
-  * `{param}` is either `MIN`, `STEP` or `MAX`
+    - `{param}` is either `MIN`, `STEP` or `MAX`
 
-  * Default values:
+    - Default values:
 
-    - Prompt:
-      - batch size min (`VLLM_PROMPT_BS_BUCKET_MIN`): `1`
-      - batch size step (`VLLM_PROMPT_BS_BUCKET_STEP`): `min(max_num_seqs, 32)`
-      - batch size max (`VLLM_PROMPT_BS_BUCKET_MAX`): `min(max_num_seqs, 64)`
-      - sequence length min (`VLLM_PROMPT_SEQ_BUCKET_MIN`): `block_size`
-      - sequence length step (`VLLM_PROMPT_SEQ_BUCKET_STEP`): `block_size`
-      - sequence length max (`VLLM_PROMPT_SEQ_BUCKET_MAX`): `max_model_len`
-    - Decode:
-      - batch size min (`VLLM_DECODE_BS_BUCKET_MIN`): `1`
-      - batch size step (`VLLM_DECODE_BS_BUCKET_STEP`): `min(max_num_seqs, 32)`
-      - batch size max (`VLLM_DECODE_BS_BUCKET_MAX`): `max_num_seqs`
-      - sequence length min (`VLLM_DECODE_BLOCK_BUCKET_MIN`): `block_size`
-      - sequence length step (`VLLM_DECODE_BLOCK_BUCKET_STEP`): `block_size`
-      - sequence length max (`VLLM_DECODE_BLOCK_BUCKET_MAX`): `max(128, (max_num_seqs*max_model_len)/block_size)`
+| `{phase}` | Parameter | Env Variable | Value Expression |
+|-----------|-----------|--------------|------------------|
+| Prompt | Batch size min | `VLLM_PROMPT_BS_BUCKET_MIN` | `1` |
+| Prompt | Batch size step | `VLLM_PROMPT_BS_BUCKET_STEP` | `min(max_num_seqs, 32)` |
+| Prompt | Batch size max | `VLLM_PROMPT_BS_BUCKET_MAX` | `min(max_num_seqs, 64)` |
+| Prompt | Sequence length min | `VLLM_PROMPT_SEQ_BUCKET_MIN` | `block_size` |
+| Prompt | Sequence length step | `VLLM_PROMPT_SEQ_BUCKET_STEP` | `block_size` |
+| Prompt | Sequence length max | `VLLM_PROMPT_SEQ_BUCKET_MAX` | `max_model_len` |
+| Decode | Batch size min | `VLLM_DECODE_BS_BUCKET_MIN` | `1` |
+| Decode | Batch size step | `VLLM_DECODE_BS_BUCKET_STEP` | `min(max_num_seqs, 32)` |
+| Decode | Batch size max | `VLLM_DECODE_BS_BUCKET_MAX` | `max_num_seqs` |
+| Decode | Sequence length min | `VLLM_DECODE_BLOCK_BUCKET_MIN` | `block_size` |
+| Decode | Sequence length step | `VLLM_DECODE_BLOCK_BUCKET_STEP` | `block_size` |
+| Decode | Sequence length max | `VLLM_DECODE_BLOCK_BUCKET_MAX` | `max(128, (max_num_seqs*max_model_len)/block_size)` |
 
 Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM execution:
 

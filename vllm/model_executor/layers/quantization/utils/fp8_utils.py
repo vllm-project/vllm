@@ -5,6 +5,7 @@
 import functools
 import json
 import os
+from collections.abc import Sequence
 from typing import Any, Callable, Optional, Union
 
 import torch
@@ -13,12 +14,13 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    scaled_dequantize)
+    group_broadcast)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv, direct_register_custom_op, has_deep_gemm
+from vllm.utils.deep_gemm import is_blackwell_deep_gemm_e8m0_used
 
 logger = init_logger(__name__)
 
@@ -54,7 +56,7 @@ def rocm_aiter_gemm_w8a8_blockscale_impl(
 ) -> torch.Tensor:
     import aiter as rocm_aiter
 
-    return rocm_aiter.gemm_a8w8_blockscale_CK(A, B, As, Bs, dtype=output_dtype)
+    return rocm_aiter.gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
 
 
 def rocm_aiter_gemm_w8a8_blockscale_fake(
@@ -80,6 +82,13 @@ if current_platform.is_rocm():
         fake_impl=rocm_aiter_gemm_w8a8_blockscale_fake,
         dispatch_key=current_platform.dispatch_key,
     )
+    if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
+            and current_platform.is_fp8_fnuz()):
+
+        import aiter as rocm_aiter
+        from aiter import get_hip_quant
+
+        aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
 
 
 def dispatch_w8a8_blockscale_func(
@@ -176,8 +185,12 @@ def apply_w8a8_block_fp8_linear(
                                       block_size, input.dtype)
 
     else:
-        q_input, x_scale = per_token_group_quant_fp8(
-            input_2d, block_size[1], column_major_scales=use_cutlass)
+        if use_aiter_and_is_supported:
+            q_input, x_scale = aiter_per1x128_quant(
+                input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8)
+        else:
+            q_input, x_scale = per_token_group_quant_fp8(
+                input_2d, block_size[1], column_major_scales=use_cutlass)
 
         output = w8a8_blockscale_func(q_input, weight, x_scale, weight_scale,
                                       block_size, input.dtype)
@@ -201,12 +214,13 @@ def apply_w8a8_block_fp8_linear_fake(
     return torch.empty(output_shape, dtype=input.dtype, device=input.device)
 
 
-direct_register_custom_op(
-    op_name="apply_w8a8_block_fp8_linear",
-    op_func=apply_w8a8_block_fp8_linear,
-    mutates_args=[],
-    fake_impl=apply_w8a8_block_fp8_linear_fake,
-)
+if not current_platform.is_cpu():
+    direct_register_custom_op(
+        op_name="apply_w8a8_block_fp8_linear",
+        op_func=apply_w8a8_block_fp8_linear,
+        mutates_args=[],
+        fake_impl=apply_w8a8_block_fp8_linear_fake,
+    )
 
 
 def input_to_float8(
@@ -234,7 +248,7 @@ def block_quant_to_tensor_quant(
     The outputs are tensor-wise quantization tensor and tensor-wise
     quantization scale. Note only float8 is supported for now.
     """
-    x_dq_block = scaled_dequantize(x_q_block, x_s)
+    x_dq_block = group_broadcast(x_q_block, x_s)
     x_q_tensor, scale = input_to_float8(x_dq_block, dtype=x_q_block.dtype)
     return x_q_tensor, scale
 
@@ -254,6 +268,7 @@ def _per_token_group_quant_fp8(
     # Information for float8
     fp8_min,
     fp8_max,
+    use_ue8m0: tl.constexpr,
     # Meta-parameters
     BLOCK: tl.constexpr,
 ):
@@ -283,7 +298,8 @@ def _per_token_group_quant_fp8(
     y = tl.load(y_ptr + cols, mask=mask, other=0.0).to(tl.float32)
     # Quant
     _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
-    y_s = _absmax / fp8_max
+    scale_raw = _absmax / fp8_max
+    y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
     tl.store(y_q_ptr + cols, y_q, mask=mask)
@@ -307,6 +323,7 @@ def _per_token_group_quant_fp8_colmajor(
     # Information for float8
     fp8_min,
     fp8_max,
+    use_ue8m0: tl.constexpr,
     # Meta-parameters
     BLOCK: tl.constexpr,
 ):
@@ -345,7 +362,8 @@ def _per_token_group_quant_fp8_colmajor(
     y = tl.load(y_ptr + cols, mask=mask, other=0.0).to(tl.float32)
     # Quant
     _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
-    y_s = _absmax / fp8_max
+    scale_raw = _absmax / fp8_max
+    y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
     y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
     tl.store(y_q_ptr + cols, y_q, mask=mask)
@@ -359,6 +377,7 @@ def per_token_group_quant_fp8(
     dtype: Optional[torch.dtype] = None,
     column_major_scales: bool = False,
     out_q: Optional[torch.Tensor] = None,
+    use_ue8m0: Optional[bool] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Function to perform per-token-group quantization on an input tensor `x`.
     It converts the tensor values into signed float8 values and returns the
@@ -373,8 +392,10 @@ def per_token_group_quant_fp8(
         out_q: Optional output tensor. If not provided, function will create.
     Returns:
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
-        scaling factor for quantization.
+        scaling factor.
     """
+    if use_ue8m0 is None:
+        use_ue8m0 = is_blackwell_deep_gemm_e8m0_used()
     dtype = current_platform.fp8_dtype() if dtype is None else dtype
     assert (x.shape[-1] % group_size == 0), (
         f"the last dimension of `x` {x.shape[-1]} must be divisible "
@@ -390,8 +411,7 @@ def per_token_group_quant_fp8(
     if x_q is None:
         x_q = torch.empty_like(x, device=x.device, dtype=dtype)
 
-    M = x.numel() // group_size
-    N = group_size
+    # Allocate the scale tensor in either row- or column-major format.
     if column_major_scales:
         shape = (x.shape[-1] // group_size, ) + x.shape[:-1]
         x_s = torch.empty(shape, device=x.device,
@@ -400,6 +420,15 @@ def per_token_group_quant_fp8(
         shape = x.shape[:-1] + (x.shape[-1] // group_size, )
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
+    # prefer CUDA kernel if available
+    if current_platform.is_cuda() and x.is_contiguous():
+        torch.ops._C.per_token_group_fp8_quant(x, x_q, x_s, group_size, eps,
+                                               fp8_min, fp8_max, use_ue8m0)
+        return x_q, x_s
+
+    # TRITON FALLBACK
+    M = x.numel() // group_size
+    N = group_size
     BLOCK = triton.next_power_of_2(N)
     # heuristics for number of warps
     num_warps = min(max(BLOCK // 256, 1), 8)
@@ -416,6 +445,7 @@ def per_token_group_quant_fp8(
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
+            use_ue8m0=use_ue8m0,
             BLOCK=BLOCK,
             num_warps=num_warps,
             num_stages=num_stages,
@@ -431,6 +461,7 @@ def per_token_group_quant_fp8(
             eps,
             fp8_min=fp8_min,
             fp8_max=fp8_max,
+            use_ue8m0=use_ue8m0,
             BLOCK=BLOCK,
             num_warps=num_warps,
             num_stages=num_stages,
@@ -650,3 +681,125 @@ def w8a8_block_fp8_matmul(
     )
 
     return C
+
+
+# Taken from https://github.com/deepseek-ai/DeepGEMM/blob/0c88cd01392c1073c7049a97d6328c7bba9b3947
+# TODO(wentao): remove this function when DeepGEMM exposes this function
+def get_tma_aligned_size(x: int, element_size: int) -> int:
+    """
+    Global memory address of TMA must be 16-byte aligned.
+    Since we use column-major layout for the LHS scaling tensor,
+        the M-axis of the LHS scaling tensor needs to be padded to a multiple of
+        16 bytes.
+
+    Arguments:
+        x: original M-axis shape of the LHS scaling tensor.
+        element_size: element size of the LHS scaling tensor.
+
+    Returns:
+        M-axis shape of the LHS scaling tensor after padding.
+    """
+    tma_alignment_bytes = 16
+    assert tma_alignment_bytes % element_size == 0
+    alignment = tma_alignment_bytes // element_size
+    return cdiv(x, alignment) * alignment
+
+
+# Taken from https://github.com/deepseek-ai/DeepGEMM/blob/0c88cd01392c1073c7049a97d6328c7bba9b3947
+# TODO(wentao): remove this function when DeepGEMM exposes this function
+def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
+    """
+    Returns TMA-aligned transposed format of the input tensor. `torch.transpose`
+        will be called if necessary.
+    If the input tensor is already column-major layout and 16-byte aligned along
+        the M axis (thus meets the requirement of LHS scaling tensor in
+        DeepGEMM), this function will do nothing.
+
+    Arguments:
+        x: usually the LHS scaling tensor in GEMM.
+
+    Returns:
+        The LHS scaling tensor of TMA-aligned transposed format.
+    """
+    # NOTES: for the extreme performance, you may rewrite/fuse this function in
+    # CUDA
+    assert x.dim() in (2, 3)
+    remove_dim = False
+    m, n = x.shape[-2], x.shape[-1]
+    aligned_m = get_tma_aligned_size(m, x.element_size())
+    if x.dim() == 2:
+        if x.stride(0) == 1 and x.stride(1) == aligned_m:
+            return x
+        x, remove_dim = x.unsqueeze(0), True
+
+    b = x.shape[0]
+
+    # The last kernel gives a column-major TMA aligned layout
+    if x.stride(0) == aligned_m * n and x.stride(1) == 1 and x.stride(
+            2) == aligned_m:
+        return x.squeeze(0) if remove_dim else x
+
+    # Normal layout requires transposing
+    aligned_x = torch.transpose(
+        torch.empty((b, n, aligned_m), device=x.device, dtype=x.dtype), 1, 2)
+    aligned_x[:, :m, :] = x
+    aligned_x = aligned_x[:, :m, :]
+    return aligned_x.squeeze(0) if remove_dim else aligned_x
+
+
+def requant_weight_ue8m0_inplace(
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        block_size: Sequence[int] = (128, 128),
+) -> None:
+    """Re-quantise *weight* so that its per-block scaling factors are in the
+    UE8M0 (power-of-two) format expected by the new DeepGEMM kernels inplace.
+
+    Args:
+        weight: Block-quantised weight tensor stored in ``torch.float8_e4m3fn``.
+            Expected shape ``(..., M, K)``.
+        weight_scale: Corresponding per-block scale tensor (``torch.float32``)
+            with shape ``(..., M // block_size[0], K // block_size[1])``.
+        block_size: 2-element iterable ``[block_m, block_k]`` describing the
+            block quantisation granularity.
+    """
+    if weight.numel() == 0:
+        return
+
+    if weight.dtype != torch.float8_e4m3fn:
+        raise ValueError("Expected *weight* to be torch.float8_e4m3fn, got "
+                         f"{weight.dtype} instead.")
+
+    from vllm.utils.deep_gemm import per_block_cast_to_fp8
+
+    block_m, block_k = int(block_size[0]), int(block_size[1])
+
+    # Flatten leading dimensions so we can iterate over the last two dims.
+    leading_shape = weight.shape[:-2]
+    if len(leading_shape) == 0:
+        w_view = weight.unsqueeze(0)
+        s_view = weight_scale.unsqueeze(0)
+    else:
+        w_view = weight.reshape(-1, weight.shape[-2], weight.shape[-1])
+        s_view = weight_scale.reshape(-1, *weight_scale.shape[-2:])
+
+    num_mats = w_view.size(0)
+    for idx in range(num_mats):
+        w_q = w_view[idx]
+        s_old = s_view[idx]
+
+        # De-quantise with the *old* scaling factors (float32).
+        m_cur, k_cur = w_q.shape
+        s_float = s_old.to(torch.float32)
+        # Expand scales along rows and cols by block size, then crop.
+        s_exp_r = torch.repeat_interleave(s_float, block_m, dim=0)
+        s_exp = torch.repeat_interleave(s_exp_r, block_k, dim=1)
+        s_exp = s_exp[:m_cur, :k_cur]
+        w_dq = w_q.to(torch.float32) * s_exp
+        # Re-quantise using power-of-two scaling (UE8M0).
+        w_requant, s_requant = per_block_cast_to_fp8(w_dq, [block_m, block_k],
+                                                     use_ue8m0=True)
+
+        # Write back the results in-place.
+        w_q.copy_(w_requant)
+        s_old.copy_(s_requant)

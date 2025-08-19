@@ -14,13 +14,13 @@ from vllm import LLM, SamplingParams
 
 
 @pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    """We can run both engines for this test."""
-    pass
+def v1(monkeypatch):
+    """Only run on vLLM v1."""
+    monkeypatch.setenv('VLLM_USE_V1', '1')
 
 
 def _generate(
-    model: LLM,
+    llm: LLM,
     prompt: str,
     num_prompt_tokens: int,
     temperature: float = 0,
@@ -32,7 +32,7 @@ def _generate(
     )
 
     # [([output_token_ids, ], [output_text, ]), ]
-    output = model.generate([prompt], sampling_params=sampling_params)
+    output = llm.generate([prompt], sampling_params=sampling_params)
 
     output_token_ids = output[0][0][0][num_prompt_tokens:]
     # [0] first (and only) request output
@@ -66,10 +66,10 @@ class TestOneTokenBadWord:
             assert self.target_token_id not in output_token_ids
 
     def _generate(self,
-                  model: LLM,
+                  llm: LLM,
                   bad_words: Optional[list[str]] = None) -> list[int]:
         return _generate(
-            model=model,
+            llm=llm,
             prompt=self.PROMPT,
             num_prompt_tokens=self.num_prompt_tokens,
             bad_words=bad_words,
@@ -156,10 +156,10 @@ class TestTwoTokenBadWord:
                     or (self.neighbour_token_id2 in output_token_ids))
 
     def _generate(self,
-                  model: LLM,
+                  llm: LLM,
                   bad_words: Optional[list[str]] = None) -> list[int]:
         return _generate(
-            model=model,
+            llm=llm,
             prompt=self.PROMPT,
             num_prompt_tokens=self.num_prompt_tokens,
             bad_words=bad_words,

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -8,6 +10,7 @@ from transformers import AutoModel
 from vllm.platforms import current_platform
 
 from ....conftest import HfRunner
+from ...utils import check_transformers_version
 
 
 @pytest.fixture(autouse=True)
@@ -84,13 +87,19 @@ def test_prm_models(
     dtype: str,
     monkeypatch,
 ) -> None:
+    check_transformers_version("Qwen/Qwen2.5-Math-PRM-7B",
+                               max_transformers_version="4.53.2")
+
+    if current_platform.is_cpu() and os.environ.get("VLLM_USE_V1", "0") == "0":
+        pytest.skip("CPU only supports V1")
+
     if current_platform.is_rocm():
         # ROCm Triton FA does not currently support sliding window attention
         # switch to use ROCm CK FA backend
         monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
 
     with vllm_runner(model, max_model_len=1024, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.encode(math_step_prompts)
+        vllm_outputs = vllm_model.reward(math_step_prompts)
 
     with hf_runner(model, dtype=dtype, auto_cls=AutoModel) as hf_model:
         hf_model = step_reward_patch_hf_model(hf_model)
@@ -98,7 +107,7 @@ def test_prm_models(
 
     # check logits difference
     for hf_output, vllm_output in zip(hf_outputs, vllm_outputs):
-        hf_output = torch.tensor(hf_output)
-        vllm_output = torch.tensor(vllm_output)
+        hf_output = torch.tensor(hf_output).float()
+        vllm_output = torch.tensor(vllm_output).float()
 
         assert torch.allclose(hf_output, vllm_output, 1.5e-2)

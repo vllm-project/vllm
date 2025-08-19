@@ -5,12 +5,13 @@
 import torch
 import torch.nn as nn
 
-from vllm.utils import async_tensor_h2d, is_pin_memory_available
+from vllm.config import LogprobsMode
+from vllm.utils import is_pin_memory_available
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
-from vllm.v1.sample.ops.penalties import (apply_all_penalties,
-                                          apply_min_token_penalties)
+from vllm.v1.sample.ops.logprobs import batched_count_greater_than
+from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
 _SAMPLING_EPS = 1e-5
@@ -18,10 +19,11 @@ _SAMPLING_EPS = 1e-5
 
 class Sampler(nn.Module):
 
-    def __init__(self):
+    def __init__(self, logprobs_mode: LogprobsMode = "raw_logprobs"):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler()
         self.pin_memory = is_pin_memory_available()
+        self.logprobs_mode = logprobs_mode
 
     def forward(
         self,
@@ -36,7 +38,10 @@ class Sampler(nn.Module):
         # See https://vllm-dev.slack.com/archives/C07UUL8E61Z/p1735907856007919 # noqa: E501
         num_logprobs = sampling_metadata.max_num_logprobs
         if num_logprobs is not None:
-            raw_logprobs = self.compute_logprobs(logits)
+            if self.logprobs_mode == "raw_logprobs":
+                raw_logprobs = self.compute_logprobs(logits)
+            elif self.logprobs_mode == "raw_logits":
+                raw_logprobs = logits.clone()
 
         # Use float32 for the logits.
         logits = logits.to(torch.float32)
@@ -44,10 +49,21 @@ class Sampler(nn.Module):
         logits = self.apply_allowed_token_ids(logits, sampling_metadata)
         # Apply bad words exclusion.
         logits = self.apply_bad_words(logits, sampling_metadata)
-        # Apply logits bias.
-        logits = self.apply_logits_bias(logits, sampling_metadata)
+
+        # Apply logits processors which can impact greedy sampling
+        for processor in (sampling_metadata.logitsprocs.non_argmax_invariant):
+            logits = processor.apply(logits)
+
         # Apply penalties (e.g., min_tokens, freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata)
+
+        # Get the process logprobs or logits.
+        if num_logprobs is not None:
+            if self.logprobs_mode == "processed_logprobs":
+                raw_logprobs = self.compute_logprobs(logits)
+            elif self.logprobs_mode == "processed_logits":
+                raw_logprobs = logits.clone()
+
         # Sample the next token.
         sampled = self.sample(logits, sampling_metadata)
         # Convert sampled token ids to int64 (long) type to ensure compatibility
@@ -110,9 +126,10 @@ class Sampler(nn.Module):
         # Apply temperature.
         logits = self.apply_temperature(logits, sampling_metadata.temperature)
 
-        # Apply min_p.
-        if sampling_metadata.min_p is not None:
-            logits = self.apply_min_p(logits, sampling_metadata.min_p)
+        # Apply logits processors that only apply to random sampling
+        # (argmax invariant)
+        for processor in sampling_metadata.logitsprocs.argmax_invariant:
+            logits = processor.apply(logits)
 
         # Apply top_k and/or top_p.
         random_sampled = self.topk_topp_sampler(
@@ -171,7 +188,7 @@ class Sampler(nn.Module):
         token_logprobs = logprobs.gather(-1, token_ids)
 
         # Compute the ranks of the actual token.
-        token_ranks = (logprobs >= token_logprobs).sum(-1)
+        token_ranks = batched_count_greater_than(logprobs, token_logprobs)
 
         # Concatenate together with the topk.
         indices = torch.cat((token_ids, topk_indices), dim=1)
@@ -187,10 +204,6 @@ class Sampler(nn.Module):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> torch.Tensor:
-        if sampling_metadata.min_tokens:
-            apply_min_token_penalties(logits,
-                                      sampling_metadata.output_token_ids,
-                                      sampling_metadata.min_tokens)
         if not sampling_metadata.no_penalties:
             assert sampling_metadata.prompt_token_ids is not None
             logits = apply_all_penalties(
@@ -201,65 +214,6 @@ class Sampler(nn.Module):
                 sampling_metadata.repetition_penalties,
                 sampling_metadata.output_token_ids,
             )
-        return logits
-
-    def apply_min_p(
-        self,
-        logits: torch.Tensor,
-        min_p: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Filters logits using adaptive probability thresholding.
-        """
-        # Convert logits to probability distribution
-        probability_values = torch.nn.functional.softmax(logits, dim=-1)
-        # Calculate maximum probabilities per sequence
-        max_probabilities = torch.amax(probability_values,
-                                       dim=-1,
-                                       keepdim=True)
-        # Reshape min_p for broadcasting
-        adjusted_min_p = min_p.unsqueeze(1) * max_probabilities
-        # Identify valid tokens using threshold comparison
-        valid_token_mask = probability_values >= adjusted_min_p
-        # Apply mask using boolean indexing
-        logits[~valid_token_mask] = -float('inf')
-        return logits
-
-    def apply_logits_bias(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
-        # TODO(houseroad): this implementation is extremely inefficient.
-        # One idea is implement this as a PyTorch C++ op, and we may
-        # even optimize the logit_bias layout.
-
-        rows: list[int] = []
-        cols: list[int] = []
-        vals: list[float] = []
-
-        # Get vocabulary size from logits
-        vocab_size = logits.shape[-1]
-
-        for i, logit_bias in enumerate(sampling_metadata.logit_bias):
-            if logit_bias:
-                for token_id, bias in logit_bias.items():
-                    # Check token_id bounds to ensure within vocabulary
-                    if token_id < 0 or token_id >= vocab_size:
-                        raise ValueError(
-                            f"token_id {token_id} in logit_bias contains "
-                            f"out-of-vocab token id. Vocabulary size: "
-                            f"{vocab_size}")
-                    rows.append(i)
-                    cols.append(token_id)
-                    vals.append(bias)
-
-        if rows:
-            indices = async_tensor_h2d([rows, cols], torch.int64,
-                                       logits.device, self.pin_memory)
-            values = async_tensor_h2d(vals, torch.float, logits.device,
-                                      self.pin_memory)
-            logits.index_put_(tuple(indices), values=values, accumulate=True)
         return logits
 
     def apply_allowed_token_ids(

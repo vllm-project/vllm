@@ -1,16 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+import tempfile
+from collections import defaultdict
+from typing import Any, Callable, Optional
 
 import torch
 
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
+from vllm.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory)
+from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa
+    SharedStorageConnector)
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
+                                         init_none_hash)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -33,7 +42,6 @@ def assert_scheduler_empty(scheduler: Scheduler):
     # KVCache Manager.
     assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                req_to_blocks) == 0
-    assert len(scheduler.kv_cache_manager.req_to_block_hashes) == 0
     assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                num_cached_block) == 0
     num_free_blocks = (
@@ -61,9 +69,6 @@ def create_vllm_config(
     )
     model_config = ModelConfig(
         model=model,
-        task="auto",
-        tokenizer=model,
-        tokenizer_mode="auto",
         trust_remote_code=True,
         dtype="float16",
         seed=42,
@@ -111,16 +116,23 @@ def create_scheduler(
     )
 
 
-def create_request(
-    request_id: int,
-    num_tokens: int = 10,
-    max_tokens: int = 16,
-    do_remote_decode: bool = False,
-    do_remote_prefill: bool = False,
-    use_all_1s_for_prompt_tokens: bool = False,
-    num_remote_blocks: int = 3,
-) -> Request:
+_none_hash_initialized = False
+
+
+def create_request(request_id: int,
+                   num_tokens: int = 10,
+                   max_tokens: int = 16,
+                   do_remote_decode: bool = False,
+                   do_remote_prefill: bool = False,
+                   use_all_1s_for_prompt_tokens: bool = False,
+                   num_remote_blocks: int = 3,
+                   block_size: int = 16,
+                   hash_fn: Callable = hash) -> Request:
     """Make dummy request for testing."""
+    global _none_hash_initialized
+    if not _none_hash_initialized:
+        init_none_hash(hash)
+        _none_hash_initialized = True
 
     kv_transfer_params: Optional[dict[str, Any]] = None
 
@@ -150,10 +162,11 @@ def create_request(
         prompt_token_ids=prompt_token_ids,
         sampling_params=sampling_params,
         pooling_params=None,
-        multi_modal_inputs=None,
+        multi_modal_kwargs=None,
         multi_modal_placeholders=None,
         multi_modal_hashes=None,
         eos_token_id=EOS_TOKEN_ID,
+        block_hasher=get_request_block_hasher(block_size, hash_fn),
     )
     req.kv_transfer_params = kv_transfer_params
     return req
@@ -175,15 +188,75 @@ def create_model_runner_output(
     sampled_token = EOS_TOKEN_ID if use_eos else 0
     sampled_token_ids = [[sampled_token] for _ in req_ids]
 
+    kv_connector_output = None if (
+        finished_sending is None
+        and finished_recving is None) else KVConnectorOutput(
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
+        )
+
     # Make output data structure.
     return ModelRunnerOutput(
         req_ids=req_ids,
         req_id_to_index=req_id_to_index,
         sampled_token_ids=sampled_token_ids,
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=None,
-        finished_sending=finished_sending,
-        finished_recving=finished_recving,
+        kv_connector_output=kv_connector_output,
     )
+
+
+class TestSharedStorageConnector(SharedStorageConnector):
+
+    def __init__(self, config: VllmConfig, role):
+        self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
+        self._connector = SharedStorageConnector(config, role)
+        self.call_record: dict[str, int] = defaultdict(int)
+        # Use a unique temp file per connector
+        self._event_file = tempfile.gettempdir(
+        ) + f"/connector_{self.name}-{self.role.name}_events.log"
+        # Start with an empty file
+        with open(self._event_file, "w") as _:
+            pass
+
+    def __getattribute__(self, name):
+        if name in ("_connector", "call_record", "name", "_event_file",
+                    "__class__", "__dict__", "__getattribute__",
+                    "__init__"):  # avoid recursion
+            return object.__getattribute__(self, name)
+        if not hasattr(self._connector, name):
+            return object.__getattribute__(self, name)
+        attr = getattr(self._connector, name)
+
+        # Intercept calls to the connector interface and write an event
+        # for each one to a file, which can be read back in the main test proc.
+        if callable(attr):
+
+            def wrapper(*args, **kwargs):
+                self.call_record[name] += 1
+
+                # Include args that we're interested in
+                to_log = [name]
+                for arg in args:
+                    if isinstance(arg, int):
+                        to_log.append(str(arg))
+                    elif isinstance(arg, KVCacheBlocks):
+                        to_log.append(
+                            f"num_blocks={[len(b) for b in arg.blocks]}")
+
+                # Log the event as a line to the file
+                try:
+                    with open(self._event_file, "a") as f:
+                        f.write(' '.join(to_log) + "\n")
+                except Exception as e:
+                    print(f"[ERROR] Could not log event {name} "
+                          f"for {self.name}: {e}")
+                return attr(*args, **kwargs)
+
+            return wrapper
+        return attr
+
+
+KVConnectorFactory.register_connector("TestSharedStorageConnector", __name__,
+                                      TestSharedStorageConnector.__name__)

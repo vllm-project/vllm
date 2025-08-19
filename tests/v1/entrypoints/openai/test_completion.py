@@ -7,6 +7,7 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import regex as re
+import requests
 from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
@@ -19,14 +20,14 @@ MODEL_NAME = "facebook/opt-125m"
 @pytest.fixture(scope="module")
 def default_server_args():
     return [
-        # use half precision for speed and memory savings in CI environment
         "--dtype",
-        "bfloat16",
+        "float32",
         "--max-model-len",
         "2048",
         "--max-num-seqs",
         "128",
-        "--enforce-eager"
+        "--enforce-eager",
+        "--enable-prompt-tokens-details",
     ]
 
 
@@ -38,7 +39,7 @@ def default_server_args():
                         ]])
 def server(default_server_args, request):
     if request.param:
-        default_server_args.extend(request.param)
+        default_server_args = default_server_args + request.param
     with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
 
@@ -679,3 +680,17 @@ async def test_invalid_grammar(client: openai.AsyncOpenAI, model_name: str):
             prompt=prompt,
             extra_body={"guided_grammar": invalid_simplified_sql_grammar},
         )
+
+
+@pytest.mark.asyncio
+async def test_completion_with_empty_prompt_embeds(
+        client: openai.AsyncOpenAI) -> None:
+    """Test completion with empty prompt embeds."""
+    payload: dict[str, list] = {"prompt_embeds": []}
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    # base_url = http://localhost:8000/v1/completions
+    response = requests.post(f"{client.base_url}completions",
+                             headers=headers,
+                             json=payload)
+    assert response.status_code == 200, (
+        f"Expected status code 200, got {response.status_code}. ")

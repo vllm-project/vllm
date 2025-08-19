@@ -41,6 +41,24 @@ void cutlass_moe_mm_sm90(
 
 #endif
 
+#if defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100
+void cutlass_moe_mm_sm100(
+    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
+    bool per_act_token, bool per_out_ch);
+#endif
+
+#if defined ENABLE_SCALED_MM_SM120 && ENABLE_SCALED_MM_SM120
+void cutlass_scaled_mm_sm120(torch::Tensor& c, torch::Tensor const& a,
+                             torch::Tensor const& b,
+                             torch::Tensor const& a_scales,
+                             torch::Tensor const& b_scales,
+                             std::optional<torch::Tensor> const& bias);
+#endif
+
 #if defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM100
 void cutlass_scaled_mm_sm100(torch::Tensor& c, torch::Tensor const& a,
                              torch::Tensor const& b,
@@ -122,10 +140,10 @@ bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability) {
   // and at least SM90 (Hopper)
 
 #if defined CUDA_VERSION
-  if (cuda_device_capability >= 90 && cuda_device_capability < 100) {
-    return CUDA_VERSION >= 12000;
-  } else if (cuda_device_capability >= 100) {
+  if (cuda_device_capability >= 100) {
     return CUDA_VERSION >= 12080;
+  } else if (cuda_device_capability >= 90) {
+    return CUDA_VERSION >= 12000;
   }
 #endif
 
@@ -133,11 +151,14 @@ bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability) {
 }
 
 bool cutlass_group_gemm_supported(int64_t cuda_device_capability) {
-  // CUTLASS grouped FP8 kernels need at least CUDA 12.3
-  // and SM90 (Hopper)
+  // CUTLASS grouped FP8 kernels need at least CUDA 12.3 and SM90 (Hopper)
+  // or CUDA 12.8 and SM100 (Blackwell)
 
 #if defined CUDA_VERSION
-  if (cuda_device_capability == 90) {
+  if (cuda_device_capability >= 100) {
+    return CUDA_VERSION >= 12080;
+  }
+  if (cuda_device_capability >= 90) {
     return CUDA_VERSION >= 12030;
   }
 #endif
@@ -168,8 +189,15 @@ void cutlass_scaled_mm(torch::Tensor& c, torch::Tensor const& a,
   at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
   int32_t version_num = get_sm_version_num();
 
+#if defined ENABLE_SCALED_MM_SM120 && ENABLE_SCALED_MM_SM120
+  if (version_num >= 120) {
+    cutlass_scaled_mm_sm120(c, a, b, a_scales, b_scales, bias);
+    return;
+  }
+#endif
+
 #if defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM100
-  if (version_num >= 100) {
+  if (version_num >= 100 && version_num < 120) {
     cutlass_scaled_mm_sm100(c, a, b, a_scales, b_scales, bias);
     return;
   }
@@ -219,16 +247,26 @@ void cutlass_moe_mm(
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
     bool per_act_token, bool per_out_ch) {
   int32_t version_num = get_sm_version_num();
+#if defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100
+  if (version_num >= 100) {
+    cutlass_moe_mm_sm100(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
+                         expert_offsets, problem_sizes, a_strides, b_strides,
+                         c_strides, per_act_token, per_out_ch);
+    return;
+  }
+#endif
 #if defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90
-  cutlass_moe_mm_sm90(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
-                      expert_offsets, problem_sizes, a_strides, b_strides,
-                      c_strides, per_act_token, per_out_ch);
-  return;
+  if (version_num >= 90) {
+    cutlass_moe_mm_sm90(out_tensors, a_tensors, b_tensors, a_scales, b_scales,
+                        expert_offsets, problem_sizes, a_strides, b_strides,
+                        c_strides, per_act_token, per_out_ch);
+    return;
+  }
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
       "No compiled cutlass_scaled_mm for CUDA device capability: ", version_num,
-      ". Required capability: 90");
+      ". Required capability: 90 or 100");
 }
 
 void get_cutlass_moe_mm_data(

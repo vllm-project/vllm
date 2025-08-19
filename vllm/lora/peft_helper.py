@@ -35,12 +35,9 @@ class PEFTHelper:
     use_rslora: bool = field(default=False)
     # True to use Weight-Decomposed Low-Rank Adaptation (DoRA, see: https://arxiv.org/abs/2402.09353)
     use_dora: bool = field(default=False)
-    # long context lora field
-    context_length: int = field(default=0)
     # Extra vllm field, start with 'vllm_' to avoid conflict
     vllm_lora_scaling_factor: float = field(default=1.0)
     vllm_max_position_embeddings: Optional[int] = field(default=False)
-    vllm_long_context_scaling_factor: Optional[float] = field(default=None)
 
     def _validate_features(self) -> list[str]:
         """
@@ -59,12 +56,6 @@ class PEFTHelper:
             self.vllm_lora_scaling_factor = self.lora_alpha / math.sqrt(self.r)
         else:
             self.vllm_lora_scaling_factor = self.lora_alpha / self.r
-        if self.context_length:
-            if self.vllm_max_position_embeddings is None:
-                self.vllm_max_position_embeddings = self.context_length
-            self.vllm_long_context_scaling_factor = float(
-                math.ceil(self.context_length /
-                          self.vllm_max_position_embeddings))
 
     @classmethod
     def from_dict(cls, config_dict: dict) -> "PEFTHelper":
@@ -102,15 +93,15 @@ class PEFTHelper:
             tensorizer_config = TensorizerConfig(**tensorizer_config_dict)
             tensorizer_args = tensorizer_config._construct_tensorizer_args()
             from tensorizer.stream_io import open_stream
-            lora_config_path = os.path.join(tensorizer_config.lora_dir,
+            lora_config_path = os.path.join(tensorizer_config.tensorizer_dir,
                                             "adapter_config.json")
             with open_stream(lora_config_path,
                              mode="rb",
-                             **tensorizer_args.stream_params) as f:
+                             **tensorizer_args.stream_kwargs) as f:
                 config = json.load(f)
 
             logger.info("Successfully deserialized LoRA config from %s",
-                        tensorizer_config.lora_dir)
+                        tensorizer_config.tensorizer_dir)
 
         else:
             with open(lora_config_path) as f:

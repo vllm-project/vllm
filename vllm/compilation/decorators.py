@@ -20,7 +20,36 @@ from .monitor import start_monitoring_torch_compile
 
 logger = init_logger(__name__)
 
+IGNORE_COMPILE_KEY = "_ignore_compile_vllm"
+
 _T = TypeVar("_T", bound=type[nn.Module])
+
+
+def ignore_torch_compile(cls: _T) -> _T:
+    """
+    A decorator to ignore support_torch_compile decorator
+    on the class. This is useful when a parent class has
+    a support_torch_compile decorator, but we don't want to
+    compile the class `cls` that inherits the parent class.
+    This only ignores compiling the forward of the class the
+    decorator is applied to. 
+
+    If the parent has ignore_torch_compile but the child has
+    support_torch_compile, the child will still be compiled.
+    
+    If the class has one or more submodules
+    that have support_torch_compile decorator applied, compile will
+    not be ignored for those submodules.
+    """
+    setattr(cls, IGNORE_COMPILE_KEY, True)
+    return cls
+
+
+def _should_ignore_torch_compile(cls) -> bool:
+    """
+    Check if the class should be ignored for torch.compile.
+    """
+    return getattr(cls, IGNORE_COMPILE_KEY, False)
 
 
 @overload
@@ -79,7 +108,7 @@ def support_torch_compile(
     During runtime, when we actually mark dimensions of tensors,
      it depends on the value of arguments:
 
-    - if it is a single integer (can be negative), the corresponding dimension 
+    - if it is a single integer (can be negative), the corresponding dimension
         of the argument will be marked as dynamic.
     - if it is `None`, ignored.
     - if it is `IntermediateTensors`, all the tensors in the intermediate
@@ -148,6 +177,8 @@ def _support_torch_compile(
 
     old_init = cls.__init__
 
+    setattr(cls, IGNORE_COMPILE_KEY, False)
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
         self.vllm_config = vllm_config
@@ -156,9 +187,11 @@ def _support_torch_compile(
         self.do_not_compile = \
             vllm_config.compilation_config.level in [
             CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
-        ] or not supports_dynamo()
+        ] or not supports_dynamo() or _should_ignore_torch_compile(
+            self.__class__)
         if self.do_not_compile:
             return
+
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
             self, compilation_level=vllm_config.compilation_config.level)
@@ -234,8 +267,24 @@ def _support_torch_compile(
                     code.co_filename)
                 return inline_call(parent, func, args, kwargs)
 
+            # Disable the C++ compilation of symbolic shape guards. C++-fication
+            # of symbolic shape guards can improve guard overhead. But, since
+            # vllm skip guards anyways, setting this flag to False can improve
+            # compile time.
+            dynamo_config_patches = {}
+            try:
+                _ = torch._dynamo.config.enable_cpp_symbolic_shape_guards
+                dynamo_config_patches[
+                    "enable_cpp_symbolic_shape_guards"] = False
+            except AttributeError:
+                # Note: this config is not available in torch 2.6, we can skip
+                # if the config doesn't exist
+                logger.debug(
+                    "enable_cpp_symbolic_shape_guards config not available")
+
             with patch.object(InliningInstructionTranslator, 'inline_call',
-                              patched_inline_call):
+                              patched_inline_call), torch._dynamo.config.patch(
+                                  **dynamo_config_patches):
                 output = self.compiled_callable(*args, **kwargs)
             return output
 
