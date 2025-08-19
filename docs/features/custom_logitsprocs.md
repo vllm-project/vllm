@@ -5,13 +5,14 @@ This document shows you how to augment vLLM with custom logits processors.
 ## Build a custom logits processor and pass it to the offline `LLM` engine
 
 Subclass `vllm.v1.sample.logits_processor.LogitsProcessor` and override the following methods
+
 * `__init__(self, vllm_config: vllm.config.VllmConfig, device: torch.device, is_pin_memory: bool)`
     * `vllm_config`: vLLM engine configuration
 * `is_argmax_invariant(self)`
 * `update_state(self, batch_update: Optional[vllm.v1.sample.logits_processor.BatchUpdate])`
     * `batch_update`: representation of added/removed/moved requests in the vLLM persistent batch during the most recent engine step
 * `apply(self, logits: torch.Tensor)`
-    * `logits`: a $num\_reqs \times vocab\_size$ tensor representing the unprocessed token probability distribution for each request. 
+    * `logits`: a $num\_reqs \times vocab\_size$ tensor representing the unprocessed token probability distribution for each request.
 
 The contrived example below implements a custom logits processor which masks out all tokens except for one (`target_token`) with `float(-inf)`.
 
@@ -78,7 +79,7 @@ The contrived example below implements a custom logits processor which masks out
 
 Pass your custom logits processor to the `LLM` constructor in the form of (1) a class object or (2) a fully-qualified class name (FQCN), as shown in the example below (which assumes that `DummyLogitsProcessor` is defined in `vllm.test_utils`):
 
-```
+``` python
 # Pass in class object
 llm = LLM(
     model="facebook/opt-125m",
@@ -91,6 +92,8 @@ llm = LLM(
     logits_processors=["vllm.test_utils:DummyLogitsProcessor"],
 )
 ```
+
+### Custom 
 
 ## Online scenario: pass the logits processor FQCN via CLI with `--logits-processors`
 
