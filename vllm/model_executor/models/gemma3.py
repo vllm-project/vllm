@@ -20,10 +20,11 @@ from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
+import os
 from torch import nn
 from transformers import Gemma3TextConfig
 
-from vllm.attention import Attention
+from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -52,7 +53,23 @@ from .utils import (AutoWeightsLoader, extract_layer_index,
                     maybe_prefix)
 
 logger = init_logger(__name__)
+is_hpu = current_platform.is_hpu()
+if is_hpu:
+    import habana_frameworks.torch as htorch
 
+# split_size>128: fixed-length splits (each slice is split_size)
+# split_size<128: fixed-num splits (split_size num of slices)
+def get_split_size(seq_len, batch_size, orig_split_size):
+    if orig_split_size<128:
+        split_size = max((seq_len*batch_size)//orig_split_size, 1)
+    else:
+        split_size = orig_split_size
+    return split_size
+
+# Use the first override whenever possible
+VLLM_MLP_SIZE_OVERRIDE = int(os.environ.get("VLLM_MLP_SIZE_OVERRIDE", "512"))
+# Use the second override 
+VLLM_MLP_SIZE_OVERRIDE_2 = int(os.environ.get("VLLM_MLP_SIZE_OVERRIDE_2", "384"))
 
 class Gemma3MLP(nn.Module):
 
@@ -63,6 +80,8 @@ class Gemma3MLP(nn.Module):
         hidden_activation: str,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        do_split: bool = False,
+        split_size: int = 2,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -87,9 +106,18 @@ class Gemma3MLP(nn.Module):
         self.act_fn = GeluAndMul(approximate="tanh")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size = x.size(0)
+        seq_len = x.size(1)
+        if (seq_len*batch_size)%VLLM_MLP_SIZE_OVERRIDE==0:
+            x = x.view(-1,VLLM_MLP_SIZE_OVERRIDE,self.hidden_size)
+        elif (seq_len*batch_size)%VLLM_MLP_SIZE_OVERRIDE_2==0:
+            x = x.view(-1,VLLM_MLP_SIZE_OVERRIDE_2,self.hidden_size)
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
+        # Separate split for down is not implemented yet
         x, _ = self.down_proj(x)
+        if ((seq_len*batch_size)%VLLM_MLP_SIZE_OVERRIDE==0) or ((seq_len*batch_size)%VLLM_MLP_SIZE_OVERRIDE_2==0):
+            x = x.view(batch_size,seq_len,self.hidden_size)
         return x
 
 
@@ -105,7 +133,10 @@ class Gemma3Attention(nn.Module):
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  attn_logits_soft_cap: Optional[float] = None,
-                 prefix: str = "") -> None:
+                 prefix: str = "",
+                 do_split: bool = False,
+                 split_size: int = 2,
+                 output_slice: bool = False) -> None:
         super().__init__()
         self.config = config
         self.hidden_size = hidden_size
@@ -128,6 +159,9 @@ class Gemma3Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = config.query_pre_attn_scalar**-0.5
         self.split_qkv = cache_config.split_qkv
+        self.do_split = do_split
+        self.split_size = split_size
+        self.output_slice = output_slice
 
         if self.split_qkv:
             self.qkv_proj = SplitQKVParallelLinear(
@@ -196,12 +230,66 @@ class Gemma3Attention(nn.Module):
                               per_layer_sliding_window=self.sliding_window,
                               prefix=f"{prefix}.attn")
 
+    
+    def forward_qkv(
+        self,
+        hidden_states: torch.Tensor,
+    ):
+        if self.split_qk_v:
+            q, _ = self.q_proj(hidden_states)
+            k, _ = self.k_proj(hidden_states)
+            v, _ = self.v_proj(hidden_states)
+        else:
+            qkv, _ = self.qkv_proj(hidden_states)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size],
+                                dim=-1)
+        
+        return q,k,v
+    
+    def forward_attnpost(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        positions: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
+    ) -> torch.Tensor:
+        q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        batch_size = attn_output.size(0)
+        seq_len = attn_output.size(1)
+        split_size = get_split_size(seq_len, batch_size, self.split_size)
+        do_split = self.do_split and attn_metadata.is_prompt
+        if ((seq_len*batch_size)//split_size>=2) and do_split:
+            attn_output = attn_output.view(1, -1, self.q_size)
+            attn_list = torch.split(attn_output, split_size, 1)
+            output_list = []
+            for attn_slice in attn_list:
+                output_slice = self.o_proj(attn_slice)[0]
+                output_list.append(output_slice)
+            if self.output_slice:
+                return output_list
+            else:
+                output = torch.cat(output_list)
+                output = output.view(batch_size, seq_len, self.hidden_size)
+                return output
+        else:
+            output, _ = self.o_proj(attn_output)
+            return output
+
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> torch.Tensor:
+        batch_size = hidden_states.size(0)
+        seq_len = hidden_states.size(1)
+        split_size = get_split_size(seq_len, batch_size, self.split_size)
+        do_split = self.do_split and attn_metadata.is_prompt
         if self.split_qkv:
             q, k, v, _ = self.qkv_proj(hidden_states)
         else:
@@ -240,13 +328,28 @@ class Gemma3Attention(nn.Module):
         # output is discarded and overwritten below. While this duplicates
         # computation, it maintains compatibility.
         # TODO(woosuk): Optimize by implementing custom attention kernels.
+        # attn_metadata?
         attn_output = self.naive_attn_with_masks(q,
                                                  k,
                                                  v,
                                                  out=attn_output,
                                                  **kwargs)
-        output, _ = self.o_proj(attn_output)
-        return output
+        if ((seq_len*batch_size)//split_size>=2) and do_split:
+            attn_output = attn_output.view(1, -1, self.q_size)
+            attn_list = torch.split(attn_output, split_size, 1)
+            output_list = []
+            for attn_slice in attn_list:
+                output_slice = self.o_proj(attn_slice)[0]
+                output_list.append(output_slice)
+            if self.output_slice:
+                return output_list
+            else:
+                output = torch.cat(output_list)
+                output = output.view(batch_size, seq_len, self.hidden_size)
+                return output
+        else:
+            output, _ = self.o_proj(attn_output)
+            return output
 
     def naive_attn_with_masks(
         self,
@@ -308,6 +411,12 @@ class Gemma3DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        split_size = int(os.environ.get('VLLM_TP_SPLIT_SIZE_BY_SEQ', '1'))
+        output_slice = int(os.environ.get('OUTPUT_SLICE', '1')) == 1
+        do_split = split_size > 1
+        self.split_size = split_size
+        self.do_split = do_split
+        self.output_slice = output_slice and do_split
         self.self_attn = Gemma3Attention(
             config=config,
             hidden_size=self.hidden_size,
@@ -319,6 +428,9 @@ class Gemma3DecoderLayer(nn.Module):
             quant_config=quant_config,
             attn_logits_soft_cap=None,
             prefix=f"{prefix}.self_attn",
+            do_split=do_split,
+            split_size=split_size,
+            output_slice=output_slice,
         )
         self.hidden_size = config.hidden_size
         self.mlp = Gemma3MLP(
@@ -327,6 +439,8 @@ class Gemma3DecoderLayer(nn.Module):
             hidden_activation=config.hidden_activation,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
+            do_split=do_split,
+            split_size=split_size,
         )
         self.input_layernorm = GemmaRMSNorm(config.hidden_size,
                                             eps=config.rms_norm_eps)
@@ -341,28 +455,92 @@ class Gemma3DecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        attn_metadata: AttentionMetadata,
         residual: Optional[torch.Tensor],
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+        # Get prompt bs from attn_metadata. The one from hidden_states may be inaccurate due to slicing
+        if attn_metadata.is_prompt:
+            batch_size = attn_metadata.seq_lens_tensor.size(0)
         else:
-            hidden_states, residual = self.input_layernorm(
+            batch_size = 1
+        # Self Attention
+        if (residual is not None) and type(hidden_states)==list:
+            # TP parallel slice cross layers
+            residual_list_output = []
+            q_list = []
+            k_list = []
+            v_list = []
+            for hidden_states_ind, residual_ind in zip(hidden_states, residual):
+                hidden_states_ind, residual_ind = self.input_layernorm(hidden_states_ind, residual_ind)
+                
+                q,k,v = self.self_attn.forward_qkv(hidden_states_ind)
+                residual_list_output.append(residual_ind)
+                q_list.append(q)
+                k_list.append(k)
+                v_list.append(v)
+                # Prevent qkv from getting merged by GC
+                htorch.core.mark_step()
+            q = torch.cat(q_list, dim=1)
+            k = torch.cat(k_list, dim=1)
+            v = torch.cat(v_list, dim=1)
+            residual = torch.cat(residual_list_output, dim=1)
+            hidden_states_shape = residual.shape
+            batch_size_fake, seq_len_fake, hidden_size = hidden_states_shape
+            hidden_states = self.self_attn.forward_attnpost(
+                q=q,
+                k=k,
+                v=v,
+                positions=positions,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata
+            )
+        else:
+            if residual is None:
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = self.input_layernorm(
+                    hidden_states, residual)
+            hidden_states_shape = hidden_states.shape
+            batch_size_fake, seq_len_fake, hidden_size = hidden_states_shape
+            
+            hidden_states = self.self_attn(positions=positions,
+                                        hidden_states=hidden_states,
+                                        kv_cache=kv_cache,
+                                        attn_metadata=attn_metadata)
+        
+        # Calculate real seq_len from product of inaccurate batch_size and seq_len
+        seq_len = (batch_size_fake*seq_len_fake)//batch_size
+        split_size = get_split_size(seq_len, batch_size, self.split_size)
+        # only split for prefill
+        do_split = self.do_split and attn_metadata.is_prompt
+
+        # self_attn output a list of tensors to be processed sequential at layernorm and mlp
+        if do_split and (seq_len*batch_size)//split_size>=2 and self.output_slice:
+            # Slice residual
+            residual = residual.view(1, -1, hidden_size)
+            residual_list = torch.split(residual, split_size, 1)
+
+            residual_list_output = []
+            output_list = []
+            # Sequentially process slices
+            for hidden_state, residual in zip(hidden_states, residual_list):
+                hidden_state, residual = self.post_attention_layernorm(hidden_state, residual)
+                hidden_state = self.mlp(hidden_state)
+                residual_list_output.append(residual)
+                output_list.append(hidden_state)
+
+            residual = residual_list_output
+            hidden_states = output_list
+
+        else:
+            # Fully Connected
+            hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            **kwargs,
-        )
-        hidden_states = self.post_attention_layernorm(hidden_states)
+            hidden_states = self.mlp(hidden_states)
 
-        hidden_states, residual = self.pre_feedforward_layernorm(
-            hidden_states, residual)
-        hidden_states = self.mlp(hidden_states)
-        hidden_states = self.post_feedforward_layernorm(hidden_states)
         return hidden_states, residual
-
 
 @support_torch_compile
 class Gemma3Model(nn.Module):
@@ -409,10 +587,12 @@ class Gemma3Model(nn.Module):
         self,
         input_ids: Optional[torch.Tensor],
         positions: torch.Tensor,
+        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        breakpoint()
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -427,9 +607,13 @@ class Gemma3Model(nn.Module):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
+                attn_metadata,
                 residual,
                 **kwargs,
             )
+        if type(hidden_states)==list:
+            hidden_states = torch.cat(hidden_states, dim=1)
+            residual = torch.cat(residual, dim=1)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -545,11 +729,12 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, attn_metadata, intermediate_tensors,
                                    inputs_embeds, **kwargs)
         return hidden_states
 
