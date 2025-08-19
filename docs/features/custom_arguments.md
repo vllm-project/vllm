@@ -18,9 +18,7 @@ curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "Qwen/Qwen2.5-1.5B-Instruct",
-        "prompt": "San Francisco is a",
-        "max_tokens": 7,
-        "temperature": 0,
+        ...
         "vllm_xargs": {"your_custom_arg": 67}
     }'
 ```
@@ -30,7 +28,7 @@ Furthermore, OpenAI SDK users can access `vllm_xargs` via the `extra_body` argum
 ``` python
 batch = await client.completions.create(
     model=model_name,
-    prompt=prompt,
+    ...,
     extra_body={
         "vllm_xargs": {
             "your_custom_arg": 67
