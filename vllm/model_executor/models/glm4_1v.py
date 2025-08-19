@@ -126,7 +126,7 @@ class Glm4vVideoPixelInputs(TensorSchema):
         - ctpp: Number of channels * temporal_patch_size *
             patch_size * patch_size
         - f: Number of frames
-        - g: Grid dimensions (3 for grid_t which is usually 1 for processed 
+        - g: Grid dimensions (3 for grid_t which is usually 1 for processed
           video, grid_h, grid_w)
     """
     type: Literal["pixel_values_videos"] = "pixel_values_videos"
@@ -141,7 +141,7 @@ class Glm4vVideoEmbeddingInputs(TensorSchema):
         - p: Number of video patches across all frames
         - h: Hidden size (must match language model backbone)
         - f: Number of frames
-        - g: Grid dimensions (3 for grid_t which is usually 1 for processed 
+        - g: Grid dimensions (3 for grid_t which is usually 1 for processed
           video, grid_h, grid_w)
     """
     type: Literal["video_embeds"] = "video_embeds"
@@ -234,7 +234,8 @@ class Glm4vVisionAttention(nn.Module):
             total_num_kv_heads=num_heads,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.qkv",
+            # Change qkv prefix to align with GLM-4.5V-FP8 quantization config
+            prefix=f"{prefix}.qkv_proj" if quant_config else f"{prefix}.qkv",
         )
         self.proj = RowParallelLinear(
             input_size=projection_size,

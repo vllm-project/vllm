@@ -333,6 +333,80 @@ def run_glm4_1v(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# GLM-4.5V
+def run_glm4_5v(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "zai-org/GLM-4.5V"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        mm_processor_kwargs={
+            "size": {"shortest_edge": 12544, "longest_edge": 47040000},
+            "fps": 1,
+        },
+        limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,
+        tensor_parallel_size=4,
+    )
+
+    if modality == "image":
+        placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+    elif modality == "video":
+        placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
+
+    prompts = [
+        (
+            "[gMASK]<sop><|system|>\nYou are a helpful assistant.<|user|>\n"
+            f"{placeholder}"
+            f"{question}<|assistant|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# GLM-4.5V-FP8
+def run_glm4_5v_fp8(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "zai-org/GLM-4.5V-FP8"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        mm_processor_kwargs={
+            "size": {"shortest_edge": 12544, "longest_edge": 47040000},
+            "fps": 1,
+        },
+        limit_mm_per_prompt={modality: 1},
+        enforce_eager=True,
+        tensor_parallel_size=4,
+    )
+
+    if modality == "image":
+        placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+    elif modality == "video":
+        placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
+
+    prompts = [
+        (
+            "[gMASK]<sop><|system|>\nYou are a helpful assistant.<|user|>\n"
+            f"{placeholder}"
+            f"{question}<|assistant|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # H2OVL-Mississippi
 def run_h2ovl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -383,8 +457,8 @@ def run_hyperclovax_seed_vision(
     for question in questions:
         if modality == "image":
             """
-            ocr: List the words in the image in raster order. 
-                Even if the word order feels unnatural for reading, 
+            ocr: List the words in the image in raster order.
+                Even if the word order feels unnatural for reading,
                 the model will handle it as long as it follows raster order.
                 e.g. "Naver, CLOVA, bigshane"
             lens_keywords: List the entity names in the image.
@@ -1448,6 +1522,8 @@ model_example_map = {
     "gemma3n": run_gemma3n,
     "glm4v": run_glm4v,
     "glm4_1v": run_glm4_1v,
+    "glm4_5v": run_glm4_5v,
+    "glm4_5v_fp8": run_glm4_5v_fp8,
     "h2ovl_chat": run_h2ovl,
     "hyperclovax_seed_vision": run_hyperclovax_seed_vision,
     "idefics3": run_idefics3,
