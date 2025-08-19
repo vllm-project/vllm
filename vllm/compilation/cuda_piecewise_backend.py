@@ -11,15 +11,17 @@ from vllm.compilation.backends import VllmBackend
 from vllm.compilation.monitor import end_monitoring_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from typing import Optional
 
 logger = init_logger(__name__)
 
-
 @dataclasses.dataclass
-class ConcreteSizeEntry:
+class ConditionalEntry:
     runtime_shape: int
     compiled: bool = False
     runnable: Callable = None  # type: ignore
+    runtime_range: Optional[tuple[int,
+                                  int]] = None  # only used for range entries
 
 
 class PiecewiseBackend:
@@ -53,6 +55,9 @@ class PiecewiseBackend:
 
         self.compile_sizes: set[int] = set(
             self.compilation_config.compile_sizes)
+        self.compile_ranges: tuple[
+            int, int] = self.compilation_config.compile_ranges
+        self.is_in_range = lambda x, range: range[0] <= x <= range[1]
 
         self.first_run_finished = False
 
@@ -63,21 +68,28 @@ class PiecewiseBackend:
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
         # the entries for different shapes that we need to compile
-        self.concrete_size_entries: dict[int, ConcreteSizeEntry] = {}
+        self.concrete_size_entries: dict[int, ConditionalEntry] = {}
+
+        # the entries for ranges that we need to either
+        # TODO: we should merge with concrete_size_entries
+        self.range_entries: dict[tuple[int, int], ConditionalEntry] = {}
 
         # to_be_compiled_sizes tracks the remaining sizes to compile,
         # and updates during the compilation process, so we need to copy it
         self.to_be_compiled_sizes: set[int] = self.compile_sizes.copy()
+        self.to_be_compiled_ranges: set[tuple[int,
+                                              int]] = set(self.compile_ranges)
 
         # We only keep compilation management inside this class directly.
         for shape in self.compile_sizes:
-            self.concrete_size_entries[shape] = ConcreteSizeEntry(
+            self.concrete_size_entries[shape] = ConditionalEntry(
                 runtime_shape=shape,
                 runnable=self.compiled_graph_for_general_shape,
             )
 
     def check_for_ending_compilation(self):
-        if self.is_last_graph and not self.to_be_compiled_sizes:
+        if (self.is_last_graph and not self.to_be_compiled_sizes
+                and not self.to_be_compiled_ranges):
             # no specific sizes to compile
             # save the hash of the inductor graph for the next run
             self.vllm_backend.compiler_manager.save_to_file()
@@ -91,15 +103,34 @@ class PiecewiseBackend:
 
         runtime_shape = args[self.sym_shape_indices[0]]
 
-        if runtime_shape not in self.concrete_size_entries:
+
+        range_entry = None
+        for range in self.compile_ranges:
+            if self.is_in_range(runtime_shape, range):
+                if range not in self.range_entries:
+                    self.range_entries[range] = ConditionalEntry(
+                        runtime_shape=runtime_shape,
+                        runtime_range=range,
+                    )
+                range_entry = self.range_entries[range]
+                break
+
+        if (runtime_shape not in self.concrete_size_entries
+                and range_entry is None):
             # we don't need to do anything for this shape
             return self.compiled_graph_for_general_shape(*args)
 
-        entry = self.concrete_size_entries[runtime_shape]
+        if range_entry is not None:
+            entry = range_entry
+        else:
+            entry = self.concrete_size_entries[runtime_shape]
 
         if not entry.compiled:
             entry.compiled = True
-            self.to_be_compiled_sizes.remove(runtime_shape)
+            if range_entry is not None:
+                self.to_be_compiled_ranges.remove(range_entry.runtime_range)
+            else:
+                self.to_be_compiled_sizes.remove(runtime_shape)
             # args are real arguments
             entry.runnable = self.vllm_backend.compiler_manager.compile(
                 self.graph,
@@ -111,7 +142,8 @@ class PiecewiseBackend:
                 runtime_shape=runtime_shape)
 
             # finished compilations for all required shapes
-            if self.is_last_graph and not self.to_be_compiled_sizes:
+            if (self.is_last_graph and not self.to_be_compiled_sizes
+                    and not self.to_be_compiled_ranges):
                 self.check_for_ending_compilation()
 
         return entry.runnable(*args)

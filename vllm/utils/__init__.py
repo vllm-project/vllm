@@ -87,6 +87,21 @@ DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
+# Max communication size for flashinfer fused allreduce
+
+MiB = 1024 * 1024
+# Max size of the input tensor per world size
+# to use flashinfer fused allreduce
+_FI_ALLREDUCE_MAX_INPUT_SIZES = {
+    2: 2 * MiB,  # 4MB
+    4: 1 * MiB,  # 1MB
+    6: 1 * MiB,  # 1MB
+    8: 1 * MiB,  # 1MB
+}
+# opt for a more conservative default value
+# when world size is not in _FI_MAX_SIZES
+_DEFAULT_FI_ALLREDUCE_MAX_INPUT_SIZE = MiB // 2
+
 # Exception strings for non-implemented encoder/decoder scenarios
 
 # Reminder: Please update docs/features/compatibility_matrix.md
