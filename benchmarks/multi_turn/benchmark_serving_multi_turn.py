@@ -825,9 +825,11 @@ def get_client_config(
 
     # Arguments for API requests
     chat_url = f"{args.url}/v1/chat/completions"
+    model_name = args.served_model_name if args.served_model_name else args.model
+
     req_args = RequestArgs(
         chat_url=chat_url,
-        model=args.model,
+        model=model_name,
         stream=not args.no_stream,
         limit_min_tokens=args.limit_min_tokens,
         limit_max_tokens=args.limit_max_tokens,
@@ -1247,9 +1249,19 @@ async def main() -> None:
         default=0,
         help="Seed for random number generators (default: 0)",
     )
+
     parser.add_argument(
         "-m", "--model", type=str, required=True, help="Path of the LLM model"
     )
+    parser.add_argument(
+        "--served-model-name",
+        type=str,
+        default=None,
+        help="The model name used in the API. "
+        "If not specified, the model name will be the "
+        "same as the ``--model`` argument. ",
+    )
+
     parser.add_argument(
         "-u",
         "--url",
