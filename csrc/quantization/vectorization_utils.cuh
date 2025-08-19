@@ -129,7 +129,8 @@ __device__ inline void vectorize_read_with_alignment(const InT* in, int len,
     auto* v_in = reinterpret_cast<const vin_t*>(in);
 
     for (int i = tid; i < num_vec; i += stride) {
-      vec_op(v_in[i]);
+      vin_t tmp = v_in[i];
+      vec_op(tmp);
     }
     return;
   }
