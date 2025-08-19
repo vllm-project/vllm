@@ -719,6 +719,8 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
         self.quant_dtype = torch.float8_e4m3fn
         self.quant_fp8 = QuantFP8(static=True,
                                   group_shape=GroupShape.PER_TENSOR)
+        # TODO HACK
+        self.quant_fp8._forward_method = self.quant_fp8.forward_native
 
     def register(self, pm_pass: PatternMatcherPass):
 
@@ -729,9 +731,9 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
             rmsnorm_result = torch.empty([1, 8, 4],
                                          device=self.device,
                                          dtype=self.dtype)
-            quant_result = torch.empty([1, 8, 4],
-                                       device=self.device,
-                                       dtype=self.quant_dtype)
+            # quant_result = torch.empty([1, 8, 4],
+            #                            device=self.device,
+            #                            dtype=self.quant_dtype)
             weight = torch.empty([4], device=self.device, dtype=self.dtype)
             scale = torch.tensor(1.0, device=self.device, dtype=torch.float32)
             return [
@@ -807,6 +809,8 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
         self.quant_dtype = torch.float8_e4m3fn
         self.quant_fp8 = QuantFP8(static=True,
                                   group_shape=GroupShape.PER_TENSOR)
+        # TODO HACK
+        self.quant_fp8._forward_method = self.quant_fp8.forward_native
 
     def register(self, pm_pass: PatternMatcherPass):
 
@@ -817,9 +821,9 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
                                    device=self.device,
                                    dtype=self.dtype)
             weight = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-            quant_result = torch.empty([4, 4],
-                                       device=self.device,
-                                       dtype=self.quant_dtype)
+            # quant_result = torch.empty([4, 4],
+            #                            device=self.device,
+            #                            dtype=self.quant_dtype)
             scale = torch.empty([1, 1],
                                 device=self.device,
                                 dtype=torch.float32)
@@ -1166,6 +1170,9 @@ class AllReduceFusionPass(VllmInductorPass):
             # and allow multiple values of epsilon.
             torch._inductor.pattern_matcher._seen_patterns.clear()
 
+        if path := config.compilation_config.debug_dump_path:
+            with open(f"{path}/patterns.txt", 'w') as f:
+                print(self.patterns.patterns, file=f)
         self.disabled = False
 
     def __call__(self, graph: fx.Graph):
