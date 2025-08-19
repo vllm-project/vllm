@@ -271,4 +271,4 @@ def _validate_scale_shape(
 
 
 def activation_without_mul(activation: str) -> str:
-    return str + "_no_mul"
+    return activation + "_no_mul"
