@@ -113,7 +113,7 @@ class AWQConfig(QuantizationConfig):
             }
             awq_marlin_config = AWQMarlinConfig.from_config(
                 marlin_compatible_config_dict)
-            return AWQMoEMethod(awq_marlin_config)
+            return AWQMoEMethod(awq_marlin_config, layer.moe_config)
         return None
 
 
