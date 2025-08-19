@@ -1111,6 +1111,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert activation == 'silu'
             assert scoring_func == 'sigmoid'
             if self.block_quant:
+
                 assert (renormalize and use_grouped_topk
                         and custom_routing_function is None)
 
