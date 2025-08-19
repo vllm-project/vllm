@@ -30,7 +30,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         # XPU does not support auto-functionalization yet.
         # Will enable this when switch to vllm-xpu-kernels.
         if current_platform.is_xpu():
-            logger.debug("XPU platform does not support fix functionality"
+            logger.debug("XPU platform does not support fix functionalization"
                          "pass currently.")
             return
 
