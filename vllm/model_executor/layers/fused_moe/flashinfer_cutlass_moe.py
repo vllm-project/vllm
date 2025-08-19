@@ -184,12 +184,7 @@ def flashinfer_cutlass_moe_fp4(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    g1_alphas: torch.Tensor,
-    g2_alphas: torch.Tensor,
-    a1_gscale: torch.Tensor,
-    a2_gscale: torch.Tensor,
+    quant_config: FusedMoEQuantConfig,
     inplace: bool = False,
     activation: str = "silu",
     global_num_experts: int = -1,
@@ -198,15 +193,11 @@ def flashinfer_cutlass_moe_fp4(
 ) -> torch.Tensor:
 
     fused_experts = mk.FusedMoEModularKernel(
-        FlashInferCutlassMoEPrepareAndFinalize(use_dp=False,
-                                               a1_gscale=a1_gscale),
+        FlashInferCutlassMoEPrepareAndFinalize(use_dp=False),
         FlashInferExperts(
-            g1_alphas=g1_alphas,
-            g2_alphas=g2_alphas,
-            a1_gscale=a1_gscale,
-            a2_gscale=a2_gscale,
             out_dtype=hidden_states.dtype,
             quant_dtype="nvfp4",
+            quant_config=quant_config,
         ))
 
     return fused_experts(
@@ -219,7 +210,5 @@ def flashinfer_cutlass_moe_fp4(
         activation=activation,
         global_num_experts=global_num_experts,
         expert_map=expert_map,
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
         apply_router_weight_on_input=apply_router_weight_on_input,
     )

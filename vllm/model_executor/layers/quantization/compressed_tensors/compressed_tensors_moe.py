@@ -438,12 +438,16 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 x, layer.w13_weight, layer.w2_weight), (
                     "Flashinfer CUTLASS Fused MoE not applicable!")
 
+            if self.moe_quant_configis is None:
+                self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+
             return flashinfer_cutlass_moe_fp4(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
+                quant_config=self.moe_quant_config,
                 inplace=False,  # TODO(shuw): fix later, now output is high prec
                 activation=activation,
                 global_num_experts=global_num_experts,
@@ -456,6 +460,9 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 a2_gscale=layer.w2_input_scale_quant,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
+
+        from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+            cutlass_moe_fp4)
 
         assert expert_map is None, ("Expert Parallelism / expert_map "
                                     "is currently not supported for "

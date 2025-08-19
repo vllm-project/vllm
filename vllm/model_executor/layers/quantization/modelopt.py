@@ -1043,28 +1043,12 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 " for ModelOptNvFp4FusedMoE.")
 
     def maybe_make_prepare_finalize(
-        self,
-        moe: FusedMoEConfig,
-    ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
-        if (self.allow_flashinfer and self.flashinfer_moe_backend
-                == FlashinferMoeBackend.CUTLASS):
-            prepare_finalize = (
-                build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-                    moe,
-                    a1_gscale=self.layer.w13_input_scale_quant,
-                ))
-            logger.debug_once("%s", prepare_finalize.__class__.__name__)
-            return prepare_finalize
-
-    def maybe_make_prepare_finalize(
-        self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
+            self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
 
         if (self.allow_flashinfer and self.flashinfer_moe_backend
                 == FlashinferMoeBackend.CUTLASS):
             prepare_finalize = (
-                build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-                    self.moe
-                ))
+                build_flashinfer_fp4_cutlass_moe_prepare_finalize(self.moe))
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
 
@@ -1536,15 +1520,18 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 flashinfer_cutlass_moe_fp4)
 
+            if self.moe_quant_configis is None:
+                self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+
             out = flashinfer_cutlass_moe_fp4(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
+                quant_config=self.moe_quant_config,
                 inplace=False,
                 activation=activation,
-                quant_confg=quant_config,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input,
@@ -1569,24 +1556,4 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 n=layer.w2_weight.shape[2] * 2,
                 k=x.shape[1],
                 e=layer.w13_weight.shape[0],
-            )
-        else:
-            assert self.allow_flashinfer and \
-               self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-
-            assert is_valid_flashinfer_cutlass_fused_moe(
-                x, layer.w13_weight, layer.w2_weight), (
-                    "Flashinfer CUTLASS Fused MoE not applicable!")
-
-            return self.fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=False,  # TODO(shuw): fix later, now output is high prec
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
             )
