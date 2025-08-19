@@ -296,7 +296,6 @@ class EngineArgs:
     data_parallel_rpc_port: Optional[int] = None
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
-    enable_nccl_symm_mem: bool = ParallelConfig.enable_nccl_symm_mem
     enable_eplb: bool = ParallelConfig.enable_eplb
     num_redundant_experts: int = ParallelConfig.num_redundant_experts
     eplb_window_size: int = ParallelConfig.eplb_window_size
@@ -655,9 +654,6 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-multimodal-encoder-data-parallel",
             **parallel_kwargs["enable_multimodal_encoder_data_parallel"])
-        parallel_group.add_argument(
-            "--enable-nccl-symm-mem",
-            **parallel_kwargs["enable_nccl_symm_mem"])
 
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
@@ -1173,7 +1169,6 @@ class EngineArgs:
             worker_extension_cls=self.worker_extension_cls,
             enable_multimodal_encoder_data_parallel=self.
             enable_multimodal_encoder_data_parallel,
-            enable_nccl_symm_mem=self.enable_nccl_symm_mem,
         )
 
         speculative_config = self.create_speculative_config(
