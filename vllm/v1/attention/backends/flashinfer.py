@@ -31,6 +31,7 @@ from vllm.v1.attention.backends.utils import (AttentionCGSupport,
                                               get_per_layer_parameters,
                                               infer_global_hyperparameters,
                                               split_decodes_and_prefills)
+# yapf: enable
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
@@ -134,18 +135,6 @@ class FlashInferMetadata:
     # The number of entries in the last page of each request in
     # the paged kv cache, shape: [batch_size] (CPU for plan)
     paged_kv_last_page_len_cpu: torch.Tensor
-    # The number of query/output heads
-    num_qo_heads: int
-    # The number of key/value heads
-    num_kv_heads: int
-    # The dimension of the attention heads
-    head_dim: int
-    # Block size of vllm
-    page_size: int
-    # The data type of the paged kv cache
-    kv_data_type: torch.dtype
-    # The data type of the query
-    q_data_type: torch.dtype
 
     slot_mapping: torch.Tensor
 
@@ -177,10 +166,6 @@ class FlashInferMetadata:
     qo_indptr_gpu: Optional[torch.Tensor] = None
     paged_kv_indptr_gpu: Optional[torch.Tensor] = None
 
-    def __post_init__(self):
-        if self.head_dim is not None:
-            FlashInferBackend.validate_head_size(self.head_dim)
-
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     cudagraph_support: ClassVar[AttentionCGSupport] = \
@@ -193,13 +178,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.device = device
         self.vllm_config = vllm_config
         self.cache_config = vllm_config.cache_config
+        self.model_config = vllm_config.model_config
         self.kv_cache_spec = kv_cache_spec
         self._workspace_buffer = None
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
         self.compilation_config = vllm_config.compilation_config
-        max_num_pages_per_req = cdiv(vllm_config.model_config.max_model_len,
+        max_num_pages_per_req = cdiv(self.model_config.max_model_len,
                                      self.kv_cache_spec.block_size)
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
@@ -212,6 +198,22 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 int, BatchDecodeWithPagedKVCacheWrapper] = {}
             self._decode_cudagraph_max_bs = min(
                 max_num_reqs, self.compilation_config.max_capture_size)
+
+        self.num_qo_heads = self.model_config.get_num_attention_heads(
+            self.vllm_config.parallel_config)
+        self.num_kv_heads = self.kv_cache_spec.num_kv_heads
+        self.head_dim = self.kv_cache_spec.head_size
+        FlashInferBackend.validate_head_size(self.head_dim)
+
+        self.page_size = self.kv_cache_spec.block_size
+        self.cache_dtype = self.cache_config.cache_dtype
+        if self.cache_dtype.startswith("fp8"):
+            self.kv_cache_dtype = (
+                FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                    self.cache_dtype))
+        else:
+            self.kv_cache_dtype = self.kv_cache_spec.dtype
+        self.q_data_type = self.model_config.dtype
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -334,16 +336,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     attn_metadata.shared_kv_last_page_len_cpu,
                     attn_metadata.paged_kv_last_page_len_cpu
                 ],
-                attn_metadata.num_qo_heads,
-                attn_metadata.num_kv_heads,
-                attn_metadata.head_dim,
-                attn_metadata.page_size,
+                self.num_qo_heads,
+                self.num_kv_heads,
+                self.head_dim,
+                self.page_size,
                 causal=True,
                 sm_scale=self.global_hyperparameters.sm_scale,
                 window_left=self.global_hyperparameters.window_left,
                 logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
-                q_data_type=attn_metadata.q_data_type,
-                kv_data_type=attn_metadata.kv_data_type,
+                q_data_type=self.q_data_type,
+                kv_data_type=self.kv_cache_dtype,
             )
         else:
             # Regular attention (common case).
@@ -375,17 +377,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         attn_metadata.paged_kv_indices,
                         attn_metadata.
                         paged_kv_last_page_len_cpu[prefill_start:],
-                        attn_metadata.num_qo_heads,
-                        attn_metadata.num_kv_heads,
-                        attn_metadata.head_dim,
-                        attn_metadata.page_size,
+                        self.num_qo_heads,
+                        self.num_kv_heads,
+                        self.head_dim,
+                        self.page_size,
                         causal=True,
                         sm_scale=self.global_hyperparameters.sm_scale,
                         window_left=self.global_hyperparameters.window_left,
                         logits_soft_cap=self.global_hyperparameters.
                         logits_soft_cap,
-                        q_data_type=attn_metadata.q_data_type,
-                        kv_data_type=attn_metadata.kv_data_type,
+                        q_data_type=self.q_data_type,
+                        kv_data_type=self.kv_cache_dtype,
                     )
                 else:
                     attn_metadata.qo_indptr_gpu = qo_indptr_cpu.to(self.device)
@@ -427,18 +429,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         self.paged_kv_indptr_cpu[:num_input_tokens + 1],
                         attn_metadata.paged_kv_indices,
                         self.paged_kv_last_page_len_cpu[:num_input_tokens],
-                        attn_metadata.num_qo_heads,
-                        attn_metadata.num_kv_heads,
-                        attn_metadata.head_dim,
-                        attn_metadata.page_size,
+                        self.num_qo_heads,
+                        self.num_kv_heads,
+                        self.head_dim,
+                        self.page_size,
                         # Disable flashinfer's pos encoding and use vllm's rope.
                         pos_encoding_mode="NONE",
                         sm_scale=self.global_hyperparameters.sm_scale,
                         window_left=self.global_hyperparameters.window_left,
                         logits_soft_cap=self.global_hyperparameters.
                         logits_soft_cap,
-                        q_data_type=attn_metadata.q_data_type,
-                        kv_data_type=attn_metadata.kv_data_type,
+                        q_data_type=self.q_data_type,
+                        kv_data_type=self.kv_cache_dtype,
                     )
 
     def build(self,
@@ -512,29 +514,20 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     paged_kv_last_page_len_cpu,
                     out=self.paged_kv_last_page_len_cpu[:num_reqs])
 
-        cache_dtype = self.cache_config.cache_dtype
-        if cache_dtype.startswith("fp8"):
-            kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
-                cache_dtype)
-        else:
-            kv_cache_dtype = self.kv_cache_spec.dtype
-
-        num_qo_heads = self.vllm_config.model_config.get_num_attention_heads(
-            self.vllm_config.parallel_config)
-        num_kv_heads = self.kv_cache_spec.num_kv_heads
-        head_dim = self.kv_cache_spec.head_size
-
         # Check if any layer uses sinks (requires TRTLLM attention)
         has_sinks = self.global_hyperparameters.has_sinks
 
         # currently prefill trtllm attention does not support fp8 kv cache
-        prefill_use_trtllm = not cache_dtype.startswith("fp8") \
-                                and use_trtllm_attention(
-                                num_prefill_tokens, max_seq_len, cache_dtype,
-                                num_qo_heads, num_kv_heads, head_dim, has_sinks)
-        decode_use_trtllm = use_trtllm_attention(
-                                num_decode_tokens, max_seq_len, cache_dtype,
-                                num_qo_heads, num_kv_heads, head_dim, has_sinks)
+        prefill_use_trtllm = (not self.cache_dtype.startswith("fp8")
+                              and use_trtllm_attention(
+                                  num_prefill_tokens, max_seq_len,
+                                  self.cache_dtype, self.num_qo_heads,
+                                  self.num_kv_heads, self.head_dim, has_sinks))
+        decode_use_trtllm = use_trtllm_attention(num_decode_tokens,
+                                                 max_seq_len, self.cache_dtype,
+                                                 self.num_qo_heads,
+                                                 self.num_kv_heads,
+                                                 self.head_dim, has_sinks)
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -543,12 +536,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len_cpu=self.
             paged_kv_last_page_len_cpu[:num_reqs],
-            num_qo_heads=num_qo_heads,
-            num_kv_heads=num_kv_heads,
-            head_dim=head_dim,
-            page_size=page_size,
-            kv_data_type=kv_cache_dtype,
-            q_data_type=self.vllm_config.model_config.dtype,
             slot_mapping=common_attn_metadata.slot_mapping,
             max_q_len=max_q_len,
             max_seq_len=max_seq_len,
@@ -640,8 +627,7 @@ class FlashInferImpl(AttentionImpl):
                 raise ValueError(
                     "Sinks must have the same number of heads as the number of "
                     f"heads in the layer. Expected {num_heads}, but got "
-                    f"{sinks.shape[0]}."
-                )
+                    f"{sinks.shape[0]}.")
             self.sinks = sinks
 
     def forward(
