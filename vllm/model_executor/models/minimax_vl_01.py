@@ -272,7 +272,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
     def pack_image_features(self, image_features: list[torch.Tensor],
                             image_sizes: torch.Tensor):
         new_image_features = []
-        feature_lens = []
         for image_idx, image_feature in enumerate(image_features):
             if image_feature.shape[0] > 1:
                 base_image_feature = image_feature[0]
@@ -317,7 +316,6 @@ class MiniMaxVL01ForConditionalGeneration(nn.Module, SupportsMultiModal,
                      self.image_newline[None].to(image_feature)),
                     dim=0)
             new_image_features.append(image_feature)
-            feature_lens.append(image_feature.size(0))
         return new_image_features
 
     def _process_image_pixels(
