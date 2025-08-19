@@ -12,6 +12,7 @@ from transformers import (BatchFeature, PretrainedConfig, ProcessorMixin,
 
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -37,6 +38,8 @@ from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal
 from .phi4mm_audio import AudioEmbedding
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
+
+logger = init_logger(__name__)
 
 # <|endoftext10|> (see vocab.json in hf model)
 _IMAGE_PLACEHOLDER_TOKEN_ID = 200010
@@ -841,8 +844,18 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
 
             return audio_tokens
 
-        num_images = mm_items.get_count("image", strict=False)
-        num_audios = mm_items.get_count("audio", strict=False)
+        if self.cache is None:
+            num_images = mm_items.get_count("image", strict=False)
+            num_audios = mm_items.get_count("audio", strict=False)
+        else:
+            logger.warning_once(
+                "Additional overhead is required in multi-modal processor "
+                "to support caching. "
+                "Consider turning it off by `--mm-processor-cache-gb 0`.")
+
+            mm_limits = self.info.get_supported_mm_limits()
+            num_images = mm_limits.get("image", 0)
+            num_audios = mm_limits.get("audio", 0)
 
         image_repl = [
             PromptReplacement(

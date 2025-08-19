@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union
 
 import torch
-from typing_extensions import override
+from typing_extensions import TypeAlias, override
 
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, LRUCache
@@ -31,18 +31,20 @@ class MultiModalProcessorCacheItem:
 
     Args:
         item: The processed tensor data corresponding to a multi-modal item.
-        prompt_update: The prompt update information for that item.
+        prompt_updates: The prompt updates that are potentially applicable to
+            that item, even if the item is later in a different position inside
+            `items[modality]`.
     """
 
     def __init__(
         self,
         item: MultiModalKwargsItem,
-        prompt_update: "BoundPromptUpdate",
+        prompt_updates: "Sequence[BoundPromptUpdate]",
     ) -> None:
         super().__init__()
 
         self.item = item
-        self.prompt_update = prompt_update
+        self.prompt_updates = prompt_updates
 
 
 class MultiModalProcessorCacheItemMetadata:
@@ -53,7 +55,9 @@ class MultiModalProcessorCacheItemMetadata:
         item: The processed tensor data corresponding to a multi-modal item.
             Since P1 already stores the tensor data, we only store its size
             metadata in P0 to reduce memory usage.
-        prompt_update: The prompt update information for that item.
+        prompt_updates: The prompt updates that are potentially applicable to
+            that item, even if the item is later in a different position inside
+            `items[modality]`.
             This needs to stay on P0 because for some models, the processor
             cannot regenerate the prompt update if the processed tensor data
             is not available.
@@ -62,12 +66,12 @@ class MultiModalProcessorCacheItemMetadata:
     def __init__(
         self,
         item: MultiModalKwargsItem,
-        prompt_update: "BoundPromptUpdate",
+        prompt_updates: Sequence["BoundPromptUpdate"],
     ) -> None:
         super().__init__()
 
         self.item_size = MultiModalCache.get_item_size(item)
-        self.prompt_update = prompt_update
+        self.prompt_updates = prompt_updates
 
 
 MultiModalCacheValue = Union[
@@ -227,10 +231,17 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
         raise NotImplementedError
 
 
-class BaseMultiModalProcessorCache(BaseMultiModalCache[
-        Optional[tuple[MultiModalKwargsItem, "BoundPromptUpdate"]],
-        tuple[Optional[MultiModalKwargsItem], "BoundPromptUpdate"],
-]):
+MultiModalProcessorCacheInItem: TypeAlias = \
+    Optional[tuple[MultiModalKwargsItem, Sequence["BoundPromptUpdate"]]]
+
+
+MultiModalProcessorCacheOutItem: TypeAlias = \
+    tuple[Optional[MultiModalKwargsItem], Sequence["BoundPromptUpdate"]]
+
+
+class BaseMultiModalProcessorCache(
+        BaseMultiModalCache[MultiModalProcessorCacheInItem,
+                            MultiModalProcessorCacheOutItem]):
     """The required interface for caches on P0."""
 
     @abstractmethod
@@ -290,11 +301,11 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
     @override
     def get_and_update_item(
         self,
-        mm_item: Optional[tuple[MultiModalKwargsItem, "BoundPromptUpdate"]],
+        mm_item: MultiModalProcessorCacheInItem,
         mm_hash: str,
-    ) -> tuple[Optional[MultiModalKwargsItem], "BoundPromptUpdate"]:
+    ) -> MultiModalProcessorCacheOutItem:
         if (cached_item := self._cache.get(mm_hash)) is not None:
-            return cached_item.item, cached_item.prompt_update
+            return cached_item.item, cached_item.prompt_updates
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
@@ -337,11 +348,11 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
     @override
     def get_and_update_item(
         self,
-        mm_item: Optional[tuple[MultiModalKwargsItem, "BoundPromptUpdate"]],
+        mm_item: MultiModalProcessorCacheInItem,
         mm_hash: str,
-    ) -> tuple[Optional[MultiModalKwargsItem], "BoundPromptUpdate"]:
+    ) -> MultiModalProcessorCacheOutItem:
         if (cached_item := self._cache.get(mm_hash)) is not None:
-            return None, cached_item.prompt_update
+            return None, cached_item.prompt_updates
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
