@@ -174,6 +174,7 @@ def create_vllm_config(model_name: str = "meta-llama/Meta-Llama-3-8B",
                        block_size: int = 16,
                        max_num_seqs: int = 256,
                        max_num_batched_tokens: int = 8192,
+                       enable_chunked_prefill: bool = True,
                        add_mock_model_methods: bool = True) -> VllmConfig:
     """Create a VllmConfig for testing with reasonable defaults."""
 
@@ -202,6 +203,7 @@ def create_vllm_config(model_name: str = "meta-llama/Meta-Llama-3-8B",
     scheduler_config = SchedulerConfig(
         max_num_seqs=max_num_seqs,
         max_num_batched_tokens=max_num_batched_tokens,
+        enable_chunked_prefill=enable_chunked_prefill,
     )
 
     device_config = DeviceConfig()
