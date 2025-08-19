@@ -1,15 +1,13 @@
-import logging
 from packaging import version
 import tempfile
-from typing import TYPE_CHECKING
 
 import torch
 from torch.cuda.memory import CUDAPluggableAllocator
 
 from vllm.config import ParallelConfig
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
-if TYPE_CHECKING:
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+
 
 logger = init_logger(__name__)
 

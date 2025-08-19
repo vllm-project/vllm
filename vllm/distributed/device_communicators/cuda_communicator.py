@@ -16,6 +16,37 @@ from .base_device_communicator import DeviceCommunicatorBase
 logger = init_logger(__name__)
 
 
+def register_nccl_symmetric_ops():
+    from vllm.distributed.device_communicators.pynccl import (
+            PyNcclCommunicator)
+    from vllm.distributed.device_communicators.pynccl_allocator import (
+        use_symmetric_memory)
+    from vllm.utils import direct_register_custom_op
+
+    def all_reduce_symmetric_with_copy_impl(
+        input_tensor: torch.Tensor, pynccl_comm: PyNcclCommunicator
+    ) -> torch.Tensor:
+        with use_symmetric_memory(pynccl_comm):
+            symm_input = torch.empty_like(input_tensor)
+            symm_output = torch.empty_like(input_tensor)
+        symm_input.copy_(input_tensor)
+        symm_output = pynccl_comm.all_reduce(symm_input, symm_output)
+        return symm_output
+
+
+    def all_reduce_symmetric_with_copy_fake(
+        input_tensor: torch.Tensor, pynccl_comm: PyNcclCommunicator
+    ) -> torch.Tensor:
+        return torch.empty_like(input_tensor)
+
+    direct_register_custom_op(
+        op_name="all_reduce_symmetric_with_copy",
+        op_func=all_reduce_symmetric_with_copy_impl,
+        mutates_args=[],
+        fake_impl=all_reduce_symmetric_with_copy_fake,
+    )
+
+
 class CudaCommunicator(DeviceCommunicatorBase):
 
     def __init__(self,
@@ -41,7 +72,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce)
-        import vllm.distributed.device_communicators.pynccl_symmetric_ops # noqa
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
         from vllm.distributed.device_communicators.quick_all_reduce import (
@@ -55,6 +85,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 group=self.cpu_group,
                 device=self.device,
             )
+            register_nccl_symmetric_ops()
 
         self.ca_comm: Optional[CustomAllreduce] = None
         self.qr_comm: Optional[QuickAllReduce] = None
