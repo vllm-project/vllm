@@ -10,6 +10,7 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_standard_kv_cache_spec,
                                       create_vllm_config,
                                       get_attention_backend)
+from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
 from vllm.v1.attention.backends.utils import CommonAttentionMetadata
@@ -424,25 +425,26 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                 k_nope_context, v_context = kv_nope_context.split(
                     [qk_nope_head_dim, v_head_dim], dim=-1)
 
-            # Build attention inputs 
+            # Build attention inputs
             q_mha = torch.cat([q_nope, q_pe],
                               dim=-1)  # [q_len, num_heads, total_dim]
             k_pe_new_expanded = k_pe_new.expand(-1, num_q_heads, -1)
             k_new = torch.cat([k_nope_new, k_pe_new_expanded], dim=-1)
 
-            # Pad v_new to match k_new head dimension for FlashAttention if necessary
+            # Pad v_new to match k_new head dimension for FlashAttention
+            # if necessary
             total_head_dim = qk_nope_head_dim + qk_rope_head_dim
             if v_head_dim < total_head_dim:
                 v_new = torch.nn.functional.pad(
                     v_new, [0, total_head_dim - v_head_dim], value=0)
 
             # Step 1: Context computation first (matching backend order)
-            k_pe_context_expanded = k_pe_context.expand(
-                -1, num_q_heads, -1)
+            k_pe_context_expanded = k_pe_context.expand(-1, num_q_heads, -1)
             k_context = torch.cat([k_nope_context, k_pe_context_expanded],
                                   dim=-1)
 
-            # Pad v_context to match k_context head dimension for FlashAttention if necessary
+            # Pad v_context to match k_context head dimension for FlashAttention
+            # if necessary
             if v_head_dim < total_head_dim:
                 v_context = torch.nn.functional.pad(
                     v_context, [0, total_head_dim - v_head_dim], value=0)
@@ -504,17 +506,21 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                     softmax_scale=scale,
                     return_attn_probs=True)
 
-            # Use new tokens output directly - backend handles the merge
-            sdpa_out_i = new_tokens_out
+            # Step 3: Merge outputs
+            sdpa_out_i = torch.zeros_like(new_tokens_out)
+            merge_attn_states(output=sdpa_out_i,
+                              prefix_output=context_out,
+                              prefix_lse=context_lse,
+                              suffix_output=new_tokens_out,
+                              suffix_lse=new_tokens_lse)
 
             # Unpad output back to original v_head_dim if we padded
             if v_head_dim < total_head_dim:
                 sdpa_out_i = sdpa_out_i[..., :v_head_dim]
 
-            # sdpa_out_i is now [q_len, num_heads, v_head_dim], flatten last two dims
+            # sdpa_out_i is now [q_len, num_heads, v_head_dim],
+            # flatten last two dims
             sdpa_out_i = sdpa_out_i.flatten(start_dim=-2)
-
-            breakpoint()
 
         all_sdpa_outputs.append(sdpa_out_i)
 
