@@ -172,6 +172,9 @@ def get_tasks(pooling_metadata: PoolingMetadata) -> list[PoolingTask]:
 
 
 def get_classification_activation_function(config: PretrainedConfig):
+    if getattr(config, "problem_type", "") == "multi_label_classification":
+        return PoolerMultiLabelClassify()
+
     return PoolerClassify()
 
 
@@ -407,6 +410,12 @@ class PoolerNormalize(PoolerActivation):
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         x = F.normalize(pooled_data.float(), p=2, dim=-1)
         return x.to(pooled_data.dtype)
+
+
+class PoolerMultiLabelClassify(PoolerActivation):
+
+    def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
+        return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
 
 
 class PoolerClassify(PoolerActivation):

@@ -456,7 +456,12 @@ class HfRunner:
         outputs = []
         for inputs in all_inputs:
             output = self.model(**self.wrap_device(inputs))
-            logits = output.logits.softmax(dim=-1)[0].tolist()
+
+            if getattr(self.config, "problem_type",
+                       "") == "multi_label_classification":
+                logits = output.logits.sigmoid()[0].tolist()
+            else:
+                logits = output.logits.softmax(dim=-1)[0].tolist()
             outputs.append(logits)
 
         return outputs
