@@ -815,7 +815,7 @@ def run_minicpmv(questions: list[str], modality: str) -> ModelRequestData:
     return run_minicpmv_base(questions, modality, "openbmb/MiniCPM-V-2_6")
 
 
-def run_minimax_vl(questions: list[str], modality: str) -> ModelRequestData:
+def run_minimax_vl_01(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
     model_name = "MiniMaxAI/MiniMax-VL-01"
@@ -1496,7 +1496,7 @@ model_example_map = {
     "mantis": run_mantis,
     "minicpmo": run_minicpmo,
     "minicpmv": run_minicpmv,
-    "minimax": run_minimax,
+    "minimax_vl_01": run_minimax_vl_01,
     "mistral3": run_mistral3,
     "mllama": run_mllama,
     "molmo": run_molmo,
