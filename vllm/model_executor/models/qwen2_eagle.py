@@ -122,7 +122,7 @@ class Qwen2Model(nn.Module):
         return loaded_params
 
 
-class EagleQwen2ForCausalLM(Qwen2ForCausalLM):
+class EagleQwen2ForCausalLMEagle(Qwen2ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
