@@ -33,6 +33,10 @@ def validate_config(config: dict):
             raise ValueError(f"{k} is not an allowed Tensorizer argument.")
 
 
+from vllm.plugins import ExtensionManager
+
+
+@ExtensionManager.register(base_cls=BaseModelLoader, names=["tensorizer"])
 class TensorizerLoader(BaseModelLoader):
     """Model loader using CoreWeave's tensorizer library."""
 

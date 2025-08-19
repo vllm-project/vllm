@@ -25,7 +25,14 @@ from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
+from vllm.plugins import ExtensionManager
 
+
+@ExtensionManager.register(base_cls=BaseModelLoader,
+                           names=[
+                               "auto", "fastsafetensors", "mistral", "npcache",
+                               "pt", "safetensors"
+                           ])
 class DefaultModelLoader(BaseModelLoader):
     """Model loader that can load different file types from disk."""
 

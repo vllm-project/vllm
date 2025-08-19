@@ -36,7 +36,8 @@ from vllm.forward_context import (BatchDescriptor, DPMetadata,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.model_loader import TensorizerLoader
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
                                                    supports_eagle3,
                                                    supports_transcription)
@@ -46,6 +47,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
                                     PlaceholderRange)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
+from vllm.plugins import ExtensionManager
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
@@ -1992,7 +1994,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         with DeviceMemoryProfiler() as m:
             time_before_load = time.perf_counter()
-            model_loader = get_model_loader(self.load_config)
+            model_loader = ExtensionManager.create(
+                BaseModelLoader, self.load_config.load_format)
             logger.info("Loading model from scratch...")
             self.model = model_loader.load_model(
                 vllm_config=self.vllm_config, model_config=self.model_config)
@@ -2056,7 +2059,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def reload_weights(self) -> None:
         assert getattr(self, "model", None) is not None, \
             "Cannot reload weights before model is loaded."
-        model_loader = get_model_loader(self.load_config)
+        model_loader = ExtensionManager.create(BaseModelLoader,
+                                               self.load_config.load_format)
         logger.info("Reloading weights inplace...")
         model = self.get_model()
         model_loader.load_weights(model, model_config=self.model_config)

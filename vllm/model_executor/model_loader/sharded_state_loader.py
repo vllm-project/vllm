@@ -20,7 +20,11 @@ from vllm.transformers_utils.utils import is_s3
 
 logger = init_logger(__name__)
 
+from vllm.plugins import ExtensionManager
 
+
+@ExtensionManager.register(base_cls=BaseModelLoader,
+                           names=["runai_streamer_sharded", "sharded_state"])
 class ShardedStateLoader(BaseModelLoader):
     """
     Model loader that directly loads each worker's model state dict, which

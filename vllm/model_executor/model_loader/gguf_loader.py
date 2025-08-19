@@ -15,8 +15,10 @@ from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading, set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     get_gguf_extra_tensor_names, gguf_quant_weights_iterator)
+from vllm.plugins import ExtensionManager
 
 
+@ExtensionManager.register(base_cls=BaseModelLoader, names=["gguf"])
 class GGUFModelLoader(BaseModelLoader):
     """
     Model loader that can load GGUF files. This is useful for loading models

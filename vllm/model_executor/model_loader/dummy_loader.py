@@ -6,8 +6,10 @@ from vllm.config import LoadConfig, ModelConfig
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
     initialize_dummy_weights)
+from vllm.plugins import ExtensionManager
 
 
+@ExtensionManager.register(base_cls=BaseModelLoader, names=["dummy"])
 class DummyModelLoader(BaseModelLoader):
     """Model loader that will set model weights to random values."""
 

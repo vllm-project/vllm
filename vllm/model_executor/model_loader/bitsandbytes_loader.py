@@ -51,6 +51,10 @@ def is_moe_model(model: torch.nn.Module) -> bool:
         isinstance(module, FusedMoE) for module in model.modules()))
 
 
+from vllm.plugins import ExtensionManager
+
+
+@ExtensionManager.register(base_cls=BaseModelLoader, names=["bitsandbytes"])
 class BitsAndBytesModelLoader(BaseModelLoader):
     """Model loader to load model weights with BitAndBytes quantization."""
 
