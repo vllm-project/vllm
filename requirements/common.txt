@@ -49,3 +49,5 @@ pybase64 # fast base64 implementation
 cbor2 # Required for cross-language serialization of hashable objects
 setproctitle # Used to set process names for better debugging and monitoring
 openai-harmony >= 0.0.3  # Required for gpt-oss
+numba==0.60.0; python_version == '3.9' # v0.61 doesn't support Python 3.9. Required for N-gram speculative decoding
+numba==0.61.2; python_version > '3.9'
