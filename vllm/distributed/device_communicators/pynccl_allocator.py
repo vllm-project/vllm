@@ -1,7 +1,7 @@
 import logging
 from packaging import version
 import tempfile
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import torch
 from torch.cuda.memory import CUDAPluggableAllocator
@@ -174,7 +174,7 @@ class use_symmetric_memory:
 
 
 def all_reduce_symmetric_with_copy_impl(
-    input_tensor: torch.Tensor, pynccl_comm: "PyNcclCommunicator"
+    input_tensor: torch.Tensor, pynccl_comm: Any
 ) -> torch.Tensor:
     with use_symmetric_memory(pynccl_comm):
         symm_input = torch.empty_like(input_tensor)
@@ -184,7 +184,7 @@ def all_reduce_symmetric_with_copy_impl(
     return symm_output
 
 def all_reduce_symmetric_with_copy_fake(
-    input_tensor: torch.Tensor, pynccl_comm: "PyNcclCommunicator"
+    input_tensor: torch.Tensor, pynccl_comm: Any
 ) -> torch.Tensor:
     return torch.empty_like(input_tensor)
 
