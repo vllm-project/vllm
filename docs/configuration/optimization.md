@@ -141,7 +141,7 @@ overhead because of all-reduce being performed after every layer.
 Given this, it may be advantageous to use TP ranks to instead shard the input data, essentially
 performing intra-request DP. This has been shown to improve the throughput by around 10% for
 `tensor_parallel_size=8`. For vision encoders that use hardware-unoptimized Conv3D operations,
-intra-request DP can provide another 40% increase to throughput compared to applying TP to weights.
+intra-request DP can provide another 40% increase to throughput compared to regular TP.
 
 Supported models:
 
