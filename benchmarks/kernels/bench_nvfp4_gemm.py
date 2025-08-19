@@ -12,6 +12,8 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.triton_utils import triton
 
+import triton.language as tl
+
 if not current_platform.has_device_capability(100):
     raise RuntimeError("NVFP4 requires compute capability of 10.0 (Blackwell)")
 
@@ -23,7 +25,7 @@ PROVIDER_CFGS = {
     "torch-bf16": dict(enabled=True),
     "nvfp4": dict(no_a_quant=False, enabled=True),
     "nvfp4-noquant": dict(no_a_quant=True, enabled=True),
-    "triton-fpr": dict(enabled=True),
+    "triton-fp4": dict(enabled=True),
 }
 
 _enabled = [k for k, v in PROVIDER_CFGS.items() if v["enabled"]]
@@ -68,6 +70,7 @@ def build_nvfp4_runner(cfg, a, b, dtype, device):
 
     return run
 
+@triton.jit
 def block_scale_fp4_matmul(  #
         a_ptr, b_ptr, output_ptr,  #
         a_scale, b_scale,  #
@@ -127,20 +130,6 @@ def block_scale_fp4_matmul(  #
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(output_ptrs, accumulator, mask=c_mask)
 
-@triton.testing.perf_report(
-    triton.testing.Benchmark(
-        x_names=["batch_size"],
-        x_vals=[1, 16, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384],
-        x_log=False,
-        line_arg="provider",
-        line_vals=_enabled,
-        line_names=_enabled,
-        ylabel="TFLOP/s (larger is better)",
-        plot_name="BF16 vs NVFP4 GEMMs",
-        args={},
-    )
-)
-
 def build_triton_fp4_runner(a: torch.Tensor, b: torch.Tensor, dtype, device: str):
     """
     Launches the Triton FP4 matmul using the existing block_scale_fp4_matmul kernel.
@@ -150,6 +139,8 @@ def build_triton_fp4_runner(a: torch.Tensor, b: torch.Tensor, dtype, device: str
 
     # weights
     b_fp4, scale_b_fp4, b_global_scale = _quant_weight_nvfp4(b, device)
+
+    b_fp4 = b_fp4.T.contiguous()  
 
     # activation
     a_amax = torch.abs(a).max().to(torch.float32)
@@ -168,7 +159,7 @@ def build_triton_fp4_runner(a: torch.Tensor, b: torch.Tensor, dtype, device: str
 
     # row major
     stride_am, stride_ak = a.stride()      
-    stride_bn, stride_bk = b.stride()      
+    stride_bk, stride_bn = b_fp4.stride()
     stride_cm, stride_cn = c.stride()      
 
     stride_scale = K // VEC_SIZE
@@ -176,6 +167,7 @@ def build_triton_fp4_runner(a: torch.Tensor, b: torch.Tensor, dtype, device: str
     def run():
         a_fp4, scale_a_fp4 = ops.scaled_fp4_quant(a, a_global_scale)
 
+        stride_am, stride_ak = a_fp4.stride()
         grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),)
 
         block_scale_fp4_matmul[grid](
@@ -202,6 +194,20 @@ def build_triton_fp4_runner(a: torch.Tensor, b: torch.Tensor, dtype, device: str
         return c
 
     return run
+
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=["batch_size"],
+        x_vals=[1, 16, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384],
+        x_log=False,
+        line_arg="provider",
+        line_vals=_enabled,
+        line_names=_enabled,
+        ylabel="TFLOP/s (larger is better)",
+        plot_name="BF16 vs NVFP4 GEMMs",
+        args={},
+    )
+)
 
 def benchmark(batch_size, provider, N, K):
     M = batch_size
