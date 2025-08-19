@@ -36,9 +36,7 @@ import enum
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
-import msgspec
 import torch
-from pydantic_core import core_schema
 
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -68,25 +66,12 @@ class KVConnectorRole(enum.Enum):
     WORKER = 1
 
 
-class KVConnectorHandshakeMetadata(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        # required for @cached_property.
-        dict=True):
+class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
     """
-    Metadata optionally used for out of band connector handshake between
-    P/D workers.
+    Metadata used for out of band connector handshakeandshake between
+    P/D workers. This needs to serializeable.
     """
-    connector_type: str = "base"
-
-    @classmethod
-    def __get_pydantic_core_schema__(
-        cls, _source_type: Any, _handler: Callable[[Any],
-                                                   core_schema.CoreSchema]
-    ) -> core_schema.CoreSchema:
-        """bridge msgspec.Struct with pydantic for schema generation"""
-        return core_schema.no_info_after_validator_function(
-            cls, core_schema.dict_schema())
+    pass
 
 
 class KVConnectorMetadata(ABC):  # noqa: B024
@@ -245,7 +230,7 @@ class KVConnectorBase_V1(ABC):
         """
         return None, None
 
-    def get_handshake_metadata() -> Optional[KVConnectorHandshakeMetadata]:
+    def get_handshake_metadata(self) -> Optional[KVConnectorHandshakeMetadata]:
         """
         Get the KVConnector handshake metadata for this connector.
         This metadata is used for out-of-band connector handshake
