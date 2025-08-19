@@ -84,4 +84,5 @@ class EncoderOnlyAttention(Attention):
                          scale=scale,
                          cache_config=cache_config,
                          attn_backend=attn_backend,
+                         attn_type=AttentionType.ENCODER_ONLY,
                          **kwargs)

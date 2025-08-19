@@ -8,6 +8,7 @@ import time
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import numpy as np
@@ -340,6 +341,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else None)
 
         self.reorder_batch_threshold: Optional[int] = None
+
+        # Attention layers that are only in the KVCacheConfig of the runner
+        # (e.g., KV sharing, encoder-only attention), but not in the
+        # KVCacheConfig of the scheduler.
+        self.runner_only_kv_layers: set[str] = set()
 
     def _init_model_kwargs(self, num_tokens: int):
         model_kwargs = dict[str, Any]()
@@ -2950,7 +2956,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
-            layer_names.update(group.layer_names)
+            for layer_name in group.layer_names:
+                if layer_name in self.runner_only_kv_layers:
+                    continue
+                layer_names.add(layer_name)
         assert layer_names == set(kv_cache_raw_tensors.keys(
         )), "Some layers are not correctly initialized"
         return kv_cache_raw_tensors
@@ -2988,6 +2997,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for kv_cache_spec, group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             for layer_name in group.layer_names:
+                if layer_name in self.runner_only_kv_layers:
+                    continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
                 assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
                 num_blocks = (raw_tensor.numel() //
@@ -3109,6 +3120,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 kv_cache_config.kv_cache_groups,
                 kv_caches,
                 self.attn_groups,
+                self.runner_only_kv_layers,
             )
             attn_layers = get_layers_from_vllm_config(self.vllm_config,
                                                       Attention)
@@ -3133,9 +3145,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
+        kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self.may_reinitialize_input_batch(kv_cache_config)
-        self.may_add_encoder_only_layers_to_kv_cache_config(kv_cache_config)
+        self.may_add_encoder_only_layers_to_kv_cache_config()
         self.initialize_attn_backend(kv_cache_config)
         kv_caches = self.initialize_kv_cache_tensors(kv_cache_config)
 
@@ -3148,8 +3161,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
-    def may_add_encoder_only_layers_to_kv_cache_config(
-            self, kv_cache_config: KVCacheConfig) -> None:
+    def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
         Add encoder-only layers to the KV cache config.
         """
@@ -3167,6 +3179,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     dtype=self.kv_cache_dtype,
                     use_mla=use_mla)
                 encoder_only_attn_specs[attn_spec].append(layer_name)
+                self.runner_only_kv_layers.add(layer_name)
         if len(encoder_only_attn_specs) > 0:
             assert len(
                 encoder_only_attn_specs
