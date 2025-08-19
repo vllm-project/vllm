@@ -14,7 +14,6 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils import current_stream, direct_register_custom_op
-from vllm.distributed.device_communicators.pynccl_allocator import use_symmetric_memory
 
 logger = init_logger(__name__)
 
