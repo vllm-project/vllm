@@ -130,9 +130,10 @@ class BenchmarkDataset(ABC):
             elif isinstance(mm_content, dict):
                 content.append(mm_content)
             else:
-                raise TypeError(
-                    "Could not process multimodal content"
-                )
+                raise TypeError(  
+                    "Could not process multimodal content of type: " +
+                    f"{type(mm_content)}"  
+                ) 
         return [{"role": "user", "content": content}]
 
     def load_data(self) -> None:
@@ -364,12 +365,11 @@ class RandomDataset(BenchmarkDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
+        request_id_prefix: str = "",
         prefix_len: int = DEFAULT_PREFIX_LEN,
         range_ratio: float = DEFAULT_RANGE_RATIO,
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
-        request_id_prefix: str = "",
-        **kwargs,
     ) -> list[SampleRequest]:
 
         input_lens, output_lens, offsets = self.get_sampling_params(
@@ -632,6 +632,7 @@ class RandomMultiModalDataset(RandomDataset):
         self,
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
+        request_id_prefix: str = "",
         prefix_len: int = RandomDataset.DEFAULT_PREFIX_LEN,
         range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
         input_len: int = RandomDataset.DEFAULT_INPUT_LEN,
@@ -643,36 +644,7 @@ class RandomMultiModalDataset(RandomDataset):
         height: int = DEFAULT_HEIGHT,
         dimension_range_ratio: float = DEFAULT_DIMENSION_RANGE_RATIO,
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
-        request_id_prefix: str = "",
-        **kwargs,
     ) -> list[SampleRequest]:
-        """
-        Standard sample method compatible with serve.py and other datasets.
-        Returns OpenAI API format for compatibility with serve.py.
-        Args:
-            prefix_len: Length of the prefix to add to the prompt
-            range_ratio: Relative half-width of the sampling interval for input
-                and output lengths.
-            input_len: Average input length
-            output_len: Average output length
-            num_images: Number of images per request
-            width: Image width in pixels
-            height: Image height in pixels
-            num_images_range_ratio: Relative half-width of the sampling
-                interval for number of images.
-            limit_images_per_prompt: Maximum number of images per request
-            dimension_range_ratio: Relative half-width of the sampling
-                interval for image dimensions.
-            enable_multimodal_chat: Whether to apply multimodal chat
-                transformation. 
-                NOTE: the serve.py benchmark does not use this
-                option. This option is only provided for completeness given 
-                that the serve.py benchmark does not use it.
-            **kwargs: Additional arguments passed to parent sample method
-        Returns:
-            List of SampleRequest objects with properly formatted OpenAI
-            multimodal data.
-        """
         input_lens, output_lens, offsets = self.get_sampling_params(
             num_requests, range_ratio, input_len, output_len, tokenizer
         )
