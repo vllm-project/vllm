@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from typing import Union
 
 import numpy as np
+import torch
 import torch.nn as nn
 
 from vllm.config import LoRAConfig, ModelConfig, SchedulerConfig
@@ -31,7 +32,8 @@ class LoRAModelRunnerMixin:
 
     def load_lora_model(self, model: nn.Module, model_config: ModelConfig,
                         scheduler_config: SchedulerConfig,
-                        lora_config: LoRAConfig, device: str) -> nn.Module:
+                        lora_config: LoRAConfig,
+                        device: torch.device) -> nn.Module:
 
         if not supports_lora(model):
             raise ValueError(

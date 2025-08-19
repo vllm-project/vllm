@@ -1145,7 +1145,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_ids=req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
-            spec_token_ids=None,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
@@ -1824,11 +1823,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dummy_mm_data = dummy_decoder_data.multi_modal_data
 
         # Result in the maximum GPU consumption of the model
-        dummy_mm_item = dummy_mm_data.get_item(modality=modality, item_index=0)
+        dummy_mm_item = dummy_mm_data[modality][0]
+        dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
         return next(grouped_mm_kwargs
                     for _, _, grouped_mm_kwargs in group_mm_kwargs_by_modality(
-                        [dummy_mm_item] * max_items_per_batch,
+                        dummy_mm_items,
                         device=self.device,
                         pin_memory=self.pin_memory,
                     ))

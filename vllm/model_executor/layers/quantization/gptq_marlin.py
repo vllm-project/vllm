@@ -56,7 +56,7 @@ def get_moe_quant_method(
             # Dynamic per module/layer rules may override base config
             override_config(cloned_config, prefix=prefix)
 
-        return moe_method_cls(cloned_config)
+        return moe_method_cls(cloned_config, layer.moe_config)
     return None
 
 
