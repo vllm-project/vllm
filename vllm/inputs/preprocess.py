@@ -330,6 +330,21 @@ class InputPreprocessor:
     ) -> EmbedsInputs:
         return self._process_embeds(parsed_content)
 
+    def _truncate_inputs(
+            self,
+            inputs: list[int],
+            tokenization_kwargs: Optional[dict[str, Any]] = None) -> list[int]:
+
+        if not tokenization_kwargs or "truncation" not in tokenization_kwargs:
+            return inputs
+
+        max_length = tokenization_kwargs["max_length"]
+
+        if self.tokenizer.truncation_side == "left":
+            return inputs[-max_length:]
+        else:
+            return inputs[:max_length]
+
     def _process_tokens(
         self,
         parsed_content: TokensPrompt,
@@ -337,8 +352,12 @@ class InputPreprocessor:
         lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> Union[TokenInputs, MultiModalInputs]:
-        prompt_token_ids = parsed_content["prompt_token_ids"]
+        prompt_token_ids = self._truncate_inputs(
+            parsed_content["prompt_token_ids"], tokenization_kwargs)
         token_type_ids = parsed_content.get("token_type_ids")
+        if token_type_ids is not None:
+            token_type_ids = self._truncate_inputs(
+                parsed_content["token_type_ids"], tokenization_kwargs)
 
         inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):
@@ -368,8 +387,12 @@ class InputPreprocessor:
         lora_request: Optional[LoRARequest] = None,
         return_mm_hashes: bool = False,
     ) -> Union[TokenInputs, MultiModalInputs]:
-        prompt_token_ids = parsed_content["prompt_token_ids"]
+        prompt_token_ids = self._truncate_inputs(
+            parsed_content["prompt_token_ids"], tokenization_kwargs)
         token_type_ids = parsed_content.get("token_type_ids")
+        if token_type_ids is not None:
+            token_type_ids = self._truncate_inputs(
+                parsed_content["token_type_ids"], tokenization_kwargs)
 
         inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):
