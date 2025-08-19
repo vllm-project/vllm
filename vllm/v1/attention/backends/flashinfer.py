@@ -213,6 +213,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             self.kv_cache_dtype = self.kv_cache_spec.dtype
         self.q_data_type = self.model_config.dtype
+        self.use_tensor_cores = (envs.VLLM_FLASHINFER_FORCE_TENSOR_CORES or
+                                 (self.num_qo_heads // self.num_kv_heads > 4))
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -275,14 +277,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             decode_wrapper = self._decode_wrapper
 
         if decode_wrapper is None:
-            num_qo_heads = (
-                self.vllm_config.model_config.get_num_attention_heads(
-                    self.vllm_config.parallel_config))
-            num_kv_heads = self.vllm_config.model_config.get_num_kv_heads(
-                self.vllm_config.parallel_config)
-            use_tensor_cores = envs.VLLM_FLASHINFER_FORCE_TENSOR_CORES or (
-                num_qo_heads // num_kv_heads > 4)
-
             if use_cudagraph:
                 paged_kv_indptr = self.paged_kv_indptr[:batch_size + 1]
                 paged_kv_indices = self.paged_kv_indices
@@ -299,7 +293,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 paged_kv_indptr_buffer=paged_kv_indptr,
                 paged_kv_indices_buffer=paged_kv_indices,
                 paged_kv_last_page_len_buffer=paged_kv_last_page_len,
-                use_tensor_cores=use_tensor_cores)
+                use_tensor_cores=self.use_tensor_cores)
 
             # save the decode wrapper
             if use_cudagraph:
