@@ -324,7 +324,7 @@ def process_video(video: Any) -> Mapping[str, Any]:
         return {"type": "video_url", "video_url": {"url": video_url}}
 
     raise ValueError(
-        f"Invalid video input {video}. Must be a str or dictionary with raw video bytes."  # noqa: E501
+        f"Invalid video input {video}. Must be a string of local path/remote url, or a dictionary with raw video bytes in the form of `{{'bytes': raw_video_bytes}}`."  # noqa: E501
     )
 
 
