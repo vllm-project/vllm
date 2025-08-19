@@ -113,6 +113,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.topk_indices_dtype = None
         self.moe = moe
         self.use_marlin = self._should_use_marlin()
+        self.device_support_pdl = current_platform.is_cuda(
+        ) and current_platform.has_device_capability(90)
 
         if current_platform.is_device_capability(100) and not has_flashinfer():
             logger.warning_once(
@@ -520,7 +522,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 x_scale = None
             else:
                 x_quant, x_scale = mxfp8_quantize(x, False)  # to mxfp8
-                x_scale = x_scale.view(torch.float8_e4m3fn).reshape(-1)
+                x_scale = x_scale.view(torch.float8_e4m3fn).reshape(
+                    *x.shape[:-1], -1)
             trtllm_gen_output = trtllm_fp4_block_scale_moe(
                 router_logits.to(torch.bfloat16),
                 None,  # routing_bias
@@ -549,6 +552,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 self._get_tile_tokens_dim(x, top_k),
                 1 if renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
+                self.device_support_pdl,
+                None,  # output
+                # TODO: use the maximum number in the cudagraph_batch_sizes
+                8192,  # tune_max_num_tokens.
             )[0]
             return trtllm_gen_output
         else:
