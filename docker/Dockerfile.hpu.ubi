@@ -1,3 +1,6 @@
+# Copyright (C) 2025 Habana Labs, Ltd. an Intel Company
+# SPDX-License-Identifier: Apache-2.0
+
 ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.20.0/rhel9.4/habanalabs/pytorch-installer-2.6.0:latest
 FROM ${BASE_IMAGE} as habana-base
 

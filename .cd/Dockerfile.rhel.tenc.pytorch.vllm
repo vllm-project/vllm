@@ -1,3 +1,6 @@
+# Copyright (C) 2025 Habana Labs, Ltd. an Intel Company
+# SPDX-License-Identifier: Apache-2.0
+
 # Parameterize base image components for RHEL 8.6/9.2/9.4/9.6 and TencentOS 3.1
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
 ARG VERSION=1.22.0

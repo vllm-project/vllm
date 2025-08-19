@@ -1,3 +1,6 @@
+# Copyright (C) 2025 Habana Labs, Ltd. an Intel Company
+# SPDX-License-Identifier: Apache-2.0
+
 # Parameterize base image components for SUSE (tested on 15.5)
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
 ARG VERSION=1.22.0
