@@ -204,7 +204,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # required by torch.compile
-        layer.weight = Parameter(layer.weight.data, requires_grad=False)
+        # do not overwrite with Parameter class to preserve weight reloading
+        self.layer_weight_data = layer.weight.data
 
         # special postprocessing for CPU SGL
         if current_platform.is_cpu() and envs.VLLM_CPU_SGL_KERNEL:
@@ -232,7 +233,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
+        return dispatch_unquantized_gemm()(layer, x, self.layer_weight_data,
+                                           bias)
 
 
 class LinearBase(CustomOp):
