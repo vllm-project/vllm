@@ -31,7 +31,6 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 # Test ownership
 /.buildkite/lm-eval-harness @mgoin @simon-mo
 /tests/async_engine @njhill @robertgshaw2-redhat @simon-mo
-/tests/basic_correctness/test_chunked_prefill @rkooo567 @comaniac
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
