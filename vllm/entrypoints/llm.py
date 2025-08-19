@@ -47,6 +47,8 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput, RequestOutput,
                           ScoringRequestOutput)
+from vllm.plugins.multimodal_data_processors import (
+    get_multimodal_data_processor, multimodal_plugin_outputs_to_pooling_output)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, RequestOutputKind,
                                   SamplingParams)
@@ -298,6 +300,10 @@ class LLM:
         logger.info("Supported_tasks: %s", supported_tasks)
 
         self.supported_tasks = supported_tasks
+
+        # Load the multimodal data processing plugin if any
+        self.multimodal_data_processor = get_multimodal_data_processor(
+            self.llm_engine.vllm_config)
 
     def get_tokenizer(
         self,
@@ -1144,6 +1150,69 @@ class LLM:
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs,
                                                   PoolingRequestOutput)
+
+    def encode_with_mm_data_plugin(
+        self,
+        prompts: Union[PromptType, Sequence[PromptType]],
+        /,
+        pooling_params: Optional[Union[PoolingParams,
+                                       Sequence[PoolingParams]]] = None,
+        *,
+        truncate_prompt_tokens: Optional[int] = None,
+        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
+        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
+        pooling_task: PoolingTask = "encode",
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
+    ) -> list[PoolingRequestOutput]:
+
+        model_config = self.llm_engine.model_config
+        runner_type = model_config.runner_type
+        if runner_type != "pooling":
+            raise ValueError(
+                "LLM.encode_with_mm_data_plugin() is only supported for " \
+                "pooling models. Try passing `--runner pooling` to " \
+                "use the model as a pooling model.")
+
+        # obtain the actual model prompts from the pre-processor
+        processed_prompts = (self.multimodal_data_processor.pre_process(
+            prompts=prompts))
+
+        if pooling_params is None:
+            # Use default pooling params.
+            pooling_params = PoolingParams()
+
+        if isinstance(pooling_params, PoolingParams):
+            pooling_params.verify(pooling_task, model_config)
+        else:
+            for pooling_param in pooling_params:
+                pooling_param.verify(pooling_task, model_config)
+
+        if tokenization_kwargs is None:
+            tokenization_kwargs = dict[str, Any]()
+            _validate_truncation_size(model_config.max_model_len,
+                                      truncate_prompt_tokens,
+                                      tokenization_kwargs)
+
+        self._validate_and_add_requests(
+            prompts=processed_prompts,
+            params=pooling_params,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
+        )
+
+        outputs = self._run_engine(use_tqdm=use_tqdm)
+        model_outputs = self.engine_class.validate_outputs(
+            outputs, PoolingRequestOutput)
+
+        # get the post-processed model outputs
+        processed_outputs = self.multimodal_data_processor.post_process(
+            model_out=model_outputs)
+
+        final_out = multimodal_plugin_outputs_to_pooling_output(
+            plugin_out=processed_outputs)
+
+        return final_out
 
     def embed(
         self,

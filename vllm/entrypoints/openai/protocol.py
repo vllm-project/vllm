@@ -2509,7 +2509,7 @@ class ImagesPredictionRequest(OpenAIBaseModel):
     The model to use for image generation
     """
 
-    response_format: Optional[Literal["b64_json", "url"]] = "b64_json"
+    response_format: Literal["b64_json", "url"] = "b64_json"
     """
     The format in which the generated images are returned.
     Must be one of url or b64_json. URLs are only valid for 60 minutes

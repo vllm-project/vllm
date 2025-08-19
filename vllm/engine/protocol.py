@@ -228,6 +228,21 @@ class EngineClient(ABC):
         """Generate outputs for a request from a pooling model."""
         ...
 
+    async def encode_with_mm_data_plugin(
+        self,
+        prompt: PromptType,
+        pooling_params: PoolingParams,
+        request_id: str,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
+    ) -> PoolingRequestOutput:
+        """
+        Perform an encode request using the mulimodal
+        data processor plugin
+        """
+        raise NotImplementedError("encode_with_mm_data_plugin"
+                                  " is not implemented")
+
     @abstractmethod
     async def abort(self, request_id: Union[str, Iterable[str]]) -> None:
         """Abort a request.

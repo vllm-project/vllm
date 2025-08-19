@@ -2,12 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import logging
+from collections.abc import Sequence
+
+import torch
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.plugins import load_plugins_by_group
 from vllm.plugins.multimodal_data_processors.interface import (
     MultimodalDataProcessor)
+from vllm.plugins.multimodal_data_processors.types import (
+    MultiModalRequestOutput)
 from vllm.utils import resolve_obj_by_qualname
 
 logger = logging.getLogger(__name__)
@@ -65,3 +71,25 @@ def get_multimodal_data_processor(
     activated_plugin_cls = loadable_plugins[model_plugin]
 
     return resolve_obj_by_qualname(activated_plugin_cls)(vllm_config)
+
+
+def multimodal_plugin_outputs_to_pooling_output(
+    plugin_out: Sequence[MultiModalRequestOutput], ):
+
+    # Here I am assuming that the only field we care about is the
+    # task out and the request+id. This is beause we are not really pooling
+    # but rather wrapping non text-generating models as pooling ones.
+    # In the future we can also think of aggregating the pooler output
+    # for all the sub requests into one single PoolerRequestOutput object.
+    outputs = []
+    for output in plugin_out:
+        outputs.append(
+            PoolingRequestOutput(
+                request_id=output.request_id,
+                finished=True,
+                outputs=PoolingOutput(data=torch.empty([])),
+                prompt_token_ids=[1],
+                task_output=output,
+            ))
+
+    return outputs

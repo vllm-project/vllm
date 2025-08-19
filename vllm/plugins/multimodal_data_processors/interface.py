@@ -3,11 +3,13 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import Optional
+from typing import Optional, Union
 
 from vllm.config import VllmConfig
-from vllm.inputs.data import MultiModalPromptType, PromptType
-from vllm.outputs import MultiModalRequestOutput, PoolingRequestOutput
+from vllm.inputs.data import PromptType
+from vllm.outputs import PoolingRequestOutput
+from vllm.plugins.multimodal_data_processors.types import (
+    MultiModalRequestOutput)
 
 
 class MultimodalDataProcessor(ABC):
@@ -18,26 +20,26 @@ class MultimodalDataProcessor(ABC):
     @abstractmethod
     def pre_process(
         self,
-        prompt: MultiModalPromptType,
+        prompts: Union[PromptType, Sequence[PromptType]],
         request_id: Optional[str] = None,
         **kwargs,
-    ) -> Sequence[PromptType]:
+    ) -> Union[PromptType, Sequence[PromptType]]:
         ...
 
     @abstractmethod
     async def pre_process_async(
         self,
-        prompt: MultiModalPromptType,
+        prompts: Union[PromptType, Sequence[PromptType]],
         request_id: Optional[str] = None,
         **kwargs,
-    ) -> Sequence[PromptType]:
+    ) -> Union[PromptType, Sequence[PromptType]]:
         ...
 
     @abstractmethod
     def post_process(self,
                      model_out: Sequence[Optional[PoolingRequestOutput]],
                      request_id: Optional[str] = None,
-                     **kwargs) -> MultiModalRequestOutput:
+                     **kwargs) -> Sequence[MultiModalRequestOutput]:
         ...
 
     @abstractmethod
@@ -46,5 +48,5 @@ class MultimodalDataProcessor(ABC):
         model_out: Sequence[Optional[PoolingRequestOutput]],
         request_id: Optional[str] = None,
         **kwargs,
-    ) -> MultiModalRequestOutput:
+    ) -> Sequence[MultiModalRequestOutput]:
         ...

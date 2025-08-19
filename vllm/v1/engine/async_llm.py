@@ -4,7 +4,8 @@ import asyncio
 import os
 import socket
 import time
-from collections.abc import AsyncGenerator, Iterable, Mapping
+
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from copy import copy
 from typing import Any, Optional, Union
 
@@ -21,7 +22,9 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.outputs import PoolingOutput, PoolingRequestOutput, RequestOutput
+from vllm.plugins.multimodal_data_processors import (
+    get_multimodal_data_processor)
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
@@ -30,8 +33,9 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (Device, as_list, cancel_task_threadsafe, cdiv,
-                        deprecate_kwargs)
+
+from vllm.utils import (Device, as_list, cancel_task_threadsafe, cdiv, deprecate_kwargs,
+                        merge_async_iterators)
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -166,6 +170,9 @@ class AsyncLLM(EngineClient):
                 "Torch profiler disabled. AsyncLLM CPU traces will not be collected."  # noqa: E501
             )
             self.profiler = None
+        # Load the multimodal data processing plugin if any
+        self.multimodal_data_processor = get_multimodal_data_processor(
+            vllm_config)
 
     @classmethod
     @deprecate_kwargs(
@@ -545,6 +552,69 @@ class AsyncLLM(EngineClient):
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
+
+    async def encode_with_mm_data_plugin(
+        self,
+        prompt: PromptType,
+        pooling_params: PoolingParams,
+        request_id: str,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
+    ) -> PoolingRequestOutput:
+
+        # Here I am assuming that the image prediction request might
+        # be split in multiple prompts because of tiling
+        prompts = await self.multimodal_data_processor.pre_process_async(
+            prompts=[prompt], request_id=request_id)
+
+        # Schedule the request and get the result generator.
+        # Note that at the moment, models capable of generating images
+        # are piggybacking on the pooling models support.
+        # See the PrithviMAEGeospatial model
+        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
+
+        for i, prompt in enumerate(prompts):
+            request_id_item = f"{request_id}-{i}"
+
+            generator = self.encode(
+                prompt,
+                pooling_params,
+                request_id_item,
+                trace_headers=trace_headers,
+                priority=priority,
+            )
+            generators.append(generator)
+
+        result_generator = merge_async_iterators(*generators)
+        num_prompts = len(prompts)
+
+        final_results: Sequence[Optional[PoolingRequestOutput]]
+        final_results = [None] * num_prompts
+
+        async for i, res in result_generator:
+            final_results[i] = res
+
+        post_processed_outputs = (
+            await self.multimodal_data_processor.post_process_async(
+                model_out=final_results,
+                request_id=request_id,
+            ))
+
+        if num_prompts > 1:
+            out_tensors = [
+                output.outputs.data for output in final_results if output
+            ]
+            stacked_tensor = torch.stack(out_tensors, dim=0)
+            request_out = PoolingRequestOutput(
+                outputs=PoolingOutput(data=stacked_tensor),
+                prompt_token_ids=[],
+                finished=True,
+                request_id=request_id)
+        else:
+            request_out = final_results[0]
+
+        request_out.task_output = post_processed_outputs[0]
+        return request_out
 
     async def get_vllm_config(self) -> VllmConfig:
         return self.vllm_config

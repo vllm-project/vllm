@@ -3,7 +3,6 @@
 
 import asyncio
 import time
-from collections.abc import AsyncGenerator, Sequence
 from typing import Optional, Union
 
 from fastapi import Request
@@ -16,12 +15,11 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse, ImageData,
                                               ImagesPredictionRequest)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.inputs.data import ImagePrompt, PromptType
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
-from vllm.outputs import ImageRequestOutput, PoolingRequestOutput
 from vllm.plugins.multimodal_data_processors import (
     get_multimodal_data_processor)
-from vllm.utils import merge_async_iterators
+from vllm.plugins.multimodal_data_processors.types import ImagePrompt
 
 logger = init_logger(__name__)
 
@@ -47,42 +45,21 @@ class ServingImagesPrediction(OpenAIServing):
         self.multimodal_data_processor = get_multimodal_data_processor(
             vllm_config)
 
-    async def _preprocess_request(
-        self,
-        request: ImagesPredictionRequest,
-        request_id: str,
-    ) -> Sequence[PromptType]:
+    def _request_to_model_prompt(
+            self, request: ImagesPredictionRequest) -> PromptType:
 
-        prompt = ImagePrompt(
+        img_prompt = ImagePrompt(
             data=request.image.data,
             data_format=request.image.data_format,
             image_format=request.image_format,
+            out_format=request.response_format,
         )
-
-        model_prompts = (await
-                         self.multimodal_data_processor.pre_process_async(
-                             prompt=prompt,
-                             request_id=request_id,
-                         ))
-        return model_prompts
-
-    async def _postprocess_request(
-        self,
-        request: ImagesPredictionRequest,
-        request_id: str,
-        model_out: Sequence[Optional[PoolingRequestOutput]],
-    ) -> ImageData:
-
-        processor_output = (await
-                            self.multimodal_data_processor.post_process_async(
-                                model_out=model_out,
-                                request_id=request_id,
-                                out_format=request.response_format))
-
-        assert isinstance(processor_output, ImageRequestOutput)
-
-        return ImageData(data=processor_output.data,
-                         data_format=request.response_format)
+        return {
+            "prompt_token_ids": [1],
+            "multi_modal_data": {
+                "image": dict(img_prompt)
+            },
+        }
 
     async def create_images_prediction(
         self,
@@ -97,65 +74,38 @@ class ServingImagesPrediction(OpenAIServing):
         request_id = f"images-prediction-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
-        try:
-            # Here I am assuming that the image prediction request might
-            # be split in multiple prompts because of tiling
-            prompts = await self._preprocess_request(request=request,
-                                                     request_id=request_id)
-
-        except Exception as e:
-            logger.exception("Error in preprocessing image")
-            return self.create_error_response(str(e))
-
         # Schedule the request and get the result generator.
         # Note that at the moment, models capable of generating images
         # are piggybacking on the pooling models support.
         # See the PrithviMAEGeospatial model
-        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
             pooling_params = request.to_pooling_params()
-            for i, prompt in enumerate(prompts):
-                request_id_item = f"{request_id}-{i}"
+            model_prompt = self._request_to_model_prompt(request)
+            trace_headers = (None if raw_request is None else await
+                             self._get_trace_headers(raw_request.headers))
 
-                trace_headers = (None if raw_request is None else await
-                                 self._get_trace_headers(raw_request.headers))
-
-                generator = self.engine_client.encode(
-                    prompt,
-                    pooling_params,
-                    request_id_item,
-                    trace_headers=trace_headers,
-                    priority=request.priority,
-                )
-                generators.append(generator)
+            output = await self.engine_client.encode_with_mm_data_plugin(
+                model_prompt,
+                pooling_params,
+                request_id,
+                trace_headers=trace_headers,
+                priority=request.priority,
+            )
         except ValueError as e:
             return self.create_error_response(str(e))
-
-        result_generator = merge_async_iterators(*generators)
-        num_prompts = len(prompts)
-
-        final_res_batch: Sequence[Optional[PoolingRequestOutput]]
-        final_res_batch = [None] * num_prompts
-        try:
-            async for i, res in result_generator:
-                final_res_batch[i] = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            return self.create_error_response(str(e))
 
-        try:
-            response_image_data = await self._postprocess_request(
-                request=request,
-                request_id=request_id,
-                model_out=final_res_batch,
-            )
-        except Exception as e:
-            logger.exception("Error in post-processing model output")
-            return self.create_error_response(str(e))
+        if output.task_output is None:
+            return self.create_error_response(
+                "Error post-processing poolin data,"
+                " task_output should not be none")
+
+        output_image = ImageData(data=output.task_output.data,
+                                 data_format=output.task_output.type)
 
         return ImagesGenerationResponse(
             created=created_time,
-            image=response_image_data,
+            image=output_image,
             image_format=request.image_format,
         )

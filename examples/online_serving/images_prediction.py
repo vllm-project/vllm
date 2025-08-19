@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import base64
+import os
 
 import requests
 
@@ -18,7 +20,7 @@ import requests
 
 
 def main():
-    image_url = "https://huggingface.co/ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11/resolve/main/examples/India_900498_S2Hand.tif"  # noqa: E501
+    image_url = "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/India_900498_S2Hand.tif"  # noqa: E501
     server_endpoint = "http://localhost:8000/v1/images/prediction"
 
     request_payload_url = {
@@ -35,7 +37,9 @@ def main():
 
     decoded_image = base64.b64decode(response["image"]["data"])
 
-    with open("/workspace/vllm_max/online.tiff", "wb") as f:
+    out_path = os.path.join(os.getcwd(), "online_prediction.tiff")
+
+    with open(out_path, "wb") as f:
         f.write(decoded_image)
 
 
