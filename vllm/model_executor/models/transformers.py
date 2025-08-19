@@ -41,7 +41,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, PlaceholderRange)
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
@@ -107,10 +107,17 @@ def replace_linear_class(
         raise ValueError(
             f"Unsupported parallel style type {type(style)}, expected str")
 
-    vllm_linear_cls = {
-        "colwise": ColumnParallelLinear,
-        "rowwise": RowParallelLinear,
-    }.get(style, ReplicatedLinear)
+    vllm_linear_cls, vllm_linear_kwargs = {
+        "colwise": (ColumnParallelLinear, {}),
+        "colwise_rep": (ColumnParallelLinear, {
+            "gather_output": True
+        }),
+        "rowwise": (RowParallelLinear, {}),
+        "rowwise_rep": (RowParallelLinear, {
+            "input_is_parallel": False
+        }),
+        "replicate": (ReplicatedLinear, {}),
+    }.get(style, (ReplicatedLinear, {}))
 
     return vllm_linear_cls(
         input_size=linear.in_features,
@@ -118,6 +125,7 @@ def replace_linear_class(
         bias=linear.bias is not None,
         quant_config=quant_config,
         return_bias=False,
+        **vllm_linear_kwargs,
     )
 
 
@@ -229,7 +237,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ):
         """
         Given the original multi-modal items for this modality
@@ -364,7 +372,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             mm_tokens_per_modality["num_image_patches"]
         ) if "num_image_patches" in mm_tokens_per_modality else None
         processed_data['num_image_patches'] = num_image_patches
-        mm_kwargs = MultiModalKwargs.from_hf_inputs(
+        mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             processed_data,
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs,
                                        num_image_patches),
@@ -497,30 +505,47 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         Apply the model's tensor parallelization plan.
         Currently only supports linear layers.
         """
-        tp_plan = getattr(self.model.config, "base_model_tp_plan", None) or {}
+        # Look for tp plans in all of the PreTrainedModels found in self.model
+        is_pretrained_model = lambda m: isinstance(m, PreTrainedModel)
+        supports_tp_plan = lambda m: m.config.base_model_tp_plan is not None
+        pretrained_models = filter(is_pretrained_model, self.model.modules())
+        models_with_tp_plan = filter(supports_tp_plan, pretrained_models)
 
-        if not tp_plan and self.tp_size > 1:
+        if not any(models_with_tp_plan) and self.tp_size > 1:
             raise ValueError(
                 f"{type(self.model)} does not support tensor parallel yet!")
 
-        # Some weight loaders expect linear layers to inherit from vLLM's
-        # LinearBase class, so we set a default style which causes any
-        # unspecified linear layers to be replaced with ReplicatedLinear
-        tp_plan[".*"] = "replicated"
+        def _tensor_parallel(module: nn.Module,
+                             prefix: str = "",
+                             tp_plan=None):
+            tp_plan = tp_plan or {}
 
-        def _tensor_parallel(module: nn.Module, prefix: str = ""):
+            # If the current module is a PreTrainedModel, set the tp_plan for
+            # all of its children
+            if isinstance(module, PreTrainedModel):
+                tp_plan = module.config.base_model_tp_plan or {}
+                tp_plan = {
+                    maybe_prefix(prefix, k): v
+                    for k, v in tp_plan.items()
+                }
+
+            # Some weight loaders expect linear layers to inherit from vLLM's
+            # LinearBase class, so we set a default style which causes any
+            # unspecified linear layers to be replaced with ReplicatedLinear
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
-                for pattern, style in tp_plan.items():
-                    if re.match(pattern, qual_name) and isinstance(
-                            child_module, nn.Linear):
-                        new_module = replace_linear_class(
-                            child_module, style, self.quant_config)
-                        setattr(module, child_name, new_module)
-                        log_replacement(qual_name, child_module, new_module)
-                        break
+                if isinstance(child_module, nn.Linear):
+                    generator = (p for p in tp_plan if re.match(p, qual_name))
+                    pattern = next(generator, None)
+                    style = tp_plan.get(pattern, "replicate")
+                    new_module = replace_linear_class(child_module, style,
+                                                      self.quant_config)
+                    setattr(module, child_name, new_module)
+                    log_replacement(qual_name, child_module, new_module)
                 else:
-                    _tensor_parallel(child_module, prefix=qual_name)
+                    _tensor_parallel(child_module,
+                                     prefix=qual_name,
+                                     tp_plan=tp_plan)
 
         _tensor_parallel(self.model)
 
@@ -669,10 +694,28 @@ class TransformersForCausalLM(TransformersBase):
         return logits
 
 
+def flatten_and_concat(x: list[torch.Tensor]) -> torch.Tensor:
+    """Flatten until a list of tensors can be concatenated then do concat"""
+
+    def _can_concat(x: list[torch.Tensor]):
+        return len(set(map(lambda _x: _x.shape[1:], x))) == 1
+
+    if _can_concat(x):
+        return torch.concat(x)
+    return flatten_and_concat(flatten_bn(x))
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     MultiModalProcessor,
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder)
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    })  # set `positions` to last dim to support Qwen-mrope
 class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
     # Backwards compatibility for prev released models. State dicts back then
     # had different formats and cannot be loaded with `AutoModel` mapping as is
@@ -741,8 +784,7 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
             if isinstance(pixel_values, torch.Tensor):
                 pixel_values = flatten_bn(pixel_values).to(self.dtype)
             elif is_list_of(pixel_values, torch.Tensor):
-                pixel_values = flatten_bn(flatten_bn(pixel_values),
-                                          concat=True).to(self.dtype)
+                pixel_values = flatten_and_concat(pixel_values).to(self.dtype)
             else:
                 raise ValueError(
                     f"Unsupported pixel_values type {type(pixel_values)}. "

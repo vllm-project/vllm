@@ -19,8 +19,16 @@ from openai.types.chat.chat_completion_message import (
 # yapf: enable
 from openai.types.responses import (ResponseFunctionToolCall,
                                     ResponseInputItemParam, ResponseOutputItem,
-                                    ResponsePrompt, ResponseStatus,
-                                    ResponseTextConfig)
+                                    ResponsePrompt, ResponseReasoningItem,
+                                    ResponseStatus)
+
+# Backward compatibility for OpenAI client versions
+try:  # For older openai versions (< 1.100.0)
+    from openai.types.responses import ResponseTextConfig
+except ImportError:  # For newer openai versions (>= 1.100.0)
+    from openai.types.responses import (ResponseFormatTextConfig as
+                                        ResponseTextConfig)
+
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
@@ -239,6 +247,7 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
 
 
 ResponseInputOutputItem: TypeAlias = Union[ResponseInputItemParam,
+                                           ResponseReasoningItem,
                                            ResponseFunctionToolCall]
 
 

@@ -125,27 +125,34 @@ def test_ngram_correctness(
         cleanup_dist_env_and_memory()
 
 
-@pytest.mark.parametrize(["model_setup", "mm_enabled"], [
-    (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False),
-    (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
-      "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
-    (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
-      "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1), False),
-    pytest.param(
-        ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
-        False,
-        marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
-    pytest.param(
-        ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-         "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
-        True,
-        marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
-],
-                         ids=[
-                             "qwen3_eagle3", "llama3_eagle", "llama3_eagle3",
-                             "llama4_eagle", "llama4_eagle_mm"
-                         ])
+@pytest.mark.parametrize(
+    ["model_setup", "mm_enabled"],
+    [
+        # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
+        # (("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1), False),
+        (("eagle", "meta-llama/Llama-3.1-8B-Instruct",
+          "yuhuili/EAGLE-LLaMA3.1-Instruct-8B", 1), False),
+        (("eagle3", "meta-llama/Llama-3.1-8B-Instruct",
+          "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B", 1), False),
+        pytest.param(
+            ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+             "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
+            False,
+            marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
+        pytest.param(
+            ("eagle", "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+             "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
+            True,
+            marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
+    ],
+    ids=[
+        # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
+        # "qwen3_eagle3",
+        "llama3_eagle",
+        "llama3_eagle3",
+        "llama4_eagle",
+        "llama4_eagle_mm"
+    ])
 @pytest.mark.parametrize("attn_backend",
                          get_attn_backend_list_based_on_platform())
 def test_eagle_correctness(
@@ -155,6 +162,12 @@ def test_eagle_correctness(
     mm_enabled: bool,
     attn_backend: str,
 ):
+    if attn_backend == "TREE_ATTN":
+        # TODO: Fix this flaky test
+        pytest.skip(
+            "TREE_ATTN is flaky in the test disable for now until it can be "
+            "reolved (see https://github.com/vllm-project/vllm/issues/22922)")
+
     # Generate test prompts inside the function instead of using fixture
     test_prompts = get_test_prompts(mm_enabled)
     '''

@@ -55,6 +55,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, Device, deprecate_kwargs, is_list_of
+from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
     from vllm.v1.metrics.reader import Metric
@@ -198,6 +199,8 @@ class LLM:
         override_pooler_config: Optional[PoolerConfig] = None,
         compilation_config: Optional[Union[int, dict[str, Any],
                                            CompilationConfig]] = None,
+        logits_processors: Optional[list[Union[str,
+                                               type[LogitsProcessor]]]] = None,
         **kwargs,
     ) -> None:
         """LLM constructor."""
@@ -272,6 +275,7 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             override_pooler_config=override_pooler_config,
             compilation_config=compilation_config_instance,
+            logits_processors=logits_processors,
             **kwargs,
         )
 
@@ -1099,6 +1103,10 @@ class LLM:
                 "LLM.encode() is only supported for pooling models. "
                 "Try passing `--runner pooling` to use the model as a "
                 "pooling model.")
+
+        if pooling_task not in self.supported_tasks:
+            raise ValueError(
+                f"pooling_task must be one of {self.supported_tasks}.")
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
