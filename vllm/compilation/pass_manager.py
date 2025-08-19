@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import ExitStack
+
 from torch import fx as fx
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils import set_env_var
 
 if current_platform.is_cuda_alike():
     from .fusion import FusionPass
@@ -43,13 +47,20 @@ class PostGradPassManager(CustomGraphPass):
         self.passes: list[VllmInductorPass] = []
 
     def __call__(self, graph: fx.Graph):
-        shape = get_pass_context().runtime_shape
-        for pass_ in self.passes:
-            if pass_.is_applicable_for_shape(shape):
-                pass_(graph)
+        with ExitStack() as stack:
+            if envs.VLLM_PATTERN_MATCH_DEBUG is not None:
+                # and get_tensor_model_parallel_rank() == 0:
+                stack.enter_context(
+                    set_env_var('TORCHINDUCTOR_PATTERN_MATCH_DEBUG',
+                                envs.VLLM_PATTERN_MATCH_DEBUG))
 
-        # always run fix_functionalization last
-        self.fix_functionalization(graph)
+            shape = get_pass_context().runtime_shape
+            for pass_ in self.passes:
+                if pass_.is_applicable_for_shape(shape):
+                    pass_(graph)
+
+            # always run fix_functionalization last
+            self.fix_functionalization(graph)
 
     def configure(self, config: VllmConfig):
         self.pass_config = config.compilation_config.pass_config
