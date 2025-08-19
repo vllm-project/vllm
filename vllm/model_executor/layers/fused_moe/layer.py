@@ -198,6 +198,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         else:
             return None
 
+    # Note: init_prepare_finalize should only be called by
+    # prepare_communication_buffer_for_model.
     def init_prepare_finalize(self):
         assert self.moe is not None
         prepare_finalize = self.maybe_make_prepare_finalize(self.moe)
