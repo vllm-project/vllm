@@ -123,6 +123,7 @@ class IPEXConfig(QuantizationConfig):
                 return IPEXGPTQLinearMethod(self)
         return None
 
+
 class IPEXGPTQLinearMethod(GPTQLinearMethod):
     """GPTQ linear method using IPEX for the CPU/XPU backend.
     """
