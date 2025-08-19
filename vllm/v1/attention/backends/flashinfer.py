@@ -452,7 +452,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens =\
             split_decodes_and_prefills(common_attn_metadata)
 
-        page_size = self.kv_cache_spec.block_size
+        page_size = self.page_size
         max_q_len = common_attn_metadata.max_query_len
         max_seq_len = common_attn_metadata.seq_lens_cpu.max().item()
         seq_lens = common_attn_metadata.seq_lens
