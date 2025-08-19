@@ -1,14 +1,15 @@
 import logging
 from packaging import version
 import tempfile
+from typing import TYPE_CHECKING
 
 import torch
 from torch.cuda.memory import CUDAPluggableAllocator
 
 from vllm.config import ParallelConfig
-from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.utils import direct_register_custom_op
-
+if TYPE_CHECKING:
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ def get_nccl_mem_pool():
 class use_symmetric_memory:
     def __init__(
         self,
-        pynccl_comm: PyNcclCommunicator,
+        pynccl_comm: "PyNcclCommunicator",
         disabled: bool = False,
         disable_war: bool = False,
     ):
@@ -173,7 +174,7 @@ class use_symmetric_memory:
 
 
 def all_reduce_symmetric_with_copy_impl(
-    input_tensor: torch.Tensor, pynccl_comm: PyNcclCommunicator
+    input_tensor: torch.Tensor, pynccl_comm: "PyNcclCommunicator"
 ) -> torch.Tensor:
     with use_symmetric_memory(pynccl_comm):
         symm_input = torch.empty_like(input_tensor)
@@ -183,7 +184,7 @@ def all_reduce_symmetric_with_copy_impl(
     return symm_output
 
 def all_reduce_symmetric_with_copy_fake(
-    input_tensor: torch.Tensor, pynccl_comm: PyNcclCommunicator
+    input_tensor: torch.Tensor, pynccl_comm: "PyNcclCommunicator"
 ) -> torch.Tensor:
     return torch.empty_like(input_tensor)
 
