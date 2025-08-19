@@ -1165,6 +1165,8 @@ class LLM:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
 
+        assert self.multimodal_data_processor is not None
+
         model_config = self.llm_engine.model_config
         runner_type = model_config.runner_type
         if runner_type != "pooling":

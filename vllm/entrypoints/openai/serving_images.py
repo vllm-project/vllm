@@ -17,8 +17,6 @@ from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
-from vllm.plugins.multimodal_data_processors import (
-    get_multimodal_data_processor)
 from vllm.plugins.multimodal_data_processors.types import ImagePrompt
 
 logger = init_logger(__name__)
@@ -40,10 +38,6 @@ class ServingImagesPrediction(OpenAIServing):
             models=models,
             request_logger=request_logger,
         )
-
-        # Load the multimodal data processing plugin
-        self.multimodal_data_processor = get_multimodal_data_processor(
-            vllm_config)
 
     def _request_to_model_prompt(
             self, request: ImagesPredictionRequest) -> PromptType:

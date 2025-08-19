@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import logging
 from collections.abc import Sequence
 
@@ -20,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_multimodal_data_processor(
-        vllm_config: VllmConfig) -> MultimodalDataProcessor:
+        vllm_config: VllmConfig) -> MultimodalDataProcessor | None:
     # Multimodal processors are loaded as plugins under the
     # 'vllm.multimodal_data_processor_plugins' group. Similar to platform
     # plugins, these plugins register a function that returns the class
@@ -40,8 +42,8 @@ def get_multimodal_data_processor(
     logger.debug("MultiModalProcessor plugin to be loaded %s", model_plugin)
 
     if not model_plugin:
-        raise ValueError("The model does not require a MultimodalProcessor"
-                         " plugin, but one is required.")
+        logger.info("No MultiModalProcessor plugins installed")
+        return None
 
     # Load all installed plugin in the group
     multimodal_data_processor_plugins = \

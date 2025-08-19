@@ -4,7 +4,6 @@ import asyncio
 import os
 import socket
 import time
-
 from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from copy import copy
 from typing import Any, Optional, Union
@@ -33,9 +32,8 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-
-from vllm.utils import (Device, as_list, cancel_task_threadsafe, cdiv, deprecate_kwargs,
-                        merge_async_iterators)
+from vllm.utils import (Device, as_list, cancel_task_threadsafe, cdiv,
+                        deprecate_kwargs, merge_async_iterators)
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -561,6 +559,8 @@ class AsyncLLM(EngineClient):
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
     ) -> PoolingRequestOutput:
+
+        assert self.multimodal_data_processor is not None
 
         # Here I am assuming that the image prediction request might
         # be split in multiple prompts because of tiling
