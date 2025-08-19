@@ -329,3 +329,11 @@ class EngineClient(ABC):
                                drain_timeout: int = 300) -> None:
         """Scale the engine"""
         raise NotImplementedError
+
+    async def collective_rpc(self,
+                             method: str,
+                             timeout: Optional[float] = None,
+                             args: tuple = (),
+                             kwargs: Optional[dict] = None):
+        """Perform a collective RPC call to the given path."""
+        raise NotImplementedError
