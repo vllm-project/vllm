@@ -211,6 +211,7 @@ class PromptUpdate(ABC):
             tokenizer=tokenizer,
         )
 
+    @abstractmethod
     def with_content(self, content: PromptUpdateContent) -> Self:
         raise NotImplementedError
 
@@ -1420,7 +1421,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
             (missing_prompt_update, ) = missing_prompt_updates
 
-            new_prompt_update_contents = list[_BoundPromptContent]()
+            # Usually, the prompt content is expressed as a function
+            # `(item_idx: int) -> PromptUpdateInfo`.
+            # To avoid keeping the scope of that function in memory
+            # (which may include `out_mm_kwargs`),
+            # we resolve the prompt content early by calling `.get_content()`
+            # and replace the old prompt content with
+            # the indexer of `resolved_contents`
+            resolved_contents = list[_BoundPromptContent]()
             for item_idx, hash_ in enumerate(hashes):
                 item: Optional[tuple[MultiModalKwargsItem, BoundPromptUpdate]]
                 if not cache.is_cached_item(hash_):
@@ -1437,14 +1445,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
                 new_kwargs, new_prompt_update = cache.get_and_update_item(
                     item, hash_)
-                new_prompt_update_content = new_prompt_update.get_content(
-                    item_idx)
+                new_content = new_prompt_update.get_content(item_idx)
 
                 merged_kwargs[modality].append(new_kwargs)
-                new_prompt_update_contents.append(new_prompt_update_content)
+                resolved_contents.append(new_content)
 
             new_prompt_update = missing_prompt_update.with_content(
-                new_prompt_update_contents.__getitem__)
+                resolved_contents.__getitem__)
             merged_prompt_updates[modality] = [new_prompt_update]
 
         mm_kwargs = MultiModalKwargsItems(merged_kwargs)
