@@ -489,7 +489,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             shared_kv_page_indices_cpu = None
             shared_kv_last_page_len_cpu = None
 
-        max_num_blocks = block_table_bounds_cpu.max()
+        max_num_blocks = block_table_bounds_cpu.max().item()
         block_table_bounds = block_table_bounds_cpu.to(self.device,
                                                        non_blocking=True)
         mask = (self.block_table_arange[:max_num_blocks].unsqueeze(0)
