@@ -142,7 +142,7 @@ class W8A8MatMulPrimitiveHandler : public DNNLMatMulPrimitiveHandler {
 
  private:
   dnnl::matmul::primitive_desc create_primitive_desc(int64_t a_m_size,
-                                                     bool fisrt_time);
+                                                     bool first_time);
 
   void init_runtime_memory_cache(const Args& args);
 
