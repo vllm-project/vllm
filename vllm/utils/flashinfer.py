@@ -174,21 +174,30 @@ def supports_trtllm_attention() -> tuple[bool, Optional[str]]:
 
 
 def use_trtllm_attention(
+    num_qo_heads: int,
+    num_kv_heads: int,
     num_tokens: int,
     max_seq_len: int,
     kv_cache_dtype: str,
-    num_qo_heads: Optional[int],
-    num_kv_heads: Optional[int],
-    attn_head_size: Optional[int],
+    q_dtype: torch.dtype,
+    is_prefill: bool,
     has_sinks: bool = False,
 ) -> bool:
     use_trtllm, env_value = supports_trtllm_attention()
     if not use_trtllm:
         return False
 
-    # Check if the dimensions are supported by TRTLLM decode attention
-    if (attn_head_size is None or num_qo_heads is None or num_kv_heads is None
-            or num_qo_heads % num_kv_heads != 0):
+    if num_qo_heads % num_kv_heads != 0:
+        return False
+
+    # Must use TRTLLM attention if query is FP8 quantized
+    if q_dtype == current_platform.fp8_dtype():
+        logger.info_once("Using TRTLLM attention (query is quantized).")
+        return True
+
+    # TRTLLM prefill attention does not support FP8 kv cache with
+    # non-quantized query
+    if is_prefill and kv_cache_dtype.startswith("fp8"):
         return False
 
     # If sinks are being used, we must use TRTLLM attention as it's
@@ -290,6 +299,7 @@ __all__ = [
     "has_flashinfer_moe",
     "has_flashinfer_cutlass_fused_moe",
     "has_nvidia_artifactory",
+    "supports_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
 ]
