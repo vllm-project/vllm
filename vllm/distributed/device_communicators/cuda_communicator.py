@@ -10,7 +10,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.distributed.device_communicators.pynccl_allocator import (
-    is_symmetric_memory_enabled,)
+    is_symmetric_memory_enabled)
 from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
@@ -41,7 +41,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce)
-        import vllm.distributed.device_communicators.pynccl_allocator # noqa
+        import vllm.distributed.device_communicators.pynccl_symmetric_ops # noqa
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
         from vllm.distributed.device_communicators.quick_all_reduce import (
