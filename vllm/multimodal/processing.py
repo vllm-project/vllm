@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import (Callable, Generator, ItemsView, Iterable, Mapping,
                              Sequence)
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
@@ -12,7 +12,7 @@ from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
 
 import regex as re
 import torch
-from typing_extensions import assert_never
+from typing_extensions import Self, assert_never
 
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
@@ -109,7 +109,7 @@ The token sequence or text to update.
 class PromptUpdateDetails(Generic[_S]):
     """Details about the token sequence or text that are part of the update."""
 
-    full: _S
+    full: Union[_S, "_BoundPromptSequence"]
     """The full content."""
 
     is_embed: Optional[Callable[["_BoundPromptSequence"], torch.Tensor]] = None
@@ -211,6 +211,9 @@ class PromptUpdate(ABC):
             tokenizer=tokenizer,
         )
 
+    def with_content(self, content: PromptUpdateContent) -> Self:
+        raise NotImplementedError
+
 
 @dataclass
 class PromptInsertion(PromptUpdate):
@@ -279,6 +282,9 @@ class PromptInsertion(PromptUpdate):
     @property
     def mode(self) -> UpdateMode:
         return UpdateMode.INSERT
+
+    def with_content(self, content: PromptUpdateContent) -> Self:
+        return replace(self, insertion=content)
 
 
 @dataclass
@@ -353,6 +359,9 @@ class PromptReplacement(PromptUpdate):
     @property
     def mode(self) -> UpdateMode:
         return UpdateMode.REPLACE
+
+    def with_content(self, content: PromptUpdateContent) -> Self:
+        return replace(self, replacement=content)
 
 
 @lru_cache(maxsize=2048)
@@ -451,6 +460,12 @@ class _BoundPromptContent:
     full: _BoundPromptSequence
     is_embed: Optional[Callable[["_BoundPromptSequence"], torch.Tensor]]
 
+    def as_prompt_update(self):
+        return PromptUpdateDetails(
+            full=self.full.token_ids,
+            is_embed=self.is_embed,
+        )
+
 
 @dataclass
 class BoundPromptUpdate:
@@ -510,15 +525,25 @@ class BoundPromptUpdate:
         if not isinstance(content, PromptUpdateDetails):
             content = PromptUpdateDetails.from_seq(content)
 
-        bound_full = _BoundPromptSequence.from_seq(self.tokenizer,
-                                                   content.full)
-        bound_content = _BoundPromptContent(full=bound_full,
-                                            is_embed=content.is_embed)
+        bound_content = content.full
+        if not isinstance(bound_content, _BoundPromptContent):
+            if not isinstance(bound_content, _BoundPromptSequence):
+                bound_content = _BoundPromptSequence.from_seq(
+                    self.tokenizer, bound_content)
+
+            bound_content = _BoundPromptContent(full=bound_content,
+                                                is_embed=content.is_embed)
 
         if cache_key is not None:
             self._content_cache[cache_key] = bound_content
 
         return bound_content
+
+    def with_content(self, content: PromptUpdateContent) -> Self:
+        return replace(
+            self,
+            _origin=self._origin.with_content(content),
+        )
 
 
 class _TokenMatch(NamedTuple):
@@ -1383,13 +1408,27 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                                     list[Optional[MultiModalKwargsItem]]](list)
         merged_prompt_updates = defaultdict[str, list[BoundPromptUpdate]](list)
         for modality, hashes in mm_hashes.items():
-            for hash_ in hashes:
+            missing_kwargs = mm_missing_kwargs.get(modality, [])
+            missing_prompt_updates = mm_missing_prompt_updates.get(
+                modality, [])
+
+            if len(missing_prompt_updates) > 1:
+                raise ValueError(
+                    "Multiple prompt update definitions per modality is "
+                    "no longer compatible with caching. Please open an issue "
+                    "on GitHub if your model needs this.")
+
+            (missing_prompt_update, ) = missing_prompt_updates
+
+            new_prompt_update_contents = list[_BoundPromptContent]()
+            for item_idx, hash_ in enumerate(hashes):
                 item: Optional[tuple[MultiModalKwargsItem, BoundPromptUpdate]]
                 if not cache.is_cached_item(hash_):
-                    kwargs = mm_missing_kwargs[modality][
-                        mm_missing_next_idx[modality]]
-                    prompt_update = mm_missing_prompt_updates[modality][
-                        mm_missing_next_idx[modality]]
+                    missing_next_idx = mm_missing_next_idx[modality]
+                    kwargs = missing_kwargs[missing_next_idx]
+                    prompt_update = missing_prompt_update.with_content(
+                        missing_prompt_update.get_content(
+                            missing_next_idx).as_prompt_update())
                     mm_missing_next_idx[modality] += 1
 
                     item = kwargs, prompt_update
@@ -1398,8 +1437,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
                 new_kwargs, new_prompt_update = cache.get_and_update_item(
                     item, hash_)
+                new_prompt_update_content = new_prompt_update.get_content(
+                    item_idx)
+
                 merged_kwargs[modality].append(new_kwargs)
-                merged_prompt_updates[modality].append(new_prompt_update)
+                new_prompt_update_contents.append(new_prompt_update_content)
+
+            new_prompt_update = missing_prompt_update.with_content(
+                new_prompt_update_contents.__getitem__)
+            merged_prompt_updates[modality] = [new_prompt_update]
 
         mm_kwargs = MultiModalKwargsItems(merged_kwargs)
         mm_prompt_updates = MultiModalPromptUpdates(merged_prompt_updates)
