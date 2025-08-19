@@ -1,4 +1,5 @@
 ﻿# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
@@ -15,7 +16,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.qwen2 import (Qwen2DecoderLayer, 
+from vllm.model_executor.models.qwen2 import (Qwen2DecoderLayer,
                                               Qwen2ForCausalLM)
 
 from .utils import AutoWeightsLoader, maybe_prefix
