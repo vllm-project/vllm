@@ -5,6 +5,7 @@ import io
 import json
 import sys
 import time
+import traceback
 from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
@@ -415,7 +416,6 @@ class OpenAIServing:
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
         if self.log_error_stack:
-            import traceback
             exc_type, _, _ = sys.exc_info()
             if exc_type is not None:
                 traceback.print_exc()
