@@ -246,11 +246,15 @@ class Qwen2_5_VisionAttention(nn.Module):
         # Detect attention implementation.
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
         if self.attn_backend not in {
-                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
+                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS,
+                _Backend.ROCM_AITER_FA
         }:
             raise RuntimeError(
                 f"Qwen2.5-VL does not support {self.attn_backend} backend now."
             )
+        self.is_flash_attn_backend = self.attn_backend in {
+            _Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA
+        }
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # [s, b, 3 * head * head_dim]
@@ -297,10 +301,13 @@ class Qwen2_5_VisionAttention(nn.Module):
             q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
             k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
 
-        if self.attn_backend == _Backend.FLASH_ATTN:
+        if self.is_flash_attn_backend:
             # from vllm_flash_attn.flash_attn_interface import (
             #   flash_attn_varlen_func)
-            from flash_attn import flash_attn_varlen_func
+            if self.attn_backend == _Backend.ROCM_AITER_FA:
+                from aiter import flash_attn_varlen_func
+            else:
+                from flash_attn import flash_attn_varlen_func
 
             q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
@@ -311,7 +318,7 @@ class Qwen2_5_VisionAttention(nn.Module):
                                             cu_seqlens_k=cu_seqlens,
                                             max_seqlen_q=max_seqlen,
                                             max_seqlen_k=max_seqlen,
-                                            dropout_p=0,
+                                            dropout_p=0.0,
                                             causal=False)
 
             context_layer = rearrange(output,
@@ -389,13 +396,13 @@ class Qwen2_5_VisionBlock(nn.Module):
             max_seqlen: Optional[int] = None,  # Only used for Flash Attention
             seqlens: Optional[list[int]] = None,  # Only used for xFormers
     ) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x),
-                          cu_seqlens=cu_seqlens,
-                          rotary_pos_emb=rotary_pos_emb,
-                          max_seqlen=max_seqlen,
-                          seqlens=seqlens)
-
-        x = x + self.mlp(self.norm2(x))
+        x_attn = self.attn(self.norm1(x),
+                           cu_seqlens=cu_seqlens,
+                           rotary_pos_emb=rotary_pos_emb,
+                           max_seqlen=max_seqlen,
+                           seqlens=seqlens)
+        x_fused_norm, residual = self.norm2(x, residual=x_attn)
+        x = residual + self.mlp(x_fused_norm)
         return x
 
 
@@ -635,7 +642,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_seqlens: torch.Tensor,
     ) -> tuple[Optional[int], Optional[list[int]]]:
         max_seqlen, seqlens = None, None
-        if self.attn_backend == _Backend.FLASH_ATTN:
+        if (self.attn_backend == _Backend.FLASH_ATTN
+                or self.attn_backend == _Backend.ROCM_AITER_FA):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
@@ -835,12 +843,17 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.visual = Qwen2_5_VisionTransformer(
-            config.vision_config,
-            norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=self._maybe_ignore_quant_config(self.quant_config),
-            prefix=maybe_prefix(prefix, "visual"),
-        )
+        if multimodal_config.get_limit_per_prompt("image") or \
+            multimodal_config.get_limit_per_prompt("video"):
+            self.visual = Qwen2_5_VisionTransformer(
+                config.vision_config,
+                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                quant_config=self._maybe_ignore_quant_config(
+                    self.quant_config),
+                prefix=maybe_prefix(prefix, "visual"),
+            )
+        else:
+            self.visual = None
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
@@ -963,10 +976,12 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
+        # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
         merge_size = self.visual.spatial_merge_size
-        sizes = grid_thw.prod(-1) // merge_size // merge_size
+        sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
+                 (merge_size * merge_size)).tolist()
 
-        return image_embeds.split(sizes.tolist())
+        return image_embeds.split(sizes)
 
     def _process_video_input(
             self,
@@ -985,9 +1000,11 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
-        sizes = grid_thw.prod(-1) // merge_size // merge_size
+        # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
+        sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
+                 (merge_size * merge_size)).tolist()
 
-        return video_embeds.split(sizes.tolist())
+        return video_embeds.split(sizes)
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
@@ -1144,7 +1161,10 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
 
-        loader = AutoWeightsLoader(self)
+        skip_prefixes = []
+        if self.visual is None:
+            skip_prefixes.extend(["visual."])
+        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:

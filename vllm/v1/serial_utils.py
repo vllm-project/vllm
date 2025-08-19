@@ -113,6 +113,9 @@ class MsgpackEncoder:
                 int(v) if v is not None else None
                 for v in (obj.start, obj.stop, obj.step))
 
+        if isinstance(obj, MultiModalKwargsItem):
+            return self._encode_mm_item(obj)
+
         if isinstance(obj, MultiModalKwargs):
             mm: MultiModalKwargs = obj
             if not mm.modalities:
@@ -120,17 +123,12 @@ class MsgpackEncoder:
                 return dict(mm)
 
             # ignore the main dict, it will be re-indexed.
-            # Encode a list of MultiModalKwargsItems as plain dicts
-            # + special handling for .field.
             # Any tensors *not* indexed by modality will be ignored.
-            return [[{
-                "modality": elem.modality,
-                "key": elem.key,
-                "data": self._encode_nested_tensors(elem.data),
-                "field": self._encode_mm_field(elem.field),
-            } for elem in item.values()]
-                    for itemlist in mm._items_by_modality.values()
-                    for item in itemlist]
+            return [
+                self._encode_mm_item(item)
+                for itemlist in mm._items_by_modality.values()
+                for item in itemlist
+            ]
 
         if isinstance(obj, UtilityResult):
             result = obj.result
@@ -192,6 +190,23 @@ class MsgpackEncoder:
         dtype = str(obj.dtype).removeprefix("torch.")
         return dtype, obj.shape, data
 
+    def _encode_mm_item(self,
+                        item: MultiModalKwargsItem) -> list[dict[str, Any]]:
+        return [self._encode_mm_field_elem(elem) for elem in item.values()]
+
+    def _encode_mm_field_elem(self,
+                              elem: MultiModalFieldElem) -> dict[str, Any]:
+        return {
+            "modality":
+            elem.modality,
+            "key":
+            elem.key,
+            "data": (None if elem.data is None else
+                     self._encode_nested_tensors(elem.data)),
+            "field":
+            self._encode_mm_field(elem.field),
+        }
+
     def _encode_nested_tensors(self, nt: NestedTensors) -> Any:
         if isinstance(nt, torch.Tensor):
             return self._encode_tensor(nt)
@@ -250,6 +265,8 @@ class MsgpackDecoder:
                 return self._decode_tensor(obj)
             if t is slice:
                 return slice(*obj)
+            if issubclass(t, MultiModalKwargsItem):
+                return self._decode_mm_item(obj)
             if issubclass(t, MultiModalKwargs):
                 if isinstance(obj, list):
                     return MultiModalKwargs.from_items(
@@ -311,26 +328,29 @@ class MsgpackDecoder:
         # Convert back to proper shape & type
         return arr.view(torch_dtype).view(shape)
 
-    def _decode_mm_items(self, obj: list) -> list[MultiModalKwargsItem]:
-        decoded_items = []
-        for item in obj:
-            elems = []
-            for v in item:
-                v["data"] = self._decode_nested_tensors(v["data"])
-                # Reconstruct the field processor using MultiModalFieldConfig
-                factory_meth_name, *field_args = v["field"]
-                factory_meth = getattr(MultiModalFieldConfig,
-                                       factory_meth_name)
+    def _decode_mm_items(self, obj: list[Any]) -> list[MultiModalKwargsItem]:
+        return [self._decode_mm_item(v) for v in obj]
 
-                # Special case: decode the union "slices" field of
-                # MultiModalFlatField
-                if factory_meth_name == "flat":
-                    field_args[0] = self._decode_nested_slices(field_args[0])
+    def _decode_mm_item(self, obj: list[Any]) -> MultiModalKwargsItem:
+        return MultiModalKwargsItem.from_elems(
+            [self._decode_mm_field_elem(v) for v in obj])
 
-                v["field"] = factory_meth(None, *field_args).field
-                elems.append(MultiModalFieldElem(**v))
-            decoded_items.append(MultiModalKwargsItem.from_elems(elems))
-        return decoded_items
+    def _decode_mm_field_elem(self, obj: dict[str,
+                                              Any]) -> MultiModalFieldElem:
+        if obj["data"] is not None:
+            obj["data"] = self._decode_nested_tensors(obj["data"])
+
+        # Reconstruct the field processor using MultiModalFieldConfig
+        factory_meth_name, *field_args = obj["field"]
+        factory_meth = getattr(MultiModalFieldConfig, factory_meth_name)
+
+        # Special case: decode the union "slices" field of
+        # MultiModalFlatField
+        if factory_meth_name == "flat":
+            field_args[0] = self._decode_nested_slices(field_args[0])
+
+        obj["field"] = factory_meth(None, *field_args).field
+        return MultiModalFieldElem(**obj)
 
     def _decode_nested_tensors(self, obj: Any) -> NestedTensors:
         if isinstance(obj, (int, float)):

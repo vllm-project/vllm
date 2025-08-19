@@ -190,7 +190,7 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union
+from typing import ClassVar, Generic, Optional, TypeVar, Union
 
 import torch
 
@@ -210,10 +210,11 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
 from vllm.utils.flashinfer import has_nvidia_artifactory
-from vllm.v1.attention.backends.utils import (
-    AttentionMetadataBuilder, CommonAttentionMetadata,
-    get_per_layer_parameters, infer_global_hyperparameters,
-    reorder_batch_to_split_decodes_and_prefills, split_decodes_and_prefills)
+from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
+                                              CommonAttentionMetadata,
+                                              get_per_layer_parameters,
+                                              infer_global_hyperparameters,
+                                              split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 try:
@@ -232,10 +233,6 @@ try:
     flashinfer_available = True
 except ImportError:
     flashinfer_available = False
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
 
 logger = init_logger(__name__)
 
@@ -403,6 +400,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+    reorder_batch_threshold: ClassVar[int] = 1
 
     def __init__(self,
                  kv_cache_spec: AttentionSpec,
@@ -561,12 +559,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         prefill.prefill_main = self._fi_prefill_main
         prefill.prefill_chunks = self._fi_prefill_chunks
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        return reorder_batch_to_split_decodes_and_prefills(input_batch,
-                                                           scheduler_output,
-                                                           decode_threshold=1)
-
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor):
         return MLACommonDecodeMetadata(
@@ -574,9 +566,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             seq_lens=seq_lens,
         )
 
-    def _split_decodes_and_prefills(self, max_query_len: int, num_reqs: int,
-                                    num_tokens: int,
-                                    query_start_loc: torch.Tensor):
+    def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata):
         """
         return 
         - num_decodes: number of decode requests
@@ -584,19 +574,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         - num_decode_tokens: number of decode tokens
         - num_prefill_tokens: number of prefill tokens
         """
-        if max_query_len == 1:
-            # Pure decode
-            return num_reqs, 0, num_tokens, 0
-        else:
-            query_lens = query_start_loc[1:] - query_start_loc[:-1]
-            first_prefill = (query_lens > 1).int().argmax(dim=-1).item()
-            assert torch.all(query_lens[first_prefill:] > 1)
-            num_decodes = first_prefill
-            num_prefills = num_reqs - num_decodes
-            num_decode_tokens = first_prefill
-            num_prefill_tokens = num_tokens - query_start_loc[first_prefill]
-            return (num_decodes, num_prefills, num_decode_tokens,
-                    num_prefill_tokens)
+        m = common_attn_metadata
+        assert m.num_reqs == m.num_actual_tokens, \
+            "MLA only supports decode-only full CUDAGraph capture. " \
+            "Make sure all cudagraph capture sizes <= max_num_seq."
+
+        assert m.max_query_len == 1  # decode-only
+
+        return self.build(0, m)
 
     def build(self,
               common_prefix_len: int,
@@ -746,10 +731,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             self._build_fi_prefill_wrappers(attn_metadata.prefill)
 
         return attn_metadata
-
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        return common_attn_metadata.max_query_len == 1
 
 
 class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
