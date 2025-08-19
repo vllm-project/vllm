@@ -784,6 +784,7 @@ class TransformersForMultimodalLM(TransformersForCausalLM,
         pixel_values = pixel_values if pixel_values is not None else kwargs.pop(
             "image_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
+        kwargs.pop("token_type_ids", None)  # used only in `forward`
 
         if image_embeds is not None:
             return image_embeds
