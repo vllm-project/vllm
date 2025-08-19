@@ -70,6 +70,7 @@ class RayPPCommunicator(Communicator):
             assert ray.get_gpu_ids(), "RayPPCommunicator has no GPUs assigned"
 
             self._comm = get_pp_group().device_communicator
+            assert self._comm is not None
 
             # Since we wrap around the vLLM _PP communicator, we use
             # the rank from the vLLM communicator, and ignore the rank

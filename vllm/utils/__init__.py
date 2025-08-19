@@ -47,7 +47,7 @@ from dataclasses import dataclass, field
 from functools import cache, lru_cache, partial, wraps
 from types import MappingProxyType
 from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, NamedTuple,
-                    Optional, TextIO, Tuple, TypeVar, Union, cast, overload)
+                    Optional, TextIO, TypeVar, Union, cast, overload)
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -72,6 +72,7 @@ from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
+from vllm.ray.lazy_utils import is_in_ray_actor
 
 if TYPE_CHECKING:
     from argparse import Namespace
@@ -172,6 +173,7 @@ CYAN = '\033[1;36m'
 RESET = '\033[0;0m'
 
 STR_DTYPE_TO_TORCH_DTYPE = {
+    "float32": torch.float32,
     "half": torch.half,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
@@ -686,19 +688,50 @@ class AsyncMicrobatchTokenizer:
         max_length = kwargs.get("max_length")
 
         if not truncation:
-            return ("encode", add_special_tokens, False, None)
+            return "encode", add_special_tokens, False, None
 
         model_max = getattr(self.tokenizer, "model_max_length", None)
         if max_length is None or (model_max is not None
                                   and max_length == model_max):
-            return ("encode", add_special_tokens, True, "model_max")
+            return "encode", add_special_tokens, True, "model_max"
 
-        return ("encode", "other")
+        return "encode", "other"
 
     def __del__(self):
-        for task in self._batcher_tasks:
-            if not task.done():
-                task.cancel()
+        if ((tasks := getattr(self, "_batcher_tasks", None))
+                and (loop := getattr(self, "_loop", None))
+                and not loop.is_closed()):
+
+            def cancel_tasks():
+                for task in tasks:
+                    task.cancel()
+
+            loop.call_soon_threadsafe(cancel_tasks)
+
+
+def cancel_task_threadsafe(task: Task):
+    if task and not task.done():
+        run_in_loop(task.get_loop(), task.cancel)
+
+
+def close_sockets(sockets: Sequence[Union[zmq.Socket, zmq.asyncio.Socket]]):
+    for sock in sockets:
+        if sock is not None:
+            sock.close(linger=0)
+
+
+def run_in_loop(loop: AbstractEventLoop, function: Callable, *args):
+    if in_loop(loop):
+        function(*args)
+    elif not loop.is_closed():
+        loop.call_soon_threadsafe(function, *args)
+
+
+def in_loop(event_loop: AbstractEventLoop) -> bool:
+    try:
+        return asyncio.get_running_loop() == event_loop
+    except RuntimeError:
+        return False
 
 
 def make_async(
@@ -849,7 +882,7 @@ def is_valid_ipv6_address(address: str) -> bool:
         return False
 
 
-def split_host_port(host_port: str) -> Tuple[str, int]:
+def split_host_port(host_port: str) -> tuple[str, int]:
     # ipv6
     if host_port.startswith('['):
         host, port = host_port.rsplit(']', 1)
@@ -1282,6 +1315,11 @@ def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
     )
 
 
+def as_list(maybe_list: Iterable[T]) -> list[T]:
+    """Convert iterable to list, unless it's already a list."""
+    return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
+
+
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -1607,15 +1645,19 @@ def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     return weak_bound
 
 
-# From: https://stackoverflow.com/a/4104188/2749989
 def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
-        if not wrapper.has_run:  # type: ignore[attr-defined]
-            wrapper.has_run = True  # type: ignore[attr-defined]
-            return f(*args, **kwargs)
+        if wrapper.has_run:  # type: ignore[attr-defined]
+            return
+
+        with wrapper.lock:  # type: ignore[attr-defined]
+            if not wrapper.has_run:  # type: ignore[attr-defined]
+                wrapper.has_run = True  # type: ignore[attr-defined]
+                return f(*args, **kwargs)
 
     wrapper.has_run = False  # type: ignore[attr-defined]
+    wrapper.lock = threading.Lock()  # type: ignore[attr-defined]
     return wrapper
 
 
@@ -1657,11 +1699,21 @@ class FlexibleArgumentParser(ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
     _deprecated: set[Action] = set()
+    _json_tip: str = (
+        "When passing JSON CLI arguments, the following sets of arguments "
+        "are equivalent:\n"
+        '   --json-arg \'{"key1": "value1", "key2": {"key3": "value2"}}\'\n'
+        "   --json-arg.key1 value1 --json-arg.key2.key3 value2\n\n"
+        "Additionally, list elements can be passed individually using +:\n"
+        '   --json-arg \'{"key4": ["value3", "value4", "value5"]}\'\n'
+        "   --json-arg.key4+ value3 --json-arg.key4+=\'value4,value5\'\n\n")
 
     def __init__(self, *args, **kwargs):
-        # Set the default 'formatter_class' to SortedHelpFormatter
-        if 'formatter_class' not in kwargs:
-            kwargs['formatter_class'] = SortedHelpFormatter
+        # Set the default "formatter_class" to SortedHelpFormatter
+        if "formatter_class" not in kwargs:
+            kwargs["formatter_class"] = SortedHelpFormatter
+        # Pop kwarg "add_json_tip" to control whether to add the JSON tip
+        self.add_json_tip = kwargs.pop("add_json_tip", True)
         super().__init__(*args, **kwargs)
 
     if sys.version_info < (3, 13):
@@ -1672,8 +1724,9 @@ class FlexibleArgumentParser(ArgumentParser):
                 # Special case warning because the warning below won't trigger
                 # if –-disable-log-requests because its value is default.
                 logger.warning_once(
-                    "argument '--disable-log-requests' is deprecated. This "
-                    "will be removed in v0.12.0.")
+                    "argument '--disable-log-requests' is deprecated and "
+                    "replaced with '--enable-log-requests'. This will be "
+                    "removed in v0.12.0.")
             namespace, args = super().parse_known_args(args, namespace)
             for action in FlexibleArgumentParser._deprecated:
                 if (hasattr(namespace, dest := action.dest)
@@ -1701,6 +1754,14 @@ class FlexibleArgumentParser(ArgumentParser):
             group = self._FlexibleArgumentGroup(self, *args, **kwargs)
             self._action_groups.append(group)
             return group
+
+    def format_help(self) -> str:
+        # Add tip about JSON arguments to the epilog
+        epilog = self.epilog or ""
+        if (self.add_json_tip
+                and not epilog.startswith(FlexibleArgumentParser._json_tip)):
+            self.epilog = FlexibleArgumentParser._json_tip + epilog
+        return super().format_help()
 
     def parse_args(  # type: ignore[override]
         self,
@@ -2501,7 +2562,7 @@ def direct_register_custom_op(
 
 def resolve_obj_by_qualname(qualname: str) -> Any:
     """
-    Resolve an object by its fully qualified name.
+    Resolve an object by its fully-qualified class name.
     """
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
@@ -2833,17 +2894,6 @@ def zmq_socket_ctx(
 
     finally:
         ctx.destroy(linger=linger)
-
-
-def is_in_ray_actor():
-    """Check if we are in a Ray actor."""
-
-    try:
-        import ray
-        return (ray.is_initialized()
-                and ray.get_runtime_context().get_actor_id() is not None)
-    except ImportError:
-        return False
 
 
 def _maybe_force_spawn():
@@ -3202,6 +3252,24 @@ def sha256_cbor_64bit(input) -> int:
     return full_hash & ((1 << 64) - 1)
 
 
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable:
+    """Get a hash function by name, or raise an error if
+    the function is not found.
+    Args:
+        hash_fn_name: Name of the hash function.
+    Returns:
+        A hash function.
+    """
+    if hash_fn_name == "sha256":
+        return sha256
+    if hash_fn_name == "sha256_cbor_64bit":
+        return sha256_cbor_64bit
+    if hash_fn_name == "builtin":
+        return hash
+
+    raise ValueError(f"Unsupported hash function: {hash_fn_name}")
+
+
 def is_torch_equal_or_newer(target: str) -> bool:
     """Check if the installed torch version is >= the target version.
 
@@ -3250,6 +3318,12 @@ def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available."""
 
     return _has_module("deep_gemm")
+
+
+def has_triton_kernels() -> bool:
+    """Whether the optional `triton_kernels` package is available."""
+
+    return _has_module("triton_kernels")
 
 
 def set_process_title(name: str,

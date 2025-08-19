@@ -13,16 +13,16 @@ All scripts accept a positional argument as workspace path for staging the build
 
 ## Usage
 
-### Single-node
-
 ```bash
-bash install_python_libraries.sh
+# for hopper
+TORCH_CUDA_ARCH_LIST="9.0" bash install_python_libraries.sh
+# for blackwell
+TORCH_CUDA_ARCH_LIST="10.0" bash install_python_libraries.sh
 ```
 
-### Multi-node
+Additional step for multi-node deployment:
 
 ```bash
-bash install_python_libraries.sh
 sudo bash configure_system_drivers.sh
 sudo reboot # Reboot is required to load the new driver
 ```

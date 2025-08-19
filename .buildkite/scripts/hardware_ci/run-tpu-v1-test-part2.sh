@@ -4,8 +4,7 @@ set -xu
 
 
 remove_docker_container() { 
-    docker rm -f tpu-test || true; 
-    docker rm -f vllm-tpu || true;
+    docker rm -f tpu-test || true;
 }
 
 trap remove_docker_container EXIT
@@ -129,7 +128,7 @@ run_and_track_test() {
 
 # --- Actual Test Execution ---
 run_and_track_test 1 "test_struct_output_generate.py" \
-    "HF_HUB_DISABLE_XET=1 python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py -k \"not test_structured_output_with_reasoning_matrices\""
+    "python3 -m pytest -s -v /workspace/vllm/tests/v1/entrypoints/llm/test_struct_output_generate.py -k \"not test_structured_output_with_reasoning_matrices\""
 run_and_track_test 2 "test_moe_pallas.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/tpu/test_moe_pallas.py"
 run_and_track_test 3 "test_lora.py" \
@@ -140,6 +139,8 @@ run_and_track_test 5 "test_spmd_model_weight_loading.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_spmd_model_weight_loading.py"
 run_and_track_test 6 "test_kv_cache_update_kernel.py" \
     "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_kv_cache_update_kernel.py"
+run_and_track_test 7 "test_tpu_int8.py" \
+    "python3 -m pytest -s -v /workspace/vllm/tests/v1/tpu/test_tpu_int8.py"
 
 # After all tests have been attempted, exit with the overall status.
 if [ "$overall_script_exit_code" -ne 0 ]; then

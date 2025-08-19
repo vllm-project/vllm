@@ -7,7 +7,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
 QuantizationMethods = Literal[
-    "aqlm",
     "awq",
     "deepspeedfp",
     "tpu_int8",
@@ -37,6 +36,7 @@ QuantizationMethods = Literal[
     "auto-round",
     "rtn",
     "inc",
+    "mxfp4",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -87,7 +87,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     # lazy import to avoid triggering `torch.compile` too early
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
-    from .aqlm import AQLMConfig
     from .auto_round import AutoRoundConfig
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
@@ -110,6 +109,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
+    from .mxfp4 import Mxfp4Config
     from .neuron_quant import NeuronQuantConfig
     from .ptpc_fp8 import PTPCFp8Config
     from .qqq import QQQConfig
@@ -118,7 +118,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .tpu_int8 import Int8TpuConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
-        "aqlm": AQLMConfig,
         "awq": AWQConfig,
         "deepspeedfp": DeepSpeedFPConfig,
         "tpu_int8": Int8TpuConfig,
@@ -148,6 +147,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "auto-round": AutoRoundConfig,
         "rtn": RTNConfig,
         "inc": INCConfig,
+        "mxfp4": Mxfp4Config,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)

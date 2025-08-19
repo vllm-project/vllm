@@ -15,6 +15,7 @@ Cash Donations:
 
 Compute Resources:
 
+- Alibaba Cloud
 - AMD
 - Anyscale
 - AWS

@@ -1,14 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused MoE utilities for GPTQ."""
-import functools
 from typing import Optional
 
 import torch
 
 import vllm._custom_ops as ops
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    moe_align_block_size, try_get_optimal_moe_config)
+from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new, maybe_warn_marlin_atomic_add)
 from vllm.scalar_type import ScalarType, scalar_types
@@ -18,6 +16,8 @@ from vllm.utils import direct_register_custom_op
 def fused_marlin_moe(hidden_states: torch.Tensor,
                      w1: torch.Tensor,
                      w2: torch.Tensor,
+                     bias1: Optional[torch.Tensor],
+                     bias2: Optional[torch.Tensor],
                      w1_scale: torch.Tensor,
                      w2_scale: torch.Tensor,
                      gating_output: torch.Tensor,
@@ -26,6 +26,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
                      quant_type_id: int,
                      apply_router_weight_on_input: bool = False,
                      global_num_experts: int = -1,
+                     activation: Optional[str] = "silu",
                      expert_map: Optional[torch.Tensor] = None,
                      global_scale1: Optional[torch.Tensor] = None,
                      global_scale2: Optional[torch.Tensor] = None,
@@ -88,23 +89,18 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
     assert hidden_states.dtype in [torch.float16, torch.bfloat16]
     assert num_bits in [4, 8]
+    assert topk_weights.dtype == torch.float32
 
     M, K = hidden_states.shape
     E = w1.shape[0]
     N = w2.shape[1] * 16
     topk = topk_ids.shape[1]
 
-    get_config_func = functools.partial(
-        try_get_optimal_moe_config,
-        w1.shape,
-        w2.shape,
-        topk_ids.shape[1],
-        None,
-        is_marlin=True,
-    )
-    config = get_config_func(M)
-
-    block_size_m = config["BLOCK_SIZE_M"]
+    # M block size selection logic
+    # TODO: tune this further for specific models
+    for block_size_m in [8, 16, 32, 48, 64]:
+        if M * topk / E / block_size_m < 0.9:
+            break
 
     if global_num_experts == -1:
         global_num_experts = E
@@ -138,6 +134,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         hidden_states,
         intermediate_cache1,
         w1,
+        bias1,
         w1_scale,
         global_scale1,
         w1_zeros,
@@ -161,8 +158,16 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         use_fp32_reduce=True,
         is_zp_float=False)
 
-    torch.ops._C.silu_and_mul(intermediate_cache2,
-                              intermediate_cache1.view(-1, 2 * N))
+    if activation == "silu":
+        torch.ops._C.silu_and_mul(intermediate_cache2,
+                                  intermediate_cache1.view(-1, 2 * N))
+    elif activation == "swigluoai":
+        # alpha = 1.702, limit = 7.0
+        torch.ops._C.swigluoai_and_mul(intermediate_cache2,
+                                       intermediate_cache1.view(-1, 2 * N))
+    else:
+        raise ValueError(f"Unsupported activation: {activation}. "
+                         "Only silu and swigluoai activations are supported.")
 
     if expert_map is not None:
         intermediate_cache3.zero_()
@@ -171,6 +176,7 @@ def fused_marlin_moe(hidden_states: torch.Tensor,
         intermediate_cache2,
         intermediate_cache3,
         w2,
+        bias2,
         w2_scale,
         global_scale2,
         w2_zeros,

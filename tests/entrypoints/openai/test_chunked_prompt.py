@@ -26,8 +26,6 @@ def server():
         "--enable-chunked-prefill",
         "--max-num-batched-tokens",
         "1000",
-        # large prompts create a lot of output
-        "--disable-log-requests",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

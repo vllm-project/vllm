@@ -216,7 +216,7 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
     from vllm import LLM, SamplingParams
     from qwen_vl_utils import process_vision_info
 
-    model_path = "Qwen/Qwen2.5-VL-3B-Instruct/"
+    model_path = "Qwen/Qwen2.5-VL-3B-Instruct"
     video_path = "https://content.pexels.com/videos/free-videos.mp4"
 
     llm = LLM(

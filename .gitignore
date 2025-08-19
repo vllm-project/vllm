@@ -4,6 +4,9 @@
 # vllm-flash-attn built from source
 vllm/vllm_flash_attn/*
 
+# triton jit 
+.triton
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -147,7 +150,8 @@ venv.bak/
 # mkdocs documentation
 /site
 docs/argparse
-docs/examples
+docs/examples/*
+!docs/examples/README.md
 
 # mypy
 .mypy_cache/
@@ -203,3 +207,6 @@ shellcheck*/
 
 # Ignore moe/marlin_moe gen code
 csrc/moe/marlin_moe_wna16/kernel_*
+
+# Ignore ep_kernels_workspace folder
+ep_kernels_workspace/

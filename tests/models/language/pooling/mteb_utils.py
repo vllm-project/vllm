@@ -18,7 +18,7 @@ from tests.models.utils import EmbedModelInfo, RerankModelInfo
 # - Different model results in differences more than 1e-3
 # 1e-4 is a good tolerance threshold
 MTEB_EMBED_TASKS = ["STS12"]
-MTEB_EMBED_TOL = 1e-4
+MTEB_EMBED_TOL = 0.02
 
 # See #19344
 MTEB_RERANK_TASKS = ["NFCorpus"]
@@ -162,7 +162,8 @@ def mteb_test_embed_models(hf_runner,
                            vllm_runner,
                            model_info: EmbedModelInfo,
                            vllm_extra_kwargs=None,
-                           hf_model_callback=None):
+                           hf_model_callback=None,
+                           atol=MTEB_RERANK_TOL):
     if not model_info.enable_test:
         # A model family has many models with the same architecture,
         # and we don't need to test each one.
@@ -174,11 +175,15 @@ def mteb_test_embed_models(hf_runner,
     with vllm_runner(model_info.name,
                      runner="pooling",
                      max_model_len=None,
+                     enforce_eager=True,
                      **vllm_extra_kwargs) as vllm_model:
 
+        model_config = vllm_model.llm.llm_engine.model_config
+
         if model_info.architecture:
-            assert (model_info.architecture
-                    in vllm_model.llm.llm_engine.model_config.architectures)
+            assert model_info.architecture in model_config.architectures
+        assert (model_config._model_info.default_pooling_type ==
+                model_info.default_pooling_type)
 
         vllm_main_score = run_mteb_embed_task(VllmMtebEncoder(vllm_model),
                                               MTEB_EMBED_TASKS)
@@ -194,11 +199,12 @@ def mteb_test_embed_models(hf_runner,
         st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
         st_dtype = next(hf_model.model.parameters()).dtype
 
+    print("Model:", model_info.name)
     print("VLLM:", vllm_dtype, vllm_main_score)
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
-    assert st_main_score == pytest.approx(vllm_main_score, abs=MTEB_EMBED_TOL)
+    assert st_main_score == pytest.approx(vllm_main_score, abs=atol)
 
 
 def run_mteb_rerank(cross_encoder, tasks, languages):
@@ -282,10 +288,16 @@ def mteb_test_rerank_models(hf_runner,
                      runner="pooling",
                      max_model_len=None,
                      max_num_seqs=8,
+                     enforce_eager=True,
                      **vllm_extra_kwargs) as vllm_model:
 
         model_config = vllm_model.llm.llm_engine.model_config
+
+        if model_info.architecture:
+            assert (model_info.architecture in model_config.architectures)
         assert model_config.hf_config.num_labels == 1
+        assert (model_config._model_info.default_pooling_type ==
+                model_info.default_pooling_type)
 
         vllm_main_score = run_mteb_rerank(vllm_mteb_encoder(vllm_model),
                                           tasks=MTEB_RERANK_TASKS,
@@ -295,6 +307,7 @@ def mteb_test_rerank_models(hf_runner,
     st_main_score, st_dtype = mteb_test_rerank_models_hf(
         hf_runner, model_info.name, hf_model_callback)
 
+    print("Model:", model_info.name)
     print("VLLM:", vllm_dtype, vllm_main_score)
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)

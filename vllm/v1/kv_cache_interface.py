@@ -182,14 +182,15 @@ class SlidingWindowSpec(AttentionSpec):
 @dataclass(frozen=True)
 class MambaSpec(KVCacheSpec):
     shapes: tuple[tuple[int, ...], ...]
-    dtype: torch.dtype
+    dtypes: tuple[torch.dtype]
     page_size_padded: Optional[int] = None
     mamba_type: str = "mamba2"
 
     @property
     def page_size_bytes(self) -> int:
-        num_elements = sum(prod(shape) for shape in self.shapes)
-        page_size = num_elements * get_dtype_size(self.dtype)
+        page_size = sum(
+            prod(shape) * get_dtype_size(dtype)
+            for (shape, dtype) in zip(self.shapes, self.dtypes))
         if self.page_size_padded is not None:
             assert self.page_size_padded >= page_size
             return self.page_size_padded

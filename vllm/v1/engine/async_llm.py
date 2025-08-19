@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import time
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, Optional, Union
 
@@ -27,7 +27,8 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device, cdiv, deprecate_kwargs
+from vllm.utils import (Device, as_list, cancel_task_threadsafe, cdiv,
+                        deprecate_kwargs)
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -57,6 +58,7 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
         stat_loggers: Optional[list[StatLoggerFactory]] = None,
         client_addresses: Optional[dict[str, str]] = None,
+        client_count: int = 1,
         client_index: int = 0,
     ) -> None:
         """
@@ -120,6 +122,7 @@ class AsyncLLM(EngineClient):
             executor_class=executor_class,
             log_stats=self.log_stats,
             client_addresses=client_addresses,
+            client_count=client_count,
             client_index=client_index,
         )
 
@@ -156,6 +159,7 @@ class AsyncLLM(EngineClient):
             enable_log_requests: bool = False,
             disable_log_stats: bool = False,
             client_addresses: Optional[dict[str, str]] = None,
+            client_count: int = 1,
             client_index: int = 0,
             disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLM":
@@ -176,6 +180,7 @@ class AsyncLLM(EngineClient):
             log_stats=not disable_log_stats,
             usage_context=usage_context,
             client_addresses=client_addresses,
+            client_count=client_count,
             client_index=client_index,
         )
 
@@ -215,8 +220,7 @@ class AsyncLLM(EngineClient):
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
 
-        if handler := getattr(self, "output_handler", None):
-            handler.cancel()
+        cancel_task_threadsafe(getattr(self, "output_handler", None))
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return await self.engine_core.get_supported_tasks_async()
@@ -428,14 +432,16 @@ class AsyncLLM(EngineClient):
 
         self.output_handler = asyncio.create_task(output_handler())
 
-    async def abort(self, request_id: str) -> None:
+    async def abort(self, request_id: Union[str, Iterable[str]]) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
-        request_ids = self.output_processor.abort_requests((request_id, ))
-        await self.engine_core.abort_requests_async(request_ids)
+        request_ids = (request_id, ) if isinstance(
+            request_id, str) else as_list(request_id)
+        all_request_ids = self.output_processor.abort_requests(request_ids)
+        await self.engine_core.abort_requests_async(all_request_ids)
 
         if self.log_requests:
-            logger.info("Aborted request %s.", request_id)
+            logger.info("Aborted request(s) %s.", ",".join(request_ids))
 
     async def encode(
         self,
@@ -562,7 +568,7 @@ class AsyncLLM(EngineClient):
         await self.engine_core.profile_async(False)
 
     async def reset_mm_cache(self) -> None:
-        self.processor.mm_registry.reset_processor_cache()
+        self.processor.mm_registry.reset_processor_cache(self.model_config)
         self.processor.mm_input_cache_client.reset()
         await self.engine_core.reset_mm_cache_async()
 
@@ -573,6 +579,7 @@ class AsyncLLM(EngineClient):
         await self.engine_core.reset_prefix_cache_async()
 
     async def sleep(self, level: int = 1) -> None:
+        await self.reset_prefix_cache()
         await self.engine_core.sleep_async(level)
 
     async def wake_up(self, tags: Optional[list[str]] = None) -> None:

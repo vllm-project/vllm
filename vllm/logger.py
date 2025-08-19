@@ -102,6 +102,14 @@ class _VllmLogger(Logger):
         _print_warning_once(self, msg, *args)
 
 
+# Pre-defined methods mapping to avoid repeated dictionary creation
+_METHODS_TO_PATCH = {
+    "debug_once": _print_debug_once,
+    "info_once": _print_info_once,
+    "warning_once": _print_warning_once,
+}
+
+
 def _configure_vllm_root_logger() -> None:
     logging_config = dict[str, Any]()
 
@@ -144,13 +152,7 @@ def init_logger(name: str) -> _VllmLogger:
 
     logger = logging.getLogger(name)
 
-    methods_to_patch = {
-        "debug_once": _print_debug_once,
-        "info_once": _print_info_once,
-        "warning_once": _print_warning_once,
-    }
-
-    for method_name, method in methods_to_patch.items():
+    for method_name, method in _METHODS_TO_PATCH.items():
         setattr(logger, method_name, MethodType(method, logger))
 
     return cast(_VllmLogger, logger)

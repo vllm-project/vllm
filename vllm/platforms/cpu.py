@@ -91,8 +91,8 @@ class CpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+                             block_size: int, use_v1: bool, use_mla: bool,
+                             has_sink: bool) -> str:
         if selected_backend and selected_backend != _Backend.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:
@@ -268,7 +268,7 @@ class CpuPlatform(Platform):
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
     @classmethod
-    def get_allowed_cpu_memory_node_list(
+    def get_allowed_cpu_core_node_list(
             cls) -> tuple[list[int], list[LogicalCPUInfo]]:
         assert platform.system() == "Linux"
 
@@ -332,5 +332,6 @@ class CpuPlatform(Platform):
         supplied model configuration.
         """
         arch = cls.get_cpu_architecture()
-        return (cls.supports_v1(model_config) and arch
-                in (CpuArchEnum.X86, CpuArchEnum.POWERPC, CpuArchEnum.ARM))
+        return (cls.supports_v1(model_config)
+                and arch in (CpuArchEnum.X86, CpuArchEnum.POWERPC,
+                             CpuArchEnum.ARM, CpuArchEnum.S390X))

@@ -271,11 +271,20 @@ def _support_torch_compile(
             # of symbolic shape guards can improve guard overhead. But, since
             # vllm skip guards anyways, setting this flag to False can improve
             # compile time.
-            with torch._dynamo.config.patch("enable_cpp_symbolic_shape_guards",
-                                            False), patch.object(
-                                                InliningInstructionTranslator,
-                                                'inline_call',
-                                                patched_inline_call):
+            dynamo_config_patches = {}
+            try:
+                _ = torch._dynamo.config.enable_cpp_symbolic_shape_guards
+                dynamo_config_patches[
+                    "enable_cpp_symbolic_shape_guards"] = False
+            except AttributeError:
+                # Note: this config is not available in torch 2.6, we can skip
+                # if the config doesn't exist
+                logger.debug(
+                    "enable_cpp_symbolic_shape_guards config not available")
+
+            with patch.object(InliningInstructionTranslator, 'inline_call',
+                              patched_inline_call), torch._dynamo.config.patch(
+                                  **dynamo_config_patches):
                 output = self.compiled_callable(*args, **kwargs)
             return output
 

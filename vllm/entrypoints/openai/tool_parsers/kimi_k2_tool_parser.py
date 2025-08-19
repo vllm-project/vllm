@@ -38,15 +38,15 @@ class KimiK2ToolParser(ToolParser):
         self.tool_call_end_token: str = "<|tool_call_end|>"
 
         self.tool_call_regex = re.compile(
-            r"<\|tool_call_begin\|>\s*(?P<tool_call_id>[\w\.]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>.*?)\s*<\|tool_call_end\|>"
+            r"<\|tool_call_begin\|>\s*(?P<tool_call_id>.+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>.*?)\s*<\|tool_call_end\|>"
         )
 
         self.stream_tool_call_portion_regex = re.compile(
-            r"(?P<tool_call_id>[\w\.]+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>.*)"
+            r"(?P<tool_call_id>.+:\d+)\s*<\|tool_call_argument_begin\|>\s*(?P<function_arguments>.*)"
         )
 
         self.stream_tool_call_name_regex = re.compile(
-            r"(?P<tool_call_id>[\w\.]+:\d+)\s*")
+            r"(?P<tool_call_id>.+:\d+)\s*")
 
         if not self.model_tokenizer:
             raise ValueError(

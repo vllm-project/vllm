@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
+from typing import (TYPE_CHECKING, Any, ClassVar, Literal, Optional, Protocol,
                     Union, overload, runtime_checkable)
 
 import torch
@@ -14,6 +14,10 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.pooler import Pooler
     from vllm.model_executor.sampling_metadata import SamplingMetadata
+else:
+    VllmConfig = Any
+    Pooler = Any
+    SamplingMetadata = Any
 
 logger = init_logger(__name__)
 
@@ -34,7 +38,7 @@ class VllmModel(Protocol[T_co]):
 
     def __init__(
         self,
-        vllm_config: "VllmConfig",
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         ...
@@ -96,7 +100,7 @@ class VllmModelForTextGeneration(VllmModel[T], Protocol[T]):
     def compute_logits(
         self,
         hidden_states: T,
-        sampling_metadata: "SamplingMetadata",
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[T]:
         """Return `None` if TP rank > 0."""
         ...
@@ -140,7 +144,7 @@ class VllmModelForPooling(VllmModel[T_co], Protocol[T_co]):
         MRO of your model class.
     """
 
-    pooler: "Pooler"
+    pooler: Pooler
     """The pooler is only called on TP rank 0."""
 
 

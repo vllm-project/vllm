@@ -297,7 +297,7 @@ class CustomAllreduce:
     @staticmethod
     def free_shared_buffer(pointers: list[int],
                            group: Optional[ProcessGroup] = None,
-                           rank: Optional[int] = 0) -> None:
+                           rank: Optional[int] = None) -> None:
         if rank is None:
             rank = dist.get_rank(group=group)
         if ops is not None:

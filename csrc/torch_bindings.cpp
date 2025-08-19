@@ -130,6 +130,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("fatrelu_and_mul(Tensor! out, Tensor input, float threshold) -> ()");
   ops.impl("fatrelu_and_mul", torch::kCUDA, &fatrelu_and_mul);
 
+  ops.def(
+      "swigluoai_and_mul(Tensor! out, Tensor input, float alpha=1.702, float "
+      "limit=7.0) "
+      "-> ()");
+  ops.impl("swigluoai_and_mul", torch::kCUDA, &swigluoai_and_mul);
+
   // GELU implementation used in GPT-2.
   ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_new", torch::kCUDA, &gelu_new);
@@ -141,25 +147,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Quick GELU implementation.
   ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_quick", torch::kCUDA, &gelu_quick);
-
-  // prepare_inputs advance_step
-  ops.def(
-      "advance_step_flashattn(int num_seqs, int num_queries, int block_size, "
-      "Tensor! input_tokens, Tensor sampled_token_ids, "
-      "Tensor! input_positions, Tensor! seq_lens, Tensor! slot_mapping, "
-      "Tensor block_tables) -> ()");
-  ops.impl("advance_step_flashattn", torch::kCUDA, &advance_step_flashattn);
-
-  ops.def(
-      "advance_step_flashinfer("
-      "    int num_seqs, int num_queries, int block_size,"
-      "    Tensor! input_tokens, Tensor sampled_token_ids,"
-      "    Tensor! input_positions, Tensor! seq_lens, Tensor! slot_mapping,"
-      "    Tensor block_tables, Tensor! paged_kv_indices,"
-      "    Tensor! paged_kv_indptr, Tensor! paged_kv_last_page_len,"
-      "    Tensor! block_table_bounds"
-      ") -> ()");
-  ops.impl("advance_step_flashinfer", torch::kCUDA, &advance_step_flashinfer);
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
@@ -226,21 +213,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Quantization ops
 #ifndef USE_ROCM
-  // Quantized GEMM for AQLM.
-  ops.def(
-      "aqlm_gemm(Tensor input, Tensor codes, Tensor codebooks, "
-      "Tensor scales, int[] codebook_partition_sizes, Tensor? bias) "
-      "-> Tensor",
-      {stride_tag});
-  ops.impl("aqlm_gemm", torch::kCUDA, &aqlm_gemm);
-
-  // Decompression method for AQLM.
-  ops.def(
-      "aqlm_dequant(Tensor codes, Tensor codebooks, "
-      "int[] codebook_partition_sizes) -> Tensor",
-      {stride_tag});
-  ops.impl("aqlm_dequant", torch::kCUDA, &aqlm_dequant);
-
   // Quantized GEMM for AWQ.
   ops.def(
       "awq_gemm(Tensor _in_feats, Tensor _kernel, Tensor _scaling_factors, "
@@ -326,6 +298,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // gptq_marlin Optimized Quantized GEMM for GPTQ.
   ops.def(
       "gptq_marlin_gemm(Tensor a, Tensor? c_or_none, Tensor b_q_weight, "
+      "Tensor? b_bias_or_none,"
       "Tensor b_scales, Tensor? global_scale, Tensor? b_zeros_or_none, Tensor? "
       "g_idx_or_none, Tensor? perm_or_none, Tensor workspace, int b_q_type, "
       "SymInt size_m, SymInt size_n, SymInt size_k, bool is_k_full, "

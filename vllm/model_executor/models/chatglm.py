@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from
-# https://github.com/THUDM/ChatGLM2-6B
+# https://github.com/zai-org/ChatGLM2-6B
 """Inference-only ChatGLM model compatible with THUDM weights."""
 import json
 from collections.abc import Iterable
@@ -86,10 +86,10 @@ class GLMAttention(nn.Module):
             prefix=f"{prefix}.dense",
         )
 
-        # https://huggingface.co/THUDM/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
+        # https://huggingface.co/zai-org/chatglm3-6b-32k/blob/e210410255278dd9d74463cf396ba559c0ef801c/modeling_chatglm.py#L141
         rope_ratio = getattr(config, "rope_ratio", 1.0)
         max_positions = getattr(config, "seq_length", 8192)
-        # NOTE: THUDM/cogagent-9b-20241220 uses original_rope=False,
+        # NOTE: zai-org/cogagent-9b-20241220 uses original_rope=False,
         # which is equivalent to is_neox_style=True
         is_neox_style = not config.original_rope
         self.rotary_emb = get_rope(

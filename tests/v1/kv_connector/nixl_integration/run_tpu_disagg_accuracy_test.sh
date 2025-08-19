@@ -63,7 +63,6 @@ launch_baseline() {
       --seed 42 \
       --block-size ${BLOCK_SIZE} \
       --gpu-memory-utilization 0.5 \
-      --disable-log-requests \
       --enforce-eager"
   echo ${BASELINE_BASE_CMD}
   ssh -tt ${BASELINE_HOST} "${BASELINE_BASE_CMD}" &
@@ -87,7 +86,6 @@ launch_pd() {
       --block-size ${BLOCK_SIZE} \
       --enforce-eager \
       --gpu-memory-utilization 0.5 \
-      --disable-log-requests \
       --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}'"
 
 
@@ -106,7 +104,6 @@ launch_pd() {
       --block-size ${BLOCK_SIZE} \
       --enforce-eager \
       --gpu-memory-utilization 0.5 \
-      --disable-log-requests \
       --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}'"
 
   echo ${PREFILL_BASE_CMD}

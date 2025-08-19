@@ -3,24 +3,18 @@
 
 from contextlib import nullcontext
 from typing import Optional, cast
-from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-import torch
 
 from vllm.config import ModelConfig
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargs,
-                                    MultiModalKwargsItem,
-                                    MultiModalSharedField)
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.multimodal.processing import (PlaceholderFeaturesInfo,
-                                        ProcessingCache, PromptIndexTargets,
-                                        PromptInsertion, PromptReplacement,
-                                        apply_text_matches,
+                                        PromptIndexTargets, PromptInsertion,
+                                        PromptReplacement, apply_text_matches,
                                         apply_token_matches,
                                         find_mm_placeholders,
                                         find_text_matches, find_token_matches,
@@ -903,45 +897,6 @@ def test_find_mm_placeholders(
     assert result == expected
 
 
-def _dummy_elem(modality: str, key: str, size: int):
-    return MultiModalFieldElem(
-        modality=modality,
-        key=key,
-        data=torch.empty((size, ), dtype=torch.int8),
-        field=MultiModalSharedField(1),
-    )
-
-
-def _dummy_item(modality: str, size_by_key: dict[str, int]):
-    return MultiModalKwargsItem.from_elems([
-        _dummy_elem(modality, key, size) for key, size in size_by_key.items()
-    ])
-
-
-def _dummy_kw(size_by_key_modality: dict[str, dict[str, int]]):
-    return MultiModalKwargs.from_items([
-        _dummy_item(modality, size_by_key)
-        for modality, size_by_key in size_by_key_modality.items()
-    ])
-
-
-# yapf: disable
-@pytest.mark.parametrize(
-    ("item", "expected_size"),
-    [
-        (_dummy_item("a", {"a1": 100}), 100),
-        (_dummy_item("a", {"a1": 100, "a2": 110}), 210),
-        (_dummy_kw({"a": {"a1": 100, "a2": 110}, "b": {"b1": 120, "b2": 130}}), 460),  # noqa: E501
-    ],
-)
-# yapf: enable
-def test_cache_item_size(item, expected_size):
-    cache = ProcessingCache.get_lru_cache(2048, type(item))
-    cache[""] = item
-
-    assert cache.currsize == expected_size
-
-
 @pytest.mark.parametrize("model_id", ["llava-hf/llava-v1.6-mistral-7b-hf"])
 @pytest.mark.parametrize(
     ("limit", "num_supported", "is_valid"),
@@ -957,15 +912,14 @@ def test_limit_mm_per_prompt_dummy(model_id, limit, num_supported, is_valid):
     )
 
     processor = MULTIMODAL_REGISTRY.create_processor(model_config)
-    profiler = MultiModalProfiler(processor)
+    processor._supported_mm_limits = {"image": num_supported}
 
-    mock_supported_mm_limits = MagicMock(return_value={"image": num_supported})
-    processor.info.get_supported_mm_limits = mock_supported_mm_limits
+    profiler = MultiModalProfiler(processor)
 
     if is_valid:
         exc_ctx = nullcontext()
     else:
-        exc_ctx = pytest.raises(ValueError, match="The model only supports")
+        exc_ctx = pytest.raises(ValueError, match="At most")
 
     with exc_ctx:
         profiler.get_decoder_dummy_data(
@@ -1002,7 +956,7 @@ def test_limit_mm_per_prompt_apply(model_id, num_images, limit, is_valid):
     if is_valid:
         exc_ctx = nullcontext()
     else:
-        exc_ctx = pytest.raises(ValueError, match=f"passed {num_images} image")
+        exc_ctx = pytest.raises(ValueError, match="At most")
 
     with exc_ctx:
         processor.apply(

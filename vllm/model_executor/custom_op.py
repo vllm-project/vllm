@@ -5,7 +5,7 @@ from typing import Optional
 
 import torch.nn as nn
 
-from vllm.config import get_current_vllm_config
+from vllm.config import get_cached_compilation_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -86,7 +86,7 @@ class CustomOp(nn.Module):
     def dispatch_forward(self):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
-        compilation_config = get_current_vllm_config().compilation_config
+        compilation_config = get_cached_compilation_config()
         enabled = self.enabled()
         if enabled:
             compilation_config.enabled_custom_ops.update([self.__class__.name])
@@ -115,7 +115,7 @@ class CustomOp(nn.Module):
     @classmethod
     def enabled(cls) -> bool:
         # if no name, then it was not registered
-        compilation_config = get_current_vllm_config().compilation_config
+        compilation_config = get_cached_compilation_config()
         custom_ops = compilation_config.custom_ops
         if not hasattr(cls, "name"):
             logger.warning_once(
@@ -138,7 +138,7 @@ class CustomOp(nn.Module):
         Specifying 'all' or 'none' in custom_op takes precedence.
         """
         from vllm.config import CompilationLevel
-        compilation_config = get_current_vllm_config().compilation_config
+        compilation_config = get_cached_compilation_config()
         default_on = (compilation_config.level < CompilationLevel.PIECEWISE
                       or not compilation_config.use_inductor)
         count_none = compilation_config.custom_ops.count("none")
