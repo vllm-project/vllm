@@ -1154,23 +1154,6 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
                 num_images=args.random_mm_images_per_request,
-                limit_images_per_prompt=args.random_mm_limit_images_per_request,
-                width=args.random_mm_width,
-                height=args.random_mm_height,
-                num_images_range_ratio=args.random_mm_images_per_request_range_ratio,
-                dimension_range_ratio=args.random_mm_dimension_range_ratio,
-            ),
-            "random-mm":
-            lambda: RandomMultiModalDataset(
-                random_seed=args.seed, dataset_path=args.dataset_path
-            ).sample(
-                tokenizer=tokenizer,
-                num_requests=args.num_prompts,
-                prefix_len=args.random_prefix_len,
-                range_ratio=args.random_range_ratio,
-                input_len=args.random_input_len,
-                output_len=args.random_output_len,
-                num_images=args.random_mm_images_per_request,
                 width=args.random_mm_width,
                 height=args.random_mm_height,
                 num_images_range_ratio=args.random_mm_images_per_request_range_ratio,
