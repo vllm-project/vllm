@@ -14,7 +14,7 @@ from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.request import StructuredOutputRequest
@@ -158,7 +158,6 @@ def test_schedule_partial_requests():
         # Only the first request has a sampled token id because
         # the rest requests are still being prefilled.
         sampled_token_ids=[[0], [], []],
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -209,7 +208,6 @@ def test_no_mm_input_chunking():
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
         sampled_token_ids=[[] for _ in range(len(requests))],
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -273,7 +271,6 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
         sampled_token_ids=[[] for _ in range(len(requests))],
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -298,7 +295,6 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
         sampled_token_ids=[[0], [0]] + [[] for _ in range(len(requests) - 2)],
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -355,7 +351,6 @@ def test_stop_via_update_from_output():
         sampled_token_ids=[[EOS_TOKEN_ID],
                            [10,
                             11]],  # First request hits EOS, second continues
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[])
@@ -409,7 +404,6 @@ def test_stop_via_update_from_output():
         },
         sampled_token_ids=[[10, 42, 12],
                            [13, 14]],  # First request hits stop token
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[])
@@ -462,7 +456,6 @@ def test_stop_via_update_from_output():
         },
         sampled_token_ids=[[10, 11, 12],
                            [13]],  # First request exceeds max_tokens
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[])
@@ -505,7 +498,6 @@ def test_stop_via_update_from_output():
         req_ids=[requests[0].request_id],
         req_id_to_index={requests[0].request_id: 0},
         sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[])
@@ -554,7 +546,6 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
         req_ids=[requests[0].request_id],
         req_id_to_index={requests[0].request_id: 0},
         sampled_token_ids=[[0]],
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -572,7 +563,6 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
         req_ids=[requests[1].request_id],
         req_id_to_index={requests[1].request_id: 0},
         sampled_token_ids=[[0]],
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -608,7 +598,6 @@ def test_preempt_during_execution():
         req_ids=[requests[0].request_id],
         req_id_to_index={requests[0].request_id: 0},
         sampled_token_ids=[[0]],
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -626,7 +615,6 @@ def test_preempt_during_execution():
         req_ids=[requests[1].request_id],
         req_id_to_index={requests[1].request_id: 0},
         sampled_token_ids=[[42]],
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -682,13 +670,14 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         req_ids=req_ids,
         req_id_to_index=req_to_index,
         sampled_token_ids=[[0] for _ in range(len(requests))],
-        spec_token_ids=spec_tokens,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
     )
     engine_core_outputs = scheduler.update_from_output(output,
                                                        model_runner_output)
+    draft_token_ids = DraftTokenIds(req_ids, spec_tokens)
+    scheduler.update_draft_token_ids(draft_token_ids)
 
     for i in range(len(requests)):
         running_req = scheduler.running[i]
@@ -722,7 +711,6 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         req_ids=req_ids,
         req_id_to_index=req_to_index,
         sampled_token_ids=output_tokens,
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -851,7 +839,6 @@ def test_kv_connector_basic():
         req_ids=req_ids,
         req_id_to_index=req_to_index,
         sampled_token_ids=[[1000]] * len(req_ids),
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -898,7 +885,6 @@ def test_kv_connector_basic():
         req_ids=req_ids,
         req_id_to_index=req_to_index,
         sampled_token_ids=[[1000]] * len(req_ids),
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -966,7 +952,6 @@ def test_kv_connector_unable_to_allocate():
         req_ids=req_ids,
         req_id_to_index=req_to_index,
         sampled_token_ids=[[1000]] * len(req_ids),
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -1048,7 +1033,6 @@ def test_kv_connector_handles_preemption():
         req_ids=req_ids,
         req_id_to_index=req_to_index,
         sampled_token_ids=[[1000]] * len(req_ids),
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -1142,7 +1126,6 @@ def make_output(scheduler: Scheduler):
             for i, req in enumerate(scheduler.running)
         },
         sampled_token_ids=[[1000]] * len(scheduler.running),
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -1468,7 +1451,6 @@ def test_priority_scheduling_preemption():
             for i, req in enumerate(low_priority_requests)
         },
         sampled_token_ids=[[100] for _ in low_priority_requests],
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -1541,7 +1523,6 @@ def test_priority_scheduling_no_preemption_when_space_available():
             for i, req in enumerate(low_priority_requests)
         },
         sampled_token_ids=[[100] for _ in low_priority_requests],
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -1783,7 +1764,6 @@ def test_priority_scheduling_heap_property():
                 req_ids=[req.req_id],
                 req_id_to_index={req.req_id: 0},
                 sampled_token_ids=[[100]],
-                spec_token_ids=None,
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=[],

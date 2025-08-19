@@ -3559,7 +3559,7 @@ class VllmConfig:
             self.compilation_config.cudagraph_num_of_warmups = 1
             self.compilation_config.set_splitting_ops_for_v1()
 
-        if current_platform.is_cuda_alike():
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
             # if cudagraph_mode is not explicitly set by users, set default
             # value
             if self.compilation_config.cudagraph_mode is None:
