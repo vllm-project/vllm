@@ -28,7 +28,8 @@ from vllm.tasks import SupportedTask
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
+                             ModelRunnerOutput)
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
@@ -385,6 +386,9 @@ class Worker(WorkerBase):
 
         assert isinstance(output, ModelRunnerOutput)
         return output
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        return self.model_runner.take_draft_token_ids()
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:

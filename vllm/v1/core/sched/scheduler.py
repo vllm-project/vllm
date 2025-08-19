@@ -30,7 +30,7 @@ from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -141,7 +141,6 @@ class Scheduler(SchedulerInterface):
             cache_size=encoder_cache_size)
 
         speculative_config = vllm_config.speculative_config
-
         self.use_eagle = False
         self.num_spec_tokens = self.num_lookahead_tokens = 0
         if speculative_config:
@@ -760,7 +759,6 @@ class Scheduler(SchedulerInterface):
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
-        spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
@@ -845,19 +843,8 @@ class Scheduler(SchedulerInterface):
                 request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids)
 
-            # spec_token_ids comes from the model runner output
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
-
-            # Add newly generated spec token ids to the request.
-            if spec_token_ids is not None:
-                if self.structured_output_manager.should_advance(request):
-                    metadata = request.structured_output_request
-                    # Needs to happen after new_token_ids are accepted.
-                    request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
-                        spec_token_ids[req_index])
-                else:
-                    request.spec_token_ids = spec_token_ids[req_index]
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
@@ -962,6 +949,30 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 self.encoder_cache_manager.free_encoder_input(
                     request, input_id)
+
+    def update_draft_token_ids(
+        self,
+        draft_token_ids: DraftTokenIds,
+    ) -> None:
+        for req_id, spec_token_ids in zip(
+                draft_token_ids.req_ids,
+                draft_token_ids.draft_token_ids,
+        ):
+            request = self.requests.get(req_id)
+            if request is None or request.is_finished():
+                # The request may have been finished. Skip.
+                continue
+
+            # Add newly generated spec token ids to the request.
+            if not spec_token_ids:
+                # NOTE(woosuk): request.spec_token_ids should be updated.
+                request.spec_token_ids.clear()
+            elif self.structured_output_manager.should_advance(request):
+                metadata = request.structured_output_request
+                request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
+                    spec_token_ids)
+            else:
+                request.spec_token_ids = spec_token_ids
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
