@@ -1471,7 +1471,7 @@ class OpenAIServingChat(OpenAIServing):
         engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
 
         # Add cache_salt if provided in the request
-        if hasattr(request, "cache_salt") and request.cache_salt is not None:
+        if request.cache_salt is not None:
             engine_prompt["cache_salt"] = request.cache_salt
 
         return messages, [prompt_token_ids], [engine_prompt]
