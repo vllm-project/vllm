@@ -720,6 +720,7 @@ fahrenheit
     assert state["name"] == "get_current_weather"
 
     # Verify arguments were parsed correctly despite missing closing tag
+    assert state["arguments"] is not None
     args = json.loads(state["arguments"])
     assert args["city"] == "Dallas"
     assert args["state"] == "TX"
