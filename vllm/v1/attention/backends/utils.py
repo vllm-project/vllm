@@ -158,18 +158,21 @@ class AttentionCGSupport(enum.Enum):
     Here we do not consider the cascade attention, as currently
     it is never cudagraph supported."""
 
+    ALWAYS = 3
+    """Cudagraph always supported; supports mixed-prefill-decode"""
+    UNIFORM_BATCH = 2
+    """Cudagraph supported for batches the only contain query lengths that are
+    the same, this can be used for spec-decode 
+        i.e. "decodes" are 1 + num_speculative_tokens"""
+    UNIFORM_SINGLE_TOKEN_DECODE = 1
+    """Cudagraph supported for batches the only contain query_len==1 decodes"""
     NEVER = 0
     """NO cudagraph support"""
-    PURE_DECODE_ONLY = 1
-    """Cudagraph supported for pure decode, need to run without
-    cudagraph for mixed prefill-decode batches"""
-    ALWAYS = 2
-    """Cudagraph always supported"""
 
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
-    # Does this backend/builder support CUDA Graphs for attention.
-    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+    # Does this backend/builder support CUDA Graphs for attention (default: no).
+    cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.NEVER
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
@@ -198,13 +201,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
                 result of a build call may only be used for few layers/iters.
         """
         raise NotImplementedError
-
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        """
-        Can this batch (with given metadata) use CUDA Graphs for attention.
-        """
-        return False
 
     def build_for_cudagraph_capture(
             self, common_attn_metadata: CommonAttentionMetadata) -> M:
@@ -252,19 +248,23 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
 
 @functools.lru_cache
 def get_kv_cache_layout():
+    # Format specified by the code.
     global _KV_CACHE_LAYOUT_OVERRIDE
-    # Override with format specified by the user.
+
+    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
+        cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
+        logger.info_once("`_KV_CACHE_LAYOUT_OVERRIDE` variable detected. " \
+                         "Setting KV cache layout to %s.", cache_layout)
+        return cache_layout
+
+    # Format specified by the user.
     cache_layout = envs.VLLM_KV_CACHE_LAYOUT
+    # When neither the user nor the override specified a layout, get default
     if cache_layout is None:
-        if envs.VLLM_USE_TRTLLM_ATTENTION:
-            cache_layout = "HND"
-        else:
-            cache_layout = get_kv_connector_cache_layout()
+        cache_layout = get_kv_connector_cache_layout()
     else:
         logger.info_once("`VLLM_KV_CACHE_LAYOUT` environment variable " \
         "detected. Setting KV cache layout to %s.", cache_layout)
-    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
-        cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
     return cache_layout
 
 
