@@ -54,8 +54,7 @@ class Request:
             time.time()
 
         self.status = RequestStatus.WAITING
-        if sampling_params and sampling_params.guided_decoding is not None:
-            self.status = RequestStatus.WAITING_FOR_FSM
+        self.use_structured_output = False
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
 
@@ -63,12 +62,15 @@ class Request:
         self.kv_transfer_params: Optional[dict[str, Any]] = None
 
         if pooling_params is not None:
+            # Pooling models.
             self.max_tokens = 1
         elif sampling_params is not None:
+            # Generative models.
             assert sampling_params.max_tokens is not None
             self.max_tokens = sampling_params.max_tokens
             if sampling_params.guided_decoding is not None:
                 self.status = RequestStatus.WAITING_FOR_FSM
+                self.use_structured_output = True
 
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = \
@@ -125,14 +127,17 @@ class Request:
         block_hasher: Optional[Callable[["Request"], list["BlockHash"]]]
     ) -> "Request":
         if request.mm_kwargs is not None:
-            assert is_list_of(request.mm_kwargs, MultiModalKwargsItem), (
+            mm_kwargs_lst = list(request.mm_kwargs)
+            assert is_list_of(mm_kwargs_lst, MultiModalKwargsItem), (
                 "mm_kwargs was not updated in EngineCore.add_request")
+        else:
+            mm_kwargs_lst = None
 
         return cls(
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
-            multi_modal_kwargs=request.mm_kwargs,
+            multi_modal_kwargs=mm_kwargs_lst,
             multi_modal_hashes=request.mm_hashes,
             multi_modal_placeholders=request.mm_placeholders,
             sampling_params=request.sampling_params,
@@ -188,11 +193,6 @@ class Request:
         assert input_id < len(self.mm_positions)
         num_tokens = self.mm_positions[input_id].length
         return num_tokens
-
-    @property
-    def use_structured_output(self) -> bool:
-        return self.sampling_params is not None and \
-            self.sampling_params.guided_decoding is not None
 
     def record_event(
         self,

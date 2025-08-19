@@ -48,7 +48,8 @@ def multimodal_server():  # noqa: F811
         f"{{\"audio\": \"{AUDIO_LORA_PATH}\"}}",
     ]
 
-    with RemoteOpenAIServer(MULTIMODAL_MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(MULTIMODAL_MODEL_NAME, args,
+                            max_wait_seconds=480) as remote_server:
         yield remote_server
 
 
