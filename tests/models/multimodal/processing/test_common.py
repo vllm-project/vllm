@@ -162,6 +162,7 @@ def _test_processing_correctness(
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
     "mllama": False,
     "ovis": False,
+    "ovis2_5": False,
     "paligemma": False,
     "ultravox": False,
     "whisper": False,
@@ -301,6 +302,7 @@ def _test_processing_correctness_one(
     "AIDC-AI/Ovis1.6-Gemma2-9B",
     "AIDC-AI/Ovis1.6-Llama3.2-3B",
     "AIDC-AI/Ovis2-1B",
+    "AIDC-AI/Ovis2.5-2B",
     "google/paligemma-3b-mix-224",
     "google/paligemma2-3b-ft-docci-448",
     "microsoft/Phi-3.5-vision-instruct",
