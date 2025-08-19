@@ -815,18 +815,17 @@ def run_minicpmv(questions: list[str], modality: str) -> ModelRequestData:
     return run_minicpmv_base(questions, modality, "openbmb/MiniCPM-V-2_6")
 
 
-def run_minimax(questions: list[str], modality: str) -> ModelRequestData:
+def run_minimax_vl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
     model_name = "MiniMaxAI/MiniMax-VL-01"
 
-    # The configuration below has been confirmed to launch on a single L40 GPU.
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=14336,
         max_num_seqs=2,
         limit_mm_per_prompt={modality: 1},
         trust_remote_code=True,
+        tensor_parallel_size=8,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
