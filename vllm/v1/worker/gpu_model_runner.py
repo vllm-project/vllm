@@ -65,8 +65,8 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec,
                                         SlidingWindowSpec)
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
-                             ModelRunnerOutput)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
+                             LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -232,8 +232,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
         # The batch sizes in the config are in descending order.
-        self.cudagraph_batch_sizes = list(
-            reversed(self.compilation_config.cudagraph_capture_sizes))
+        if self.compilation_config.cudagraph_capture_sizes and \
+                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            self.cudagraph_batch_sizes = list(
+                reversed(self.compilation_config.cudagraph_capture_sizes))
 
         # Cache the device properties.
         self._init_device_properties()
@@ -345,6 +347,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else None)
 
         self.reorder_batch_threshold: Optional[int] = None
+
+        # Cached outputs.
+        self._draft_token_ids: Optional[Union[list[list[int]],
+                                              torch.Tensor]] = None
 
     def _init_model_kwargs(self, num_tokens: int):
         model_kwargs = dict[str, Any]()
@@ -755,10 +761,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
+        # Note: pad query_start_loc to be non-decreasing, as kernels
+        # like FlashAttention requires that
+        self.query_start_loc_np[num_reqs + 1:].fill(cu_num_tokens[-1])
+        self.query_start_loc.copy_(self.query_start_loc_cpu, non_blocking=True)
+        query_start_loc = self.query_start_loc[:num_reqs + 1]
 
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
+        # Fill unused with 0 for full cuda graph mode.
+        self.seq_lens_np[num_reqs:].fill(0)
+        self.seq_lens.copy_(self.seq_lens_cpu, non_blocking=True)
+        seq_lens = self.seq_lens[:num_reqs]
 
         # Copy the tensors to the GPU.
         self.input_ids[:total_num_scheduled_tokens].copy_(
@@ -773,22 +788,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.positions[:total_num_scheduled_tokens].copy_(
                 self.positions_cpu[:total_num_scheduled_tokens],
                 non_blocking=True)
-
-        self.query_start_loc[:num_reqs + 1].copy_(
-            self.query_start_loc_cpu[:num_reqs + 1], non_blocking=True)
-        self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
-                                       non_blocking=True)
-
-        # Fill unused with 0 for full cuda graph mode.
-        self.seq_lens[num_reqs:].fill_(0)
-        # Note: pad query_start_loc to be non-decreasing, as kernels
-        # like FlashAttention requires that
-        self.query_start_loc[num_reqs + 1:].fill_(
-            self.query_start_loc_cpu[num_reqs].item())
-
-        query_start_loc = self.query_start_loc[:num_reqs + 1]
-
-        spec_decode_common_attn_metadata = None
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -858,6 +857,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         per_layer_metadata[layer_name]
                     attn_metadata[layer_name] = encoder_attn_metadata
 
+        # Used in the below loop.
+        query_start_loc_cpu = self.query_start_loc_cpu[:num_reqs + 1]
+        seq_lens_cpu = self.seq_lens_cpu[:num_reqs]
+        num_computed_tokens_cpu = (
+            self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
+        spec_decode_common_attn_metadata = None
+
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -872,12 +878,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             blk_table.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
 
             common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=self.query_start_loc[:num_reqs + 1],
-                query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
-                seq_lens=self.seq_lens[:num_reqs],
-                seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
-                num_computed_tokens_cpu=self.input_batch.
-                num_computed_tokens_cpu_tensor[:num_reqs],
+                query_start_loc=query_start_loc,
+                query_start_loc_cpu=query_start_loc_cpu,
+                seq_lens=seq_lens,
+                seq_lens_cpu=seq_lens_cpu,
+                num_computed_tokens_cpu=num_computed_tokens_cpu,
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
@@ -1492,7 +1497,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=[],
-            spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
@@ -1720,7 +1724,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Compute prompt logprobs if needed.
         prompt_logprobs_dict = self._get_prompt_logprobs_dict(
             hidden_states[:num_scheduled_tokens],
-            scheduler_output,
+            scheduler_output.num_scheduled_tokens,
         )
 
         # Get the valid generated tokens.
@@ -1763,12 +1767,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
-        if not self.speculative_config:
-            # Speculative decoding is not enabled.
-            spec_token_ids = None
-        else:
+        if self.speculative_config:
             assert spec_decode_common_attn_metadata is not None
-            spec_token_ids = self.propose_draft_token_ids(
+            self._draft_token_ids = self.propose_draft_token_ids(
                 scheduler_output,
                 valid_sampled_token_ids,
                 sampling_metadata,
@@ -1785,13 +1786,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
-            spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
             kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
         )
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        if self._draft_token_ids is None:
+            return None
+        req_ids = self.input_batch.req_ids
+        if isinstance(self._draft_token_ids, torch.Tensor):
+            draft_token_ids = self._draft_token_ids.tolist()
+        else:
+            draft_token_ids = self._draft_token_ids
+        self._draft_token_ids = None
+        return DraftTokenIds(req_ids, draft_token_ids)
 
     def propose_draft_token_ids(
         self,
@@ -1803,11 +1814,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         aux_hidden_states: Optional[torch.Tensor],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         common_attn_metadata: CommonAttentionMetadata,
-    ) -> list[list[int]]:
+    ) -> Union[list[list[int]], torch.Tensor]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
-            spec_token_ids = self.propose_ngram_draft_token_ids(
+            draft_token_ids = self.propose_ngram_draft_token_ids(
                 sampled_token_ids)
         elif self.speculative_config.method == "medusa":
             assert isinstance(self.drafter, MedusaProposer)
@@ -1825,7 +1836,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 indices = torch.tensor(indices, device=self.device)
                 hidden_states = sample_hidden_states[indices]
 
-            spec_token_ids = self.drafter.propose(
+            draft_token_ids = self.drafter.propose(
                 target_hidden_states=hidden_states,
                 sampling_metadata=sampling_metadata,
             )
@@ -1896,8 +1907,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
                 mm_embeds=mm_embeds,
             )
-            spec_token_ids = draft_token_ids.tolist()
-        return spec_token_ids
+        return draft_token_ids
 
     def propose_ngram_draft_token_ids(
         self,
@@ -2062,7 +2072,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _get_prompt_logprobs_dict(
         self,
         hidden_states: torch.Tensor,
-        scheduler_output: "SchedulerOutput",
+        num_scheduled_tokens: dict[str, int],
     ) -> dict[str, Optional[LogprobsTensors]]:
         num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
         if not num_prompt_logprobs_dict:
@@ -2075,8 +2085,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # maintainable loop over optimal performance.
         completed_prefill_reqs = []
         for req_id, num_prompt_logprobs in num_prompt_logprobs_dict.items():
-
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_tokens = num_scheduled_tokens[req_id]
 
             # Get metadata for this request.
             request = self.requests[req_id]
@@ -2217,11 +2226,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dummy_mm_data = dummy_decoder_data.multi_modal_data
 
         # Result in the maximum GPU consumption of the model
-        dummy_mm_item = dummy_mm_data.get_item(modality=modality, item_index=0)
+        dummy_mm_item = dummy_mm_data[modality][0]
+        dummy_mm_items = [dummy_mm_item] * max_items_per_batch
 
         return next(mm_kwargs_group
                     for _, _, mm_kwargs_group in group_mm_kwargs_by_modality(
-                        [dummy_mm_item] * max_items_per_batch,
+                        dummy_mm_items,
                         device=self.device,
                         pin_memory=self.pin_memory,
                     ))
