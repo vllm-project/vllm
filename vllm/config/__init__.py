@@ -191,7 +191,17 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
             yield a, b
             a = b
 
-    cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+    try:
+        cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+    except (OSError, KeyError, TypeError):
+        # HACK: Python 3.13+ workaround - set missing __firstlineno__
+        # Workaround can be removed after we upgrade to pydantic==2.12.0
+        with open(inspect.getfile(cls)) as f:
+            for i, line in enumerate(f):
+                if f"class {cls.__name__}" in line and ":" in line:
+                    cls.__firstlineno__ = i + 1
+                    break
+        cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
 
     if not isinstance(cls_node, ast.ClassDef):
         raise TypeError("Given object was not a class.")
