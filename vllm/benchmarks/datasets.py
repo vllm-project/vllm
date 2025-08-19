@@ -18,6 +18,7 @@ import logging
 import random
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from functools import cache
 from io import BytesIO
@@ -26,6 +27,7 @@ from typing import Any, Callable, Optional, Union
 import numpy as np
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
+from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
@@ -75,6 +77,7 @@ class SampleRequest:
         Union[MultiModalDataDict, dict, list[dict]]
     ] = None
     lora_request: Optional[LoRARequest] = None
+    request_id: Optional[str] = None
 
 
 # -----------------------------------------------------------------------------
@@ -182,7 +185,8 @@ class BenchmarkDataset(ABC):
 
     @abstractmethod
     def sample(self, tokenizer: PreTrainedTokenizerBase,
-               num_requests: int) -> list[SampleRequest]:
+               num_requests: int, 
+               request_id_prefix: str = "") -> list[SampleRequest]:
         """
         Abstract method to generate sample requests from the dataset.
 
@@ -193,6 +197,8 @@ class BenchmarkDataset(ABC):
             tokenizer (PreTrainedTokenizerBase): The tokenizer to be used
                 for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
+            request_id_prefix (str) The prefix of request_id.
+            
 
         Returns:
             list[SampleRequest]: A list of sample requests generated from the
@@ -200,8 +206,12 @@ class BenchmarkDataset(ABC):
         """
         raise NotImplementedError("sample must be implemented in subclasses.")
 
-    def maybe_oversample_requests(self, requests: list[SampleRequest],
-                                  num_requests: int) -> None:
+    def maybe_oversample_requests(
+        self,
+        requests: list[SampleRequest],
+        num_requests: int,
+        request_id_prefix: str = "",
+    ) -> None:
         """
         Oversamples the list of requests if its size is less than the desired
         number.
@@ -210,11 +220,17 @@ class BenchmarkDataset(ABC):
             requests (List[SampleRequest]): The current list of sampled
                 requests.
             num_requests (int): The target number of requests.
+            request_id_prefix (str) The prefix of the request ids.
+
         """
         if len(requests) < num_requests:
             random.seed(self.random_seed)
-            additional = random.choices(requests,
-                                        k=num_requests - len(requests))
+            additional = deepcopy(
+                random.choices(requests, k=num_requests - len(requests))
+            )
+            for i in range(len(additional)):
+                req = additional[i]
+                req.request_id = request_id_prefix + str(len(requests) + i)
             requests.extend(additional)
             logger.info("Oversampled requests to reach %d total samples.",
                         num_requests)
@@ -366,6 +382,7 @@ class RandomDataset(BenchmarkDataset):
         range_ratio: float = DEFAULT_RANGE_RATIO,
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list[SampleRequest]:
         # Enforce range_ratio < 1
@@ -423,6 +440,7 @@ class RandomDataset(BenchmarkDataset):
                     prompt=prompt,
                     prompt_len=total_input_len,
                     expected_output_len=int(output_lens[i]),
+                    request_id=request_id_prefix + str(i),
                 ))
         return requests
 
@@ -464,9 +482,11 @@ class ShareGPTDataset(BenchmarkDataset):
         max_loras: Optional[int] = None,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         samples: list = []
+        ind = 0
         for entry in self.data:
             if len(samples) >= num_requests:
                 break
@@ -503,8 +523,10 @@ class ShareGPTDataset(BenchmarkDataset):
                     expected_output_len=new_output_len,
                     lora_request=lora_request,
                     multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(ind),
                 ))
-        self.maybe_oversample_requests(samples, num_requests)
+            ind += 1
+        self.maybe_oversample_requests(samples, num_requests, request_id_prefix)
         return samples
 
 
@@ -520,7 +542,10 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--dataset-name",
         type=str,
         default="random",
-        choices=["sharegpt", "burstgpt", "sonnet", "random", "hf", "custom"],
+        choices=[
+            "sharegpt", "burstgpt", "sonnet", "random", "hf", "custom",
+            "prefix_repetition"
+        ],
         help="Name of the dataset to benchmark on.",
     )
     parser.add_argument(
@@ -637,6 +662,37 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "from the sampled HF dataset.",
     )
 
+    prefix_repetition_group = parser.add_argument_group(
+        "prefix repetition dataset options")
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-prefix-len",
+        type=int,
+        default=256,
+        help="Number of prefix tokens per request, used only for prefix "
+        "repetition dataset.",
+    )
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-suffix-len",
+        type=int,
+        default=256,
+        help="Number of suffix tokens per request, used only for prefix "
+        "repetition dataset. Total input length is prefix_len + suffix_len.",
+    )
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-num-prefixes",
+        type=int,
+        default=10,
+        help="Number of prefixes to generate, used only for prefix repetition "
+        "dataset. Prompts per prefix is num_requests // num_prefixes.",
+    )
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-output-len",
+        type=int,
+        default=128,
+        help="Number of output tokens per request, used only for prefix "
+        "repetition dataset.",
+    )
+
 
 def get_samples(args, tokenizer) -> list[SampleRequest]:
     if args.dataset_name == "custom":
@@ -646,6 +702,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
             skip_chat_template=args.custom_skip_chat_template,
+            request_id_prefix=args.request_id_prefix,
         )
 
     elif args.dataset_name == "sonnet":
@@ -659,6 +716,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
                 return_prompt_formatted=False,
+                request_id_prefix=args.request_id_prefix,
             )
         else:
             assert tokenizer.chat_template or tokenizer.default_chat_template, (
@@ -670,6 +728,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
                 return_prompt_formatted=True,
+                request_id_prefix=args.request_id_prefix,
             )
 
     elif args.dataset_name == "hf":
@@ -715,10 +774,11 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 "openai-chat",
                 "openai-audio",
         ]:
-            # multi-modal benchmark is only available on OpenAI Chat backend.
+            # multi-modal benchmark is only available on OpenAI Chat
+            # endpoint-type.
             raise ValueError(
                 "Multi-modal content is only supported on 'openai-chat' and "
-                "'openai-audio' backend.")
+                "'openai-audio' endpoint-type.")
         input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
@@ -729,6 +789,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             output_len=args.hf_output_len,
+            request_id_prefix=args.request_id_prefix,
         )
 
     else:
@@ -740,11 +801,13 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                                         tokenizer=tokenizer,
                                         num_requests=args.num_prompts,
                                         output_len=args.sharegpt_output_len,
+                                        request_id_prefix=args.request_id_prefix,
                                     ),
             "burstgpt":
             lambda: BurstGPTDataset(random_seed=args.seed,
                                     dataset_path=args.dataset_path).
-            sample(tokenizer=tokenizer, num_requests=args.num_prompts),
+            sample(tokenizer=tokenizer, num_requests=args.num_prompts, 
+                   request_id_prefix=args.request_id_prefix,),
             "random":
             lambda: RandomDataset(random_seed=args.seed,
                                   dataset_path=args.dataset_path).sample(
@@ -754,6 +817,19 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
                 range_ratio=args.random_range_ratio,
+                request_id_prefix=args.request_id_prefix,
+            ),
+            "prefix_repetition":
+            lambda: PrefixRepetitionRandomDataset(
+                random_seed=args.seed, dataset_path=args.dataset_path
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                prefix_len=args.prefix_repetition_prefix_len,
+                suffix_len=args.prefix_repetition_suffix_len,
+                num_prefixes=args.prefix_repetition_num_prefixes,
+                output_len=args.prefix_repetition_output_len,
+                request_id_prefix=args.request_id_prefix,
             ),
         }
 
@@ -827,10 +903,11 @@ class CustomDataset(BenchmarkDataset):
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         sampled_requests = []
-        for item in self.data:
+        for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["prompt"]
@@ -852,8 +929,10 @@ class CustomDataset(BenchmarkDataset):
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
+                    request_id=request_id_prefix + str(i),
                 ))
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+        self.maybe_oversample_requests(sampled_requests, num_requests, 
+                                       request_id_prefix)
 
         return sampled_requests
 
@@ -862,7 +941,9 @@ class CustomDataset(BenchmarkDataset):
 # Sonnet Dataset Implementation
 # -----------------------------------------------------------------------------
 
-
+@deprecated(
+    "SonnetDataset is deprecated and will be removed in a future version.",
+)
 class SonnetDataset(BenchmarkDataset):
     """
     Simplified implementation of the Sonnet dataset.  Loads poem lines from a
@@ -895,6 +976,7 @@ class SonnetDataset(BenchmarkDataset):
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         return_prompt_formatted: bool = False,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         # Calculate average token length for a poem line.
@@ -920,6 +1002,7 @@ class SonnetDataset(BenchmarkDataset):
         prefix_lines = self.data[:num_prefix_lines]
 
         samples = []
+        ind = 0
         while len(samples) < num_requests:
             extra_lines = random.choices(self.data,
                                          k=num_input_lines - num_prefix_lines)
@@ -935,7 +1018,9 @@ class SonnetDataset(BenchmarkDataset):
                         if return_prompt_formatted else prompt,
                         prompt_len=prompt_len,
                         expected_output_len=output_len,
+                         request_id=request_id_prefix + str(ind),
                     ))
+                ind += 1
         return samples
 
 
@@ -986,6 +1071,7 @@ class BurstGPTDataset(BenchmarkDataset):
         num_requests: int,
         max_loras: Optional[int] = None,
         lora_path: Optional[str] = None,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list[SampleRequest]:
         samples = []
@@ -1006,6 +1092,7 @@ class BurstGPTDataset(BenchmarkDataset):
                     prompt_len=input_len,
                     expected_output_len=output_len,
                     lora_request=lora_req,
+                    request_id=request_id_prefix + str(i),
                 ))
         return samples
 
@@ -1061,11 +1148,13 @@ class ConversationDataset(HuggingFaceDataset):
                num_requests: int,
                output_len: Optional[int] = None,
                enable_multimodal_chat: bool = False,
+               request_id_prefix: str = "",
                **kwargs) -> list:
         # Filter examples with at least 2 conversations
         filtered_data = self.data.filter(
             lambda x: len(x["conversations"]) >= 2)
         sampled_requests = []
+        ind = 0
         dynamic_output = output_len is None
 
         for item in filtered_data:
@@ -1097,8 +1186,11 @@ class ConversationDataset(HuggingFaceDataset):
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
                     multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(ind),
                 ))
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+            ind += 1
+        self.maybe_oversample_requests(sampled_requests, num_requests, 
+                                       request_id_prefix)
         return sampled_requests
 
 
@@ -1127,12 +1219,13 @@ class VisionArenaDataset(HuggingFaceDataset):
         num_requests: int,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         output_len = (output_len
                       if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         sampled_requests = []
-        for item in self.data:
+        for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
             parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.dataset_path)
@@ -1154,8 +1247,10 @@ class VisionArenaDataset(HuggingFaceDataset):
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
                     multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(i),
                 ))
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+        self.maybe_oversample_requests(sampled_requests, num_requests, 
+                                       request_id_prefix)
         return sampled_requests
 
 
@@ -1184,11 +1279,12 @@ class InstructCoderDataset(HuggingFaceDataset):
                num_requests: int,
                output_len: Optional[int] = None,
                enable_multimodal_chat: bool = False,
+               request_id_prefix: str = "",
                **kwargs) -> list:
         output_len = (output_len
                       if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         sampled_requests = []
-        for item in self.data:
+        for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = f"{item['input']}\n\n{item['instruction']} Just output \
@@ -1210,8 +1306,10 @@ class InstructCoderDataset(HuggingFaceDataset):
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
+                    request_id=request_id_prefix + str(i),
                 ))
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+        self.maybe_oversample_requests(sampled_requests, num_requests, 
+                                       request_id_prefix)
         return sampled_requests
 
 
@@ -1241,13 +1339,14 @@ class MTBenchDataset(HuggingFaceDataset):
         num_requests: int,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         output_len = (output_len
                       if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         sampled_requests = []
 
-        for item in self.data:
+        for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["turns"][0]
@@ -1268,8 +1367,10 @@ class MTBenchDataset(HuggingFaceDataset):
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
+                    request_id=request_id_prefix + str(i),
                 ))
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+        self.maybe_oversample_requests(sampled_requests, num_requests, 
+                                       request_id_prefix)
         return sampled_requests
 
 
@@ -1291,8 +1392,10 @@ class AIMODataset(HuggingFaceDataset):
                tokenizer: PreTrainedTokenizerBase,
                num_requests: int,
                output_len: Optional[int] = None,
+               request_id_prefix: str = "",
                **kwargs) -> list:
         sampled_requests = []
+        ind = 0
         dynamic_output = output_len is None
 
         for item in self.data:
@@ -1317,8 +1420,12 @@ class AIMODataset(HuggingFaceDataset):
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
                     multi_modal_data=None,
+                    request_id=request_id_prefix + str(ind),
+                    
                 ))
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+            ind += 1
+        self.maybe_oversample_requests(sampled_requests, num_requests,
+                                       request_id_prefix)
         return sampled_requests
 
 
@@ -1389,13 +1496,14 @@ class NextEditPredictionDataset(HuggingFaceDataset):
     }
 
     def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int,
+               request_id_prefix: str = "",
                **kwargs):
         formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(
             self.dataset_path)
         if formatting_prompt_func is None:
             raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
         samples = []
-        for sample in self.data:
+        for i, sample in enumerate(self.data):
             sample = formatting_prompt_func(sample)
             samples.append(
                 SampleRequest(
@@ -1403,10 +1511,11 @@ class NextEditPredictionDataset(HuggingFaceDataset):
                     prompt_len=len(tokenizer(sample["prompt"]).input_ids),
                     expected_output_len=len(
                         tokenizer(sample["expected_output"]).input_ids),
+                    request_id=request_id_prefix + str(i),
                 ))
             if len(samples) >= num_requests:
                 break
-        self.maybe_oversample_requests(samples, num_requests)
+        self.maybe_oversample_requests(samples, num_requests, request_id_prefix)
         return samples
 
 
@@ -1456,6 +1565,7 @@ class ASRDataset(HuggingFaceDataset):
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
         output_len: Optional[int] = None,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         output_len = (output_len
@@ -1463,6 +1573,7 @@ class ASRDataset(HuggingFaceDataset):
         prompt = ASRDataset.TRANSCRIPTION_PREAMBLE
         prompt_len = len(tokenizer(prompt).input_ids)
         sampled_requests = []
+        ind = 0
         skipped = 0
         for item in self.data:
             if len(sampled_requests) >= num_requests:
@@ -1482,7 +1593,9 @@ class ASRDataset(HuggingFaceDataset):
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
                     multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(ind),
                 ))
+            ind += 1
         if skipped:
             logger.warning(
                 "%d samples discarded from dataset due to"
@@ -1490,7 +1603,8 @@ class ASRDataset(HuggingFaceDataset):
                 " what Whisper supports.",
                 skipped,
             )
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+        self.maybe_oversample_requests(sampled_requests, num_requests, 
+                                       request_id_prefix)
         return sampled_requests
 
 
@@ -1527,11 +1641,13 @@ class MLPerfDataset(HuggingFaceDataset):
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
         output_len: Optional[int] = None,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list[SampleRequest]:
         # Force dynamic output length based on reference completion.
         dynamic_output = output_len is None
         sampled_requests: list[SampleRequest] = []
+        ind = 0
 
         for item in self.data:
             if len(sampled_requests) >= num_requests:
@@ -1566,8 +1682,93 @@ class MLPerfDataset(HuggingFaceDataset):
                     prompt=prompt_formatted,
                     prompt_len=prompt_len,
                     expected_output_len=expected_output_len,
+                    request_id=request_id_prefix + str(ind),
                 )
             )
+            ind += 1
 
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+        self.maybe_oversample_requests(sampled_requests, num_requests, 
+                                       request_id_prefix)
         return sampled_requests
+
+
+# -----------------------------------------------------------------------------
+# Prefix Repetition Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class PrefixRepetitionRandomDataset(BenchmarkDataset):
+    # Default values copied from benchmark_serving.py for the repeated prefix 
+    # dataset.
+    DEFAULT_PREFIX_LEN = 256
+    DEFAULT_SUFFIX_LEN = 256
+    DEFAULT_NUM_PREFIXES = 10
+    DEFAULT_OUTPUT_LEN = 128
+
+    def __init__(
+        self,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        random.seed(self.random_seed)
+        np.random.seed(self.random_seed)
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        prefix_len: int = DEFAULT_PREFIX_LEN,
+        suffix_len: int = DEFAULT_SUFFIX_LEN,
+        num_prefixes: int = DEFAULT_NUM_PREFIXES,
+        output_len: int = DEFAULT_OUTPUT_LEN,
+        request_id_prefix: str = "",
+        **kwargs,
+    ) -> list[SampleRequest]:
+        vocab_size = tokenizer.vocab_size
+        prompts_per_prefix = num_requests // num_prefixes
+        if prompts_per_prefix == 0:
+            raise ValueError(
+                f"num_requests ({num_requests}) must be greater than or equal "
+                f"to num_prefixes ({num_prefixes})"
+            )
+
+        def _generate_exact_length_tokens(target_length: int) -> list[int]:
+            """Generate tokens that decode and re-encode to exactly
+            target_length."""
+            # Generate random tokens
+            tokens = np.random.randint(
+                0, vocab_size, size=target_length).tolist()
+            text = tokenizer.decode(tokens)
+            re_encoded = tokenizer.encode(text, add_special_tokens=False)
+
+            if len(re_encoded) == target_length:
+                return re_encoded
+            elif len(re_encoded) < target_length:
+                # Recursively generate additional consistent tokens
+                needed = target_length - len(re_encoded)
+                extra_tokens = _generate_exact_length_tokens(needed)
+                return re_encoded + extra_tokens
+            else:
+                # Truncate to target length
+                return re_encoded[:target_length]
+
+        requests = []
+        for _ in range(num_prefixes):
+            prefix_tokens = _generate_exact_length_tokens(prefix_len)
+
+            for _ in range(prompts_per_prefix):
+                suffix_tokens = _generate_exact_length_tokens(suffix_len)
+
+                combined_tokens = prefix_tokens + suffix_tokens
+                prompt = tokenizer.decode(combined_tokens)
+                prompt_len = len(combined_tokens)
+                requests.append(
+                    SampleRequest(
+                        prompt=prompt,
+                        prompt_len=prompt_len,
+                        expected_output_len=output_len,
+                    )
+                )
+
+        random.shuffle(requests)
+        return requests
