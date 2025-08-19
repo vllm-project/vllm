@@ -46,6 +46,7 @@ from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
                              MultiModalRegistry)
+from vllm.platforms import current_platform
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
@@ -2079,7 +2080,8 @@ class CUDAGraphRunner(nn.Module):
             set_graph_pool_id(memory_pool)
         else:
             # TODO(asamani): remove this once we have a better way to handle
-            set_graph_pool_id(torch.cuda.graph_pool_handle())
+            #set_graph_pool_id(torch.cuda.graph_pool_handle())
+            set_graph_pool_id(current_platform.graph_pool_handle())
         with torch.cuda.graph(self._graph, pool=memory_pool, stream=stream):
             output_hidden_or_intermediate_states = self.model(
                 input_ids=input_ids,

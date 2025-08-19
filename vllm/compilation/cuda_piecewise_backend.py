@@ -14,8 +14,10 @@ from vllm.compilation.backends import VllmBackend
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import end_monitoring_torch_compile
 from vllm.config import VllmConfig
+from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import weak_ref_tensors
 
 logger = init_logger(__name__)
@@ -180,6 +182,12 @@ class CUDAPiecewiseBackend:
                     stack.enter_context(
                         patch("torch.cuda.empty_cache", lambda: None))
 
+                if self.graph_pool is not None:
+                    set_graph_pool_id(self.graph_pool)
+                else:
+                    # TODO(asamani): remove once we have a better way to handle
+                    #set_graph_pool_id(torch.cuda.graph_pool_handle())
+                    set_graph_pool_id(current_platform.graph_pool_handle())
                 # mind-exploding: carefully manage the reference and memory.
                 with torch.cuda.graph(cudagraph, pool=self.graph_pool):
                     # `output` is managed by pytorch's cudagraph pool
