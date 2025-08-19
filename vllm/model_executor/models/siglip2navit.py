@@ -212,8 +212,7 @@ class Siglip2Attention(nn.Module):
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA,
                 _Backend.ROCM_AITER_FA
         }:
-            raise RuntimeError(
-                f"Ovis2.5 does not support {self.attn_backend} backend now.")
+            self.attn_backend = _Backend.TORCH_SDPA
         self.is_flash_attn_backend = self.attn_backend in {
             _Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA
         }
