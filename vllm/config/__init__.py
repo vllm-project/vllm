@@ -49,7 +49,9 @@ from vllm.transformers_utils.config import (
     try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
-from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS, LayerBlockType,
+from vllm.utils import (_DEFAULT_FI_ALLREDUCE_MAX_INPUT_SIZE,
+                        _FI_ALLREDUCE_MAX_INPUT_SIZES,
+                        DEFAULT_MAX_NUM_BATCHED_TOKENS, LayerBlockType,
                         LazyLoader, common_broadcastable_dtype, random_uuid)
 
 if TYPE_CHECKING:
@@ -3640,6 +3642,7 @@ class VllmConfig:
             self._set_cudagraph_sizes()
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        self._set_compile_ranges()
 
         if self.cache_config.cpu_offload_gb > 0 and \
             self.compilation_config.level != CompilationLevel.NO_COMPILATION \
@@ -3856,6 +3859,66 @@ class VllmConfig:
 
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)
+
+    def _set_compile_ranges(self):
+        """
+        Set the compile ranges for the compilation config.
+        """
+
+        def add_range(ranges: list[tuple[int, int]],
+                      new_range: tuple[int, int]) -> list[tuple[int, int]]:
+            """
+            Add a new range to a list of non-overlapping ranges.
+            """
+            start, end = new_range
+            if not ranges:
+                return [new_range]
+
+            result = []
+            added = False
+            current_start, current_end = start, end
+
+            for r_start, r_end in sorted(ranges):
+                # Case 1: Current range is completely before this range
+                if current_end < r_start:
+                    if not added:
+                        result.append((current_start, current_end))
+                        added = True
+                    result.append((r_start, r_end))
+
+                # Case 2: Current range is completely after this range
+                elif current_start > r_end:
+                    result.append((r_start, r_end))
+
+                # Case 3: Ranges overlap - merge them
+                else:
+                    current_start = min(current_start, r_start)
+                    current_end = max(current_end, r_end)
+
+            if not added:
+                result.append((current_start, current_end))
+
+            return result
+
+        compilation_config = self.compilation_config
+        computed_compile_ranges = []
+        # Add the compile ranges for flashinfer
+        if _FI_ALLREDUCE_MAX_INPUT_SIZES is not None:
+            tp_size = self.parallel_config.tensor_parallel_size
+            max_size = _FI_ALLREDUCE_MAX_INPUT_SIZES.get(
+                tp_size, _DEFAULT_FI_ALLREDUCE_MAX_INPUT_SIZE)
+            max_token_num = max_size // (self.model_config.get_hidden_size() *
+                                         self.model_config.dtype.itemsize)
+            computed_compile_ranges.append((1, max_token_num))
+
+        if compilation_config.compile_ranges is not None:
+            for x in compilation_config.compile_ranges:
+                assert isinstance(x, tuple)
+                assert len(x) == 2, f"Invalid compile range: {x}"
+                start, end = x
+                assert start <= end, f"Invalid compile range: {x}"
+                computed_compile_ranges = add_range(computed_compile_ranges, x)
+        compilation_config.compile_ranges = computed_compile_ranges  # type: ignore
 
     def recalculate_max_model_len(self, max_model_len: int):
         # Can only be called in try_verify_and_update_config

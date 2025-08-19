@@ -1008,11 +1008,11 @@ def format_results_markdown(
         residual_str = "with residual" if use_residual else "no residual"
 
         markdown += f"""
-        ## Configuration: seq_len={seq_len}, dtype={dtype}, {residual_str}
+## Configuration: seq_len={seq_len}, dtype={dtype}, {residual_str}
 
-            | Operation | Time (ms) | Speedup |
-            |-----------|-----------|---------|
-            """
+| Operation | Time (ms) | Speedup |
+|-----------|-----------|---------|
+"""
 
         # Prepare results with speedup calculations
         prepared_results = prepare_results_with_speedups(results_dict)
