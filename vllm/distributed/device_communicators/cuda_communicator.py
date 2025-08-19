@@ -24,9 +24,11 @@ def register_nccl_symmetric_ops(pynccl_comm):
     def all_reduce_symmetric_with_copy_impl(
         input_tensor: torch.Tensor
     ) -> torch.Tensor:
-        with use_symmetric_memory(pynccl_comm):
+        with use_symmetric_memory(pynccl_comm) as sm:
             symm_input = torch.empty_like(input_tensor)
             symm_output = torch.empty_like(input_tensor)
+            sm.tag(symm_input)
+            sm.tag(symm_output)
         symm_input.copy_(input_tensor)
         symm_output = pynccl_comm.all_reduce(symm_input, symm_output)
         return symm_output
