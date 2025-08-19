@@ -424,7 +424,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                 k_nope_context, v_context = kv_nope_context.split(
                     [qk_nope_head_dim, v_head_dim], dim=-1)
 
-            # Build attention inputs for new tokens
+            # Build attention inputs 
             q_mha = torch.cat([q_nope, q_pe],
                               dim=-1)  # [q_len, num_heads, total_dim]
             k_pe_new_expanded = k_pe_new.expand(-1, num_q_heads, -1)
@@ -436,12 +436,51 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                 v_new = torch.nn.functional.pad(
                     v_new, [0, total_head_dim - v_head_dim], value=0)
 
-            # Step 1: New tokens attending to new tokens (causal) - use flash_attn_varlen_func
+            # Step 1: Context computation first (matching backend order)
+            k_pe_context_expanded = k_pe_context.expand(
+                -1, num_q_heads, -1)
+            k_context = torch.cat([k_nope_context, k_pe_context_expanded],
+                                  dim=-1)
+
+            # Pad v_context to match k_context head dimension for FlashAttention if necessary
+            if v_head_dim < total_head_dim:
+                v_context = torch.nn.functional.pad(
+                    v_context, [0, total_head_dim - v_head_dim], value=0)
+
             cu_seqlens_new = torch.tensor([0, q_len],
                                           dtype=torch.int32,
                                           device=device)
+            cu_seqlens_context = torch.tensor([0, context_len],
+                                              dtype=torch.int32,
+                                              device=device)
             if is_vllm_fa:
-                new_to_new_out, new_to_new_lse = flash_attn_varlen_func(
+                context_out, context_lse = flash_attn_varlen_func(
+                    q=q_mha,
+                    k=k_context,
+                    v=v_context,
+                    cu_seqlens_q=cu_seqlens_new,
+                    cu_seqlens_k=cu_seqlens_context,
+                    max_seqlen_q=q_len,
+                    max_seqlen_k=context_len,
+                    causal=False,
+                    softmax_scale=scale,
+                    return_softmax_lse=True)
+            else:
+                context_out, context_lse = flash_attn_varlen_func(
+                    q=q_mha,
+                    k=k_context,
+                    v=v_context,
+                    cu_seqlens_q=cu_seqlens_new,
+                    cu_seqlens_k=cu_seqlens_context,
+                    max_seqlen_q=q_len,
+                    max_seqlen_k=context_len,
+                    causal=False,
+                    softmax_scale=scale,
+                    return_attn_probs=True)
+
+            # Step 2: New tokens computation second (matching backend order)
+            if is_vllm_fa:
+                new_tokens_out, new_tokens_lse = flash_attn_varlen_func(
                     q=q_mha,
                     k=k_new,
                     v=v_new,
@@ -449,12 +488,11 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                     cu_seqlens_k=cu_seqlens_new,
                     max_seqlen_q=q_len,
                     max_seqlen_k=q_len,
-                    dropout_p=0.0,
                     causal=True,
                     softmax_scale=scale,
                     return_softmax_lse=True)
             else:
-                new_to_new_out, new_to_new_lse = flash_attn_varlen_func(
+                new_tokens_out, new_tokens_lse = flash_attn_varlen_func(
                     q=q_mha,
                     k=k_new,
                     v=v_new,
@@ -462,81 +500,12 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                     cu_seqlens_k=cu_seqlens_new,
                     max_seqlen_q=q_len,
                     max_seqlen_k=q_len,
-                    dropout_p=0.0,
                     causal=True,
                     softmax_scale=scale,
                     return_attn_probs=True)
 
-            if context_len > 0:
-                # Step 2: New tokens attending to context (non-causal)
-                k_pe_context_expanded = k_pe_context.expand(
-                    -1, num_q_heads, -1)
-                k_context = torch.cat([k_nope_context, k_pe_context_expanded],
-                                      dim=-1)
-
-                # Pad v_context to match k_context head dimension for FlashAttention if necessary
-                if v_head_dim < total_head_dim:
-                    v_context = torch.nn.functional.pad(
-                        v_context, [0, total_head_dim - v_head_dim], value=0)
-
-                cu_seqlens_context = torch.tensor([0, context_len],
-                                                  dtype=torch.int32,
-                                                  device=device)
-                if is_vllm_fa:
-                    new_to_context_out, new_to_context_lse = flash_attn_varlen_func(
-                        q=q_mha,
-                        k=k_context,
-                        v=v_context,
-                        cu_seqlens_q=cu_seqlens_new,
-                        cu_seqlens_k=cu_seqlens_context,
-                        max_seqlen_q=q_len,
-                        max_seqlen_k=context_len,
-                        dropout_p=0.0,
-                        causal=False,
-                        softmax_scale=scale,
-                        return_softmax_lse=True)
-                else:
-                    new_to_context_out, new_to_context_lse = flash_attn_varlen_func(
-                        q=q_mha,
-                        k=k_context,
-                        v=v_context,
-                        cu_seqlens_q=cu_seqlens_new,
-                        cu_seqlens_k=cu_seqlens_context,
-                        max_seqlen_q=q_len,
-                        max_seqlen_k=context_len,
-                        dropout_p=0.0,
-                        causal=False,
-                        softmax_scale=scale,
-                        return_attn_probs=True)
-
-                # Step 3: Proper LSE merge (matching vLLM's merge_attn_states logic)
-                # LSE format is already [num_heads, q_len] from flash_attn_varlen_func
-                suffix_lse = new_to_new_lse  # (H, L)
-                prefix_lse = new_to_context_lse  # (H, L)
-
-                # Compute the max LSE for numerical stability
-                max_lse = torch.maximum(suffix_lse, prefix_lse)
-
-                # Compute normalized weights
-                suffix_weight = torch.exp(suffix_lse - max_lse)
-                prefix_weight = torch.exp(prefix_lse - max_lse)
-                total_weight = suffix_weight + prefix_weight
-
-                # Normalize outputs and weights
-                suffix_norm = suffix_weight / total_weight  # (H, L)
-                prefix_norm = prefix_weight / total_weight  # (H, L)
-
-                # Merge outputs: [q_len, num_heads, v_dim]
-                # Transpose to (H, L, D) for broadcasting, then back to (L, H, D)
-                suffix_out_t = new_to_new_out.transpose(0, 1)  # (H, L, D)
-                prefix_out_t = new_to_context_out.transpose(0, 1)  # (H, L, D)
-
-                merged_out = (suffix_out_t * suffix_norm.unsqueeze(-1) +
-                              prefix_out_t * prefix_norm.unsqueeze(-1))
-
-                sdpa_out_i = merged_out.transpose(0, 1)  # Back to (L, H, D)
-            else:
-                sdpa_out_i = new_to_new_out
+            # Use new tokens output directly - backend handles the merge
+            sdpa_out_i = new_tokens_out
 
             # Unpad output back to original v_head_dim if we padded
             if v_head_dim < total_head_dim:
@@ -544,6 +513,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
 
             # sdpa_out_i is now [q_len, num_heads, v_head_dim], flatten last two dims
             sdpa_out_i = sdpa_out_i.flatten(start_dim=-2)
+
             breakpoint()
 
         all_sdpa_outputs.append(sdpa_out_i)
