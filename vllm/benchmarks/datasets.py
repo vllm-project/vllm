@@ -352,7 +352,7 @@ def process_video(video: Any) -> Mapping[str, Any]:
             ("http://", "file://")) else f"file://{video}")
         return {"type": "video_url", "video_url": {"url": video_url}}
 
-    raise ValueError(f"Invalid video input {video}. Must be a str or dictionary with raw video bytes.")
+    raise ValueError(f"Invalid video input {video}. Must be a str or dictionary with raw video bytes.") # noqa: E501
 
 # -----------------------------------------------------------------------------
 # Random Dataset Implementation (Synthetic Data)
