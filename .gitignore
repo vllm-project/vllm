@@ -206,3 +206,4 @@ csrc/moe/marlin_moe_wna16/kernel_*
 InfiniteBench/results/
 InfiniteBench/.gitignore
 archive/
+vllm-inference-bench/sbatch_logs/

@@ -7,8 +7,15 @@ This version uses a different strategy to ensure we properly measure:
 - Prefill: Time to process input and generate first token  
 - Decode: Time to generate remaining tokens
 
-Usage: torchrun --nproc-per-node=1 HTTP/benchmark_prefill_decode_v2.py --tensor-parallel-size 1 --batch-size 4 --input-length 512 --output-length 128
+Usage: torchrun --nproc-per-node=2 vllm-inference-bench/benchmark_prefill_decode_v2.py --tensor-parallel-size 1 --pipeline-parallel-size 2 --batch-size 4 --input-length 512 --output-length 128
 Output CSV includes: total decode time, average decode time per step, and decode throughput
+
+
+
+Example usages: 
+
+
+
 """
 
 import argparse
@@ -40,6 +47,8 @@ def parse_args():
                         help="Enable token parallelism")
     parser.add_argument("--expert-parallel-size", type=int, default=1,
                         help="Number of expert parallel processes (default: 1)")
+    parser.add_argument("--enable-expert-parallel", action="store_true",
+                        help="Enable expert parallelism")
     parser.add_argument("--max-model-len", type=int, default=8192,
                         help="Maximum model length (default: 8192)")
     parser.add_argument("--seed", type=int, default=42,
@@ -224,7 +233,9 @@ def calculate_metrics(timing_data: Dict[str, Any], baseline_data: Dict[str, Any]
 
 
 def write_results_to_csv(results: List[Dict[str, Any]], output_file: str):
-    """Write results to CSV with updated columns including baseline total generation time."""
+    """Write results to CSV with updated columns including baseline total generation time.
+    If the file exists, append to it; otherwise, create and write header.
+    """
     fieldnames = [
         "model_name",
         "tensor_parallel_size", 
@@ -242,9 +253,12 @@ def write_results_to_csv(results: List[Dict[str, Any]], output_file: str):
         "baseline_total_time_ms"
     ]
     
-    with open(output_file, 'w', newline='') as csvfile:
+    file_exists = os.path.isfile(output_file)
+    mode = 'a' if file_exists else 'w'
+    with open(output_file, mode, newline='') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-        writer.writeheader()
+        if not file_exists:
+            writer.writeheader()
         writer.writerows(results)
 
 
@@ -265,6 +279,7 @@ def main():
         "pipeline_parallel_size": args.pipeline_parallel_size,
         "data_parallel_size": args.data_parallel_size,
         # "expert_parallel_size": args.expert_parallel_size,
+        "enable_expert_parallel": args.enable_expert_parallel,
         "distributed_executor_backend": "external_launcher",
         "max_model_len": args.max_model_len,
         "seed": args.seed,
@@ -286,6 +301,9 @@ def main():
         print(f"Parallelism: TP={args.tensor_parallel_size}, PP={args.pipeline_parallel_size}, DP={args.data_parallel_size}")
         if args.enable_token_parallel:
             print(f"Token Parallel: {args.token_parallel_size}")
+        if args.enable_expert_parallel:
+            args.expert_parallel_size = args.tensor_parallel_size * args.data_parallel_size
+            print(f"Expert Parallel: {args.expert_parallel_size}")
         print(f"Batch size: {args.batch_size}")
         print(f"Input length: {args.input_length} tokens")
         print(f"Output length: {args.output_length} tokens")
