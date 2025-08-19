@@ -17,7 +17,7 @@ __all__ = ['Ovis2_5Processor']
 IMAGE_TOKEN = "<image>"
 VIDEO_TOKEN = "<video>"
 MIN_PIXELS = 448 * 448
-MAX_PIXELS = 1344 * 1792
+MAX_PIXELS = 1792 * 1792
 
 
 class Ovis2_5ProcessorKwargs(ProcessingKwargs,
@@ -91,7 +91,7 @@ class Ovis2_5Processor(ProcessorMixin):
         extra_special_tokens = {
             "image_token": -200,
             "video_token": -201,
-            "video_atom": -300,
+            "visual_atom": -300,
             "image_start": -301,
             "image_end": -302,
             "video_start": -303,
@@ -341,12 +341,12 @@ class Ovis2_5Processor(ProcessorMixin):
             start_token = self.get_token_value('image_start')
             end_token = self.get_token_value('image_end')
 
-        image_placeholders = [start_token, self.get_token_value('video_atom')]
+        image_placeholders = [start_token, self.get_token_value('visual_atom')]
         if grid[0] * grid[1] > 1:
             for r in range(grid[0]):
                 for c in range(grid[1]):
                     image_placeholders.append(
-                        self.get_token_value('video_atom'))
+                        self.get_token_value('visual_atom'))
 
         image_placeholders.append(end_token)
         return image_placeholders
@@ -355,7 +355,7 @@ class Ovis2_5Processor(ProcessorMixin):
         visual_placeholders = self.construct_visual_indicators((1, 1),
                                                                is_video)
 
-        image_atom_token_id = self.get_token_value('video_atom')
+        image_atom_token_id = self.get_token_value('visual_atom')
         # Extract the padding token ID from tokenizer
         image_padding_token_id = self.get_token_value('image_pad')
 

@@ -168,9 +168,9 @@ class Ovis2_5ProcessingInfo(BaseProcessingInfo):
         return {"image": None, "video": 1}
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        # NOTE(myselvess): max_pixels 1344 * 1792 hardcoded in original code
+        # NOTE(myselvess): max_pixels 1792 * 1792 hardcoded in original code
         # TODO(myselvess): Be adjusted based on the max_pixels
-        return ImageSize(width=1344, height=1792)
+        return ImageSize(width=1792, height=1792)
 
     def get_num_image_tokens(
         self,
