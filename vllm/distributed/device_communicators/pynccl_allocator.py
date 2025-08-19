@@ -174,7 +174,7 @@ class use_symmetric_memory:
 
 
 def all_reduce_symmetric_with_copy_impl(
-    input_tensor: torch.Tensor, pynccl_comm: Any
+    input_tensor: torch.Tensor, pynccl_comm: object
 ) -> torch.Tensor:
     with use_symmetric_memory(pynccl_comm):
         symm_input = torch.empty_like(input_tensor)
@@ -184,7 +184,7 @@ def all_reduce_symmetric_with_copy_impl(
     return symm_output
 
 def all_reduce_symmetric_with_copy_fake(
-    input_tensor: torch.Tensor, pynccl_comm: Any
+    input_tensor: torch.Tensor, pynccl_comm: object
 ) -> torch.Tensor:
     return torch.empty_like(input_tensor)
 
