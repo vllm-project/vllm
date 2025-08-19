@@ -62,7 +62,7 @@ def get_multimodal_data_processor(
     num_available_plugins = len(loadable_plugins.keys())
     if num_available_plugins == 0:
         raise ValueError("No MultimodalProcessor plugins installed"
-                         " but one is required.")
+                         f" but one is required ({model_plugin}).")
 
     if model_plugin not in loadable_plugins:
         raise ValueError(

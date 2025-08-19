@@ -6,12 +6,10 @@ import os
 import torch
 
 from vllm import LLM
-from vllm.plugins.multimodal_data_processors import get_multimodal_data_processor
 from vllm.plugins.multimodal_data_processors.types import (
     ImagePrompt,
-    ImageRequestOutput,
-    MultiModalPromptType,
 )
+from vllm.pooling_params import PoolingParams
 
 # This example shows how to perform an offline inference that generates
 # multimodal data. In this specific case this example will take a geotiff
@@ -19,30 +17,6 @@ from vllm.plugins.multimodal_data_processors.types import (
 # perform inference.
 # Reuirement - install plugin at:
 #   https://github.com/christian-pinto/prithvi_multimodal_processor_plugin
-
-
-class LLMForImageTiling(LLM):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-
-        self.multimodal_processor = get_multimodal_data_processor(
-            self.llm_engine.vllm_config
-        )
-
-    def predict(self, prompt: MultiModalPromptType) -> ImageRequestOutput:
-        # At the momend we generate images (ab-)using pooling models
-        # Here we first extract the prompts for the pooling model
-        pooling_prompts = self.multimodal_processor.pre_process(prompt)
-
-        pooling_output = self.encode(pooling_prompts)
-
-        output = self.multimodal_processor.post_process(
-            model_out=pooling_output, out_format="path"
-        )
-
-        assert isinstance(output, ImageRequestOutput)
-
-        return output
 
 
 def main():
@@ -72,7 +46,12 @@ def main():
         max_num_seqs=32,
     )
 
-    output = llm.encode_with_mm_data_plugin(prompt)
+    pooling_params = PoolingParams(task="encode", softmax=False)
+
+    output = llm.encode_with_mm_data_plugin(
+        prompt,
+        pooling_params=pooling_params,
+    )
 
     print(output)
     decoded_data = base64.b64decode(output[0].task_output.data)
