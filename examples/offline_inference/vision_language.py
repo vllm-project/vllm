@@ -889,6 +889,39 @@ def run_minicpmv(questions: list[str], modality: str) -> ModelRequestData:
     return run_minicpmv_base(questions, modality, "openbmb/MiniCPM-V-2_6")
 
 
+def run_minimax_vl_01(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "MiniMaxAI/MiniMax-VL-01"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+        trust_remote_code=True,
+        tensor_parallel_size=8,
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    messages = [
+        [
+            {
+                "role": "user",
+                "content": [{"type": "image"}, {"type": "text", "text": question}],
+            }
+        ]
+        for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=False
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Mistral-3 HF-format
 def run_mistral3(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1061,6 +1094,38 @@ def run_ovis(questions: list[str], modality: str) -> ModelRequestData:
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [
         [{"role": "user", "content": f"<image>\n{question}"}] for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Ovis2_5
+def run_ovis2_5(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "AIDC-AI/Ovis2.5-2B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        trust_remote_code=True,
+        dtype="half",
+        limit_mm_per_prompt={modality: 1},
+    )
+    if modality == "image":
+        placeholder = "<image>"
+    elif modality == "video":
+        placeholder = "<video>"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+        for question in questions
     ]
     prompts = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
@@ -1539,12 +1604,14 @@ model_example_map = {
     "mantis": run_mantis,
     "minicpmo": run_minicpmo,
     "minicpmv": run_minicpmv,
+    "minimax_vl_01": run_minimax_vl_01,
     "mistral3": run_mistral3,
     "mllama": run_mllama,
     "molmo": run_molmo,
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
     "ovis": run_ovis,
+    "ovis2_5": run_ovis2_5,
     "paligemma": run_paligemma,
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
