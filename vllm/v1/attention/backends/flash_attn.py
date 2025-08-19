@@ -20,7 +20,8 @@ from vllm.attention.utils.fa_utils import (flash_attn_supports_fp8,
 if is_flash_attn_varlen_func_available():
     from vllm.attention.utils.fa_utils import (flash_attn_varlen_func,
                                                get_scheduler_metadata,
-                                               reshape_and_cache_flash)
+                                               reshape_and_cache_flash,
+                                               tree_attention)
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
@@ -109,6 +110,14 @@ class FlashAttentionBackend(AttentionBackend):
 
 
 @dataclass
+class TreeMetadata:
+    # mask is a 1-D Tensor of uint64. Each uint64 represents a row in the causal mask starting from the end.
+    mask: torch.Tensor
+    # lens is a 1-D Tensor of the cumulative lengths of the masks in the batch.
+    lens: torch.Tensor
+
+
+@dataclass
 class FlashAttentionMetadata:
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|
@@ -136,9 +145,11 @@ class FlashAttentionMetadata:
     # Optional aot scheduling
     scheduler_metadata: Optional[torch.Tensor] = None
     prefix_scheduler_metadata: Optional[torch.Tensor] = None
-    max_num_splits: int = 0
 
+    max_num_splits: int = 0
     causal: bool = True
+    # Optional tree attention
+    tree_metadata: Optional[TreeMetadata] = None
 
 
 def _get_sliding_window_configs(
@@ -225,7 +236,8 @@ class FlashAttentionMetadataBuilder(
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> FlashAttentionMetadata:
+              fast_build: bool = False,
+              tree_metadata: TreeMetadata = None) -> FlashAttentionMetadata:
         """
         fast_build disables AOT scheduling, used when there will be few 
         iterations i.e. spec-decode
@@ -358,7 +370,9 @@ class FlashAttentionMetadataBuilder(
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
-            causal=causal)
+            causal=causal,
+            tree_metadata=tree_metadata,
+        )
         return attn_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
@@ -530,29 +544,56 @@ class FlashAttentionImpl(AttentionImpl):
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
-            flash_attn_varlen_func(
-                q=query[:num_actual_tokens],
-                k=key_cache,
-                v=value_cache,
-                out=output[:num_actual_tokens],
-                cu_seqlens_q=cu_seqlens_q,
-                max_seqlen_q=max_seqlen_q,
-                seqused_k=seqused_k,
-                max_seqlen_k=max_seqlen_k,
-                softmax_scale=self.scale,
-                causal=attn_metadata.causal,
-                alibi_slopes=self.alibi_slopes,
-                window_size=self.sliding_window,
-                block_table=block_table,
-                softcap=self.logits_soft_cap,
-                scheduler_metadata=scheduler_metadata,
-                fa_version=self.vllm_flash_attn_version,
-                q_descale=layer._q_scale.expand(descale_shape),
-                k_descale=layer._k_scale.expand(descale_shape),
-                v_descale=layer._v_scale.expand(descale_shape),
-                num_splits=attn_metadata.max_num_splits,
-                s_aux=self.sinks,
-            )
+            # print(f"$$$$ DEBUG: metadata:\n")
+            # print(f"\tnum_actual_tokens={attn_metadata.num_actual_tokens}, max_query_len={attn_metadata.max_query_len}, \
+            #        query_start_loc shape={attn_metadata.query_start_loc.shape}, seq_lens shape={attn_metadata.seq_lens.shape},\
+            #        block_table shape={attn_metadata.block_table.shape}, slot_mapping shape={attn_metadata.slot_mapping.shape} ")
+            if attn_metadata.tree_metadata:
+                tree_attention(
+                    q=query[:num_actual_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    tree_mask=attn_metadata.tree_metadata.mask,
+                    tree_mask_lens=attn_metadata.tree_metadata.lens,
+                    seqused_k=seqused_k,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=self.scale,
+                    alibi_slopes=self.alibi_slopes,
+                    block_table=block_table,
+                    softcap=self.logits_soft_cap,
+                    scheduler_metadata=scheduler_metadata,
+                    fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                )
+            else:
+                flash_attn_varlen_func(
+                    q=query[:num_actual_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_actual_tokens],
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    seqused_k=seqused_k,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=self.scale,
+                    causal=attn_metadata.causal,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=self.sliding_window,
+                    block_table=block_table,
+                    softcap=self.logits_soft_cap,
+                    scheduler_metadata=scheduler_metadata,
+                    fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                    num_splits=attn_metadata.max_num_splits,
+                    # s_aux=self.sinks,
+                )
             return output
 
         # Cascade attention (rare case).
