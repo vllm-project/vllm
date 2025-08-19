@@ -398,7 +398,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                         trust_remote_code=True,
                                         hf_overrides={"architectures": ["GLM4VForCausalLM"]}),  # noqa: E501
     "Glm4vForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.1V-9B-Thinking"),  # noqa: E501
-    "Glm4vMoeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V"),
+    "Glm4vMoeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V",
+                                                        min_transformers_version="4.56"),  # noqa: E501
     "H2OVLChatModel": _HfExamplesInfo("h2oai/h2ovl-mississippi-800m",
                                       trust_remote_code=True,
                                       extras={"2b": "h2oai/h2ovl-mississippi-2b"},  # noqa: E501
