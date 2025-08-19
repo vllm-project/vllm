@@ -12,6 +12,7 @@ from vllm.config import CacheConfig, QuantizationConfig
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata, make_local_attention_virtual_batches,
     subclass_attention_backend, subclass_attention_metadata_builder)
+from vllm.v1.core.sched.output import SchedulerOutput
 
 from ..layer import Attention
 
@@ -24,7 +25,8 @@ def create_chunked_local_attention_backend(
 ) -> type[AttentionBackend]:
     prefix = f"ChunkedLocalAttention_{attention_chunk_size}_{block_size}_"
 
-    def build_preprocess_fn(cm: CommonAttentionMetadata):
+    def patch_common_attn_metadata(cm: CommonAttentionMetadata,
+                                   scheduler_output: SchedulerOutput):
         return make_local_attention_virtual_batches(attention_chunk_size, cm,
                                                     block_size)
 
@@ -34,7 +36,7 @@ def create_chunked_local_attention_backend(
     builder_cls = subclass_attention_metadata_builder(
         name_prefix=prefix,
         builder_cls=underlying_attn_backend.get_builder_cls(),
-        build_preprocess_fn=build_preprocess_fn)
+        patch_common_attn_metadata=patch_common_attn_metadata)
     attn_backend = subclass_attention_backend(
         name_prefix=prefix,
         attention_backend_cls=underlying_attn_backend,

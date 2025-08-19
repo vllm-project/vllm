@@ -245,6 +245,17 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     ) -> bool:
         return False
 
+    def patch_common_attn_metadata(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        scheduler_output: "SchedulerOutput",
+    ) -> CommonAttentionMetadata:
+        """
+        Update the common attention metadata based on attention type. Do nothing
+        by default.
+        """
+        return common_attn_metadata
+
 
 @functools.lru_cache
 def get_kv_cache_layout():
@@ -536,8 +547,8 @@ def make_local_attention_virtual_batches(
 def subclass_attention_metadata_builder(
     name_prefix: str,
     builder_cls: type[AttentionMetadataBuilder[M]],
-    build_preprocess_fn: Callable[[CommonAttentionMetadata],
-                                  CommonAttentionMetadata],
+    patch_common_attn_metadata: Callable[
+        [CommonAttentionMetadata, "SchedulerOutput"], CommonAttentionMetadata],
 ) -> type[AttentionMetadataBuilder[M]]:
     """
     Return a new subclass of `builder_cls` whose .build(...) method
@@ -545,19 +556,11 @@ def subclass_attention_metadata_builder(
     """
     name: str = name_prefix + builder_cls.__name__  # type: ignore
 
-    def build(self,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False):
-        return builder_cls.build(self, common_prefix_len,
-                                 build_preprocess_fn(common_attn_metadata),
-                                 fast_build)
-
     Wrapped = type(
         name,
         (builder_cls, ),  # inherit from the original
         {
-            "build": build,
+            "patch_common_attn_metadata": patch_common_attn_metadata,
         })
     return Wrapped  # type: ignore
 
