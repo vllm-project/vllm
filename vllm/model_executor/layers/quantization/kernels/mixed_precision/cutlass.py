@@ -6,10 +6,11 @@ from typing import Optional
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            permute_param_layout_)
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -21,7 +22,8 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         # dynamic per-tok fp8 activation quantization
-        self.quant_fp8 = QuantFP8(static=False, group_shape=GroupShape.PER_TOKEN)
+        self.quant_fp8 = QuantFP8(static=False,
+                                  group_shape=GroupShape.PER_TOKEN)
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -34,26 +36,30 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
             return False, "CUTLASS only supported on CUDA"
 
         if not current_platform.is_device_capability(90):
-            return False, "CUTLASS W4A8 requires compute capability of 90 (Hopper)"
+            return False, "CUTLASS W4A8 requires compute capability of 90 "\
+                "(Hopper)"
 
         if c.act_type != torch.float8_e4m3fn:
             return False, "CUTLASS W4A8 only supports FP8 (e4m3) activations"
 
         if c.has_g_idx:
-            return False, "Act reordering currently not supported by CUTLASS W4A8"
+            return False, "Act reordering not supported by CUTLASS W4A8"
 
         if c.zero_points:
-            return False, "Zero points not currently supported by CUTLASS W4A8"
-        
+            return False, "Zero points not supported by CUTLASS W4A8"
+
         if c.weight_type != scalar_types.int4:
             return False, f"Quant type ({c.weight_type}) not supported by "\
                            "CUTLASS W4A8, only supported int4"
 
-        # TODO: column-wise should work
+        # TODO(czhu): support -1 (column-wise)
         if c.group_size != 128:
             return False, "Only group_size 128 is supported"
 
-        # TODO: verify shapes (c.partition_weight_shape[0], c.partition_weight_shape[1]))
+        in_features, out_features = c.partition_weight_shape
+        if in_features % 128 or out_features % 128:
+            return False, "K and N must be divisible by 128, got "\
+                           f"{c.partition_weight_shape}"
         return True, None
 
     # note assumes that
@@ -62,11 +68,12 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module):
         c = self.config
 
-        # TODO: optimize speed/mem usage
+        # TODO(czhu): optimize speed/mem usage
         def transform_w_q(x):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
-            x.data = ops.cutlass_encode_and_reorder_int4b(x.data.t().contiguous().t())
+            x.data = ops.cutlass_encode_and_reorder_int4b(
+                x.data.t().contiguous().t())
             return x
 
         def transform_w_s(x):
@@ -80,9 +87,11 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_q_name, transform_w_q)
         self._transform_param(layer, self.w_s_name, transform_w_s)
 
-        # TODO: support loading channel scales
-        self.w_ch_s = torch.ones((c.partition_weight_shape[1],), dtype=torch.float32, device='cuda')
-        
+        # TODO(czhu): support loading channel scales
+        self.w_ch_s = torch.ones((c.partition_weight_shape[1], ),
+                                 dtype=torch.float32,
+                                 device='cuda')
+
     def apply_weights(self,
                       layer: torch.nn.Module,
                       x: torch.Tensor,
@@ -101,6 +110,5 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
                                      b_group_size=c.group_size,
                                      a_token_scales=act_scales,
                                      b_channel_scales=self.w_ch_s)
-
 
         return output.reshape(out_shape)

@@ -18,9 +18,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
-                                           PackedColumnParameter,
-                                           PackedvLLMParameter,
-                                           RowvLLMParameter)
+                                           PackedvLLMParameter)
 # yapf: enable
 from vllm.scalar_type import scalar_types
 
@@ -115,7 +113,8 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
                                          dtype=torch.int32,
                                      ))
 
-        # TODO: allocate the packed fp8 scales memory here?
+        # TODO(czhu): allocate the packed fp8 scales memory here?
+        # the scales will be expanded by 8x via `cutlass_pack_scale_fp8`
         weight_scale_args = {
             "weight_loader":
             weight_loader,
@@ -127,36 +126,13 @@ class CompressedTensorsW4A8Fp8(CompressedTensorsScheme):
             )
         }
 
-        zeros_args = {
-            "weight_loader":
-            weight_loader,
-            "data":
-            torch.zeros(
-                output_size_per_partition // self.pack_factor,
-                scales_and_zp_size,
-                dtype=torch.int32,
-            )
-        }
-
         if not partition_scales:
             weight_scale = ChannelQuantScaleParameter(output_dim=0,
                                                       **weight_scale_args)
-
-            if not self.symmetric:
-                qzeros = PackedColumnParameter(output_dim=0,
-                                               packed_dim=0,
-                                               packed_factor=self.pack_factor,
-                                               **zeros_args)
         else:
             weight_scale = GroupQuantScaleParameter(output_dim=0,
                                                     input_dim=1,
                                                     **weight_scale_args)
-            if not self.symmetric:
-                qzeros = PackedvLLMParameter(input_dim=1,
-                                             output_dim=0,
-                                             packed_dim=0,
-                                             packed_factor=self.pack_factor,
-                                             **zeros_args)
 
         # A 2D array defining the original shape of the weights
         # before packing
