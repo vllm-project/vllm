@@ -60,6 +60,7 @@ def apply_fp8_marlin_linear(
                                   b_q_weight=weight,
                                   b_bias=bias,
                                   b_scales=weight_scale,
+                                  a_scales=None,
                                   global_scale=None,
                                   b_zeros=None,
                                   g_idx=None,
@@ -311,7 +312,7 @@ def pack_fp8_to_int32(fp8_tensor: torch.Tensor,
     return int32_tensor.T.contiguous() if size_k_first else int32_tensor
 
 
-def marlin_quant_fp8_torch(weight, group_size):
+def marlin_quant_fp8_torch(weight, group_size, is_a_8bit=False):
     size_n, size_k = weight.shape
     device = weight.device
 
@@ -327,18 +328,19 @@ def marlin_quant_fp8_torch(weight, group_size):
         weight_ref = fp8_weight.to(weight.dtype) * repeated_scales
 
     packed_weight = pack_fp8_to_int32(fp8_weight, False).T.contiguous()
-    marlin_qweight = ops.gptq_marlin_repack(
-        b_q_weight=packed_weight,
-        perm=torch.empty(0, dtype=torch.int, device=device),
-        size_k=size_k,
-        size_n=size_n,
-        num_bits=8,
-    )
+    perm = torch.empty(0, dtype=torch.int, device=device)
+    marlin_qweight = ops.gptq_marlin_repack(b_q_weight=packed_weight,
+                                            perm=perm,
+                                            size_k=size_k,
+                                            size_n=size_n,
+                                            num_bits=8,
+                                            is_a_8bit=is_a_8bit)
 
     marlin_scales = marlin_permute_scales(s=scales.T,
                                           size_k=size_k,
                                           size_n=size_n,
-                                          group_size=group_size)
+                                          group_size=group_size,
+                                          is_a_8bit=is_a_8bit)
 
     marlin_scales = fp8_fused_exponent_bias_into_scales(marlin_scales)
 

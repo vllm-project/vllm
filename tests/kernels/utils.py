@@ -1072,7 +1072,7 @@ def torch_experts(
     a1_scale: Optional[torch.Tensor] = None,
     a2_scale: Optional[torch.Tensor] = None,
     quant_dtype: Optional[torch.dtype] = None,
-    per_act_token_quant=False,
+    per_act_token_quant: bool = False,
     block_shape: Optional[list[int]] = None,
     apply_router_weights_on_input: bool = False,
 ) -> torch.Tensor:
@@ -1080,6 +1080,12 @@ def torch_experts(
             or (global_num_experts == w1.shape[0] and expert_map is None)
             or (expert_map is not None
                 and global_num_experts == expert_map.shape[0]))
+
+    quant_input_only = quant_dtype is not None and \
+        w1_scale is None and w2_scale is None
+    if quant_input_only:
+        assert a1_scale is None and a2_scale is None
+        assert per_act_token_quant
 
     M, K = a.shape
     topk = topk_ids.shape[1]
@@ -1096,6 +1102,9 @@ def torch_experts(
         assert not per_act_token_quant and block_shape is None
     a, a_scale = moe_kernel_quantize_input(a, a1_scale, quant_dtype,
                                            per_act_token_quant, block_shape)
+
+    if quant_input_only:
+        a = (a * a_scale.view(-1, 1)).to(w1.dtype)
 
     num_experts = w1.shape[0]
 
@@ -1117,6 +1126,13 @@ def torch_experts(
                 if b_bias2 is not None:
                     out[mask] = out[mask] + b_bias2[i].view(1, -1).to(
                         tmp1.dtype)
+            elif quant_input_only:
+                tmp1 = a[mask] @ w1[i].transpose(0, 1)
+                tmp2 = SiluAndMul()(tmp1)
+                tmp2, tmp2_scale = moe_kernel_quantize_input(
+                    tmp2, None, quant_dtype, per_act_token_quant)
+                tmp2 = (tmp2 * tmp2_scale.view(-1, 1)).to(w2.dtype)
+                out[mask] = tmp2 @ w2[i].transpose(0, 1)
             elif block_shape is not None:
                 # block quantized
                 assert (a_scale is not None and w1_scale is not None

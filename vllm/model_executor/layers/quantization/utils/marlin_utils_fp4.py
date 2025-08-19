@@ -33,11 +33,6 @@ def nvfp4_marlin_process_scales(marlin_scales):
     # convert to half first, we would convert to fp8 later
     marlin_scales = marlin_scales.to(torch.half)
 
-    # 8 is the number of scale number using by one thread
-    marlin_scales = marlin_scales.view(marlin_scales.size(0) // 2, 2, -1, 8)
-    marlin_scales = marlin_scales.permute(0, 2, 1, 3).reshape(
-        marlin_scales.size(0) * 2, -1)
-
     # fit the layout of fp8 dequantization
     marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
         marlin_scales.size(0), -1)
@@ -57,11 +52,6 @@ def nvfp4_marlin_process_scales(marlin_scales):
 
 
 def mxfp4_marlin_process_scales(marlin_scales):
-    # 8 is the number of scale number using by one thread
-    marlin_scales = marlin_scales.view(marlin_scales.size(0) // 2, 2, -1, 8)
-    marlin_scales = marlin_scales.permute(0, 2, 1, 3).reshape(
-        marlin_scales.size(0) * 2, -1)
-
     # fit the layout of fp8 dequantization
     marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
         marlin_scales.size(0), -1)
@@ -109,6 +99,7 @@ def apply_fp4_marlin_linear(
                                   b_q_weight=weight,
                                   b_bias=bias,
                                   b_scales=weight_scale,
+                                  a_scales=None,
                                   global_scale=weight_scale_2,
                                   b_zeros=None,
                                   g_idx=None,
@@ -297,7 +288,7 @@ def prepare_moe_fp4_layer_for_marlin(layer: torch.nn.Module) -> None:
         setattr(layer, name, bias)
 
 
-def rand_marlin_weight_nvfp4_like(weight, group_size):
+def rand_marlin_weight_nvfp4_like(weight, group_size, is_a_8bit = False):
     assert group_size > 0
     size_n, size_k = weight.shape
     device = weight.device
@@ -333,12 +324,14 @@ def rand_marlin_weight_nvfp4_like(weight, group_size):
         size_k=size_k,
         size_n=size_n,
         num_bits=4,
+        is_a_8bit=is_a_8bit
     )
 
     marlin_scales = marlin_permute_scales(s=scales.T.to(weight.dtype),
                                           size_k=size_k,
                                           size_n=size_n,
-                                          group_size=group_size)
+                                          group_size=group_size,
+                                          is_a_8bit=is_a_8bit)
     marlin_scales = nvfp4_marlin_process_scales(marlin_scales)
 
     global_scale = nvfp4_marlin_process_global_scale(global_scale)
@@ -346,7 +339,7 @@ def rand_marlin_weight_nvfp4_like(weight, group_size):
     return weight_ref.T, marlin_qweight, marlin_scales, global_scale
 
 
-def rand_marlin_weight_mxfp4_like(weight, group_size):
+def rand_marlin_weight_mxfp4_like(weight, group_size, is_a_8bit=False):
     assert group_size > 0
     size_n, size_k = weight.shape
     device = weight.device
@@ -378,18 +371,20 @@ def rand_marlin_weight_mxfp4_like(weight, group_size):
     weight_ref = weight_ref * \
         scales.repeat_interleave(group_size, 1).to(weight.dtype)
 
-    marlin_qweight = ops.gptq_marlin_repack(
-        b_q_weight=fp4_weight.view(torch.int32).T.contiguous(),
-        perm=torch.empty(0, dtype=torch.int, device=device),
-        size_k=size_k,
-        size_n=size_n,
-        num_bits=4,
-    )
+    perm = torch.empty(0, dtype=torch.int, device=device)
+    fp4_weight = fp4_weight.view(torch.int32).T.contiguous()
+    marlin_qweight = ops.gptq_marlin_repack(b_q_weight=fp4_weight,
+                                            perm=perm,
+                                            size_k=size_k,
+                                            size_n=size_n,
+                                            num_bits=4,
+                                            is_a_8bit=is_a_8bit)
 
     marlin_scales = marlin_permute_scales(s=scales.T.to(weight.dtype),
                                           size_k=size_k,
                                           size_n=size_n,
-                                          group_size=group_size)
+                                          group_size=group_size,
+                                          is_a_8bit=is_a_8bit)
 
     marlin_scales = mxfp4_marlin_process_scales(marlin_scales)
 

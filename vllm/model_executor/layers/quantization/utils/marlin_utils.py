@@ -10,6 +10,8 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.quantization.utils.int8_utils import (
+    per_token_quant_int8)
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -187,6 +189,17 @@ def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) \
         supports_router_weight and supports_activation
 
 
+def get_marlin_input_dtype(prefix):
+    if envs.VLLM_MARLIN_INPUT_DTYPE is None:
+        return
+    elif envs.VLLM_MARLIN_INPUT_DTYPE.upper() == "INT8":
+        return torch.int8
+    elif envs.VLLM_MARLIN_INPUT_DTYPE.upper() == "FP8":
+        return torch.float8_e4m3fn
+    else:
+        return
+
+
 def marlin_make_workspace(output_size_per_partition: int,
                           device: torch.device) -> torch.Tensor:
     max_workspace_size = (output_size_per_partition //
@@ -248,11 +261,14 @@ def get_scale_perms():
     return scale_perm, scale_perm_single
 
 
-def marlin_permute_scales(s: torch.Tensor, size_k: int, size_n: int,
-                          group_size: int) -> torch.Tensor:
+def marlin_permute_scales(s: torch.Tensor,
+                          size_k: int,
+                          size_n: int,
+                          group_size: int,
+                          is_a_8bit: bool = False) -> torch.Tensor:
 
     scale_perm, scale_perm_single = get_scale_perms()
-    if group_size < size_k and group_size != -1:
+    if group_size < size_k and group_size != -1 and not is_a_8bit:
         s = s.reshape((-1, len(scale_perm)))[:, scale_perm]
     else:
         s = s.reshape((-1, len(scale_perm_single)))[:, scale_perm_single]
@@ -268,12 +284,46 @@ def marlin_permute_bias(s: torch.Tensor) -> torch.Tensor:
     return s.reshape(*origin_shape).contiguous()
 
 
-def marlin_moe_permute_scales(
-    s: torch.Tensor,
-    size_k: int,
-    size_n: int,
-    group_size: int,
-):
+def marlin_a8_process_scales(s: torch.Tensor, b_type: ScalarType,
+                             a_dtype: torch.dtype):
+    assert a_dtype == torch.int8, "only int8 activation is supported now."
+
+    a_scales_scale_factor = 1 / 4096 * s.max().float()
+    if b_type == scalar_types.uint4b8:
+        a_scales_scale_factor = a_scales_scale_factor / 16
+
+    s = s / s.max() * 4096
+    s = s.round().to(torch.int16).view(s.dtype)
+    return s, a_scales_scale_factor
+
+
+def marlin_a8_process_qweight(qweight: torch.Tensor, b_type: ScalarType,
+                              a_dtype: torch.dtype):
+    assert a_dtype == torch.int8, "only int8 activation is supported now."
+
+    if b_type == scalar_types.uint8b128:
+        # uint8b128 -> int8
+        qweight = qweight.view(torch.int8) - 128
+        qweight = qweight.view(torch.int32)
+
+    if b_type == scalar_types.uint4b8:
+        # to fit the dequantizition method of GPTQ-W4A8
+        qweight0 = (qweight & 0x0F0F0F0F | 0x80808080) - 0x08080808
+        qweight0 = qweight0 & 0x0F0F0F0F
+
+        qweight1 = (qweight & 0xF0F0F0F0 | 0x08080808) - 0x80808080
+        qweight1 = qweight1 & 0xF0F0F0F0
+
+        qweight = qweight0 | qweight1
+
+    return qweight
+
+
+def marlin_moe_permute_scales(s: torch.Tensor,
+                              size_k: int,
+                              size_n: int,
+                              group_size: int,
+                              is_a_8bit: bool = False):
     num_experts = s.shape[0]
     output = torch.empty(
         (num_experts, s.shape[1], s.shape[2]),
@@ -282,12 +332,16 @@ def marlin_moe_permute_scales(
     )
 
     for e in range(num_experts):
-        output[e] = marlin_permute_scales(s[e], size_k, size_n, group_size)
+        output[e] = marlin_permute_scales(s[e], size_k, size_n, group_size,
+                                          is_a_8bit)
     return output
 
 
-def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
-                       num_bits: int) -> torch.Tensor:
+def marlin_zero_points(zp: torch.Tensor,
+                       size_k: int,
+                       size_n: int,
+                       num_bits: int,
+                       is_a_8bit: bool = False) -> torch.Tensor:
     # Permute zero-points in a similar way to scales, but do not use the
     # "single" permutation, since zero-points are applied on every MMA
     scale_perm, _ = get_scale_perms()
@@ -301,15 +355,19 @@ def marlin_zero_points(zp: torch.Tensor, size_k: int, size_n: int,
     else:
         raise Exception("num_bits must be 4 or 8, got {}".format(num_bits))
 
-    zp = zp.reshape((-1, len(interleave)))[:, interleave].ravel()
+    if not is_a_8bit:
+        zp = zp.reshape((-1, len(interleave)))[:, interleave].ravel()
     zp = zp.reshape((-1, size_n)).contiguous()
     zp = pack_cols(zp, num_bits, size_k, size_n)
 
     return zp
 
 
-def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
-                              size_n: int, num_bits: int) -> torch.Tensor:
+def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor,
+                              size_k: int,
+                              size_n: int,
+                              num_bits: int,
+                              is_a_8bit: bool = False) -> torch.Tensor:
     # AWQ zero-points are quantized and packed on the column dim.
     # In addition, the values are permuted based on dequantizer.
     # Here we undo both of these, and then apply marlin permutation
@@ -327,12 +385,12 @@ def awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
     q_zp = q_zp.reshape((-1, len(undo_interleave)))[:, undo_interleave].ravel()
     q_zp = q_zp.reshape((-1, size_n)).contiguous()
 
-    marlin_zp = marlin_zero_points(q_zp, size_k, size_n, num_bits)
+    marlin_zp = marlin_zero_points(q_zp, size_k, size_n, num_bits, is_a_8bit)
     return marlin_zp
 
 
 def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
-                                  size_n: int, num_bits: int):
+                                  size_n: int, num_bits: int, is_a_8bit: bool = False):
     num_experts = q_zp_packed.shape[0]
     output = torch.empty(
         (num_experts, q_zp_packed.shape[1], q_zp_packed.shape[2]),
@@ -341,7 +399,7 @@ def moe_awq_to_marlin_zero_points(q_zp_packed: torch.Tensor, size_k: int,
     )
     for e in range(num_experts):
         output[e] = awq_to_marlin_zero_points(q_zp_packed[e], size_k, size_n,
-                                              num_bits)
+                                              num_bits, is_a_8bit)
     return output
 
 
@@ -403,8 +461,10 @@ def apply_gptq_marlin_linear(
         output_size_per_partition: int,
         input_size_per_partition: int,
         is_k_full: bool,
+        input_global_scale: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
-        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
+        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
+        input_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
@@ -414,11 +474,18 @@ def apply_gptq_marlin_linear(
                                                   device=input.device,
                                                   dtype=input.dtype)
 
+    a_scales = None
+    if input_dtype == torch.int8:
+        reshaped_x, a_scales = per_token_quant_int8(reshaped_x)
+        a_scales = a_scales * input_global_scale
+        if wtype == scalar_types.uint8b128:
+            wtype = scalar_types.int8
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   None,
                                   weight,
                                   bias,
                                   weight_scale,
+                                  a_scales,
                                   None,
                                   weight_zp,
                                   g_idx,
@@ -447,8 +514,10 @@ def apply_awq_marlin_linear(
         quant_type: ScalarType,
         output_size_per_partition: int,
         input_size_per_partition: int,
+        input_global_scale: Optional[torch.Tensor] = None,
         bias: Optional[torch.Tensor] = None,
-        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT) -> torch.Tensor:
+        use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
+        input_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (output_size_per_partition, )
 
@@ -458,11 +527,17 @@ def apply_awq_marlin_linear(
                                                   device=input.device,
                                                   dtype=input.dtype)
 
+    a_scales = None
+    if input_dtype == torch.int8:
+        reshaped_x, a_scales = per_token_quant_int8(reshaped_x)
+        a_scales = a_scales * input_global_scale
+
     output = ops.gptq_marlin_gemm(reshaped_x,
                                   None,
                                   weight,
                                   bias,
                                   weight_scale,
+                                  a_scales,
                                   None,
                                   weight_zp,
                                   g_idx,

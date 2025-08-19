@@ -122,6 +122,7 @@ if TYPE_CHECKING:
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
+    VLLM_MARLIN_INPUT_DTYPE: Optional[str] = None
     VLLM_MXFP4_USE_MARLIN: Optional[bool] = None
     VLLM_V0_USE_OUTLINES_CACHE: bool = False
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
@@ -916,6 +917,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use marlin kernel in mxfp4 quantization method
     "VLLM_MXFP4_USE_MARLIN":
     lambda: maybe_convert_bool(os.environ.get("VLLM_MXFP4_USE_MARLIN", None)),
+
+    # Whether to use marlin kernel in mxfp4 quantization method
+    "VLLM_MARLIN_INPUT_DTYPE":
+    lambda: os.environ.get("VLLM_MARLIN_INPUT_DTYPE", None),
 
     # Whether to turn on the outlines cache for V0
     # This cache is unbounded and on disk, so it's not safe to use in

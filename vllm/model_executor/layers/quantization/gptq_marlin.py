@@ -24,7 +24,9 @@ from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override, get_linear_quant_method, override_config)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     check_marlin_supported, check_moe_marlin_supports_layer,
-    marlin_make_workspace_new, marlin_moe_permute_scales, marlin_permute_bias,
+    get_marlin_input_dtype, marlin_a8_process_qweight,
+    marlin_a8_process_scales, marlin_make_workspace_new,
+    marlin_moe_permute_scales, marlin_permute_bias,
     marlin_repeat_scales_on_all_ranks, verify_marlin_supported)
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            GroupQuantScaleParameter,
@@ -33,6 +35,7 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            RowvLLMParameter)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 
 logger = init_logger(__name__)
 
@@ -56,7 +59,7 @@ def get_moe_quant_method(
             # Dynamic per module/layer rules may override base config
             override_config(cloned_config, prefix=prefix)
 
-        return moe_method_cls(cloned_config)
+        return moe_method_cls(cloned_config, get_marlin_input_dtype(prefix))
     return None
 
 
@@ -228,8 +231,12 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 
     _kernel_backends_being_used: set[str] = set()
 
-    def __init__(self, quant_config: GPTQMarlinConfig) -> None:
+    def __init__(self,
+                 quant_config: GPTQMarlinConfig,
+                 input_dtype: Optional[torch.dtype] = None) -> None:
         self.quant_config = quant_config
+        self.input_dtype = input_dtype
+        self.quant_type = self.quant_config.quant_type
 
         # Verify supported on platform.
         verify_marlin_supported(quant_type=self.quant_config.quant_type,
@@ -375,7 +382,9 @@ class GPTQMarlinLinearMethod(LinearMethodBase):
 class GPTQMarlinMoEMethod(FusedMoEMethodBase):
     """MoE Marlin method with quantization."""
 
-    def __init__(self, quant_config: GPTQMarlinConfig) -> None:
+    def __init__(self,
+                 quant_config: GPTQMarlinConfig,
+                 input_dtype: Optional[torch.dtype] = None) -> None:
         self.quant_config = quant_config
         if self.quant_config.quant_type.size_bits == 4:
             self.quant_type = scalar_types.uint4b8
@@ -384,6 +393,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         else:
             raise ValueError(
                 "GPTQMarlinMoEMethod only supports int4 and int8 now.")
+        self.input_dtype = input_dtype
 
     def create_weights(
         self,
@@ -394,6 +404,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        layer.input_dtype = self.input_dtype
         intermediate_size_full = extra_weight_attrs.pop(
             "intermediate_size_full")
 
@@ -535,6 +546,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         layer.workspace = marlin_make_workspace_new(device, 4)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        is_a_8bit = self.input_dtype is not None and \
+            self.input_dtype.itemsize == 1
 
         # Process act_order
         if self.quant_config.desc_act:
@@ -590,7 +603,10 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             layer.w13_qweight.shape[1] * self.quant_config.pack_factor,
             layer.w13_qweight.shape[2],
             self.quant_config.quant_type.size_bits,
-        )
+            is_a_8bit=is_a_8bit)
+        if is_a_8bit:
+            marlin_w13_qweight = marlin_a8_process_qweight(
+                marlin_w13_qweight, self.quant_type, self.input_dtype)
         replace_parameter(layer, "w13_qweight", marlin_w13_qweight)
         marlin_w2_qweight = ops.gptq_marlin_moe_repack(
             layer.w2_qweight,
@@ -598,7 +614,10 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             layer.w2_qweight.shape[1] * self.quant_config.pack_factor,
             layer.w2_qweight.shape[2],
             self.quant_config.quant_type.size_bits,
-        )
+            is_a_8bit=is_a_8bit)
+        if is_a_8bit:
+            marlin_w2_qweight = marlin_a8_process_qweight(
+                marlin_w2_qweight, self.quant_type, self.input_dtype)
         replace_parameter(layer, "w2_qweight", marlin_w2_qweight)
         # Repack scales
         marlin_w13_scales = marlin_moe_permute_scales(
@@ -606,7 +625,16 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             size_k=layer.intermediate_size_per_partition,
             size_n=layer.w13_scales.shape[2],
             group_size=self.quant_config.group_size,
-        )
+            is_a_8bit=is_a_8bit)
+        if is_a_8bit:
+            marlin_w13_scales, w13_input_global_scale = \
+                marlin_a8_process_scales(marlin_w13_scales,
+                                         self.quant_type, self.input_dtype)
+            layer.register_parameter(
+                "w13_input_global_scale",
+                torch.nn.Parameter(w13_input_global_scale,
+                                   requires_grad=False))
+
         replace_parameter(layer, "w13_scales", marlin_w13_scales)
         marlin_w2_scales = marlin_moe_permute_scales(
             s=layer.w2_scales,
@@ -615,7 +643,15 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
              else self.quant_config.pack_factor),
             size_n=layer.w2_scales.shape[2],
             group_size=self.quant_config.group_size,
-        )
+            is_a_8bit=is_a_8bit)
+        if is_a_8bit:
+            marlin_w2_scales, w2_input_global_scale = \
+                marlin_a8_process_scales(marlin_w2_scales,
+                                         self.quant_type, self.input_dtype)
+            layer.register_parameter(
+                "w2_input_global_scale",
+                torch.nn.Parameter(w2_input_global_scale, requires_grad=False))
+
         replace_parameter(layer, "w2_scales", marlin_w2_scales)
 
         if hasattr(layer, "w13_bias") and layer.w13_bias is not None:
@@ -652,6 +688,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
 
         assert activation == "silu", "Only SiLU activation is supported."
 
+        router_logits = torch.randn_like(router_logits)
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -664,24 +701,32 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        return torch.ops.vllm.fused_marlin_moe(
-            x,
-            layer.w13_qweight,
-            layer.w2_qweight,
-            getattr(layer, "w13_bias", None),
-            getattr(layer, "w2_bias", None),
-            layer.w13_scales,
-            layer.w2_scales,
-            router_logits,
-            topk_weights,
-            topk_ids,
-            quant_type_id=self.quant_type.id,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            g_idx1=layer.w13_g_idx,
-            g_idx2=layer.w2_g_idx,
-            sort_indices1=layer.w13_g_idx_sort_indices,
-            sort_indices2=layer.w2_g_idx_sort_indices,
-            workspace=layer.workspace,
-            is_k_full=self.is_k_full)
+        import time
+        start_time = time.time()
+        for _ in range(1000):
+            res = fused_marlin_moe(
+                x,
+                layer.w13_qweight,
+                layer.w2_qweight,
+                getattr(layer, "w13_bias", None),
+                getattr(layer, "w2_bias", None),
+                layer.w13_scales,
+                layer.w2_scales,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                input_global_scale1=getattr(layer, "w13_input_global_scale", None),
+                input_global_scale2=getattr(layer, "w2_input_global_scale", None),
+                quant_type_id=self.quant_type.id,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                g_idx1=layer.w13_g_idx,
+                g_idx2=layer.w2_g_idx,
+                sort_indices1=layer.w13_g_idx_sort_indices,
+                sort_indices2=layer.w2_g_idx_sort_indices,
+                workspace=layer.workspace,
+                is_k_full=self.is_k_full,
+                input_dtype=self.input_dtype)
+        print(time.time() - start_time)
+        return res

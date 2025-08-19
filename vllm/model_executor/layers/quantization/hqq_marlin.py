@@ -313,6 +313,7 @@ class HQQMarlinMethod(LinearMethodBase):
             bias,
             scales,
             None,
+            None,
             zeros,
             layer.g_idx,
             layer.g_idx_sort_indices,

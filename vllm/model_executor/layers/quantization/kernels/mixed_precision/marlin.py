@@ -8,7 +8,8 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     MARLIN_SUPPORTED_GROUP_SIZES, apply_gptq_marlin_linear,
-    check_marlin_supports_shape, marlin_is_k_full, marlin_make_empty_g_idx,
+    check_marlin_supports_shape, marlin_a8_process_qweight,
+    marlin_a8_process_scales, marlin_is_k_full, marlin_make_empty_g_idx,
     marlin_make_workspace_new, marlin_permute_bias, marlin_permute_scales,
     marlin_sort_g_idx, marlin_zero_points, query_marlin_supported_quant_types,
     unpack_cols)
@@ -54,6 +55,8 @@ class MarlinLinearKernel(MPLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = getattr(layer, self.w_q_name).device
         c = self.config
+        is_a_8bit = c.act_type is not None and \
+            c.act_type.itemsize == 1
 
         row_parallel = (c.partition_weight_shape[0] != c.full_weight_shape[0])
         self.is_k_full = marlin_is_k_full(c.has_g_idx, row_parallel)
@@ -75,7 +78,11 @@ class MarlinLinearKernel(MPLinearKernel):
                                             perm=layer.g_idx_sort_indices,
                                             size_k=c.partition_weight_shape[0],
                                             size_n=c.partition_weight_shape[1],
-                                            num_bits=c.weight_type.size_bits)
+                                            num_bits=c.weight_type.size_bits,
+                                            is_a_8bit=is_a_8bit)
+            if is_a_8bit:
+                x.data = marlin_a8_process_qweight(x.data, c.weight_type,
+                                                   c.act_type)
             return x
 
         def transform_w_s(x):
@@ -84,7 +91,16 @@ class MarlinLinearKernel(MPLinearKernel):
             x.data = marlin_permute_scales(x.data.contiguous(),
                                            size_k=c.partition_weight_shape[0],
                                            size_n=c.partition_weight_shape[1],
-                                           group_size=c.group_size)
+                                           group_size=c.group_size,
+                                           is_a_8bit=is_a_8bit)
+
+            if is_a_8bit:
+                x.data, input_global_scale = \
+                    marlin_a8_process_scales(x.data, c.weight_type, c.act_type)
+                layer.register_parameter(
+                    "input_global_scale",
+                    torch.nn.Parameter(input_global_scale,
+                                       requires_grad=False))
             return x
 
         if c.has_g_idx:
@@ -106,7 +122,8 @@ class MarlinLinearKernel(MPLinearKernel):
                                 c.partition_weight_shape[1]),
                     size_k=grouped_k,
                     size_n=c.partition_weight_shape[1],
-                    num_bits=c.weight_type.size_bits))
+                    num_bits=c.weight_type.size_bits,
+                    is_a_8bit=is_a_8bit))
         else:
             setattr(layer, self.w_zp_name, marlin_make_empty_g_idx(device))
         self._transform_param(layer, self.w_q_name, transform_w_q)
@@ -136,4 +153,6 @@ class MarlinLinearKernel(MPLinearKernel):
             input_size_per_partition=c.partition_weight_shape[0],
             output_size_per_partition=c.partition_weight_shape[1],
             is_k_full=self.is_k_full,
-            bias=bias)
+            input_global_scale=getattr(layer, "input_global_scale", None),
+            bias=bias,
+            input_dtype=c.act_type)

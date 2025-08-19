@@ -9,6 +9,8 @@ import torch
 from vllm.config import QuantizationConfig
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, UnquantizedEmbeddingMethod)
 
@@ -91,5 +93,5 @@ def get_linear_quant_method(
             # Dynamic per module/layer rules may override base config
             override_config(cloned_config, prefix=prefix)
 
-        return linear_method_cls(cloned_config)
+        return linear_method_cls(cloned_config, get_marlin_input_dtype(prefix))
     return None

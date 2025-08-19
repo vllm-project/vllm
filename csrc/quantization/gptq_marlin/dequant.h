@@ -470,6 +470,35 @@ __device__ inline void dequant<nv_bfloat162, vllm::kFE2M1f.id(), false>(
   frag_b[0] = __hmul2(frag_b[0], bias_reg);
 }
 
+template <>
+__device__ inline void dequant<__nv_fp8x4_e4m3, vllm::kFE2M1f.id(), true>(
+    int q, __nv_fp8x4_e4m3* frag_b) {
+  // Constants for FP4 (E2M1) and FP16 formats
+  constexpr int FP4_EXPONENT = 2, FP8_EXPONENT = 4;
+  constexpr int RIGHT_SHIFT = FP8_EXPONENT - FP4_EXPONENT;
+  constexpr int MASK = 0x70707070;
+
+  // Extract and shift FP4 values to FP16 format
+  int Out1 = (q & 0x80808080) | ((q & MASK) >> RIGHT_SHIFT);
+  q <<= 4;
+  int Out2 = (q & 0x80808080) | ((q & MASK) >> RIGHT_SHIFT);
+
+  // Note1: reverse indexing is intentional because weights are permuted
+  // Note2: when dequant to 8bit type, we write to `frag_b[2]` instead of
+  //        `frag_b[1]` to fit the layout of tensorcore
+  frag_b[1] = *reinterpret_cast<const __nv_fp8x4_e4m3*>(&Out1);
+  frag_b[0] = *reinterpret_cast<const __nv_fp8x4_e4m3*>(&Out2);
+}
+
+template <>
+__device__ inline void dequant<int32_t, vllm::kU4B8.id(), true>(
+    int q, int32_t* frag_b) {
+  frag_b[1] = q & 0xF0F0F0F0;
+  q <<= 4;
+  frag_b[0] = q & 0xF0F0F0F0;
+}
+
+
 template <typename scalar_t2, vllm::ScalarTypeId s_type_id>
 __device__ inline void dequant_fp8_scales(int q, scalar_t2* frag_b);
 
@@ -515,6 +544,51 @@ __device__ inline void dequant_fp8_scales<nv_bfloat162, vllm::kFE8M0fnu.id()>(
   // Note: reverse indexing is intentional because weights are permuted
   frag_b[1] = *reinterpret_cast<const nv_bfloat162*>(&Out1);
   frag_b[0] = *reinterpret_cast<const nv_bfloat162*>(&Out2);
+};
+
+template <typename scalar_t2, vllm::ScalarTypeId w_type_id,
+          bool skip_flop = false>
+__device__ inline void dequant_and_sub_zp(int q, scalar_t2* frag_b, int zp);
+
+template <>
+__device__ inline void dequant_and_sub_zp<int32_t, vllm::kU4.id(), true>(
+    int q, int32_t* frag_b, int zp) {
+
+  int repeated_zp = 0x01010101 * zp;
+  int MASK = 0x80808080;
+
+  frag_b[0] = ((q & 0x0F0F0F0F | MASK) - repeated_zp) ^ MASK;
+  q >>= 4;
+  frag_b[1] = ((q & 0x0F0F0F0F | MASK) - repeated_zp) ^ MASK;
+}
+
+template <>
+__device__ inline void dequant_and_sub_zp<__nv_fp8x4_e4m3, vllm::kU4.id(), true>(
+    int q, __nv_fp8x4_e4m3* frag_b, int zp) {
+
+  constexpr int SUB = 0x00880088;
+  int* frag_b_int = reinterpret_cast<int*>(frag_b);
+
+  #pragma unroll
+  for (int i = 0; i < 2; i++) {
+    #pragma unroll
+    for (int j = 0; j < 2; j++) {
+      int q0 = (q & 0x000F000F) | 0x00800080;
+      nv_bfloat162 q1 = __hsub2(
+        *reinterpret_cast<nv_bfloat162*>(&q0),
+        *reinterpret_cast<const nv_bfloat162*>(&SUB)
+      );
+
+      if (i == 0) {
+        frag_b_int[j] = *reinterpret_cast<int*>(&q1);
+      } else {
+        frag_b_int[j] |= *reinterpret_cast<int*>(&q1) << 8;
+      }
+      q >>= 4;
+    }
+    frag_b_int[0] ^= 0x80808080;
+    frag_b_int[1] ^= 0x80808080;
+  }
 }
 
 #endif
