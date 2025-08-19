@@ -465,7 +465,7 @@ def get_load_balance_assignment(sizes: list[int], num_gpus: int = 2):
     not the number of images.
     
     Args:
-        sizes: List or tensor of flatten image sizes
+        sizes: The size of each image
         num_gpus: Number of GPUs to balance across
     
     Returns:
