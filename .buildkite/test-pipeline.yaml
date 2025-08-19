@@ -834,3 +834,17 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
+
+##### B200 test #####
+- label: LM Eval Blackwell Models
+  gpu: b200
+  num_gpus: 2
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/quantization/fp4/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/modelopt.py
+  - vllm/model_executor/layers/quantization/compressed_tensors/
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-sm100.txt --tp-size=2
