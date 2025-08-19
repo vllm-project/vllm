@@ -72,7 +72,7 @@ class BasevLLMParameter(Parameter):
 
     @weight_loader.deleter
     def weight_loader(self):
-        self._weight_loader = None
+        self._weight_loader = None  # type: ignore[assignment]
 
     def _is_1d_and_scalar(self, loaded_weight: torch.Tensor):
         cond1 = self.data.ndim == 1 and self.data.numel() == 1
