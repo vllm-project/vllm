@@ -168,7 +168,7 @@ llm = LLM(
 
 !! important
     Intra-request DP is not to be confused with inter-request DP
-    (which is instead controlled by `--data-parallel-size`).
+    (which is instead controlled by `data_parallel_size`).
 
 ## Input Processing
 
