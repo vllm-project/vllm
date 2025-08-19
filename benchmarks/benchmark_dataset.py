@@ -19,6 +19,7 @@ import logging
 import random
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass
 from functools import cache
 from io import BytesIO
@@ -54,6 +55,7 @@ class SampleRequest:
     expected_output_len: int
     multi_modal_data: Optional[Union[MultiModalDataDict, dict, list[dict]]] = None
     lora_request: Optional[LoRARequest] = None
+    request_id: Optional[str] = None
 
 
 # -----------------------------------------------------------------------------
@@ -155,7 +157,10 @@ class BenchmarkDataset(ABC):
 
     @abstractmethod
     def sample(
-        self, tokenizer: PreTrainedTokenizerBase, num_requests: int
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        request_id_prefix: str = "",
     ) -> list[SampleRequest]:
         """
         Abstract method to generate sample requests from the dataset.
@@ -167,6 +172,7 @@ class BenchmarkDataset(ABC):
             tokenizer (PreTrainedTokenizerBase): The tokenizer to be used
              for processing the dataset's text.
             num_requests (int): The number of sample requests to generate.
+            request_id_prefix (str) The prefix of request_id.
 
         Returns:
             list[SampleRequest]: A list of sample requests generated from the
@@ -175,7 +181,10 @@ class BenchmarkDataset(ABC):
         raise NotImplementedError("sample must be implemented in subclasses.")
 
     def maybe_oversample_requests(
-        self, requests: list[SampleRequest], num_requests: int
+        self,
+        requests: list[SampleRequest],
+        num_requests: int,
+        request_id_prefix: str = "",
     ) -> None:
         """
         Oversamples the list of requests if its size is less than the desired
@@ -183,11 +192,18 @@ class BenchmarkDataset(ABC):
 
         Args:
             requests (List[SampleRequest]): The current list of sampled
-            requests.  num_requests (int): The target number of requests.
+            requests.
+            num_requests (int): The target number of requests.
+            request_id_prefix (str) The prefix of the request ids.
         """
         if len(requests) < num_requests:
             random.seed(self.random_seed)
-            additional = random.choices(requests, k=num_requests - len(requests))
+            additional = deepcopy(
+                random.choices(requests, k=num_requests - len(requests))
+            )
+            for i in range(len(additional)):
+                req = additional[i]
+                req.request_id = request_id_prefix + str(len(requests) + i)
             requests.extend(additional)
             logger.info("Oversampled requests to reach %d total samples.", num_requests)
 
@@ -303,6 +319,7 @@ class RandomDataset(BenchmarkDataset):
         range_ratio: float = DEFAULT_RANGE_RATIO,
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list[SampleRequest]:
         # Enforce range_ratio < 1
@@ -363,8 +380,10 @@ class RandomDataset(BenchmarkDataset):
                     prompt=prompt,
                     prompt_len=total_input_len,
                     expected_output_len=int(output_lens[i]),
+                    request_id=request_id_prefix + str(i),
                 )
             )
+
         return requests
 
 
@@ -406,9 +425,11 @@ class ShareGPTDataset(BenchmarkDataset):
         max_loras: Optional[int] = None,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         samples: list = []
+        ind = 0
         for entry in self.data:
             if len(samples) >= num_requests:
                 break
@@ -444,9 +465,11 @@ class ShareGPTDataset(BenchmarkDataset):
                     expected_output_len=new_output_len,
                     lora_request=lora_request,
                     multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(ind),
                 )
             )
-        self.maybe_oversample_requests(samples, num_requests)
+            ind += 1
+        self.maybe_oversample_requests(samples, num_requests, request_id_prefix)
         return samples
 
 
@@ -512,10 +535,11 @@ class CustomDataset(BenchmarkDataset):
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         sampled_requests = []
-        for item in self.data:
+        for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["prompt"]
@@ -534,9 +558,12 @@ class CustomDataset(BenchmarkDataset):
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
+                    request_id=request_id_prefix + str(i),
                 )
             )
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix
+        )
 
         return sampled_requests
 
@@ -578,6 +605,7 @@ class SonnetDataset(BenchmarkDataset):
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         return_prompt_formatted: bool = False,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         # Calculate average token length for a poem line.
@@ -603,6 +631,7 @@ class SonnetDataset(BenchmarkDataset):
         prefix_lines = self.data[:num_prefix_lines]
 
         samples = []
+        ind = 0
         while len(samples) < num_requests:
             extra_lines = random.choices(
                 self.data, k=num_input_lines - num_prefix_lines
@@ -613,14 +642,17 @@ class SonnetDataset(BenchmarkDataset):
                 msg, add_generation_prompt=True, tokenize=False
             )
             prompt_len = len(tokenizer(prompt_formatted).input_ids)
+
             if prompt_len <= input_len:
                 samples.append(
                     SampleRequest(
                         prompt=prompt_formatted if return_prompt_formatted else prompt,
                         prompt_len=prompt_len,
                         expected_output_len=output_len,
+                        request_id=request_id_prefix + str(ind),
                     )
                 )
+                ind += 1
         return samples
 
 
@@ -672,6 +704,7 @@ class BurstGPTDataset(BenchmarkDataset):
         num_requests: int,
         max_loras: Optional[int] = None,
         lora_path: Optional[str] = None,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list[SampleRequest]:
         samples = []
@@ -693,6 +726,7 @@ class BurstGPTDataset(BenchmarkDataset):
                     prompt_len=input_len,
                     expected_output_len=output_len,
                     lora_request=lora_req,
+                    request_id=request_id_prefix + str(i),
                 )
             )
         return samples
@@ -752,12 +786,14 @@ class ConversationDataset(HuggingFaceDataset):
         num_requests: int,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         # Filter examples with at least 2 conversations
         filtered_data = self.data.filter(lambda x: len(x["conversations"]) >= 2)
         sampled_requests = []
         dynamic_output = output_len is None
+        ind = 0
 
         for item in filtered_data:
             if len(sampled_requests) >= num_requests:
@@ -785,9 +821,13 @@ class ConversationDataset(HuggingFaceDataset):
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
                     multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(ind),
                 )
             )
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+            ind += 1
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix
+        )
         return sampled_requests
 
 
@@ -814,11 +854,12 @@ class VisionArenaDataset(HuggingFaceDataset):
         num_requests: int,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
         sampled_requests = []
-        for item in self.data:
+        for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
             parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.dataset_path)
@@ -838,9 +879,12 @@ class VisionArenaDataset(HuggingFaceDataset):
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
                     multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(i),
                 )
             )
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix
+        )
         return sampled_requests
 
 
@@ -870,11 +914,12 @@ class InstructCoderDataset(HuggingFaceDataset):
         num_requests: int,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
         sampled_requests = []
-        for item in self.data:
+        for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = f"{item['input']}\n\n{item['instruction']} Just output \
@@ -892,9 +937,12 @@ class InstructCoderDataset(HuggingFaceDataset):
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
+                    request_id=request_id_prefix + str(i),
                 )
             )
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix
+        )
         return sampled_requests
 
 
@@ -924,12 +972,13 @@ class MTBenchDataset(HuggingFaceDataset):
         num_requests: int,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
         sampled_requests = []
 
-        for item in self.data:
+        for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
             prompt = item["turns"][0]
@@ -947,9 +996,12 @@ class MTBenchDataset(HuggingFaceDataset):
                     prompt=prompt,
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
+                    request_id=request_id_prefix + str(i),
                 )
             )
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix
+        )
         return sampled_requests
 
 
@@ -974,10 +1026,12 @@ class AIMODataset(HuggingFaceDataset):
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
         output_len: Optional[int] = None,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         sampled_requests = []
         dynamic_output = output_len is None
+        ind = 0
 
         for item in self.data:
             if len(sampled_requests) >= num_requests:
@@ -1000,9 +1054,13 @@ class AIMODataset(HuggingFaceDataset):
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
                     multi_modal_data=None,
+                    request_id=request_id_prefix + str(ind),
                 )
             )
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+            ind += 1
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix
+        )
         return sampled_requests
 
 
@@ -1072,12 +1130,18 @@ class NextEditPredictionDataset(HuggingFaceDataset):
         "zed-industries/zeta": _format_zeta_prompt,
     }
 
-    def sample(self, tokenizer: PreTrainedTokenizerBase, num_requests: int, **kwargs):
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        request_id_prefix: str = "",
+        **kwargs,
+    ):
         formatting_prompt_func = self.MAPPING_PROMPT_FUNCS.get(self.dataset_path)
         if formatting_prompt_func is None:
             raise ValueError(f"Unsupported dataset path: {self.dataset_path}")
         samples = []
-        for sample in self.data:
+        for i, sample in enumerate(self.data):
             sample = formatting_prompt_func(sample)
             samples.append(
                 SampleRequest(
@@ -1086,11 +1150,12 @@ class NextEditPredictionDataset(HuggingFaceDataset):
                     expected_output_len=len(
                         tokenizer(sample["expected_output"]).input_ids
                     ),
+                    request_id=request_id_prefix + str(i),
                 )
             )
             if len(samples) >= num_requests:
                 break
-        self.maybe_oversample_requests(samples, num_requests)
+        self.maybe_oversample_requests(samples, num_requests, request_id_prefix)
         return samples
 
 
@@ -1139,6 +1204,7 @@ class ASRDataset(HuggingFaceDataset):
         tokenizer: PreTrainedTokenizerBase,
         num_requests: int,
         output_len: Optional[int] = None,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list:
         import librosa
@@ -1148,6 +1214,7 @@ class ASRDataset(HuggingFaceDataset):
         prompt_len = len(tokenizer(prompt).input_ids)
         sampled_requests = []
         skipped = 0
+        ind = 0
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
@@ -1166,8 +1233,10 @@ class ASRDataset(HuggingFaceDataset):
                     prompt_len=prompt_len,
                     expected_output_len=output_len,
                     multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(ind),
                 )
             )
+            ind += 1
         if skipped:
             logger.warning(
                 "%d samples discarded from dataset due to"
@@ -1175,5 +1244,7 @@ class ASRDataset(HuggingFaceDataset):
                 " what Whisper supports.",
                 skipped,
             )
-        self.maybe_oversample_requests(sampled_requests, num_requests)
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix
+        )
         return sampled_requests
