@@ -53,9 +53,9 @@ class Tensors:
     a_ref: torch.Tensor
     a: torch.Tensor
     w_q: torch.Tensor
-    w_g_s: Optional[torch.Tensor]
-    w_ch_s: Optional[torch.Tensor]
-    w_tok_s: Optional[torch.Tensor]
+    w_g_s: torch.Tensor
+    w_ch_s: torch.Tensor
+    w_tok_s: torch.Tensor
 
 
 # (Act Type, Weight Type, Output Type, Scale Type, ZeroPoints,
