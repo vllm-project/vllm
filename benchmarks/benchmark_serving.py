@@ -375,11 +375,12 @@ async def benchmark(
                     rps_change_events.append({"rps": rps_val, "timestamp": timestamp})
                 last_int_rps = current_int_rps
 
-        prompt, prompt_len, output_len, mm_content = (
+        prompt, prompt_len, output_len, mm_content, request_id = (
             request.prompt,
             request.prompt_len,
             request.expected_output_len,
             request.multi_modal_data,
+            request.request_id,
         )
         req_model_id, req_model_name = model_id, model_name
         if lora_modules:
@@ -397,6 +398,7 @@ async def benchmark(
             multi_modal_content=mm_content,
             ignore_eos=ignore_eos,
             extra_body=extra_body,
+            request_id=request_id,
         )
         task = limited_request_func(request_func_input=request_func_input, pbar=pbar)
         tasks.append(asyncio.create_task(task))
@@ -665,6 +667,7 @@ def main(args: argparse.Namespace):
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
             skip_chat_template=args.custom_skip_chat_template,
+            request_id_prefix=args.request_id_prefix,
         )
 
     elif args.dataset_name == "sonnet":
@@ -678,6 +681,7 @@ def main(args: argparse.Namespace):
                 prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
                 return_prompt_formatted=False,
+                request_id_prefix=args.request_id_prefix,
             )
         else:
             assert tokenizer.chat_template or tokenizer.default_chat_template, (
@@ -690,6 +694,7 @@ def main(args: argparse.Namespace):
                 prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
                 return_prompt_formatted=True,
+                request_id_prefix=args.request_id_prefix,
             )
 
     elif args.dataset_name == "hf":
@@ -751,6 +756,7 @@ def main(args: argparse.Namespace):
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             output_len=args.hf_output_len,
+            request_id_prefix=args.request_id_prefix,
         )
 
     else:
@@ -762,10 +768,15 @@ def main(args: argparse.Namespace):
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 output_len=args.sharegpt_output_len,
+                request_id_prefix=args.request_id_prefix,
             ),
             "burstgpt": lambda: BurstGPTDataset(
                 random_seed=args.seed, dataset_path=args.dataset_path
-            ).sample(tokenizer=tokenizer, num_requests=args.num_prompts),
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                request_id_prefix=args.request_id_prefix,
+            ),
             "random": lambda: RandomDataset(dataset_path=args.dataset_path).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
@@ -773,6 +784,7 @@ def main(args: argparse.Namespace):
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
                 range_ratio=args.random_range_ratio,
+                request_id_prefix=args.request_id_prefix,
             ),
         }
 
@@ -1117,6 +1129,13 @@ def create_argument_parser():
         '"ttft", "tpot", "e2el". For more context on the definition of '
         "goodput, refer to DistServe paper: https://arxiv.org/pdf/2401.09670 "
         "and the blog: https://hao-ai-lab.github.io/blogs/distserve",
+    )
+    parser.add_argument(
+        "--request-id-prefix",
+        type=str,
+        required=False,
+        default="benchmark-serving",
+        help="Specify the prefix of request id.",
     )
 
     # group for dataset specific arguments
