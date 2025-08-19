@@ -1,0 +1,685 @@
+apiVersion: perses.dev/v1alpha1
+kind: PersesDashboard
+metadata:
+    name: performance-statistics
+spec:
+    display:
+        name: Performance Statistics
+    variables:
+        - kind: ListVariable
+          spec:
+            display:
+                name: Aggregation
+                hidden: false
+            defaultValue: |-
+                avg : Average
+                0.50 : P50
+                0.90 : P90
+                0.99 : P99
+                0.999 : Max (Approx)
+            allowAllValue: false
+            allowMultiple: false
+            plugin:
+                kind: StaticListVariable
+                spec:
+                    values:
+                        - |-
+                          avg : Average
+                          0.50 : P50
+                          0.90 : P90
+                          0.99 : P99
+                          0.999 : Max (Approx)
+            name: agg_method
+        - kind: ListVariable
+          spec:
+            display:
+                name: Deployment_ID
+                hidden: false
+            defaultValue:
+                - granite-33-2b-instruct
+            allowAllValue: true
+            allowMultiple: true
+            plugin:
+                kind: PrometheusLabelValuesVariable
+                spec:
+                    labelName: model_name
+                    matchers:
+                        - vllm:generation_tokens_total
+            name: Deployment_id
+    panels:
+        "0_0":
+            kind: Panel
+            spec:
+                display:
+                    name: E2E Latency over Time
+                    description: End-to-End latency of requests, showing average and key percentiles over time.
+                plugin:
+                    kind: TimeSeriesChart
+                    spec:
+                        legend:
+                            mode: list
+                            position: bottom
+                            values: []
+                        visual:
+                            areaOpacity: 0.18
+                            connectNulls: true
+                            display: line
+                            lineWidth: 1
+                        yAxis:
+                            format:
+                                decimalPlaces: 2
+                                unit: seconds
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                datasource:
+                                    kind: PrometheusDatasource
+                                    name: 4184fc20-68a7-483a-8d9b-7caa59c680dd
+                                query: rate(vllm:e2e_request_latency_seconds_sum[$__interval]) / rate(vllm:e2e_request_latency_seconds_count[$__interval])
+                                seriesNameFormat: E2E Latency
+        "0_1":
+            kind: Panel
+            spec:
+                display:
+                    name: E2E Latency (P99)
+                    description: 99th percentile of End-to-End request latency over the selected time range.
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            decimalPlaces: 2
+                            unit: seconds
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: histogram_quantile(0.99, sum by(le) (rate(vllm:e2e_request_latency_seconds_bucket[$__range])))
+        "0_2":
+            kind: Panel
+            spec:
+                display:
+                    name: E2E Latency (P90)
+                    description: 90th percentile of End-to-End request latency over the selected time range.
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            decimalPlaces: 2
+                            unit: seconds
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: histogram_quantile(0.90, sum by(le) (rate(vllm:e2e_request_latency_seconds_bucket[$__range])))
+        "0_3":
+            kind: Panel
+            spec:
+                display:
+                    name: E2E Latency (Avg)
+                    description: Average End-to-End request latency over the selected time range.
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            decimalPlaces: 2
+                            unit: seconds
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: (sum(increase(vllm:e2e_request_latency_seconds_sum[$__range])) / sum(increase(vllm:e2e_request_latency_seconds_count[$__range])))
+                                seriesNameFormat: Average E2E Latency
+        "0_4":
+            kind: Panel
+            spec:
+                display:
+                    name: E2E Latency (P50)
+                    description: 50th percentile (median) of End-to-End request latency over the selected time range.
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            decimalPlaces: 2
+                            unit: seconds
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: histogram_quantile(0.50, sum by(le) (rate(vllm:e2e_request_latency_seconds_bucket[$__range])))
+        "1_0":
+            kind: Panel
+            spec:
+                display:
+                    name: TTFT Over Time
+                    description: Time to first token (TTFT) latency, showing average and key percentiles over time.
+                plugin:
+                    kind: TimeSeriesChart
+                    spec:
+                        legend:
+                            mode: list
+                            position: bottom
+                            values: []
+                        visual:
+                            areaOpacity: 0.18
+                            connectNulls: false
+                            display: line
+                            lineWidth: 1
+                        yAxis:
+                            format:
+                                decimalPlaces: 2
+                                unit: seconds
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: rate(vllm:time_to_first_token_seconds_sum[$__interval]) / rate(vllm:time_to_first_token_seconds_count[$__interval])
+                                seriesNameFormat: TTFT (Avg)
+        "1_1":
+            kind: Panel
+            spec:
+                display:
+                    name: TTFT (P99)
+                    description: 99th percentile of Time To First Token latency over the selected time range.
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            decimalPlaces: 2
+                            unit: seconds
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: histogram_quantile(0.99, sum by(le) (rate(vllm:time_to_first_token_seconds_bucket[$__range])))
+                                seriesNameFormat: TTFT (p99)
+        "1_2":
+            kind: Panel
+            spec:
+                display:
+                    name: TTFT (P90)
+                    description: 90th percentile of Time To First Token latency over the selected time range.
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            decimalPlaces: 2
+                            unit: seconds
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: histogram_quantile(0.90, sum by(le) (rate(vllm:time_to_first_token_seconds_bucket[$__range])))
+                                seriesNameFormat: TTFT (p90)
+        "1_3":
+            kind: Panel
+            spec:
+                display:
+                    name: TTFT (Avg)
+                    description: Average Time To First Token latency over the selected time range.
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            decimalPlaces: 2
+                            unit: seconds
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: (sum(increase(vllm:time_to_first_token_seconds_sum[$__range])) / sum(increase(vllm:time_to_first_token_seconds_count[$__range])))
+        "1_4":
+            kind: Panel
+            spec:
+                display:
+                    name: TTFT (P50)
+                    description: 50th percentile (median) of Time To First Token latency over the selected time range.
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            unit: seconds
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: histogram_quantile(0.50, sum by(le) (rate(vllm:time_to_first_token_seconds_bucket[$__range])))
+        "2_0":
+            kind: Panel
+            spec:
+                display:
+                    name: ITL (Time Per Output Token) Over Time
+                    description: Iteration latency, or average time taken to generate a single output token, with percentiles.
+                plugin:
+                    kind: TimeSeriesChart
+                    spec:
+                        legend:
+                            mode: list
+                            position: bottom
+                            values: []
+                        visual:
+                            areaOpacity: 0.17
+                            connectNulls: false
+                            display: line
+                            lineWidth: 1
+                        yAxis:
+                            format:
+                                decimalPlaces: 2
+                                unit: seconds
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: rate(vllm:time_per_output_token_seconds_sum[$__interval]) / rate(vllm:time_per_output_token_seconds_count[$__interval])
+                                seriesNameFormat: ITL (Avg)
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                datasource:
+                                    kind: PrometheusDatasource
+                                    name: 4184fc20-68a7-483a-8d9b-7caa59c680dd
+                                query: histogram_quantile(0.50, sum by(le) (rate(vllm:time_per_output_token_seconds_bucket[$__interval])))
+                                seriesNameFormat: ITL (p50)
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                datasource:
+                                    kind: PrometheusDatasource
+                                    name: 4184fc20-68a7-483a-8d9b-7caa59c680dd
+                                query: histogram_quantile(0.90, sum by(le) (rate(vllm:time_per_output_token_seconds_bucket[$__interval])))
+                                seriesNameFormat: ITL (p90)
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                datasource:
+                                    kind: PrometheusDatasource
+                                    name: 4184fc20-68a7-483a-8d9b-7caa59c680dd
+                                query: histogram_quantile(0.99, sum by(le) (rate(vllm:time_per_output_token_seconds_bucket[$__interval])))
+                                seriesNameFormat: ITL (p99)
+        "2_1":
+            kind: Panel
+            spec:
+                display:
+                    name: ITL (P90)
+                    description: 90th percentile of Iteration Latency over the selected time range.
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            decimalPlaces: 2
+                            unit: seconds
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: histogram_quantile(0.90, sum by(le) (rate(vllm:time_per_output_token_seconds_bucket[$__range])))
+        "2_2":
+            kind: Panel
+            spec:
+                display:
+                    name: ITL (P99)
+                    description: |+
+                        99th percentile of Iteration Latency over the selected time range.
+
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            decimalPlaces: 2
+                            unit: seconds
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: histogram_quantile(0.99, sum by(le) (rate(vllm:time_per_output_token_seconds_bucket[$__range])))
+        "2_3":
+            kind: Panel
+            spec:
+                display:
+                    name: ITL (Avg)
+                    description: Average Iteration Latency (time per output token) over the selected time range.
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            decimalPlaces: 2
+                            unit: seconds
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: (sum(increase(vllm:time_per_output_token_seconds_sum[$__range])) / sum(increase(vllm:time_per_output_token_seconds_count[$__range])))
+        "2_4":
+            kind: Panel
+            spec:
+                display:
+                    name: ITL (P50)
+                    description: 50th percentile (median) of Iteration Latency over the selected time range.
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            decimalPlaces: 2
+                            unit: seconds
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: histogram_quantile(0.50, sum by(le) (rate(vllm:time_per_output_token_seconds_bucket[$__range])))
+        "3_0":
+            kind: Panel
+            spec:
+                display:
+                    name: TPS (Tokens Per Second) Over Time
+                    description: Rate of tokens processed per second, including prompt and generation phases.
+                plugin:
+                    kind: TimeSeriesChart
+                    spec:
+                        legend:
+                            mode: list
+                            position: bottom
+                            values: []
+                        visual:
+                            areaOpacity: 0
+                            connectNulls: false
+                            display: line
+                            lineWidth: 1
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: rate(vllm:generation_tokens_total[$__interval])
+                                seriesNameFormat: Generation TPS
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                datasource:
+                                    kind: PrometheusDatasource
+                                    name: 4184fc20-68a7-483a-8d9b-7caa59c680dd
+                                query: rate(vllm:prompt_tokens_total[$__interval])
+                                seriesNameFormat: Prompt TPS
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                datasource:
+                                    kind: PrometheusDatasource
+                                    name: 4184fc20-68a7-483a-8d9b-7caa59c680dd
+                                query: rate(vllm:iteration_tokens_total_count[$__interval])
+                                seriesNameFormat: Overall Iteration TPS
+    layouts:
+        - kind: Grid
+          spec:
+            display:
+                title: 'Graph: E2E latency over time '
+                collapse:
+                    open: true
+            items:
+                - x: 0
+                  "y": 1
+                  width: 12
+                  height: 8
+                  content:
+                    $ref: '#/spec/panels/0_0'
+                - x: 12
+                  "y": 1
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/0_1'
+                - x: 18
+                  "y": 1
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/0_2'
+                - x: 12
+                  "y": 5
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/0_3'
+                - x: 18
+                  "y": 5
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/0_4'
+        - kind: Grid
+          spec:
+            display:
+                title: 'Graph: TTFT(Time To First Token) over time '
+                collapse:
+                    open: true
+            items:
+                - x: 0
+                  "y": 10
+                  width: 12
+                  height: 8
+                  content:
+                    $ref: '#/spec/panels/1_0'
+                - x: 12
+                  "y": 10
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/1_1'
+                - x: 18
+                  "y": 10
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/1_2'
+                - x: 12
+                  "y": 14
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/1_3'
+                - x: 18
+                  "y": 14
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/1_4'
+        - kind: Grid
+          spec:
+            display:
+                title: ITL (Iteration Latency / Time Per Output Token) over time.
+                collapse:
+                    open: true
+            items:
+                - x: 0
+                  "y": 19
+                  width: 12
+                  height: 8
+                  content:
+                    $ref: '#/spec/panels/2_0'
+                - x: 12
+                  "y": 19
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/2_1'
+                - x: 18
+                  "y": 19
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/2_2'
+                - x: 12
+                  "y": 23
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/2_3'
+                - x: 18
+                  "y": 23
+                  width: 6
+                  height: 4
+                  content:
+                    $ref: '#/spec/panels/2_4'
+        - kind: Grid
+          spec:
+            display:
+                title: TPS (Tokens Per Second)
+                collapse:
+                    open: true
+            items:
+                - x: 0
+                  "y": 28
+                  width: 12
+                  height: 8
+                  content:
+                    $ref: '#/spec/panels/3_0'
+    duration: 1h
+

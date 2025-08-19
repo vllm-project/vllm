@@ -1,0 +1,597 @@
+apiVersion: perses.dev/v1alpha1
+kind: PersesDashboard
+metadata:
+    name: query-statistics
+spec:
+    display:
+        name: Query Statistics_New
+    variables:
+        - kind: ListVariable
+          spec:
+            display:
+                name: Deployment_ID
+                hidden: false
+            defaultValue:
+                - $__all
+            allowAllValue: true
+            allowMultiple: true
+            sort: alphabetical-asc
+            plugin:
+                kind: PrometheusLabelValuesVariable
+                spec:
+                    labelName: model_name
+                    matchers:
+                        - vllm:request_success_total
+            name: Deployment_id
+        - kind: ListVariable
+          spec:
+            display:
+                name: Rush Hours Only
+                hidden: true
+            defaultValue: All hours
+            allowAllValue: false
+            allowMultiple: false
+            plugin:
+                kind: StaticListVariable
+                spec:
+                    values:
+                        - label: "false"
+                          value: All hours
+                        - label: "true"
+                          value: Rush hours
+            name: rush_hours
+        - kind: ListVariable
+          spec:
+            display:
+                name: Rush Hours Type
+                hidden: true
+            defaultValue: All
+            allowAllValue: false
+            allowMultiple: false
+            plugin:
+                kind: StaticListVariable
+                spec:
+                    values:
+                        - label: ^All__.*$
+                          value: All
+                        - label: ^Static__.*$
+                          value: Static
+                        - label: ^Dynamic__.*$
+                          value: Dynamic
+            name: rush_hours_type
+        - kind: ListVariable
+          spec:
+            display:
+                hidden: true
+            allowAllValue: false
+            allowMultiple: false
+            plugin:
+                kind: StaticListVariable
+                spec:
+                    values:
+                        - grafana
+                        - migration
+                        - not
+                        - supported
+            name: query0
+    panels:
+        "1":
+            kind: Panel
+            spec:
+                display:
+                    name: Successful Requests Over Time
+                plugin:
+                    kind: TimeSeriesChart
+                    spec:
+                        legend:
+                            mode: list
+                            position: bottom
+                            values: []
+                        visual:
+                            areaOpacity: 0
+                            connectNulls: false
+                            display: line
+                            lineWidth: 1
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                datasource:
+                                    kind: PrometheusDatasource
+                                    name: 4184fc20-68a7-483a-8d9b-7caa59c680dd
+                                minStep: "1"
+                                query: "sum by (model_name) (\r\n  rate(vllm:request_success_total{model_name=~\"${Deployment_id}\"}[$__interval])\r\n)"
+                                seriesNameFormat: '{{model_name}}'
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                datasource:
+                                    kind: PrometheusDatasource
+                                    name: 4184fc20-68a7-483a-8d9b-7caa59c680dd
+                                query: "sum by (model_name) (\r\n  rate(vllm:request_success_total{model_name=~\"$Deployment_id\"}[$__interval]) # Use =~ for regex matching with variable, and $__interval\r\n  * on() group_left()\r\n  vector(1)\r\n  unless (\r\n    # Adjusted for UTC: 10 AM CDT (your local time) is 15:00 UTC. 4 PM CDT is 21:00 UTC.\r\n    # day_of_week() 0=Sunday, 6=Saturday\r\n    hour() < 15 or hour() >= 21 or day_of_week() == 0 or day_of_week() == 6\r\n  )\r\n)"
+                                seriesNameFormat: Static__{{model_name}}
+        "2":
+            kind: Panel
+            spec:
+                display:
+                    name: Requests Avg Rate
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: mean
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: avg(rate(vllm:request_success_total{model_name=~"$Deployment_id"}[$__range]))
+        "3":
+            kind: Panel
+            spec:
+                display:
+                    name: p50 Latency
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            unit: milliseconds
+                        mappings:
+                            - kind: Value
+                              spec:
+                                result:
+                                    value: Last (not null)
+                                value: Calcultaions
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: histogram_quantile(0.50, sum by(le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])))
+        "4":
+            kind: Panel
+            spec:
+                display:
+                    name: p90 Latency
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            unit: milliseconds
+                        mappings:
+                            - kind: Value
+                              spec:
+                                result:
+                                    value: Last (not null)
+                                value: Calculation
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: histogram_quantile(0.90, sum by(le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])))
+        "5":
+            kind: Panel
+            spec:
+                display:
+                    name: p99 Latency
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            unit: milliseconds
+                        mappings:
+                            - kind: Value
+                              spec:
+                                result:
+                                    value: Last (not null)
+                                value: Calculation
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: histogram_quantile(0.99, sum by(le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{model_name=~"$Deployment_id"}[$__interval])))
+        "6_0":
+            kind: Panel
+            spec:
+                display:
+                    name: Input Token Size Distribution
+                plugin:
+                    kind: Markdown
+                    spec:
+                        text: '**Migration from Grafana not supported !**'
+        "6_1":
+            kind: Panel
+            spec:
+                display:
+                    name: Input Token Size p90
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            unit: counts/sec
+                        mappings:
+                            - kind: Value
+                              spec:
+                                result:
+                                    value: Last (not null)
+                                value: 'calculation '
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: "histogram_quantile(\r\n  0.90, # Calculate the 90th percentile\r\n  sum by(le, model_name) ( # Aggregate the bucket rates, keeping 'le' (bucket boundary) and 'model_name' labels\r\n    rate(\r\n      vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__interval] # Get the per-second rate of tokens falling into each bucket\r\n    )\r\n  )\r\n)"
+        "6_2":
+            kind: Panel
+            spec:
+                display:
+                    name: Input Token Size p50
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            unit: counts/sec
+                        mappings:
+                            - kind: Value
+                              spec:
+                                result:
+                                    value: Last (not null)
+                                value: Calcultion
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: "histogram_quantile(\r\n  0.50, # Calculate the 50th percentile (median)\r\n  sum by(le, model_name) ( # Aggregate the bucket rates, keeping 'le' (bucket boundary) and 'model_name' labels\r\n    rate(\r\n      vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__interval] # Get the per-second rate of tokens falling into each bucket\r\n    )\r\n  )\r\n)"
+        "6_3":
+            kind: Panel
+            spec:
+                display:
+                    name: Input Token Size Avg
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            unit: counts/sec
+                        mappings:
+                            - kind: Value
+                              spec:
+                                result:
+                                    value: mean
+                                value: Calcultaion
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: "# Calculate the sum of the rate of prompt tokens per second\r\nsum(rate(vllm:prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__interval]))\r\n/\r\n# Divide by the sum of the rate of successful requests per second\r\nsum(rate(vllm:request_success_total{model_name=~\"$Deployment_id\"}[$__interval]))"
+        "6_4":
+            kind: Panel
+            spec:
+                display:
+                    name: Input Token Size p99
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            unit: counts/sec
+                        mappings:
+                            - kind: Value
+                              spec:
+                                result:
+                                    value: Last (not null)
+                                value: Calculation
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: "histogram_quantile(\r\n  0.99, # Calculate the 99th percentile\r\n  sum by(le, model_name) ( # Aggregate the bucket rates, keeping 'le' (bucket boundary) and 'model_name' labels\r\n    rate(\r\n      vllm:request_prompt_tokens_bucket{model_name=~\"$Deployment_id\"}[$__interval] # Get the per-second rate of tokens falling into each bucket\r\n    )\r\n  )\r\n)"
+        "8":
+            kind: Panel
+            spec:
+                display:
+                    name: Input Tokens Over Time
+                plugin:
+                    kind: TimeSeriesChart
+                    spec:
+                        legend:
+                            mode: list
+                            position: bottom
+                            values: []
+                        visual:
+                            areaOpacity: 0
+                            connectNulls: false
+                            display: line
+                            lineWidth: 1
+                        yAxis:
+                            format:
+                                unit: counts/sec
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: "# Calculates the rate of input tokens per second over time\r\nsum by (model_name) (rate(vllm:prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__interval]))"
+                                seriesNameFormat: '{{model_name}}'
+        "9":
+            kind: Panel
+            spec:
+                display:
+                    name: Input Tokens/Sec Avg
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            unit: counts/sec
+                        mappings:
+                            - kind: Value
+                              spec:
+                                result:
+                                    value: mean
+                                value: Calculation
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: "#Calculates average prompt tokens per second over the selected time range and Divide by the total number of seconds in the time range (provided by Grafana)\r\nsum(increase(vllm:prompt_tokens_total{model_name=~\"$Deployment_id\"}[$__range]))\r\n/ \r\n$__range_s\r\n\r\n#This is not working, for reference\r\n# Calculates total output tokens over period, divided by total seconds in period\r\n#sum(increase(vllm:generation_tokens_total{model_name=~\"$Deployment_id\"}[$__range]))\r\n#/\r\n#(max_over_time(time()[1s] offset $__range) - min_over_time(time()[1s] offset $__range))"
+        "10_0":
+            kind: Panel
+            spec:
+                display:
+                    name: Output Tokens Over Time
+                plugin:
+                    kind: TimeSeriesChart
+                    spec:
+                        legend:
+                            mode: list
+                            position: bottom
+                            values: []
+                        visual:
+                            areaOpacity: 0
+                            connectNulls: false
+                            display: line
+                            lineWidth: 1
+                        yAxis:
+                            format:
+                                unit: counts/sec
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: "# Calculates the rate of output tokens per second over time\r\nsum by (model_name) (rate(vllm:generation_tokens_total{model_name=~\"$Deployment_id\"}[$__interval]))"
+                                seriesNameFormat: '{{model_name}}'
+        "10_1":
+            kind: Panel
+            spec:
+                display:
+                    name: Output Tokens/Sec Avg
+                plugin:
+                    kind: StatChart
+                    spec:
+                        calculation: last-number
+                        format:
+                            unit: counts/sec
+                        mappings:
+                            - kind: Value
+                              spec:
+                                result:
+                                    value: mean
+                                value: Calculation
+                        metricLabel: ""
+                        sparkline: {}
+                        thresholds:
+                            steps:
+                                - color: green
+                                  value: 0
+                                - color: red
+                                  value: 80
+                queries:
+                    - kind: TimeSeriesQuery
+                      spec:
+                        plugin:
+                            kind: PrometheusTimeSeriesQuery
+                            spec:
+                                query: "# Calculates total output tokens over period, divided by total seconds in period\r\nsum(increase(vllm:generation_tokens_total{model_name=~\"$Deployment_id\"}[$__range]))\r\n/\r\n$__range_s # Grafana variable: total seconds in the selected dashboard time range"
+    layouts:
+        - kind: Grid
+          spec:
+            items:
+                - x: 0
+                  "y": 1
+                  width: 10
+                  height: 6
+                  content:
+                    $ref: '#/spec/panels/1'
+                - x: 10
+                  "y": 1
+                  width: 7
+                  height: 3
+                  content:
+                    $ref: '#/spec/panels/2'
+                - x: 17
+                  "y": 1
+                  width: 7
+                  height: 3
+                  content:
+                    $ref: '#/spec/panels/3'
+                - x: 10
+                  "y": 4
+                  width: 7
+                  height: 3
+                  content:
+                    $ref: '#/spec/panels/4'
+                - x: 17
+                  "y": 4
+                  width: 7
+                  height: 3
+                  content:
+                    $ref: '#/spec/panels/5'
+                - x: 0
+                  "y": 15
+                  width: 10
+                  height: 6
+                  content:
+                    $ref: '#/spec/panels/8'
+                - x: 10
+                  "y": 15
+                  width: 7
+                  height: 3
+                  content:
+                    $ref: '#/spec/panels/9'
+        - kind: Grid
+          spec:
+            display:
+                title: Size Distribution
+                collapse:
+                    open: true
+            items:
+                - x: 0
+                  "y": 8
+                  width: 10
+                  height: 6
+                  content:
+                    $ref: '#/spec/panels/6_0'
+                - x: 10
+                  "y": 8
+                  width: 7
+                  height: 3
+                  content:
+                    $ref: '#/spec/panels/6_1'
+                - x: 17
+                  "y": 8
+                  width: 7
+                  height: 3
+                  content:
+                    $ref: '#/spec/panels/6_2'
+                - x: 10
+                  "y": 11
+                  width: 7
+                  height: 3
+                  content:
+                    $ref: '#/spec/panels/6_3'
+                - x: 17
+                  "y": 11
+                  width: 7
+                  height: 3
+                  content:
+                    $ref: '#/spec/panels/6_4'
+        - kind: Grid
+          spec:
+            display:
+                title: Output Token Over Time
+                collapse:
+                    open: true
+            items:
+                - x: 0
+                  "y": 22
+                  width: 10
+                  height: 6
+                  content:
+                    $ref: '#/spec/panels/10_0'
+                - x: 10
+                  "y": 22
+                  width: 7
+                  height: 3
+                  content:
+                    $ref: '#/spec/panels/10_1'
+    duration: 1h
+
