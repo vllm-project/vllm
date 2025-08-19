@@ -52,6 +52,12 @@ become available.
       <td><code>synthetic</code></td>
     </tr>
     <tr>
+      <td><strong>Random (multi-modal)</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>synthetic</code> (images generated on-the-fly)</td>
+    </tr>
+    <tr>
       <td><strong>Prefix Repetition</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
@@ -683,5 +689,68 @@ python benchmarks/benchmark_serving.py \
   --save-detailed \
   --endpoint /v1/chat/completion
 ```
+
+</details>
+
+### Synthetic Random Images (random-mm)
+
+<details>
+<summary>Show more</summary>
+
+<br/>
+
+Generate synthetic image inputs and random text prompts, useful to stress-test vision models without external datasets.
+
+Notes:
+- Currently works only with the OpenAI Chat-compatible backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
+- To avoid bad request errors, set `--limit-mm-per-prompt` according to your model config.
+
+Start the server (example):
+
+```bash
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
+  --dtype bfloat16 \
+  --max-model-len 16384 \
+  --limit-mm-per-prompt '{"image": 3, "video": 0}' \
+  --mm-processor-kwargs max_pixels=1003520
+```
+
+
+Fixed number of images and dimensions:
+
+```bash
+vllm bench serve \
+  --backend openai-chat \
+  --model Qwen/Qwen2.5-VL-3B-Instruct \
+  --endpoint /v1/chat/completions \
+  --dataset-name random-mm \
+  --num-prompts 100 \
+  --max-concurrency 10 \
+  --random-prefix-len 25 \
+  --random-input-len 300 \
+  --random-output-len 40 \
+  --random-range-ratio 0.2 \
+  --random-mm-height 224 \
+  --random-mm-width 224 \
+  --random-mm-images-per-request 2 \
+  --random-mm-limit-images-per-request 3 \
+  --request-rate inf \
+  --ignore-eos \
+  --seed 42
+```
+
+For variable number of images and dimensions per request set the flag 
+
+```bash
+  --random-mm-images-per-request-range-ratio 0.5 \
+  --random-mm-dimension-range-ratio 0.5 \
+```
+
+Flags specific to `random-mm`:
+- `--random-mm-images-per-request`: base number of images per request.
+- `--random-mm-limit-images-per-request`: hard cap per request.
+- `--random-mm-width`, `--random-mm-height`: base image dimensions.
+- `--random-mm-images-per-request-range-ratio`: vary image count in \[n(1−r), n(1+r)\).
+- `--random-mm-dimension-range-ratio`: vary width/height in \[d(1−r), d(1+r)\).
 
 </details>
