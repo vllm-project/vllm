@@ -469,6 +469,10 @@ class EmbeddingPoolerHead(PoolerHead):
 
         pooling_params = get_pooling_params(pooling_metadata)
 
+        if isinstance(pooled_data, list):
+            pooled_data = torch.stack(pooled_data)
+        # pooled_data shape: [batchsize, embedding_dimension]
+
         # for matryoshka representation
         dimensions_list = [
             pooling_param.dimensions for pooling_param in pooling_params
@@ -658,6 +662,10 @@ class ClassifierPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
+
+        if isinstance(pooled_data, list):
+            pooled_data = torch.stack(pooled_data)
+        # pooled_data shape: [batchsize, hidden_size]
 
         if self.classifier is not None:
             # apply classifier once on the full batch if possible
