@@ -3523,8 +3523,8 @@ class VllmConfig:
         # settings (see the below code).
         if self.compilation_config.level is None:
             if envs.VLLM_USE_V1:
-                if (self.model_config is not None
-                        and not self.model_config.enforce_eager):
+                if self.model_config is None or \
+                        not self.model_config.enforce_eager:
                     self.compilation_config.level = CompilationLevel.PIECEWISE
                 else:
                     self.compilation_config.level = \

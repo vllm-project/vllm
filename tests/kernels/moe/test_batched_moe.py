@@ -133,7 +133,7 @@ def test_batched_mm(num_experts: int, max_tokens_per_expert: int, K: int,
         per_act_token_quant=per_act_token_quant,
     )
 
-    B, B_q, B_scale, _, _, _ = make_test_weights(
+    (B, B_q, B_scale, _), _ = make_test_weights(
         num_experts,
         N // 2,
         K,
@@ -243,7 +243,7 @@ def test_fused_moe_batched_experts(
         act_dtype = dtype
         quant_dtype = None
 
-    w1_16, w1, w1_s, w2_16, w2, w2_s = make_test_weights(
+    (w1_16, w1, w1_s, _), (w2_16, w2, w2_s, _) = make_test_weights(
         e,
         n,
         k,
