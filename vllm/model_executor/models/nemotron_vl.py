@@ -458,27 +458,6 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         vit_embeds = self.mlp1(vit_embeds)
         return vit_embeds
 
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-
-        #use force_image_size to get image_size
-        h = w = self.config.force_image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape)
-
-            if actual_dims != expected_dims:
-                expected_expr = str(expected_dims)
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f" per patch is {expected_expr}. "
-                    f"You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[InternVLImageInputs]:
         pixel_values_flat = kwargs.pop("pixel_values_flat", None)
@@ -516,9 +495,12 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
 
             return InternVLImagePixelInputs(
                 type="pixel_values",
-                pixel_values_flat=self._validate_pixel_values(
-                    pixel_values_flat),
+                pixel_values_flat=pixel_values_flat,
                 num_patches=image_num_patches,
+                resolve_bindings={
+                    "h": self.config.force_image_size,
+                    "w": self.config.force_image_size
+                },
             )
 
         raise AssertionError("This line should be unreachable.")
