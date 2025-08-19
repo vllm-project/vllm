@@ -11,6 +11,7 @@ from pathlib import PosixPath
 import pytest
 from transformers import (AutoModel, AutoModelForImageTextToText,
                           AutoModelForTextToWaveform, AutoModelForVision2Seq)
+from transformers.utils import is_flash_attn_2_available
 
 from vllm.platforms import current_platform
 from vllm.utils import identity
@@ -620,6 +621,26 @@ VLM_TEST_SETTINGS = {
         # use sdpa mode for hf runner since ovis2 didn't work with flash_attn
         hf_model_kwargs={"llm_attn_implementation": "sdpa"},
         patch_hf_runner=model_utils.ovis_patch_hf_runner,
+    ),
+    "ovis2_5": VLMTestInfo(
+        models=["AIDC-AI/Ovis2.5-2B"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO
+        ),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>\n", # noqa: E501
+        video_idx_to_prompt=lambda idx: "<video>\n",
+        max_model_len=4096,
+        max_num_seqs=2,
+        dtype="half",
+        num_logprobs=10,
+        patch_hf_runner=model_utils.ovis2_5_patch_hf_runner,
+        marks=[pytest.mark.skipif(
+            not is_flash_attn_2_available(),
+            reason="HF model needs `flash_attn` installed"
+        )],
     ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],
