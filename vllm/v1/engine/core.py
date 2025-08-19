@@ -25,9 +25,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
-from vllm.utils import (decorate_logs, make_zmq_socket,
+from vllm.utils import (decorate_logs, get_hash_fn_by_name, make_zmq_socket,
                         resolve_obj_by_qualname, set_process_title)
-from vllm.v1.core.kv_cache_utils import (get_kv_cache_config,
+from vllm.v1.core.kv_cache_utils import (BlockHash, get_kv_cache_config,
+                                         get_request_block_hasher,
+                                         init_none_hash,
                                          unify_kv_cache_configs)
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -124,6 +126,7 @@ class EngineCore:
             > 1,
             log_stats=self.log_stats,
         )
+        self.use_spec_decode = vllm_config.speculative_config is not None
 
         self.mm_input_cache_server = MultiModalInputCacheServer(
             vllm_config.model_config, MULTIMODAL_REGISTRY)
@@ -139,6 +142,19 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
+
+        self.request_block_hasher: Optional[Callable[[Request],
+                                                     list[BlockHash]]] = None
+        if (self.vllm_config.cache_config.enable_prefix_caching
+                or self.scheduler.get_kv_connector() is not None):
+
+            block_size = vllm_config.cache_config.block_size
+            caching_hash_fn = get_hash_fn_by_name(
+                vllm_config.cache_config.prefix_caching_hash_algo)
+            init_none_hash(caching_hash_fn)
+
+            self.request_block_hasher = get_request_block_hasher(
+                block_size, caching_hash_fn)
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -279,6 +295,13 @@ class EngineCore:
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
 
+    def post_step(self, model_executed: bool) -> None:
+        if self.use_spec_decode and model_executed:
+            # Take the draft token ids.
+            draft_token_ids = self.model_executor.take_draft_token_ids()
+            if draft_token_ids is not None:
+                self.scheduler.update_draft_token_ids(draft_token_ids)
+
     def step_with_batch_queue(
             self) -> tuple[Optional[dict[int, EngineCoreOutputs]], bool]:
         """Schedule and execute batches with the batch queue.
@@ -417,7 +440,8 @@ class EngineCore:
             request.mm_kwargs = self.mm_input_cache_server.get_and_update(
                 request.mm_kwargs, request.mm_hashes)
 
-        req = Request.from_engine_core_request(request)
+        req = Request.from_engine_core_request(request,
+                                               self.request_block_hasher)
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For
@@ -730,6 +754,8 @@ class EngineCoreProc(EngineCore):
         # Put EngineCoreOutputs into the output queue.
         for output in (outputs.items() if outputs else ()):
             self.output_queue.put_nowait(output)
+        # Post-step hook.
+        self.post_step(model_executed)
 
         return model_executed
 
