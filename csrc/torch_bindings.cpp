@@ -444,11 +444,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // used by the two mms called from fused MoE operation. It takes topk_ids as
   // an input, and computes problem_sizes1 and problem_sizes2 only.
   ops.def(
-      "get_cutlass_moe_mm_problem_sizes(Tensor topk_ids, Tensor! "
-      "problem_sizes1, "
-      "                                 Tensor! problem_sizes2, int "
-      "num_experts, "
-      "                                 int n, int k, "
+      "get_cutlass_moe_mm_problem_sizes(Tensor topk_ids, "
+      "                                 Tensor! problem_sizes1, "
+      "                                 Tensor! problem_sizes2, "
+      "                                 int num_experts, int n, int k, "
       "                                 Tensor? blockscale_offsets) -> ()",
       {stride_tag});
   ops.impl("get_cutlass_moe_mm_problem_sizes", torch::kCUDA,
