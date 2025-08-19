@@ -30,7 +30,8 @@ class Qwen3CoderToolParser(ToolParser):
 
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict] = []
-        self.current_tool_id: int = -1
+        # Override base class type - we use string IDs for tool calls
+        self.current_tool_id: Optional[str] = None  # type: ignore
         self.streamed_args_for_tool: list[str] = []
 
         # Sentinel tokens for streaming mode
@@ -149,24 +150,24 @@ class Qwen3CoderToolParser(ToolParser):
                     "long") or param_type.startswith(
                         "short") or param_type.startswith("unsigned"):
             try:
-                param_value = int(param_value)
+                return int(param_value)
             except (ValueError, TypeError):
                 logger.warning(
                     "Parsed value '%s' of parameter '%s' is not an "
                     "integer in tool '%s', degenerating to string.",
                     param_value, param_name, func_name)
-            return param_value
+                return param_value
         elif param_type.startswith("num") or param_type.startswith("float"):
             try:
                 float_param_value = float(param_value)
-                param_value = float_param_value if float_param_value - int(
+                return float_param_value if float_param_value - int(
                     float_param_value) != 0 else int(float_param_value)
             except (ValueError, TypeError):
                 logger.warning(
                     "Parsed value '%s' of parameter '%s' is not a float "
                     "in tool '%s', degenerating to string.", param_value,
                     param_name, func_name)
-            return param_value
+                return param_value
         elif param_type in ["boolean", "bool", "binary"]:
             param_value = param_value.lower()
             if param_value not in ["true", "false"]:
@@ -397,20 +398,20 @@ class Qwen3CoderToolParser(ToolParser):
 
         # We're in a tool call, find the current tool call portion
         # Need to find the correct tool call based on current_tool_index
-        tool_starts = []
+        tool_start_positions: list[int] = []
         idx = 0
         while True:
             idx = current_text.find(self.tool_call_start_token, idx)
             if idx == -1:
                 break
-            tool_starts.append(idx)
+            tool_start_positions.append(idx)
             idx += len(self.tool_call_start_token)
 
-        if self.current_tool_index >= len(tool_starts):
+        if self.current_tool_index >= len(tool_start_positions):
             # No more tool calls to process yet
             return None
 
-        tool_start_idx = tool_starts[self.current_tool_index]
+        tool_start_idx = tool_start_positions[self.current_tool_index]
         # Find where this tool call ends (or current position if not ended yet)
         tool_end_idx = current_text.find(self.tool_call_end_token,
                                          tool_start_idx)
@@ -589,14 +590,14 @@ class Qwen3CoderToolParser(ToolParser):
 
                         # Get parameter configuration for type conversion
                         param_config = self._get_arguments_config(
-                            self.current_function_name,
+                            self.current_function_name or "",
                             self.streaming_request.tools
                             if self.streaming_request else None)
 
                         # Convert param value to appropriate type
                         converted_value = self._convert_param_value(
                             param_value, self.current_param_name, param_config,
-                            self.current_function_name)
+                            self.current_function_name or "")
 
                         # Build JSON fragment based on the converted type
                         # Use json.dumps to properly serialize the value
@@ -644,14 +645,14 @@ class Qwen3CoderToolParser(ToolParser):
 
                     # Get parameter configuration for type conversion
                     param_config = self._get_arguments_config(
-                        self.current_function_name,
+                        self.current_function_name or "",
                         self.streaming_request.tools
                         if self.streaming_request else None)
 
                     # Convert the parameter value to the appropriate type
                     converted_value = self._convert_param_value(
-                        full_value, self.current_param_name, param_config,
-                        self.current_function_name)
+                        full_value, self.current_param_name or "",
+                        param_config, self.current_function_name or "")
 
                     # Serialize the converted value
                     serialized_value = json.dumps(converted_value,
