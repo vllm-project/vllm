@@ -4,14 +4,8 @@
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
-from transformers import (AutoFeatureExtractor, AutoImageProcessor,
-                          AutoProcessor)
-from transformers.feature_extraction_utils import FeatureExtractionMixin
-from transformers.image_processing_utils import BaseImageProcessor
 from transformers.processing_utils import ProcessorMixin
 from typing_extensions import TypeVar
-
-from vllm.utils import get_allowed_kwarg_only_overrides
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -39,42 +33,23 @@ class HashableList(list):
         return hash(tuple(self))
 
 
-def _get_processor_factory_fn(processor_cls: Union[type, tuple[type, ...]]):
-    if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
-        return AutoProcessor.from_pretrained
-    if hasattr(processor_cls, "from_pretrained"):
-        return processor_cls.from_pretrained
-
-    return processor_cls
-
-
-def _merge_mm_kwargs(
-    model_config: "ModelConfig",
-    processor_cls: Union[type, tuple[type, ...]],
-    /,
-    **kwargs,
-):
+def _merge_mm_kwargs(model_config: "ModelConfig", **kwargs):
     mm_config = model_config.get_multimodal_config()
-    merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
+    base_kwargs = mm_config.mm_processor_kwargs
+    if base_kwargs is None:
+        base_kwargs = {}
 
-    factory = _get_processor_factory_fn(processor_cls)
-    allowed_kwargs = get_allowed_kwarg_only_overrides(
-        factory,
-        merged_kwargs,
-        requires_kw_only=False,
-        allow_var_kwargs=True,
-    )
+    merged_kwargs = {**base_kwargs, **kwargs}
 
     # NOTE: Pythonic dict is not hashable and will raise unhashable type
     # error when calling `cached_get_processor`, therefore we need to
     # wrap it to a hashable dict.
-    for key, value in allowed_kwargs.items():
+    for key, value in merged_kwargs.items():
         if isinstance(value, dict):
-            allowed_kwargs[key] = HashableDict(value)
+            merged_kwargs[key] = HashableDict(value)
         if isinstance(value, list):
-            allowed_kwargs[key] = HashableList(value)
-
-    return allowed_kwargs
+            merged_kwargs[key] = HashableList(value)
+    return merged_kwargs
 
 
 def get_processor(
@@ -86,29 +61,21 @@ def get_processor(
     **kwargs: Any,
 ) -> _P:
     """Load a processor for the given model name via HuggingFace."""
-    if revision is None:
-        revision = "main"
+    # don't put this import at the top level
+    # it will call torch.cuda.device_count()
+    from transformers import AutoProcessor
+
+    processor_factory = (AutoProcessor if processor_cls == ProcessorMixin or
+                         isinstance(processor_cls, tuple) else processor_cls)
 
     try:
-        if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
-            processor = AutoProcessor.from_pretrained(
-                processor_name,
-                *args,
-                revision=revision,
-                trust_remote_code=trust_remote_code,
-                **kwargs,
-            )
-        elif issubclass(processor_cls, ProcessorMixin):
-            processor = processor_cls.from_pretrained(
-                processor_name,
-                *args,
-                revision=revision,
-                trust_remote_code=trust_remote_code,
-                **kwargs,
-            )
-        else:
-            # Processors that are standalone classes unrelated to HF
-            processor = processor_cls(*args, **kwargs)
+        processor = processor_factory.from_pretrained(
+            processor_name,
+            *args,
+            revision=revision,
+            trust_remote_code=trust_remote_code,
+            **kwargs,
+        )
     except ValueError as e:
         # If the error pertains to the processor class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
@@ -145,7 +112,7 @@ def cached_processor_from_config(
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
-        **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
+        **_merge_mm_kwargs(model_config, **kwargs),
     )
 
 
@@ -158,6 +125,10 @@ def get_feature_extractor(
 ):
     """Load an audio feature extractor for the given model name 
     via HuggingFace."""
+    # don't put this import at the top level
+    # it will call torch.cuda.device_count()
+    from transformers import AutoFeatureExtractor
+    from transformers.feature_extraction_utils import FeatureExtractionMixin
     try:
         feature_extractor = AutoFeatureExtractor.from_pretrained(
             processor_name,
@@ -193,7 +164,7 @@ def cached_feature_extractor_from_config(
         model_config.model,
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
-        **_merge_mm_kwargs(model_config, AutoFeatureExtractor, **kwargs),
+        **_merge_mm_kwargs(model_config, **kwargs),
     )
 
 
@@ -205,6 +176,11 @@ def get_image_processor(
     **kwargs: Any,
 ):
     """Load an image processor for the given model name via HuggingFace."""
+    # don't put this import at the top level
+    # it will call torch.cuda.device_count()
+    from transformers import AutoImageProcessor
+    from transformers.image_processing_utils import BaseImageProcessor
+
     try:
         processor = AutoImageProcessor.from_pretrained(
             processor_name,
@@ -241,5 +217,5 @@ def cached_image_processor_from_config(
         model_config.model,
         revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
-        **_merge_mm_kwargs(model_config, AutoImageProcessor, **kwargs),
+        **_merge_mm_kwargs(model_config, **kwargs),
     )

@@ -71,7 +71,13 @@ UltravoxAudioInputs = Union[UltravoxAudioFeatureInputs,
 
 class UltravoxProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_processor(self, **kwargs: object) -> ProcessorMixin:
+    def get_hf_processor(
+        self,
+        *,
+        # Ignored in initialization
+        sampling_rate: Optional[int] = None,
+        **kwargs: object,
+    ) -> ProcessorMixin:
         config = self.ctx.model_config.hf_config
         hf_processor = self.ctx.get_hf_processor(**kwargs)
 
@@ -83,9 +89,13 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
 
         return hf_processor
 
-    def get_feature_extractor(self,
-                              **kwargs: object) -> WhisperFeatureExtractor:
-        hf_processor = self.get_hf_processor(**kwargs)
+    def get_feature_extractor(
+        self,
+        *,
+        # Ignored in initialization
+        sampling_rate: Optional[int] = None,
+    ) -> WhisperFeatureExtractor:
+        hf_processor = self.get_hf_processor(sampling_rate=sampling_rate)
         audio_processor = hf_processor.audio_processor  # type: ignore
         feature_extractor = audio_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
@@ -146,7 +156,7 @@ class UltravoxMultiModalProcessor(
         audios = mm_data.pop("audios", [])
         assert isinstance(audios, list)
 
-        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+        feature_extractor = self.info.get_feature_extractor()
         mm_kwargs = dict(
             **mm_kwargs,
             sampling_rate=feature_extractor.sampling_rate,

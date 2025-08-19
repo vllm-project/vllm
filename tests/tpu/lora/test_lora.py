@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
-from torch_xla._internal import tpu
 
 import vllm
 from vllm.lora.request import LoRARequest
@@ -28,31 +27,25 @@ def use_v1_only(monkeypatch: pytest.MonkeyPatch):
         yield
 
 
-def setup_vllm(num_loras: int, tp: int) -> vllm.LLM:
+def setup_vllm(num_loras: int) -> vllm.LLM:
     return vllm.LLM(model="Qwen/Qwen2.5-3B-Instruct",
                     num_scheduler_steps=1,
                     max_model_len=256,
                     max_seq_len_to_capture=256,
                     max_num_seqs=8,
-                    tensor_parallel_size=tp,
                     enable_lora=True,
                     max_loras=num_loras,
                     max_lora_rank=8)
 
 
-TPU_TENSOR_PARALLEL_SIZES = [1, tpu.num_available_chips()
-                             ] if tpu.num_available_chips() > 1 else [1]
-
-
-@pytest.mark.parametrize("tp", TPU_TENSOR_PARALLEL_SIZES)
-def test_single_lora(tp: int):
+def test_single_lora():
     """
     This test ensures we can run a single LoRA adapter on the TPU backend.
     We run "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_1_adapter" which
     will force Qwen2.5-3B-Instruct to claim 1+1=1.
     """
 
-    llm = setup_vllm(1, tp)
+    llm = setup_vllm(1)
 
     prompt = "What is 1+1? \n"
 
@@ -70,8 +63,7 @@ def test_single_lora(tp: int):
     assert int(answer) == 1
 
 
-@pytest.mark.parametrize("tp", TPU_TENSOR_PARALLEL_SIZES)
-def test_lora_hotswapping(tp: int):
+def test_lora_hotswapping():
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, even
     if we only have space to store 1.
@@ -87,7 +79,7 @@ def test_lora_hotswapping(tp: int):
         for i in range(1, 5)
     ]
 
-    llm = setup_vllm(1, tp)
+    llm = setup_vllm(1)
 
     prompt = "What is 1+1? \n"
 
@@ -102,8 +94,7 @@ def test_lora_hotswapping(tp: int):
         assert int(answer) == i + 1
 
 
-@pytest.mark.parametrize("tp", TPU_TENSOR_PARALLEL_SIZES)
-def test_multi_lora(tp: int):
+def test_multi_lora():
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, when
     we have enough space to store all of them.
@@ -118,7 +109,7 @@ def test_multi_lora(tp: int):
         for i in range(1, 5)
     ]
 
-    llm = setup_vllm(4, tp)
+    llm = setup_vllm(4)
 
     prompt = "What is 1+1? \n"
 

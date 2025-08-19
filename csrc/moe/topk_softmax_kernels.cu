@@ -24,12 +24,9 @@
 #ifndef USE_ROCM
     #include <cub/util_type.cuh>
     #include <cub/cub.cuh>
-    #include <cuda/std/functional>
-    using AddOp = cuda::std::plus<float>;
 #else
     #include <hipcub/util_type.hpp>
     #include <hipcub/hipcub.hpp>
-    using AddOp = cub::Sum; 
 #endif
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -65,6 +62,7 @@ __launch_bounds__(TPB) __global__
 
     const int thread_row_offset = blockIdx.x * num_cols;
 
+    cub::Sum sum;
     float threadData(-FLT_MAX);
 
     // Don't touch finished rows.
@@ -94,7 +92,7 @@ __launch_bounds__(TPB) __global__
         threadData += exp((static_cast<float>(input[idx]) - float_max));
     }
 
-    const auto Z = BlockReduce(tmpStorage).Reduce(threadData, AddOp());
+    const auto Z = BlockReduce(tmpStorage).Reduce(threadData, sum);
 
     if (threadIdx.x == 0)
     {

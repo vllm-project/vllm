@@ -696,12 +696,19 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> Phi4MultimodalConfig:
         return self.ctx.get_hf_config(Phi4MultimodalConfig)
 
-    def get_hf_processor(self, **kwargs: object) -> Phi4MMProcessor:
-        return self.ctx.get_hf_processor(Phi4MMProcessor, **kwargs)
+    def get_hf_processor(
+        self,
+        *,
+        dynamic_hd: Optional[int] = None,
+        **kwargs: object,
+    ) -> Phi4MMProcessor:
+        if dynamic_hd is not None:
+            kwargs["dynamic_hd"] = dynamic_hd
 
-    def get_feature_extractor(
-            self, **kwargs: object) -> Phi4MultimodalFeatureExtractor:
-        return self.get_hf_processor(**kwargs).audio_processor
+        return self.ctx.get_hf_processor(**kwargs)
+
+    def get_feature_extractor(self) -> Phi4MultimodalFeatureExtractor:
+        return self.get_hf_processor().audio_processor
 
     def get_image_processor(
         self,
@@ -1000,7 +1007,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
 
         if audio_data:
             audio_features = processed_outputs['audio_input_features']
-            sr = self.info.get_feature_extractor(**mm_kwargs).sampling_rate
+            sr = self.info.get_feature_extractor().sampling_rate
             feature_sizes = [
                 self.info.get_audio_num_frames(len(audio), sr)
                 for audio in audio_data
@@ -1036,8 +1043,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         audio_token_id = tokenizer.vocab[tokenizer.audio_token]
 
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        audio_processor = self.info.get_feature_extractor(
-            **hf_processor_mm_kwargs)
+        audio_processor = self.info.get_feature_extractor()
 
         def get_image_replacement_phi4mm(item_idx: int):
             images = mm_items.get_items(

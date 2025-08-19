@@ -623,22 +623,23 @@ class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> WhisperConfig:
         return self.ctx.get_hf_config(WhisperConfig)
 
-    def get_hf_processor(self, **kwargs: object) -> WhisperProcessor:
-        # HACK: Transformers 4.53.2 has issue with whisper tokenizer to
+    def get_hf_processor(self,
+                         sampling_rate: Optional[int] = None
+                         ) -> WhisperProcessor:
+        # HACK: Transformers 4.53.0 has issue with whisper tokenizer to
         # initialize processor. We use a monkeypatch to fix it here.
         # See: https://github.com/vllm-project/vllm/issues/20224
         processor_class = WhisperProcessor
         tokenizer_class = ("WhisperTokenizer", "WhisperTokenizerFast")
         if processor_class.tokenizer_class != tokenizer_class:
             processor_class.tokenizer_class = tokenizer_class
-        return self.ctx.get_hf_processor(processor_class, **kwargs)
+        return self.ctx.get_hf_processor(processor_class)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": 1}
 
-    def get_feature_extractor(self,
-                              **kwargs: object) -> WhisperFeatureExtractor:
-        hf_processor = self.get_hf_processor(**kwargs)
+    def get_feature_extractor(self) -> WhisperFeatureExtractor:
+        hf_processor = self.get_hf_processor()
         feature_extractor = hf_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
@@ -701,7 +702,7 @@ class WhisperMultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         if mm_data:
-            feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
+            feature_extractor = self.info.get_feature_extractor()
             mm_data = dict(audio=mm_data.pop("audios"))
             mm_kwargs = dict(
                 **mm_kwargs,
