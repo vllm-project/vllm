@@ -46,7 +46,8 @@ def get_schema(server):
         f"{server.url_root}/openapi.json",
         generation_config=GenerationConfig(allow_x00=False),
     )
-    print(schema)
+    # import json
+    print(str(schema.__dict__))
     return schema
 
 
@@ -112,6 +113,16 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
 @schema.override(headers={"Content-Type": "application/json"})
 @settings(deadline=LONG_TIMEOUT_SECONDS * 1000)
 def test_openapi_stateless(case: schemathesis.Case):
+    # Debug: Print all generated test case details
+    # print(f"\n{'='*60}")
+    # print(f"Test Case Generated:")
+    # print(f"  Method: {case.operation.method.upper()}")
+    # print(f"  Path: {case.operation.path}")
+    # print(f"  Headers: {case.headers}")
+    # print(f"  Query: {case.query}")
+    # print(f"  Body: {case.body}")
+    # print(f"{'='*60}\n")
+
     key = (
         case.operation.method.upper(),
         case.operation.path,

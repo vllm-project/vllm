@@ -164,6 +164,9 @@ class OpenAIServingChat(OpenAIServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+
+        print("!!!!!Create chat completion request!!!!!", request,
+              raw_request.body if raw_request else None)
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
