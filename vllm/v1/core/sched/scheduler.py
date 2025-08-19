@@ -60,14 +60,14 @@ class Scheduler(SchedulerInterface):
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
-        self.tokenizer = init_tokenizer_from_configs(
-            model_config=self.vllm_config.model_config,
-            scheduler_config=self.vllm_config.scheduler_config,
-            lora_config=self.vllm_config.lora_config,
-        ).get_lora_tokenizer(None)
         self.reasoner: Optional[ReasoningParser] = None
         reasoning_backend = vllm_config.decoding_config.reasoning_backend
         if reasoning_backend:
+            self.tokenizer = init_tokenizer_from_configs(
+                model_config=self.vllm_config.model_config,
+                scheduler_config=self.vllm_config.scheduler_config,
+                lora_config=self.vllm_config.lora_config,
+            ).get_lora_tokenizer()
             reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                 reasoning_backend)
             self.reasoner = reasoner_cls(tokenizer=self.tokenizer)

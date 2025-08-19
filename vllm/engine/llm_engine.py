@@ -373,9 +373,14 @@ class LLMEngine:
         # Initialize reasoning parser if reasoning backend is set.
         self.reasoner: Optional[ReasoningParser] = None
         if self.decoding_config.reasoning_backend:
+            if self.tokenizer is None:
+                raise ValueError(
+                    "Reasoning backend requires a tokenizer so it can't be used with 'skip_tokenizer_init'"  # noqa: E501
+                )
             reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                 self.decoding_config.reasoning_backend)
-            self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
+            self.reasoner = reasoner_cls(
+                tokenizer=self.tokenizer.get_lora_tokenizer())
 
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.

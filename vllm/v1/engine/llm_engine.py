@@ -95,9 +95,14 @@ class LLMEngine:
         self.reasoner: Optional[ReasoningParser] = None
         reasoning_backend = vllm_config.decoding_config.reasoning_backend
         if reasoning_backend:
+            if self.tokenizer is None:
+                raise ValueError(
+                    "Reasoning backend requires a tokenizer so it can't be used with 'skip_tokenizer_init'"  # noqa: E501
+                )
             reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                 reasoning_backend)
-            self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
+            self.reasoner = reasoner_cls(
+                tokenizer=self.tokenizer.get_lora_tokenizer())
 
         # Processor (convert Inputs --> EngineCoreRequests)
         self.processor = Processor(vllm_config=vllm_config,
