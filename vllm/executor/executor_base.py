@@ -16,7 +16,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.sequence import ExecuteModelRequest, PoolerOutput
+from vllm.pooler_output import PoolerOutput
+from vllm.sequence import ExecuteModelRequest
 from vllm.tasks import SupportedTask
 from vllm.utils import make_async
 from vllm.worker.worker_base import WorkerBase

@@ -14,8 +14,9 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind
-from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
-                           SequenceGroup, SequenceGroupBase, SequenceStatus)
+from vllm.logprobs import PromptLogprobs, SampleLogprobs
+from vllm.sequence import (RequestMetrics, SequenceGroup, SequenceGroupBase,
+                           SequenceStatus)
 
 logger = init_logger(__name__)
 

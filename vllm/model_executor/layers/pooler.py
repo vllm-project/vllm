@@ -17,7 +17,8 @@ from vllm.model_executor.pooling_metadata import (  # noqa: E501
     PoolingMetadata as V0PoolingMetadata)
 from vllm.model_executor.pooling_metadata import PoolingTensors
 from vllm.pooling_params import PoolingParams
-from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
+from vllm.pooler_output import PoolerOutput
+from vllm.sequence import PoolingSequenceGroupOutput
 from vllm.tasks import PoolingTask
 from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
