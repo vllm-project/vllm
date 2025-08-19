@@ -1,3 +1,4 @@
+import logging
 from packaging import version
 import tempfile
 
@@ -5,7 +6,9 @@ import torch
 from torch.cuda.memory import CUDAPluggableAllocator
 
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm.config import ParallelConfig
 
+logger = logging.getLogger(__name__)
 
 nccl_allocator_source = """
 #include <nccl.h>
@@ -30,14 +33,10 @@ _mem_pool = None
 _registered_base_addrs = set()
 _registered_tensor_addrs = set()
 _graph_pool_id = None
-
+_nccl_allocator_disabled = False
 
 def is_symmetric_memory_enabled():
-    # Import here to avoid circular import
-    # from sglang.srt.managers.schedule_batch import global_server_args_dict
-
-    #return global_server_args_dict["enable_symm_mem"]
-    return True
+    return ParallelConfig.enable_nccl_symm_mem
 
 def is_symmetric_memory_tensor(tensor: torch.Tensor):
     return tensor.untyped_storage().data_ptr() in _registered_tensor_addrs
@@ -49,25 +48,35 @@ def set_graph_pool_id(graph_pool_id):
 
 
 def get_nccl_mem_pool():
-    global _allocator, _mem_pool
-    if _mem_pool is None:
-        out_dir = tempfile.gettempdir()
-        nccl_allocator_libname = "nccl_allocator"
-        torch.utils.cpp_extension.load_inline(
-            name=nccl_allocator_libname,
-            cpp_sources=nccl_allocator_source,
-            with_cuda=True,
-            extra_ldflags=["-lnccl"],
-            verbose=True,
-            is_python_module=False,
-            build_directory=out_dir,
-        )
-        _allocator = CUDAPluggableAllocator(
-            f"{out_dir}/{nccl_allocator_libname}.so",
-            "nccl_alloc_plug",
-            "nccl_free_plug",
-        ).allocator()
-        _mem_pool = torch.cuda.MemPool(_allocator)
+    global _allocator, _mem_pool, _nccl_allocator_disabled
+    if _mem_pool is None and not _nccl_allocator_disabled:
+        try: 
+            out_dir = tempfile.gettempdir()
+            nccl_allocator_libname = "nccl_allocator"
+            torch.utils.cpp_extension.load_inline(
+                name=nccl_allocator_libname,
+                cpp_sources=nccl_allocator_source,
+                with_cuda=True,
+                extra_ldflags=["-lnccl"],
+                verbose=True,
+                is_python_module=False,
+                build_directory=out_dir,
+            )
+            _allocator = CUDAPluggableAllocator(
+                f"{out_dir}/{nccl_allocator_libname}.so",
+                "nccl_alloc_plug",
+                "nccl_free_plug",
+            ).allocator()
+            _mem_pool = torch.cuda.MemPool(_allocator)
+        except Exception as e:
+            _nccl_allocator_disabled = True
+            logger.warning(
+                "Failed to compile NCCL memory allocator. "
+                "Symmetric memory will be disabled. "
+                "This is expected if NCCL headers are not available. "
+                "Error: %s", str(e)
+            )
+            _mem_pool = None
     return _mem_pool
 
 
@@ -82,6 +91,7 @@ class use_symmetric_memory:
             disabled
             or not is_symmetric_memory_enabled()
             or pynccl_comm.world_size == 1
+            or get_nccl_mem_pool() is None
         )
         if self.disabled:
             self.pynccl_comm = None

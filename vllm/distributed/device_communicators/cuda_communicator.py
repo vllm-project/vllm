@@ -10,7 +10,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.distributed.device_communicators.pynccl_allocator import (
-    get_nccl_mem_pool)
+    is_symmetric_memory_enabled,)
 from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
@@ -95,17 +95,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 raise ValueError(f"Unknown all2all backend: {all2all_backend}")
 
     def all_reduce(self, input_):
-        # if (
-        #     self.pynccl_comm is not None
-        #     and hasattr(input_, "symmetric_memory")
-        #     and input_.symmetric_memory
-        #     and output_ is not None
-        # ):
-        #     # TODO(asamani): this is under change_state in sglang, double check!
-        #     output_ = self.pynccl_comm.all_reduce(input_, output_)
-        #     return output_
-        # TODO(asamani): do symmetric all reduce
-        if (self.pynccl_comm is not None):
+        # since currently we perform copy input -> symm_input -> out-of-place AR
+        # return symm_output, we don't need to check if input is symmetric
+        if (
+            self.pynccl_comm is not None
+            and is_symmetric_memory_enabled()
+        ):
             out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out
