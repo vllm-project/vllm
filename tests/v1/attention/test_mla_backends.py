@@ -287,7 +287,8 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
     """
     batch_spec = BATCH_SPECS[batch_spec_name]
     vllm_config = create_vllm_config(model_name=model,
-                                     max_model_len=max(batch_spec.seq_lens))
+                                     max_model_len=max(batch_spec.seq_lens),
+                                     num_gpu_blocks=2048)
     device = torch.device("cuda:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
@@ -480,7 +481,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         head_size=head_size,
         dtype=dtype,
         device=device,
-        num_blocks=vllm_config.cache_config.num_gpu_blocks or 1000,
+        num_blocks=vllm_config.cache_config.num_gpu_blocks,
         common_attn_metadata=common_attn_metadata,
         randomize_blocks=True)
 

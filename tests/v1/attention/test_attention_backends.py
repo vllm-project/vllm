@@ -303,7 +303,8 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     """
     batch_spec = BATCH_SPECS[batch_spec_name]
     vllm_config = create_vllm_config(model_name=model,
-                                     max_model_len=max(batch_spec.seq_lens))
+                                     max_model_len=max(batch_spec.seq_lens),
+                                     num_gpu_blocks=8192)
     device = torch.device("cuda:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
@@ -467,11 +468,12 @@ def test_backend_correctness(batch_spec_name: str, model: str):
                                    atol=atol)
 
         if not all_close:
-            print(f"[{backend_name}] output differs from SDPA baseline. "
-                  f"Max diff: {max_diff:.6f} (rel: {max_rel_diff:.6f})")
+            print(
+                f"[{backend_name}] output differs from SDPA baseline. "
+                f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})")
             print(f"[{backend_name}] output: {backend_output}")
             print(f"[{backend_name}] SDPA baseline: {sdpa_output}")
 
         assert all_close, (
             f"[{backend_name}] output differs from SDPA baseline. "
-            f"Max diff: {max_diff:.6f} (rel: {max_rel_diff:.6f})")
+            f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})")

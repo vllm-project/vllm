@@ -171,6 +171,7 @@ def create_vllm_config(model_name: str = "meta-llama/Meta-Llama-3-8B",
                        tensor_parallel_size: int = 1,
                        max_model_len: int = 1024,
                        dtype: Union[ModelDType, torch.dtype] = "auto",
+                       num_gpu_blocks: int = 1000,
                        block_size: int = 16,
                        max_num_seqs: int = 256,
                        max_num_batched_tokens: int = 8192,
@@ -194,7 +195,7 @@ def create_vllm_config(model_name: str = "meta-llama/Meta-Llama-3-8B",
     )
     # Set cache blocks for testing
     #   (these may be set during initialization normally)
-    cache_config.num_gpu_blocks = 1000
+    cache_config.num_gpu_blocks = num_gpu_blocks
     cache_config.num_cpu_blocks = 0
 
     parallel_config = ParallelConfig(
