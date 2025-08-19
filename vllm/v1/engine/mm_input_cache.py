@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Optional
 
 from vllm.multimodal import MultiModalRegistry
 from vllm.multimodal.cache import MultiModalCache, MultiModalCacheItemMetadata
-from vllm.multimodal.inputs import MultiModalKwargsItem, NestedTensors
+from vllm.multimodal.inputs import MultiModalKwargsItem
+from vllm.utils import is_list_of
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -58,21 +59,21 @@ class MultiModalInputCacheClient:
 
     def get_and_update(
         self,
-        mm_kwargs: list[MultiModalKwargsItem],
+        mm_kwargs: Sequence[MultiModalKwargsItem],
         mm_hashes: list[str],
-    ) -> list[MultiModalKwargsItem]:
+    ) -> list[Optional[MultiModalKwargsItem]]:
         if not self.enabled:
-            return mm_kwargs
+            return list(mm_kwargs)
 
         assert len(mm_kwargs) == len(mm_hashes)
 
-        out_mm_items = list[MultiModalKwargsItem]()
+        out_mm_items = list[Optional[MultiModalKwargsItem]]()
         for mm_item, mm_hash in zip(mm_kwargs, mm_hashes):
             if self.mm_cache.get(mm_hash) is not None:
-                out_mm_items.append(mm_item.without_data())
+                out_mm_items.append(None)
             else:
                 self.mm_cache[mm_hash] = \
-                    MultiModalCacheItemMetadata.wraps(mm_item.require_data())
+                    MultiModalCacheItemMetadata.wraps(mm_item)
                 out_mm_items.append(mm_item)
 
         return out_mm_items
@@ -91,25 +92,27 @@ class MultiModalInputCacheServer:
         self.enabled = mm_registry.enable_mm_input_cache(model_config)
         self.mm_cache = MultiModalCache.get_lru_cache(
             model_config.get_mm_input_cache_gb(),
-            Mapping[str, NestedTensors],
+            MultiModalKwargsItem,
         )
 
     def get_and_update(
         self,
-        mm_kwargs: list[MultiModalKwargsItem],
+        mm_kwargs: Sequence[Optional[MultiModalKwargsItem]],
         mm_hashes: list[str],
     ) -> list[MultiModalKwargsItem]:
         if not self.enabled:
-            return mm_kwargs
+            mm_kwargs_lst = list(mm_kwargs)
+            assert is_list_of(mm_kwargs_lst, MultiModalKwargsItem)
+            return mm_kwargs_lst
 
         assert len(mm_kwargs) == len(mm_hashes)
 
         out_mm_items = list[MultiModalKwargsItem]()
         for mm_item, mm_hash in zip(mm_kwargs, mm_hashes):
-            if (mm_data := mm_item.get_data()) is None:
-                out_mm_items.append(mm_item.with_data(self.mm_cache[mm_hash]))
+            if mm_item is None:
+                out_mm_items.append(self.mm_cache[mm_hash])
             else:
-                self.mm_cache[mm_hash] = mm_data
+                self.mm_cache[mm_hash] = mm_item
                 out_mm_items.append(mm_item)
 
         return out_mm_items
