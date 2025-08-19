@@ -349,9 +349,7 @@ _EMBEDDING_EXAMPLE_MODELS = {
                                                   transformers_version_reason="HF model uses remote code that is not compatible with latest Transformers"),  # noqa: E501
     "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2", v0_only=True),  # noqa: E501
     "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1", v0_only=True),  # noqa: E501
-    "SiglipModel": _HfExamplesInfo(
-                                   "HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit",
-                                   hf_overrides={"architectures": ["SiglipModel"]},),  # noqa: E501
+    "SiglipModel": _HfExamplesInfo("HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit"),  # noqa: E501
     "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small", v0_only=True),  # noqa: E501
     # [Multimodal]
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),

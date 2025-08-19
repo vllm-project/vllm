@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from typing import Optional
 
 import pytest
-import requests
 import torch
 import torch.nn.functional as F
-from PIL import Image
 
 from vllm.entrypoints.llm import LLM
 from vllm.inputs import TextPrompt
@@ -19,15 +16,9 @@ from ....conftest import VllmRunner
 MODEL = "HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit"
 TOKENIZER_ID = "google/siglip-base-patch16-224"
 
-IMAGE_URL = "http://images.cocodataset.org/val2017/000000039769.jpg"
-CORRECT_TEXT = "a photo of a cat"
-INCORRECT_TEXT = "a photo of a dog"
-
-os.environ["VLLM_ALLOW_LONG_MAX_MODEL_LEN"] = "1"
-
 
 def encode_multimodal(llm: LLM, prompts: Optional[list[Optional[str]]],
-                      images: Optional[list[Optional[Image.Image]]]):
+                      images: Optional[list[Optional[str]]]):
     batch_size = 0
     if prompts is not None:
         batch_size = len(prompts)
@@ -60,15 +51,20 @@ def encode_multimodal(llm: LLM, prompts: Optional[list[Optional[str]]],
 @pytest.mark.parametrize("dtype", ["half"])
 def test_siglip_so400m_model_functionality(
     vllm_runner: type[VllmRunner],
+    image_assets,
     model: str,
     dtype: str,
 ) -> None:
     """
-    The core functionality of the SiglipSo400m model 
+    The core functionality of the SiglipSo400m model
     is tested by verifying the relative scores of image and text matching.
     """
     set_random_seed(0)
-    image = Image.open(requests.get(IMAGE_URL, stream=True).raw).convert("RGB")
+
+    assets_by_name = {asset.name: asset for asset in image_assets}
+    image = assets_by_name["stop_sign"].pil_image
+    correct_text = "a photo of a stop sign"
+    incorrect_text = "a photo of a cherry blossom"
 
     with vllm_runner(model,
                      dtype=dtype,
@@ -80,7 +76,7 @@ def test_siglip_so400m_model_functionality(
 
         vllm_text_embeds_list = encode_multimodal(
             llm=vllm_model.llm,
-            prompts=[CORRECT_TEXT, INCORRECT_TEXT],
+            prompts=[correct_text, incorrect_text],
             images=None)
 
         vllm_image_embeds_list = encode_multimodal(llm=vllm_model.llm,
@@ -90,15 +86,14 @@ def test_siglip_so400m_model_functionality(
         image_embed = torch.tensor(vllm_image_embeds_list[0])
         correct_text_embed = torch.tensor(vllm_text_embeds_list[0])
         incorrect_text_embed = torch.tensor(vllm_text_embeds_list[1])
-
         sim_correct = F.cosine_similarity(image_embed,
                                           correct_text_embed,
                                           dim=0)
         sim_incorrect = F.cosine_similarity(image_embed,
                                             incorrect_text_embed,
                                             dim=0)
-
-        assert sim_correct >= sim_incorrect, (
+        assert sim_correct > sim_incorrect, (
             "Model failed the sanity check: "
             "Correct text should have higher similarity than incorrect text. "
-            f"(Got identical scores: {sim_correct.item()})")
+            f"Got correct_score={sim_correct.item()} vs "
+            f"incorrect_score={sim_incorrect.item()}")
