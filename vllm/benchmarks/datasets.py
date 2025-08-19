@@ -643,6 +643,7 @@ class RandomMultiModalDataset(RandomDataset):
         height: int = DEFAULT_HEIGHT,
         dimension_range_ratio: float = DEFAULT_DIMENSION_RANGE_RATIO,
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
+        request_id_prefix: str = "",
         **kwargs,
     ) -> list[SampleRequest]:
         """
@@ -675,8 +676,6 @@ class RandomMultiModalDataset(RandomDataset):
         input_lens, output_lens, offsets = self.get_sampling_params(
             num_requests, range_ratio, input_len, output_len, tokenizer
         )
-
-
 
         (
             min_num_images,
@@ -739,6 +738,7 @@ class RandomMultiModalDataset(RandomDataset):
                     prompt_len=total_input_len,
                     expected_output_len=int(output_lens[i]),
                     multi_modal_data=None,
+                    request_id=request_id_prefix + str(i),
                 )
             else:
                 sample_request = SampleRequest(
@@ -746,6 +746,7 @@ class RandomMultiModalDataset(RandomDataset):
                     prompt_len=total_input_len,
                     expected_output_len=int(output_lens[i]),
                     multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(i),
                 )
             mm_requests.append(sample_request)
         return mm_requests
@@ -981,8 +982,10 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         type=float,
         default=RandomMultiModalDataset.DEFAULT_NUM_IMAGES_RANGE_RATIO,
         help=(
-            "Relative half-width of the sampling interval for number of "
-            "images in random-mm dataset. Must be in [0, 1)."
+            "Range ratio for sampling number of images per request, "
+        "used only for random-mm sampling. Must be in the range [0, 1) to "
+        "define a symmetric sampling range"
+        "[num_images * (1 - range_ratio), num_images * (1 + range_ratio)]."
         ),
     )
     random_mm_group.add_argument(
@@ -990,8 +993,10 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         type=float,
         default=RandomMultiModalDataset.DEFAULT_DIMENSION_RANGE_RATIO,
         help=(
-            "Relative half-width of the sampling interval for image "
-            "dimensions in random-mm dataset. Must be in [0, 1)."
+            "Range ratio for sampling image dimensions, "
+        "used only for random-mm sampling. Must be in the range [0, 1) to "
+        "define a symmetric sampling range"
+        "[dim * (1 - range_ratio), dim * (1 + range_ratio)]."
         ),
     )
 
