@@ -25,9 +25,13 @@ def create_chunked_local_attention_backend(
 ) -> type[AttentionBackend]:
     prefix = f"ChunkedLocalAttention_{attention_chunk_size}_{block_size}_"
 
-    def patch_common_attn_metadata(cm: CommonAttentionMetadata,
-                                   scheduler_output: SchedulerOutput):
-        return make_local_attention_virtual_batches(attention_chunk_size, cm,
+    def patch_common_attn_metadata(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        scheduler_output: "SchedulerOutput",
+    ) -> CommonAttentionMetadata:
+        return make_local_attention_virtual_batches(attention_chunk_size,
+                                                    common_attn_metadata,
                                                     block_size)
 
     # Dynamically create a new attention backend that wraps the

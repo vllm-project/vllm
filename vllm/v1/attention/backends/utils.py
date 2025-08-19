@@ -548,7 +548,12 @@ def subclass_attention_metadata_builder(
     name_prefix: str,
     builder_cls: type[AttentionMetadataBuilder[M]],
     patch_common_attn_metadata: Callable[
-        [CommonAttentionMetadata, "SchedulerOutput"], CommonAttentionMetadata],
+        [
+            AttentionMetadataBuilder[M], CommonAttentionMetadata,
+            "SchedulerOutput"
+        ],
+        CommonAttentionMetadata,
+    ],
 ) -> type[AttentionMetadataBuilder[M]]:
     """
     Return a new subclass of `builder_cls` whose .build(...) method
