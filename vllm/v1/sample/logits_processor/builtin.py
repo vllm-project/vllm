@@ -337,23 +337,56 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             "prompt_tok_ids": prompt_tok_ids,
             "output_tok_ids": [],
             "thinking_token_budget": thinking_token_budget,
+            "prev_output_length":
+            0,  # Track previous output length for incremental updates
         }
 
     def _update_think_state(self, state: dict[str, Any]):
-        """Updates the state based on generated output tokens."""
-        output = state["output_tok_ids"]
+        """Updates the state based on newly generated output tokens."""
+        output = state.get("output_tok_ids", [])
         if not output:
             return
 
-        # Check if recent output matches start or end sequences
-        if output[-len(self.think_start_token_ids):] \
-                == self.think_start_token_ids:
-            state.update({"in_think": True, "think_count": 0})
-        elif output[-len(self.think_end_token_ids):] \
-                == self.think_end_token_ids:
-            state.update({"in_think": False, "think_count": 0})
+        # Track previous output length for incremental processing
+        prev_length = state.get("prev_output_length", 0)
+        current_length = len(output)
+
+        if current_length <= prev_length:
+            return
+
+        # Process only newly added tokens
+        new_tokens = output[prev_length:]
+        state["prev_output_length"] = current_length
+
+        # Check if new tokens contain think start or end sequences
+        start_len = len(self.think_start_token_ids)
+        end_len = len(self.think_end_token_ids)
+
+        # Look for think sequences in recent tokens (including boundary)
+        # Check overlapping regions where sequences might span boundaries
+        check_start_idx = max(0, prev_length - max(start_len, end_len) + 1)
+        recent_tokens = output[check_start_idx:]
+
+        # Find any think start/end sequences in recent tokens
+        recent_start_pos = self._find_last_sequence_index(
+            recent_tokens, self.think_start_token_ids)
+        recent_end_pos = self._find_last_sequence_index(
+            recent_tokens, self.think_end_token_ids)
+
+        # Update state based on recent sequences
+        if recent_start_pos >= 0:
+            # Found think start in recent tokens
+            absolute_start_pos = check_start_idx + recent_start_pos
+            state["in_think"] = True
+            state["think_count"] = current_length - (absolute_start_pos +
+                                                     start_len)
+        elif recent_end_pos >= 0:
+            # Found think end in recent tokens
+            state["in_think"] = False
+            state["think_count"] = 0
         elif state["in_think"]:
-            state["think_count"] += 1
+            # Continue thinking mode, increment count by new tokens
+            state["think_count"] += len(new_tokens)
 
         # Transition into end mode if thinking token limit exceeded
         if state["in_end"]:
@@ -396,8 +429,11 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
 
             for i1, i2, direction in batch_update.moved:
                 if direction == MoveDirectionality.SWAP:
-                    self._state[i1], self._state[i2] = \
-                        self._state[i2], self._state[i1]
+                    state1 = self._state.get(i1, {})
+                    state2 = self._state.get(i2, {})
+                    if state1 or state2:
+                        self._state[i1] = state2
+                        self._state[i2] = state1
                 else:
                     self._state[i2] = self._state.pop(i1, {})
 
