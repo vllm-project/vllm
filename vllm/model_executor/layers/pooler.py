@@ -177,9 +177,9 @@ def get_classification_activation_function(config: PretrainedConfig):
     problem_type = getattr(config, "problem_type", "")
     if problem_type == "regression":
         return PoolerIdentity()
-    elif problem_type == "single_label_classification":
+    if problem_type == "single_label_classification":
         return PoolerClassify()
-    elif problem_type == "multi_label_classification":
+    if problem_type == "multi_label_classification":
         return PoolerMultiLabelClassify()
     return PoolerClassify()
 
