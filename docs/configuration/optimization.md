@@ -129,6 +129,43 @@ Data parallelism replicates the entire model across multiple GPU sets and proces
 Data parallelism can be combined with the other parallelism strategies and is set by `data_parallel_size=N`.
 Note that MoE layers will be sharded according to the product of the tensor parallel size and data parallel size.
 
+### Intra-request DP for Multi-Modal Encoders
+
+Normally, TP is used to shard the weights of multi-modal encoders just like for language decoders,
+in order to reduce the memory and compute load on each GPU.
+
+However, since the size of multi-modal encoders is very small compared to language decoders,
+there is relatively little gain from TP. On the other hand, TP incurs significant communication
+overhead because of all-reduce being performed after every layer.
+
+Given this, it may be advantageous to use TP ranks to instead shard the input data, essentially
+performing intra-request DP. This has been shown to improve the throughput by around 10% for
+`tensor_parallel_size=8`. For vision encoders that use hardware-unoptimized Conv3D operations,
+intra-request DP can provide another 40% increase to throughput compared to applying TP to weights.
+
+Supported models:
+
+- Llama4 (<gh-pr:18368>)
+- Qwen2.5-VL (<gh-pr:22742>)
+- Step3 (<gh-pr:22697>)
+
+You can enable this by setting `mm_encoder_tp_mode="data"`, for example:
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-72B-Instruct",
+    tensor_parallel_size=4,
+    data_parallel_size=2,
+    mm_encoder_tp_mode="data",  # This uses TP=4 (not DP=2) to split the input data
+)
+```
+
+!! important
+    Intra-request DP is not to be confused with inter-request DP
+    (which is instead controlled by `--data-parallel-size`).
+
 ## Input Processing
 
 ### Parallel Processing
