@@ -13,7 +13,7 @@ from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils import resolve_obj_by_qualname, supports_dynamo
@@ -197,8 +197,18 @@ def _support_torch_compile(
 
     setattr(cls, IGNORE_COMPILE_KEY, False)
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
-        old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
+    def __init__(self, **kwargs):
+        # NOTE: to support multimodal models (such as encoder),
+        # we may not have vllm_config so we only want to pass
+        # vllm_config when it is available.
+        sig = inspect.signature(old_init)
+        if 'vllm_config' in sig.parameters:
+            vllm_config = kwargs['vllm_config']
+        else:
+            vllm_config = get_current_vllm_config()
+
+        old_init(self, **kwargs)
+
         self.vllm_config = vllm_config
         enable_compile = enable_if is None or enable_if(vllm_config)
         # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
