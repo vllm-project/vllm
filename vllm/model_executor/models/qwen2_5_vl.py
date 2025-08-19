@@ -39,9 +39,12 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 
 from vllm.attention.layer import check_upstream_fa_availability
+from vllm.compilation.backends import set_model_tag
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -498,6 +501,10 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
         return x
 
 
+@set_model_tag("Qwen2_5_VisionPatchMerger")
+@support_torch_compile(dynamic_arg_dims={
+    "x": 0,
+})
 class Qwen2_5_VisionPatchMerger(nn.Module):
 
     def __init__(
@@ -1001,6 +1008,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.config = config
+        self.vllm_config = vllm_config
         self.multimodal_config = multimodal_config
         self.video_pruning_rate = multimodal_config.video_pruning_rate
         self.is_multimodal_pruning_enabled = (
@@ -1134,8 +1142,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                          grid_thw_list,
                                                          rope_type="rope_3d")
             else:
-                image_embeds = self.visual(pixel_values,
-                                           grid_thw=grid_thw_list)
+                with set_forward_context(None, self.vllm_config):
+                    image_embeds = self.visual(pixel_values,
+                                               grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
