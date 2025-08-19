@@ -256,7 +256,8 @@ class LoRAModel(AdapterModel):
                 check_unexpected_modules(f)
                 for module in f.keys():  # noqa
                     tensors[module] = f.get_tensor(module)
-        elif os.path.isfile(lora_bin_file_path) or os.path.isfile(lora_pt_file_path):
+        elif os.path.isfile(lora_bin_file_path) or os.path.isfile(
+                                                    lora_pt_file_path):
             # When a bin file is provided, we rely on config to find unexpected
             # modules.
             unexpected_modules = []
