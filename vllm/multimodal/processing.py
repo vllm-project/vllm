@@ -1426,7 +1426,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             # (which may include `out_mm_kwargs`),
             # we resolve the prompt content early by calling `.get_content()`
             # and replace the old prompt content with
-            # the indexer of `resolved_contents`
+            # the indexer of `resolved_contents`.
             resolved_contents = list[_BoundPromptContent]()
             for item_idx, hash_ in enumerate(hashes):
                 item: Optional[tuple[MultiModalKwargsItem, BoundPromptUpdate]]
