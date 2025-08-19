@@ -30,7 +30,8 @@ def _convert_tokens_to_string_with_added_encoders(
     current_sub_text: list[str] = []
     convert_tokens_to_string = tokenizer.convert_tokens_to_string
     added_vocab_set = set(tokenizer.get_added_vocab())
-    all_special_tokens = set(tokenizer.all_special_tokens) if skip_special_tokens else ()
+    all_special_tokens = set(
+        tokenizer.all_special_tokens) if skip_special_tokens else ()
 
     for token in output_tokens:
         # Use precomputed set for skip-special check
