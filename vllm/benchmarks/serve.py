@@ -871,7 +871,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--request-id-prefix",
         type=str,
         required=False,
-        default="benchmakr-serving",
+        default="benchmark-serving",
         help="Specify the prefix of request id.",
     )
 

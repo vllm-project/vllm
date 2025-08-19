@@ -1134,7 +1134,7 @@ def create_argument_parser():
         "--request-id-prefix",
         type=str,
         required=False,
-        default="benchmakr-serving",
+        default="benchmark-serving",
         help="Specify the prefix of request id.",
     )
 
