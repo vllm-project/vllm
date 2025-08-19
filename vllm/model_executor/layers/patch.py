@@ -2,7 +2,8 @@ import logging
 from multiprocessing import Value
 import os
 import vllm
-import torch 
+import torch
+import time 
 import types
 import gc
 from packaging.version import parse
@@ -590,6 +591,7 @@ def patch_load_weights(self: "Worker"):
         def hacked_load_weights(
             weights,
         ):
+            start = time.time()
             # print("flash_rl quant load_weights is called")
             setattr(model, 'hacked_not_need_process_weights_after_loading', False)
             
@@ -616,9 +618,21 @@ def patch_load_weights(self: "Worker"):
                     continue
                 requested_names_vllm.add(hf_to_vllm[name])
             alloc, total = torch.cuda.memory.mem_get_info()
-            print(f"BEFORE: torch memory allocated, {alloc / 1024 **2: .2f} MB, {total / 1024**2 : .2f} MB")
+            # print(f"BEFORE: torch memory allocated, {alloc / 1024 **2: .2f} MB, {total / 1024**2 : .2f} MB")
+
+            # grab everything else in the module as well
+            modules_to_update = set()
+            for name in requested_names_vllm:
+                module = ".".join(name.split(".")[:-2])
+                modules_to_update.add(module)
+                pass
 
             existing_params = dict(model.named_parameters()) # these are in vLLM's model parameter naming
+
+            for param_name in existing_params:
+                param_module = ".".join(name.split(".")[:-2]) 
+                if param_module in modules_to_update:
+                    requested_names_vllm.add(param_name)
 
             hacked_data_dict = {}
             for name in requested_names_vllm:
@@ -628,10 +642,11 @@ def patch_load_weights(self: "Worker"):
                 hacked_data_dict[name] = p.data
             
             assert hasattr(model, "hacked_original_weights_rebuild_keys")
-            
+                        
             # new storage allocation is needed because vllm will internally fuse qkv in fp8 for attn layers, but then the weights from trainer
             # are unfused
             for name, (shape, stride, dtype, nbytes) in model.hacked_original_weights_rebuild_keys.items():
+                # allocates storage in orignal dtype (bfloat16 for fp8 dynamic quantization)
                 if name in existing_params and name in requested_names_vllm:
                     existing_params[name].data = torch.empty(shape, dtype=dtype) 
             
@@ -639,10 +654,13 @@ def patch_load_weights(self: "Worker"):
                 for n, loader in loader_k.items():
                     if not hasattr(existing_params[n], k):
                         setattr(existing_params[n], k, bond_method_to_cls(loader, existing_params[n]))
+            end1 = time.time()
 
             updated_params = original_load_weights(
                 flash_quantize_fn(weights, self.flash_rl_profile)
             )
+            end2 = time.time()
+            # print("original load weights took: ", end2 - end1, flush=True)
             
             if hasattr(model, 'hacked_model_config') and hasattr(model, 'hacked_target_device'):        
                 from vllm.model_executor.model_loader import utils
@@ -651,7 +669,12 @@ def patch_load_weights(self: "Worker"):
             else:
                 setattr(model, 'hacked_not_need_process_weights_after_loading', False)
             
+            end3 = time.time()
+            # print("process weights subset took: ", end3 - end2)
+            
             skipped_params = list()
+            # this codeblock is to use the old storage so that cudagraphs don't break
+            copy_time = 0
             for name, p in model.named_parameters():
                 if name not in requested_names_vllm:
                     continue
@@ -661,14 +684,19 @@ def patch_load_weights(self: "Worker"):
                 
                 if name in updated_params:
                     trided_data = torch.as_strided(p.data, hacked_data_dict[name].shape, hacked_data_dict[name].stride())
+                    s = time.time()
                     hacked_data_dict[name].copy_(trided_data)
+                    e = time.time()
+                    copy_time += e - s
                 else:
                     skipped_params.append(name)
                     
                 tmp_data = p.data
                 p.data = hacked_data_dict[name]
                 del tmp_data
-
+            end4 = time.time()
+            # print("remappiung weights to original storage took: ", end4 - end3, flush=True)
+            # print("copy time: ", copy_time, flush=True)
             
             # logger.debug(f"flash_rl load_weights skipped params (not accurate for `fp8-vllm`): {skipped_params}")
             alloc, total = torch.cuda.memory.mem_get_info()
@@ -678,7 +706,9 @@ def patch_load_weights(self: "Worker"):
             del existing_params
             gc.collect()
             torch.cuda.empty_cache()
-            
+            end5 = time.time()
+            # print("clearing out the cache weights took: ", end5 - end4, flush=True)
+        
             if len(self.flash_rl_module_attribute_to_preserve) > 0:
                 for _, module in model.named_modules():
                     for attr in self.flash_rl_module_attribute_to_preserve:
@@ -686,7 +716,7 @@ def patch_load_weights(self: "Worker"):
                             assert hasattr(module, f'hacked_{attr}'), f"module {module} does not have attribute hacked_{attr}"
                             setattr(module, attr, getattr(module, f'hacked_{attr}'))
                             delattr(module, f'hacked_{attr}')
-                            
+            # print("E2E time for load weights: ", time.time() - start, flush=True)
             return updated_params
         
         model.load_weights = hacked_load_weights
