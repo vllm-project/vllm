@@ -77,7 +77,7 @@ class Llama4ImagePatchInputs(TensorSchema):
                          TensorShape("total_num_chunks", "num_channels",
                                      "image_size", "image_size")]
 
-    patches_per_image: Annotated[torch.Tensor]
+    patches_per_image: Annotated[torch.Tensor, TensorShape("batch_size")]
     """
     The number of total patches for each image in the batch.
     
@@ -780,6 +780,10 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         patches_per_image = flatten_bn(kwargs.pop("patches_per_image"))
 
         aspect_ratios = kwargs.pop("aspect_ratios", None)
+        if aspect_ratios is not None and not isinstance(
+                aspect_ratios, torch.Tensor):
+            aspect_ratios = torch.tensor(aspect_ratios,
+                                         device=flat_pixel_values.device)
 
         return Llama4ImagePatchInputs(
             type="pixel_values",
