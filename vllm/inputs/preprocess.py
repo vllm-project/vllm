@@ -335,7 +335,8 @@ class InputPreprocessor:
             inputs: list[int],
             tokenization_kwargs: Optional[dict[str, Any]] = None) -> list[int]:
 
-        if not tokenization_kwargs or "truncation" not in tokenization_kwargs:
+        if not tokenization_kwargs or "truncation" not in \
+                tokenization_kwargs or self.tokenizer is None:
             return inputs
 
         max_length = tokenization_kwargs["max_length"]
