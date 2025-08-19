@@ -155,7 +155,7 @@ class PromptUpdateDetails(Generic[_S]):
         )
 
 
-PromptUpdateInfo = Union[PromptSeq, PromptUpdateDetails]
+PromptUpdateInfo = Union[PromptSeq, PromptUpdateDetails, "_BoundPromptContent"]
 """
 The token sequence or text that are part of the update.
 
