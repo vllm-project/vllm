@@ -25,10 +25,10 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend, apply_flashinfer_per_tensor_scale_fp8,
-    build_flashinfer_cutlass_moe_fp8_prepare_finalize,
-    get_flashinfer_moe_backend, register_moe_scaling_factors,
-    rotate_flashinfer_fp8_moe_weights, select_cutlass_fp8_gemm_impl,
-    swap_w13_to_w31)
+    build_flashinfer_fp8_cutlass_moe_prepare_finalize,
+    flashinfer_cutlass_moe_fp8, get_flashinfer_moe_backend,
+    register_moe_scaling_factors, rotate_flashinfer_fp8_moe_weights,
+    select_cutlass_fp8_gemm_impl, swap_w13_to_w31)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
@@ -546,9 +546,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if self.flashinfer_moe_backend != FlashinferMoeBackend.CUTLASS:
             return super().maybe_make_prepare_finalize(moe)
 
-        prepare_finalize = build_flashinfer_cutlass_moe_fp8_prepare_finalize(
+        prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
             moe,
-            a1_gscale=self.layer.w13_input_scale,
+            layer=self.layer,
         )
         logger.debug_once("%s", prepare_finalize.__class__.__name__)
         return prepare_finalize
@@ -1067,27 +1067,37 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert self.fused_experts is not None, (
-                "Expected self.fused_experts to be initialized")
             assert self.block_quant is None
             assert (not renormalize and custom_routing_function is not None)
             assert activation == 'silu', (
                 f"Expected 'silu' activation but got {activation}")
             assert scoring_func == 'sigmoid', (
                 f"Expected 'sigmoid' scoring func but got {scoring_func}")
-
-            return self.fused_experts(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights,
-                topk_ids,
-                inplace=False,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
+            if self.fused_experts is not None:
+                return self.fused_experts(
+                    x,
+                    layer.w13_weight,
+                    layer.w2_weight,
+                    topk_weights,
+                    topk_ids,
+                    inplace=False,
+                    activation=activation,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                )
+            else:
+                return flashinfer_cutlass_moe_fp8(
+                    x,
+                    layer,
+                    topk_weights,
+                    topk_ids,
+                    inplace=False,
+                    activation=activation,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
             return fused_experts(
