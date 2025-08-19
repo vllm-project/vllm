@@ -10,6 +10,7 @@
 /vllm/worker/worker.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
 /vllm/model_executor/layers/sampler.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256
+/vllm/model_executor/layers/mamba @tdoublep
 /vllm/multimodal @DarkLight1337 @ywang96
 /vllm/vllm_flash_attn @LucasWilkinson
 /vllm/lora @jeejeelee
@@ -25,11 +26,11 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 # vLLM V1
 /vllm/v1 @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat
 /vllm/v1/structured_output @mgoin @russellb @aarnphm
+/vllm/v1/attention/backends/triton_attn.py @tdoublep
 
 # Test ownership
 /.buildkite/lm-eval-harness @mgoin @simon-mo
 /tests/async_engine @njhill @robertgshaw2-redhat @simon-mo
-/tests/basic_correctness/test_chunked_prefill @rkooo567 @comaniac
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
@@ -44,6 +45,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/v1/structured_output @mgoin @russellb @aarnphm
 /tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
+/tests/models/language/generation/test_hybrid.py @tdoublep
 
 # Docs
 /docs @hmellor
@@ -72,3 +74,9 @@ mkdocs.yaml @hmellor
 /vllm/model_executor/models/pixtral*.py @patrickvonplaten
 /vllm/transformers_utils/configs/mistral.py @patrickvonplaten
 /vllm/transformers_utils/tokenizers/mistral.py @patrickvonplaten
+
+# Kernels
+/vllm/attention/ops/chunked_prefill_paged_decode.py @tdoublep
+/vllm/attention/ops/triton_unified_attention.py @tdoublep
+
+
