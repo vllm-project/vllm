@@ -83,7 +83,16 @@ class EngineCore:
                 executor_fail_callback)
 
         self.available_gpu_memory_for_kv_cache = -1
+        # No scheduler needed for distributed inference for folo
+        self.batch_queue_size = 0
+        self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
+                                                     SchedulerOutput]]] = None
 
+        self.request_block_hasher: Optional[Callable[[Request],
+                                                     list[BlockHash]]] = None
+        if self.vllm_config.parallel_config.distributed_node_rank > 0:
+            self._scheduler = None
+            return
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = \
             self._initialize_kv_caches(vllm_config)
@@ -118,7 +127,7 @@ class EngineCore:
             logger.info("Disabling chunked prefill for model without KVCache")
             vllm_config.scheduler_config.chunked_prefill_enabled = False
 
-        self.scheduler: SchedulerInterface = Scheduler(
+        self._scheduler = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             structured_output_manager=self.structured_output_manager,
@@ -136,15 +145,11 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
-        self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
-                                                     SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
             self.batch_queue = queue.Queue(self.batch_queue_size)
 
-        self.request_block_hasher: Optional[Callable[[Request],
-                                                     list[BlockHash]]] = None
         if (self.vllm_config.cache_config.enable_prefix_caching
                 or self.scheduler.get_kv_connector() is not None):
 
@@ -155,6 +160,16 @@ class EngineCore:
 
             self.request_block_hasher = get_request_block_hasher(
                 block_size, caching_hash_fn)
+
+    @property
+    def scheduler(self) -> SchedulerInterface:
+        if not isinstance(self._scheduler, SchedulerInterface):
+            raise RuntimeError("Scheduler is not initialized")
+        return self._scheduler
+
+    @property
+    def scheduless_mode(self) -> bool:
+        return self._scheduler is None
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -244,7 +259,6 @@ class EngineCore:
                 not self.scheduler.get_kv_connector()):
             logger.warning("Got kv_transfer_params, but no KVConnector found. "
                            "Disabling KVTransfer for this request.")
-
         self.scheduler.add_request(request)
 
     def abort_requests(self, request_ids: list[str]):
@@ -354,10 +368,11 @@ class EngineCore:
         return engine_core_outputs, scheduled_batch
 
     def shutdown(self):
-        self.structured_output_manager.clear_backend()
+        if self.structured_output_manager:
+            self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
-        if self.scheduler:
+        if not self.scheduless_mode:
             self.scheduler.shutdown()
 
     def profile(self, is_start: bool = True):
@@ -366,11 +381,13 @@ class EngineCore:
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
         # re-sync the internal caches (P0 processor, P0 mirror, P1 mirror)
-        if self.scheduler.has_unfinished_requests():
-            logger.warning("Resetting the multi-modal cache when requests are "
-                           "in progress may lead to desynced internal caches.")
+        if not self.scheduless_mode:
+            if self.scheduler.has_unfinished_requests():
+                logger.warning(
+                    "Resetting the multi-modal cache when requests are "
+                    "in progress may lead to desynced internal caches.")
 
-        self.mm_input_cache_server.reset()
+            self.mm_input_cache_server.reset()
 
     def reset_prefix_cache(self):
         self.scheduler.reset_prefix_cache()
@@ -720,12 +737,18 @@ class EngineCoreProc(EngineCore):
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
-        # Loop until process is sent a SIGINT or SIGTERM
-        while True:
-            # 1) Poll the input queue until there is work to do.
-            self._process_input_queue()
-            # 2) Step the engine core and return the outputs.
-            self._process_engine_step()
+        if not self.scheduless_mode:
+            # Loop until process is sent a SIGINT or SIGTERM
+            while True:
+                # 1) Poll the input queue until there is work to do.
+                self._process_input_queue()
+                # 2) Step the engine core and return the outputs.
+                self._process_engine_step()
+        else:
+            # Loop until process is sent a SIGINT or SIGTERM
+            while True:
+                # No real scheduler for follower nodes
+                time.sleep(1)
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
