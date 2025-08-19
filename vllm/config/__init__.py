@@ -857,8 +857,10 @@ class ModelConfig:
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 mm_processor_cache_gb=self.mm_processor_cache_gb,
+                mm_encoder_tp_mode=self.mm_encoder_tp_mode,
                 interleave_mm_strings=self.interleave_mm_strings,
-                skip_mm_profiling=self.skip_mm_profiling)
+                skip_mm_profiling=self.skip_mm_profiling,
+            )
 
         return None
 
