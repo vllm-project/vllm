@@ -703,9 +703,10 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 missing_item_idx,
             )
 
-        missing_content = missing_prompt_update.get_content(missing_item_idx)
         image_processor = self.info.get_image_processor()
         version = self.info.get_model_version()
+
+        text = missing_prompt_update.get_content(missing_item_idx).full.text
 
         if version == (2, 0) or version == (2, 5):
             im_start = image_processor.im_start_token
@@ -716,7 +717,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         def get_image_replacement(item_idx: int):
             return PromptUpdateDetails.select_text(
-                missing_content.full.text.replace(
+                text.replace(
                     f"{im_start}{missing_item_idx}{im_end}",
                     f"{im_start}{item_idx}{im_end}",
                 ),
