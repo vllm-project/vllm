@@ -138,7 +138,7 @@ However, since the size of multi-modal encoders is very small compared to langua
 there is relatively little gain from TP. On the other hand, TP incurs significant communication
 overhead because of all-reduce being performed after every layer.
 
-Given this, it may be advantageous to use TP ranks to instead shard the input data, essentially
+Given this, it may be advantageous to instead shard the input data using TP, essentially
 performing intra-request DP. This has been shown to improve the throughput by around 10% for
 `tensor_parallel_size=8`. For vision encoders that use hardware-unoptimized Conv3D operations,
 intra-request DP can provide another 40% increase to throughput compared to regular TP.
