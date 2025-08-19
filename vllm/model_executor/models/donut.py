@@ -201,6 +201,10 @@ class DonutMultiModalProcessor(EncDecMultiModalProcessor[DonutProcessingInfo]):
     ) -> Union[str, list[int]]:
         return prompt
 
+    @property
+    def pad_dummy_encoder_prompt(self) -> bool:
+        return True
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -275,8 +279,8 @@ class DonutForConditionalGeneration(nn.Module, SupportsMultiModal,
         self, data: Union[torch.Tensor, list[torch.Tensor]]
     ) -> Union[torch.Tensor, list[torch.Tensor]]:
 
-        size = self.processor_config["size"]
-        h, w = size["height"], size["width"]
+        # size = self.processor_config["size"]
+        h, w = self.config.encoder.image_size
         expected_dims = (3, h, w)
 
         def _validate_shape(d: torch.Tensor):
