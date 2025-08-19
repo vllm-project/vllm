@@ -84,7 +84,7 @@ def get_nccl_mem_pool():
 class use_symmetric_memory:
     def __init__(
         self,
-        pynccl_comm: "PyNcclCommunicator",
+        pynccl_comm: PyNcclCommunicator,
         disabled: bool = False,
         disable_war: bool = False,
     ):
