@@ -565,14 +565,13 @@ class EplbState:
             # Update expert_load_pass tensor size to match
             # model.num_physical_experts
             current_num_experts = self.expert_load_pass.size(-1)
-            if model.num_physical_experts > current_num_experts:
-                padding_needed = (model.num_physical_experts -
-                                  current_num_experts)
+            if num_physical_experts > current_num_experts:
+                padding_needed = (num_physical_experts - current_num_experts)
                 self.expert_load_pass = torch.nn.functional.pad(
                     self.expert_load_pass, (0, padding_needed))
-            elif model.num_physical_experts < current_num_experts:
+            elif num_physical_experts < current_num_experts:
                 self.expert_load_pass = self.expert_load_pass[
-                    ..., :model.num_physical_experts]
+                    ..., :num_physical_experts]
             model.update_expert_load_view(self.expert_load_pass)
 
         if is_main_rank:
