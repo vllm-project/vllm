@@ -630,6 +630,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_prepare_finalize.py
+  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/compilation/fusion.py
   - vllm/compilation/fusion_attn.py
@@ -650,6 +651,7 @@ steps:
     # Fusion
     - pytest -v -s tests/compile/test_fusion_all_reduce.py
     - pytest -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
+    - pytest -v -s tests/kernels/moe/test_flashinfer.py
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
