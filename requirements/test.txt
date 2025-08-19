@@ -273,7 +273,7 @@ h11==0.14.0
     #   uvicorn
 h5py==3.13.0
     # via terratorch
-harfile==0.3.0
+harfile==0.3.1
     # via schemathesis
 hf-xet==1.1.7
     # via huggingface-hub
@@ -902,6 +902,7 @@ rich==13.9.4
     #   genai-perf
     #   lightning
     #   mteb
+    #   schemathesis
     #   typer
 rioxarray==0.19.0
     # via terratorch
@@ -930,7 +931,7 @@ safetensors==0.4.5
     #   peft
     #   timm
     #   transformers
-schemathesis==3.39.15
+schemathesis==4.1.0
     # via -r requirements/test.in
 scikit-image==0.25.2
     # via albumentations
@@ -1015,7 +1016,6 @@ sqlparse==0.5.3
 starlette==0.46.2
     # via
     #   fastapi
-    #   schemathesis
     #   starlette-testclient
 starlette-testclient==0.4.1
     # via schemathesis
@@ -1063,8 +1063,6 @@ tokenizers==0.21.1
     #   -r requirements/test.in
     #   transformers
 tomli==2.2.1
-    # via schemathesis
-tomli-w==1.2.0
     # via schemathesis
 torch==2.7.1+cu128
     # via
@@ -1187,6 +1185,7 @@ typing-extensions==4.12.2
     #   pydantic-core
     #   pydantic-extra-types
     #   pytorch-lightning
+    #   schemathesis
     #   sqlalchemy
     #   torch
     #   torchgeo
@@ -1235,9 +1234,7 @@ xxhash==3.5.0
     #   datasets
     #   evaluate
 yarl==1.17.1
-    # via
-    #   aiohttp
-    #   schemathesis
+    # via aiohttp
 zipp==3.23.0
     # via importlib-metadata
 zstandard==0.23.0
