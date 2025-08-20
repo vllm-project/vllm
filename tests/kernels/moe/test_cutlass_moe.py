@@ -207,6 +207,10 @@ def run_8_bit(moe_tensors: MOETensors8Bit,
         'topk_ids': topk_ids,
         'w1_scale': moe_tensors.w1_scale,
         'w2_scale': moe_tensors.w2_scale,
+        'ab_strides1': moe_tensors.ab_strides1,
+        'ab_strides2': moe_tensors.ab_strides2,
+        'c_strides1': moe_tensors.c_strides1,
+        'c_strides2': moe_tensors.c_strides2,
         'per_act_token': per_act_token,
         'a1_scale': None  #moe_tensors.a_scale
     }
@@ -424,8 +428,8 @@ def test_run_cutlass_moe_fp8(
         topk_ids[0][1] = 1
 
         workspace13_shape = (m * topk, max(2 * n, k))
-        workspace2_shape = (m * topk, n)
-        output_shape = (m * topk, k)
+        workspace2_shape = (m * topk, max(n, k))
+        output_shape = (m, k)
 
         workspace13 = torch.empty(prod(workspace13_shape),
                                   device="cuda",
@@ -440,6 +444,11 @@ def test_run_cutlass_moe_fp8(
         expert_map[start:end] = list(range(num_local_experts))
         expert_map = torch.tensor(expert_map, dtype=torch.int32, device="cuda")
 
+        ab_strides1 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
+        ab_strides2 = torch.full((e, ), n, device="cuda", dtype=torch.int64)
+        c_strides1 = torch.full((e, ), 2 * n, device="cuda", dtype=torch.int64)
+        c_strides2 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
+
         activation = lambda o, i: torch.ops._C.silu_and_mul(o, i)
         a1q, a1q_scale = moe_kernel_quantize_input(mt.a, mt.a_scale,
                                                    torch.float8_e4m3fn,
@@ -448,8 +457,9 @@ def test_run_cutlass_moe_fp8(
         func = lambda output: run_cutlass_moe_fp8(
             output, a1q, mt.w1_q, mt.w2_q, topk_ids, activation,
             global_num_experts, expert_map, mt.w1_scale, mt.w2_scale,
-            a1q_scale, None, workspace13, workspace2, None, mt.a.dtype,
-            per_act_token, per_out_channel, False)
+            a1q_scale, None, ab_strides1, ab_strides2, c_strides1, c_strides2,
+            workspace13, workspace2, None, mt.a.dtype, per_act_token,
+            per_out_channel, False, topk_weights)
 
         workspace13.random_()
         output_random_workspace = torch.empty(output_shape,
