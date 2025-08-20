@@ -5,10 +5,12 @@ The requirements (pip) for `benchmark_serving_multi_turn.py` can be found in `re
 First start serving your model
 
 ```bash
-export MODEL_NAME=/models/meta-llama/Meta-Llama-3.1-8B-Instruct/
+export MODEL_PATH=/models/meta-llama/Meta-Llama-3.1-8B-Instruct/
 
-vllm serve $MODEL_NAME --disable-log-requests
+vllm serve $MODEL_PATH --served-model-name Llama --disable-log-requests
 ```
+
+The variable `MODEL_PATH` should be a path to the model files (e.g. downloaded from huggingface).
 
 ## Synthetic Multi-Turn Conversations
 
@@ -26,10 +28,10 @@ But you may use other text files if you prefer (using this specific file is not 
 Then run the benchmarking script
 
 ```bash
-export MODEL_NAME=/models/meta-llama/Meta-Llama-3.1-8B-Instruct/
+export MODEL_PATH=/models/meta-llama/Meta-Llama-3.1-8B-Instruct/
 
-python benchmark_serving_multi_turn.py --model $MODEL_NAME --input-file generate_multi_turn.json \
---num-clients 2 --max-active-conversations 6
+python benchmark_serving_multi_turn.py --model $MODEL_PATH --served-model-name Llama \
+--input-file generate_multi_turn.json --num-clients 2 --max-active-conversations 6
 ```
 
 You can edit the file `generate_multi_turn.json` to change the conversation parameters (number of turns, etc.).

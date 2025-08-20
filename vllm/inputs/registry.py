@@ -240,6 +240,6 @@ class InputRegistry:
 
         return DummyData(
             seq_data=SequenceData.from_seqs(dec_data.prompt_token_ids),
-            multi_modal_data=dec_data.multi_modal_data,
+            multi_modal_data=dec_data.multi_modal_data.get_data(),
             multi_modal_placeholders=dec_data.multi_modal_placeholders,
         )

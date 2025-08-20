@@ -762,8 +762,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         has Prefills (if any). The rest of the steps are guaranteed to be all
         decodes. In this case, we set up the padding as if all the sequences
         are decodes so we may run all steps except the first step in CUDA graph
-        mode. The padding is accounted for in the multi-step `advance_step`
-        family of functions.
+        mode.
 
         Args:
             num_seqs (int): Number of sequences scheduled to run.
