@@ -4,7 +4,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable
 from enum import Enum
-from typing import Callable, Literal, Optional, overload
+from typing import Callable, Literal, Optional, Union, overload
 
 import torch
 import torch.nn.functional as F
@@ -101,7 +101,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @staticmethod
     def _maybe_make_prepare_finalize(
-        moe: FusedMoEConfig, ) -> Optional[FusedMoEPrepareAndFinalize]:
+        moe: FusedMoEConfig,
+        shared_experts: Optional[torch.nn.Module] = None,
+    ) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
@@ -148,6 +150,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 max_num_tokens=moe.max_num_tokens,
                 num_local_experts=moe.num_local_experts,
                 num_dispatchers=num_dispatchers,
+                shared_experts=shared_experts,
             )
         elif moe.use_deepep_ht_kernels:
             assert moe.dp_size == all2all_manager.dp_world_size
@@ -192,9 +195,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def maybe_make_prepare_finalize(
         self,
         moe: FusedMoEConfig,
+        shared_experts: Optional[torch.nn.Module] = None,
     ) -> Optional[FusedMoEPrepareAndFinalize]:
         if moe.moe_parallel_config.use_all2all_kernels:
-            return FusedMoEMethodBase._maybe_make_prepare_finalize(moe)
+            return FusedMoEMethodBase._maybe_make_prepare_finalize(moe, shared_experts)
         else:
             return None
 
@@ -202,7 +206,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     # prepare_communication_buffer_for_model.
     def init_prepare_finalize(self, layer: torch.nn.Module):
         assert self.moe is not None
-        prepare_finalize = self.maybe_make_prepare_finalize(self.moe)
+        #print(f"SHARED EXPERTS {layer.shared_experts}")
+        prepare_finalize = self.maybe_make_prepare_finalize(self.moe, layer.shared_experts)
 
         if prepare_finalize is not None:
             logger.debug("%s for %s(%s)", prepare_finalize.__class__.__name__,
@@ -252,7 +257,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         raise NotImplementedError
 
 
@@ -409,7 +414,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb:
             assert expert_load_view is not None
             assert logical_to_physical_map is not None
@@ -461,7 +466,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
 
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
@@ -547,7 +552,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ):
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb is not False or expert_load_view is not None or \
                 logical_to_physical_map is not None or \
                 logical_replica_count is not None:
@@ -594,7 +599,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ):
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb is not False or expert_load_view is not None or \
                 logical_to_physical_map is not None or \
                 logical_replica_count is not None:
@@ -633,7 +638,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert not use_grouped_topk
         assert num_expert_group is None
         assert topk_group is None
@@ -785,8 +790,12 @@ class FusedMoE(CustomOp):
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
         has_bias: bool = False,
+        # make a method instead?
+        shared_experts: Optional[torch.nn.Module] = None,
     ):
         super().__init__()
+        self.shared_experts = shared_experts
+        #print(f"SHARED EXPERTS {shared_experts}")
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
@@ -1582,8 +1591,11 @@ class FusedMoE(CustomOp):
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
 
-    def forward(self, hidden_states: torch.Tensor,
-                router_logits: torch.Tensor):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         og_hidden_states = hidden_states.shape[-1]
         if self.hidden_size != og_hidden_states:
             hidden_states = F.pad(hidden_states,
@@ -1595,12 +1607,22 @@ class FusedMoE(CustomOp):
         if current_platform.is_tpu():
             return self.forward_impl(hidden_states, router_logits)
         else:
-            return torch.ops.vllm.moe_forward(
+            outputs = torch.ops.vllm.moe_forward(
                 hidden_states, router_logits,
-                self.layer_name)[..., :og_hidden_states]
+                self.layer_name)
 
-    def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
-                             full_router_logits: torch.Tensor):
+            if self.shared_experts is None:
+                assert len(outputs) == 1
+                return outputs[0][..., :og_hidden_states]
+            else:
+                assert len(outputs) == 2
+                return outputs[0][..., :og_hidden_states], outputs[1][..., :og_hidden_states]
+
+    def forward_impl_chunked(
+        self,
+        full_hidden_states: torch.Tensor,
+        full_router_logits: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert self.batched_hidden_states is not None
         assert self.batched_router_logits is not None
         assert self.batched_hidden_states.dtype == full_hidden_states.dtype
@@ -1611,7 +1633,9 @@ class FusedMoE(CustomOp):
         assert (
             self.batched_router_logits.size(-1) == full_router_logits.size(-1))
 
-        full_final_hidden_states = torch.empty_like(full_hidden_states)
+        full_fused_final_hidden_states = torch.empty_like(full_hidden_states)
+        if self.shared_experts is not None:
+            full_shared_final_hidden_states = torch.empty_like(full_hidden_states)
 
         def process_chunk(chunk_start, chunk_end, skip_result_store=False):
             chunk_size = chunk_end - chunk_start
@@ -1652,9 +1676,18 @@ class FusedMoE(CustomOp):
                 logical_replica_count=self.logical_replica_count,
             )
 
+            #print(f"XXXX {type(final_hidden_states)}")
+
             if not skip_result_store:
-                full_final_hidden_states[chunk_start:chunk_end, :].copy_(
-                    final_hidden_states, non_blocking=True)
+                if self.shared_experts is None:
+                    full_fused_final_hidden_states[chunk_start:chunk_end, :].copy_(
+                        final_hidden_states, non_blocking=True)
+                else:
+                    full_shared_final_hidden_states[chunk_start:chunk_end, :].copy_(
+                        final_hidden_states[0], non_blocking=True)
+                    full_fused_final_hidden_states[chunk_start:chunk_end, :].copy_(
+                        final_hidden_states[1], non_blocking=True)
+
 
         ctx = get_forward_context()
         # flashinfer_cutlass_kernels can handle: optional DP + TP/EP
@@ -1675,10 +1708,16 @@ class FusedMoE(CustomOp):
                               chunk_end,
                               skip_result_store=chunk_start_ >= num_tokens)
 
-        return full_final_hidden_states
+        if self.shared_experts is None:
+            return full_fused_final_hidden_states
+        else:
+            return full_shared_final_hidden_states, full_fused_final_hidden_states
 
-    def forward_impl(self, hidden_states: torch.Tensor,
-                     router_logits: torch.Tensor):
+    def forward_impl(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert self.quant_method is not None
         # Route to the chunked forward path using the FlashInfer Cutlass kernel
         # only when data parallelism (DP) is enabled.
@@ -1723,11 +1762,22 @@ class FusedMoE(CustomOp):
         )
 
         if do_naive_dispatch_combine:
-            final_hidden_states = get_ep_group().combine(final_hidden_states)
+            if self.shared_experts is None:
+                final_hidden_states = get_ep_group().combine(final_hidden_states)
+            else:
+                final_hidden_states[0] = get_ep_group().combine(final_hidden_states[0])
+                final_hidden_states[1] = get_ep_group().combine(final_hidden_states[1])
+
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             # Default set to False. (May have to add shared expert outputs.
-            final_hidden_states = self.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states)
+            if self.shared_experts is None:
+                final_hidden_states = self.maybe_all_reduce_tensor_model_parallel(
+                    final_hidden_states)
+            else:
+                final_hidden_states[0] = self.maybe_all_reduce_tensor_model_parallel(
+                    final_hidden_states[0])
+                final_hidden_states[1] = self.maybe_all_reduce_tensor_model_parallel(
+                    final_hidden_states[1])
 
         return final_hidden_states
 
@@ -1784,18 +1834,36 @@ class FusedMoE(CustomOp):
         return s
 
 
-def moe_forward(hidden_states: torch.Tensor, router_logits: torch.Tensor,
-                layer_name: str) -> torch.Tensor:
+def moe_forward(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    layer_name: str,
+) -> list[torch.Tensor]:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     assert self.quant_method is not None
 
-    return self.forward_impl(hidden_states, router_logits)
+    out = self.forward_impl(hidden_states, router_logits)
+
+    if self.shared_experts is None:
+        return [out]
+    else:
+        assert isinstance(out, tuple)
+        return list(out)
 
 
-def moe_forward_fake(hidden_states: torch.Tensor, router_logits: torch.Tensor,
-                     layer_name: str) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
+def moe_forward_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    layer_name: str,
+) ->  list[torch.Tensor]:
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    out = torch.empty_like(hidden_states)
+    if self.shared_experts is None:
+        return [out]
+    else:
+        return list(out)
 
 
 direct_register_custom_op(

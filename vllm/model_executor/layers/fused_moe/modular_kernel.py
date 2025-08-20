@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import Optional, final
+from typing import Optional, final, Union
 
 import torch
 
@@ -161,11 +161,12 @@ class FusedMoEPrepareAndFinalize(ABC):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> tuple[
-            torch.Tensor,
-            Optional[torch.Tensor],
-            Optional[ExpertTokensMetadata],
-            Optional[torch.Tensor],
-            Optional[torch.Tensor],
+        torch.Tensor,
+        Optional[torch.Tensor],
+        Optional[ExpertTokensMetadata],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
+        Optional[torch.Tensor],
     ]:
         """
         Perform any quantization (and/or) dispatching needed
@@ -190,6 +191,7 @@ class FusedMoEPrepareAndFinalize(ABC):
           number of tokens assigned to each local expert.
         - Optional dispatched expert topk IDs
         - Optional dispatched expert topk weight
+        - Optional: shared expert output
         """
         raise NotImplementedError
 
@@ -217,6 +219,48 @@ class FusedMoEPrepareAndFinalize(ABC):
           implementation.
         """
         raise NotImplementedError
+
+    # @abstractmethod
+    # def send(
+    #     self,
+    #     a1: torch.Tensor,
+    #     a1_scale: Optional[torch.Tensor],
+    #     a2_scale: Optional[torch.Tensor],
+    #     topk_weights: torch.Tensor,
+    #     topk_ids: torch.Tensor,
+    #     num_experts: int,
+    #     expert_map: Optional[torch.Tensor],
+    #     apply_router_weight_on_input: bool,
+    #     quant_config: FusedMoEQuantConfig,
+    # ) -> tuple[
+    #         torch.Tensor,
+    #         Optional[torch.Tensor],
+    #         Optional[ExpertTokensMetadata],
+    #         Optional[torch.Tensor],
+    #         Optional[torch.Tensor],
+    # ]:
+    #     raise NotImplementedError
+
+    # @abstractmethod
+    # def receive(
+    #     self,
+    #     a1: torch.Tensor,
+    #     a1_scale: Optional[torch.Tensor],
+    #     a2_scale: Optional[torch.Tensor],
+    #     topk_weights: torch.Tensor,
+    #     topk_ids: torch.Tensor,
+    #     num_experts: int,
+    #     expert_map: Optional[torch.Tensor],
+    #     apply_router_weight_on_input: bool,
+    #     quant_config: FusedMoEQuantConfig,
+    # ) -> tuple[
+    #         torch.Tensor,
+    #         Optional[torch.Tensor],
+    #         Optional[ExpertTokensMetadata],
+    #         Optional[torch.Tensor],
+    #         Optional[torch.Tensor],
+    # ]:
+    #     raise NotImplementedError
 
     @property
     @abstractmethod
@@ -692,7 +736,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         a1_scale: Optional[torch.Tensor] = None,
         a2_scale: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
         of weights, w1 and w2, and top-k gating mechanism.
@@ -736,8 +780,10 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
+        # TODO: if not supports shared_experts, call shared_experts explicitly here
+
         (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
-         _expert_topk_weights) = self.prepare_finalize.prepare(
+         _expert_topk_weights, shared_output) = self.prepare_finalize.prepare(
              a1,
              a1_scale,
              a2_scale,
@@ -795,4 +841,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             self.fused_experts.finalize_weight_and_reduce_impl(),
         )
 
-        return output
+        if shared_output is None:
+            return output
+        else:
+            return shared_output, output
