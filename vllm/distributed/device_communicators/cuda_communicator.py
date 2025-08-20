@@ -19,7 +19,9 @@ logger = init_logger(__name__)
 @cache
 def is_rocm_aiter_custom_allreduce_enabled() -> bool:
     """Check if aiter custom allreduce is enabled for ROCm platform."""
+    from vllm.platforms.rocm import on_gfx9
     return current_platform.is_rocm() \
+        and on_gfx9() \
         and envs.VLLM_ROCM_USE_AITER \
         and envs.VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE
 
