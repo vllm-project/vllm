@@ -8,6 +8,7 @@ import enum
 import hashlib
 import inspect
 import json
+import os
 import textwrap
 import uuid
 import warnings
@@ -35,6 +36,7 @@ from vllm.config.compilation import (CompilationConfig, CompilationLevel,
                                      CUDAGraphMode, PassConfig)
 from vllm.config.parallel import DistributedExecutorBackend, ParallelConfig
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
+from vllm.config.signature_verification import SignatureVerificationConfig
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -480,6 +482,9 @@ class ModelConfig:
     logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
     """One or more logits processors' fully-qualified class names or class
     definitions"""
+    signature_verification_config: \
+        Optional[SignatureVerificationConfig] = None
+    """The model's signature verification configuration."""
 
     def compute_hash(self) -> str:
         """
