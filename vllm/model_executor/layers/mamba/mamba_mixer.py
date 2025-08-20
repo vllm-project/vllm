@@ -243,6 +243,7 @@ class MambaMixer(MambaBase, CustomOp):
                 conv_state = self_kv_cache[0].transpose(-1, -2)
                 ssm_state = self_kv_cache[1]
                 has_initial_states = mamba1_metadata.has_initial_states
+                num_padded_decodes = mamba1_metadata.num_padded_decodes
         else:
             assert isinstance(attn_metadata, AttentionMetadata)
             assert mamba_cache_params is not None
@@ -254,6 +255,7 @@ class MambaMixer(MambaBase, CustomOp):
             has_initial_states = None
             if context_lens_tensor is not None:
                 has_initial_states = context_lens_tensor > 0
+            num_padded_decodes = attn_metadata.num_decode_tokens
 
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
@@ -285,6 +287,7 @@ class MambaMixer(MambaBase, CustomOp):
             num_decode_tokens,
             num_prefills,
             num_decodes,
+            num_padded_decodes,
         )
         hidden_states_BC_p = prefill_decode_split.hidden_states_BC_p
         hidden_states_BC_d = prefill_decode_split.hidden_states_BC_d
@@ -428,6 +431,7 @@ def split_batch_to_prefill_and_decode(
     num_decode_tokens: int,
     num_prefills: int,
     num_decodes: int,
+    num_padded_decodes: int,
 ) -> PrefillDecodeSplit:
     num_actual_tokens = num_prefill_tokens + num_decode_tokens
 
@@ -440,8 +444,10 @@ def split_batch_to_prefill_and_decode(
         gate_d, gate_p = torch.split(gate[..., :num_actual_tokens],
                                      [num_decode_tokens, num_prefill_tokens],
                                      dim=-1)
+
+        # num_padded_decodes accounts for CUDA graph padding when applicable
         state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor[:num_actual_tokens],
+            state_indices_tensor[:num_padded_decodes + num_prefills],
             [num_decodes, num_prefills],
             dim=0)
         query_start_loc_p = (query_start_loc[-num_prefills - 1:] -
