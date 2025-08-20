@@ -162,17 +162,11 @@ def apply_w8a8_block_fp8_linear(
             output += bias
         return output.to(dtype=output_dtype).view(*output_shape)
 
-    if current_platform.is_cuda():
-        if current_platform.has_device_capability(100):
-
-            use_cutlass = cutlass_block_fp8_supported and (
-                cdiv(weight.shape[0], 128) == weight_scale.shape[0]
-                and cdiv(weight.shape[1], 128) == weight_scale.shape[1])
-        else:
-            # TODO: update this after switching to public sm90 block scale gemm
-            # as it also supports weight.shape % 128 != 0
-            use_cutlass = cutlass_block_fp8_supported and (
-                weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
+    if current_platform.is_cuda() and current_platform.has_device_capability(
+            90):
+        use_cutlass = cutlass_block_fp8_supported and (
+            cdiv(weight.shape[0], 128) == weight_scale.shape[0]
+            and cdiv(weight.shape[1], 128) == weight_scale.shape[1])
     else:
         use_cutlass = False
 
