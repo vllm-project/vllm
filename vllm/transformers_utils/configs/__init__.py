@@ -40,6 +40,8 @@ from vllm.transformers_utils.configs.step3_vl import (
 )
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 
+from .kimi_audio import KimiAudioConfig, WhisperVQConfig
+
 __all__ = [
     "ChatGLMConfig",
     "DeepseekVLV2Config",
