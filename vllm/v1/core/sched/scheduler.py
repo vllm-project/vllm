@@ -25,7 +25,7 @@ from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
                                               create_request_queue)
-from vllm.v1.core.sched.utils import check_stop
+from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -872,9 +872,7 @@ class Scheduler(SchedulerInterface):
 
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
-            self.running = [
-                req for req in self.running if req not in stopped_running_reqs
-            ]
+            self.running = remove_all(self.running, stopped_running_reqs)
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
@@ -1000,7 +998,7 @@ class Scheduler(SchedulerInterface):
         else:
             request_ids = set(request_ids)
 
-        running_requests_to_remove = []
+        running_requests_to_remove = set()
         waiting_requests_to_remove = []
         valid_requests = []
 
@@ -1013,13 +1011,13 @@ class Scheduler(SchedulerInterface):
 
             valid_requests.append(request)
             if request.status == RequestStatus.RUNNING:
-                running_requests_to_remove.append(request)
+                running_requests_to_remove.add(request)
             else:
                 waiting_requests_to_remove.append(request)
 
         # Remove all requests from queues at once for better efficiency
-        for request in running_requests_to_remove:
-            self.running.remove(request)
+        if running_requests_to_remove:
+            self.running = remove_all(self.running, running_requests_to_remove)
         if waiting_requests_to_remove:
             self.waiting.remove_requests(waiting_requests_to_remove)
 
