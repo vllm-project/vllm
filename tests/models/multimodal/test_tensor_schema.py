@@ -30,7 +30,6 @@ from ..utils import dummy_hf_overrides
 
 ARCH_TO_SKIP = {
     "MolmoForCausalLM": "incompatible requirements",
-    "MiniMaxVL01ForConditionalGeneration": "broken model",
 }
 ARCH_NEEDS_EXTRAS = [
     "InternVLChatModel",
