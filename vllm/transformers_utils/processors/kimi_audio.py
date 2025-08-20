@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # adapted from https://github.com/MoonshotAI/Kimi-Audio/tree/master/kimia_infer/api/prompt_manager.py
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cache
 from subprocess import CalledProcessError, run
-from typing import Mapping, Optional, Union, cast
+from typing import Optional, Union, cast
 
 import numpy as np
 import torch
@@ -461,13 +462,13 @@ class KimiAudioProcessor(ProcessorMixin):
             return self.text_tokenizer(text,
                                        add_special_tokens=False)["input_ids"]
 
-    def _get_raw_audio(self, audio_path: str) -> dict[str, Union[str, 
-                                                                 np.ndarray]]:
+    def _get_raw_audio(self,
+                       audio_path: str) -> dict[str, Union[str, np.ndarray]]:
         audios = {"path": audio_path}
         audio_data: np.ndarray = librosa.load(**audios, sr=16000)[0]
         audios["data"] = audio_data
         return audios
-    
+
     def _tokenize_audio(self, audio_path: str) -> list[int]:
         # handle audio placeholder here, using sequence
         # with same length as actual audio tensor
@@ -477,7 +478,8 @@ class KimiAudioProcessor(ProcessorMixin):
             self.whisper_model_config = AutoConfig.from_pretrained(
                 self.tokenizer_path)
 
-        count = self.get_num_audio_tokens(audio_path, self.whisper_model_config)
+        count = self.get_num_audio_tokens(audio_path,
+                                          self.whisper_model_config)
         wav_tokens = torch.full((count, ),
                                 self.audio_token_id,
                                 dtype=torch.long)
@@ -577,7 +579,7 @@ class KimiAudioProcessor(ProcessorMixin):
             audio_path = message["content"]
             if not isinstance(audio_path, str):
                 raise ValueError("Expected 'content' to be a string")
-            
+
             audio = self._get_raw_audio(audio_path)
             speech_tokens = self._tokenize_audio(audio["path"])
 
@@ -745,8 +747,8 @@ class KimiAudioProcessor(ProcessorMixin):
         is_continuous_mask = kwargs.get("is_continuous_mask")
         whisper_input_feature = kwargs.get("whisper_input_feature")
 
-        # Generally, we expect the text tokens came from external process 
-        # in base processor rather than the method in this processor.        
+        # Generally, we expect the text tokens came from external process
+        # in base processor rather than the method in this processor.
         if text_input_ids is None:
             text_input_ids = []
         text_tokens = torch.tensor(text_input_ids, dtype=torch.long)
