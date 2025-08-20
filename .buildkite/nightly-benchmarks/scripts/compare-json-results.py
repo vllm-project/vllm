@@ -282,7 +282,7 @@ if __name__ == "__main__":
                 text_file.write(html_msgs_for_data_cols[i])
                 text_file.write(html)
 
-                if plot is True and plotly_found is True:
+                if plot and plotly_found:
                     import plotly.express as px
 
                     df = group[raw_data_cols]
