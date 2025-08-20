@@ -82,7 +82,8 @@ def moe_permute(
     n_local_expert: int = -1,
     expert_map: Optional[torch.Tensor] = None,
     align_block_size: Optional[int] = None,
-    fill_invalid_expert: int = -1
+    fill_invalid_expert: int = -1,
+    permuted_hidden_states: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor, torch.Tensor,
            torch.Tensor]:
     """
@@ -95,14 +96,17 @@ def moe_permute(
     - n_expert (int): The number of expert.
     - n_local_expert (int): The number of expert in current EP rank.
     - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
-        from the global expert space to the local expert space of the expert 
+        from the global expert space to the local expert space of the expert
         parallel shard.
     - align_block_size (Optional[int]): align group gemm block size for deepgemm
     - fill_invalid_expert(int): fill expert id in m_indices for invalid expert
       to workaround DeepGemm unsupported -1 in m_indices
+    - permuted_hidden_states (Optional[torch.Tensor]): Optional output tensor.
+        If None, the output tensor will be created in this function.
     Returns:
     - permuted_hidden_states (torch.Tensor): permuted activation.
-    - a1q_scale (Optional[torch.Tensor]): quant scale for hidden_states
+    - a1q_scale (Optional[torch.Tensor]): permuted quant scale for hidden_states
+        if original scale not per-tensor scaling
     - expert_first_token_offset (torch.Tensor): offset of the first token
        of each expert for standard grouped gemm. if enable 'align_block_size'
        expert_first_token_offset will align up to 'align_block_size'.
@@ -122,11 +126,16 @@ def moe_permute(
                              1) // align_block_size * align_block_size
     if n_local_expert == -1:
         n_local_expert = n_expert
-    permuted_hidden_states = torch.empty(
-        (permuted_row_size, n_hidden),
-        dtype=hidden_states.dtype,
-        device=hidden_states.device,
-    )
+    if permuted_hidden_states is None:
+        permuted_hidden_states = torch.empty(
+            (permuted_row_size, n_hidden),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+    assert permuted_hidden_states.size() == (permuted_row_size, n_hidden), (
+        f"Expected permuted hidden states to be {(permuted_row_size, n_hidden)}"
+        f" but got {permuted_hidden_states.size()}")
+
     token_expert_indices = torch.arange(0,
                                         n_token * topk,
                                         dtype=torch.int32,
@@ -153,7 +162,8 @@ def moe_permute(
                                  align_block_size, permuted_hidden_states,
                                  expert_first_token_offset, inv_permuted_idx,
                                  permuted_idx, m_indices)
-    if a1q_scale is not None:
+
+    if a1q_scale is not None and a1q_scale.dim() > 1:
         a1q_scale = a1q_scale[permuted_idx.clamp(max=n_token * topk - 1) //
                               topk]
     return (permuted_hidden_states, a1q_scale, expert_first_token_offset,
@@ -185,6 +195,7 @@ def moe_unpermute(
     n_hidden = permuted_hidden_states.size(-1)
     assert (n_hidden * permuted_hidden_states.element_size()
             ) % 16 == 0, "unpermue kernel need hidden dim align to 16B"
+
     torch.ops._moe_C.moe_unpermute(permuted_hidden_states, topk_weights,
                                    inv_permuted_idx, expert_first_token_offset,
                                    topk, out)
