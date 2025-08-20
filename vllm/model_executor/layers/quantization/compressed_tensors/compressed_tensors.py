@@ -356,6 +356,8 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def _is_fp8_w4a8(self, weight_quant: BaseModel,
                      input_quant: BaseModel) -> bool:
+        if not weight_quant or not input_quant:
+            return False
         is_weight_4_bits = weight_quant.num_bits == 4
         is_activation_8_bits = input_quant.num_bits == 8
         weight_strategy = (
