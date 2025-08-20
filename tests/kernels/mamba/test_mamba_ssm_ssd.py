@@ -349,8 +349,10 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
     d_head = 64
     itype = torch.float32
 
-    last_taken = {}
-    exhausted = {}
+    # hold state during the cutting process so we know if an
+    # example has been exhausted and needs to cycle
+    last_taken: dict = {}  # map: eg -> pointer to last taken sample
+    exhausted: dict = {}  # map: eg -> boolean indicating example is exhausted
     _, cu_seqlens, seq_idx, (A, dt, X, B, C) = next(
         generate_continuous_batched_examples([seqlens],
                                              num_sequences,
