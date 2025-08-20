@@ -33,7 +33,8 @@ from vllm.config.cache import (BlockSize, CacheConfig, CacheDType, MambaDType,
                                PrefixCachingHashAlgo)
 from vllm.config.compilation import (CompilationConfig, CompilationLevel,
                                      CUDAGraphMode, PassConfig)
-from vllm.config.parallel import DistributedExecutorBackend, ParallelConfig
+from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
+                                  ParallelConfig)
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
