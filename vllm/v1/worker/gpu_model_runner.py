@@ -1477,8 +1477,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         pooling_metadata = self.input_batch.pooling_metadata
         pooling_metadata.build_pooling_cursor(num_scheduled_tokens_np.tolist(),
                                               device=hidden_states.device)
-        seq_lens = self.seq_lens[:self.input_batch.num_reqs].to(
-            "cpu", non_blocking=True)
+        seq_lens_cpu = self.seq_lens_cpu[:self.input_batch.num_reqs]
 
         # Pooling models D2H & synchronize occurs in pooler.py:build_output
         raw_pooler_output = self.model.pooler(
@@ -1486,7 +1485,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         pooler_output: list[Optional[torch.Tensor]] = []
         for raw_output, seq_len, prompt_len in zip(
-                raw_pooler_output, seq_lens, pooling_metadata.prompt_lens):
+                raw_pooler_output, seq_lens_cpu, pooling_metadata.prompt_lens):
 
             if seq_len == prompt_len:
                 pooler_output.append(raw_output.data)

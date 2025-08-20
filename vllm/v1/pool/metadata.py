@@ -64,10 +64,8 @@ def build_pooling_cursor(num_scheduled_tokens: list[int],
     num_scheduled_tokens = torch.tensor(num_scheduled_tokens, device="cpu")
     cumsum = torch.zeros(n_seq + 1, dtype=torch.int64, device="cpu")
     torch.cumsum(num_scheduled_tokens, dim=0, out=cumsum[1:])
-    first = torch.tensor(cumsum[:n_seq], device="cpu").to(device,
-                                                          non_blocking=True)
-    last = torch.tensor(cumsum[1:] - 1, device="cpu").to(device,
-                                                         non_blocking=True)
+    first = cumsum[:n_seq].to(device, non_blocking=True)
+    last = (cumsum[1:] - 1).to(device, non_blocking=True)
     return PoolingCursor(index=index,
                          first=first,
                          last=last,
