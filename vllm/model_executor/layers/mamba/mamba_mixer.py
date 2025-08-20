@@ -448,7 +448,7 @@ def split_batch_to_prefill_and_decode(
         # num_padded_decodes accounts for CUDA graph padding when applicable
         state_indices_tensor_d, state_indices_tensor_p = torch.split(
             state_indices_tensor[:num_padded_decodes + num_prefills],
-            [num_decodes, num_prefills],
+            [num_padded_decodes, num_prefills],
             dim=0)
         query_start_loc_p = (query_start_loc[-num_prefills - 1:] -
                              num_decodes if num_prefills > 0 else None)
