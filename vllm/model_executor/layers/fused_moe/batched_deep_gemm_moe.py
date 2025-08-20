@@ -72,30 +72,29 @@ def _silu_mul_fp8_quant_deep_gemm(
 
     cols = tl.arange(0, BLOCK)
     cols = cols.to(tl.int64)
-    mask_h = cols < BLOCK
+    mask = cols < BLOCK
 
     base_i_offset = e * stride_i_e + g * GROUP_SIZE * stride_i_h
-    base_x_offset = base_i_offset + cols * stride_i_h
-    base_y2_offset = base_i_offset + H * stride_i_h + cols * stride_i_h
+    base_gate_offset = base_i_offset + cols * stride_i_h
+    base_up_offset = base_i_offset + H * stride_i_h + cols * stride_i_h
     base_yq_offset = (e * stride_yq_e + g * GROUP_SIZE * stride_yq_h +
                       cols * stride_yq_h)
     base_ys_offset = e * stride_ys_e + g * stride_ys_g
 
     for t in tl.range(0, n_tokens, num_stages=NUM_STAGES):
-        mask = mask_h
-        x = tl.load(input_ptr + base_x_offset + t * stride_i_t,
-                    mask=mask,
-                    other=0.0).to(tl.float32)
-        y2 = tl.load(input_ptr + base_y2_offset + t * stride_i_t,
+        gate = tl.load(input_ptr + base_gate_offset + t * stride_i_t,
+                       mask=mask,
+                       other=0.0).to(tl.float32)
+        up = tl.load(input_ptr + base_up_offset + t * stride_i_t,
                      mask=mask,
                      other=0.0)
 
-        x = x * (1.0 / (1.0 + tl.exp(-x)))
-        y = x * y2
+        gate = gate * (1.0 / (1.0 + tl.exp(-gate)))
+        y = gate * up
 
         y_s = tl.maximum(tl.max(tl.abs(y)), eps) / fp8_max
         if use_ue8m0:
-            y_s = tl.math.exp2(tl.ceil(tl.log2(y_s)))
+            y_s = tl.exp2(tl.ceil(tl.log2(y_s)))
 
         y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
