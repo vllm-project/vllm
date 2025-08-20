@@ -462,8 +462,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   # The cutlass_scaled_mm kernels for Blackwell SM100 (c3x, i.e. CUTLASS 3.x)
   # require CUDA 12.8 or later
-  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a" "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;11.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0 AND SCALED_MM_ARCHS)
     set(SRCS
       "csrc/quantization/cutlass_w8a8/scaled_mm_c3x_sm100.cu"
       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm100_fp8.cu"
