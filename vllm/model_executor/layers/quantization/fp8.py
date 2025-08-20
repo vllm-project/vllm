@@ -320,7 +320,7 @@ class Fp8LinearMethod(LinearMethodBase):
                                                          scale=None)
             weight = qweight.t()
 
-        # If checkpoint is fp8, handle that there are N scales for N
+        # If checkpoint is fp8 per-tensor, handle that there are N scales for N
         # shards in a fused module
         else:
             weight = layer.weight
@@ -333,16 +333,17 @@ class Fp8LinearMethod(LinearMethodBase):
                     process_fp8_weight_tensor_strategy(
                         weight, weight_scale, layer.logical_widths,
                         getattr(layer, 'input_scale', None)))
+                if self.act_q_static:
+                    assert input_scale is not None
+                    input_scale = input_scale.max()
             weight = weight.t()
-
-            if self.act_q_static:
-                assert input_scale is not None
-                layer.input_scale = Parameter(input_scale.max(),
-                                              requires_grad=False)
 
         # Update layer with new values.
         layer.weight = Parameter(weight.data, requires_grad=False)
         layer.weight_scale = Parameter(weight_scale.data, requires_grad=False)
+        layer.input_scale = Parameter(
+            input_scale,
+            requires_grad=False) if input_scale is not None else None
 
         if self.use_marlin:
             prepare_fp8_layer_for_marlin(layer, size_k_first)
