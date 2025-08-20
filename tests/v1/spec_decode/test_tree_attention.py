@@ -50,6 +50,7 @@ def forward_attention(
         dtype=torch.int32,
     )
     context_lens = seq_lens - query_lens
+    max_seq_len = int(seq_lens.max())
     max_query_len = q_len
     num_actual_tokens = query_start_loc[-1]
 
@@ -81,6 +82,7 @@ def forward_attention(
         num_reqs=batch_size,
         num_actual_tokens=num_actual_tokens,
         max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
         block_table_tensor=block_table,
         slot_mapping=slot_mapping,
     )
