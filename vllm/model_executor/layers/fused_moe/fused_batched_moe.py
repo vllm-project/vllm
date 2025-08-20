@@ -508,7 +508,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         quant_config: FusedMoEQuantConfig,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+               Optional[torch.Tensor]]:
         assert a1.dim() == 2
         assert topk_ids.dim() == 2
         assert topk_ids.size(0) == a1.size(0)
@@ -592,7 +592,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=tokens_per_expert, expert_num_tokens_cpu=None)
 
-        return b_a1, b_a1_scale, expert_tokens_meta, None, None, None
+        return b_a1, b_a1_scale, expert_tokens_meta, None, None
 
     def finalize(
         self,

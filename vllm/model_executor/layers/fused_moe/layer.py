@@ -102,7 +102,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     @staticmethod
     def _maybe_make_prepare_finalize(
         moe: FusedMoEConfig,
-        shared_experts: Optional[torch.nn.Module] = None,
     ) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
@@ -150,7 +149,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 max_num_tokens=moe.max_num_tokens,
                 num_local_experts=moe.num_local_experts,
                 num_dispatchers=num_dispatchers,
-                shared_experts=shared_experts,
             )
         elif moe.use_deepep_ht_kernels:
             assert moe.dp_size == all2all_manager.dp_world_size
@@ -195,10 +193,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def maybe_make_prepare_finalize(
         self,
         moe: FusedMoEConfig,
-        shared_experts: Optional[torch.nn.Module] = None,
     ) -> Optional[FusedMoEPrepareAndFinalize]:
         if moe.moe_parallel_config.use_all2all_kernels:
-            return FusedMoEMethodBase._maybe_make_prepare_finalize(moe, shared_experts)
+            return FusedMoEMethodBase._maybe_make_prepare_finalize(moe)
         else:
             return None
 
@@ -207,7 +204,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def init_prepare_finalize(self, layer: torch.nn.Module):
         assert self.moe is not None
         #print(f"SHARED EXPERTS {layer.shared_experts}")
-        prepare_finalize = self.maybe_make_prepare_finalize(self.moe, layer.shared_experts)
+        prepare_finalize = self.maybe_make_prepare_finalize(self.moe)
 
         if prepare_finalize is not None:
             logger.debug("%s for %s(%s)", prepare_finalize.__class__.__name__,
@@ -220,6 +217,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             self.fused_experts = FusedMoEModularKernel(
                 prepare_finalize,
                 experts,
+                layer.shared_experts,
             )
 
     def select_gemm_impl(

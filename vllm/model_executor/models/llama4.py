@@ -83,6 +83,7 @@ class Llama4MoE(nn.Module):
             quant_config=quant_config,
             bias=False,
             prefix=f"{prefix}.shared_expert",
+            # This will be done inside of FusedMoE layer
             reduce_results=not self.use_shared_fused, #self.experts.must_reduce_shared_expert_outputs(),
         )
 

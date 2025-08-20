@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import Optional, final, Union
+from typing import Callable, Optional, final, Union
 
 import torch
 
@@ -141,6 +141,14 @@ class TopKWeightAndReduce(ABC):
         raise NotImplementedError
 
 
+ReceiverType = Callable[[], tuple[torch.Tensor,
+                                  Optional[torch.Tensor],
+                                  Optional[ExpertTokensMetadata],
+                                  Optional[torch.Tensor],
+                                  Optional[torch.Tensor],
+                                  ]]
+
+
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
 class FusedMoEPrepareAndFinalize(ABC):
     """
@@ -164,7 +172,6 @@ class FusedMoEPrepareAndFinalize(ABC):
         torch.Tensor,
         Optional[torch.Tensor],
         Optional[ExpertTokensMetadata],
-        Optional[torch.Tensor],
         Optional[torch.Tensor],
         Optional[torch.Tensor],
     ]:
@@ -195,6 +202,24 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
+    def has_prepare_no_receive(self) -> bool:
+        return False
+
+    #@abstractmethod
+    def prepare_no_receive(
+        self,
+        a1: torch.Tensor,
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
+    ) -> ReceiverType:
+        raise NotImplementedError
+
     @abstractmethod
     def finalize(
         self,
@@ -219,48 +244,6 @@ class FusedMoEPrepareAndFinalize(ABC):
           implementation.
         """
         raise NotImplementedError
-
-    # @abstractmethod
-    # def send(
-    #     self,
-    #     a1: torch.Tensor,
-    #     a1_scale: Optional[torch.Tensor],
-    #     a2_scale: Optional[torch.Tensor],
-    #     topk_weights: torch.Tensor,
-    #     topk_ids: torch.Tensor,
-    #     num_experts: int,
-    #     expert_map: Optional[torch.Tensor],
-    #     apply_router_weight_on_input: bool,
-    #     quant_config: FusedMoEQuantConfig,
-    # ) -> tuple[
-    #         torch.Tensor,
-    #         Optional[torch.Tensor],
-    #         Optional[ExpertTokensMetadata],
-    #         Optional[torch.Tensor],
-    #         Optional[torch.Tensor],
-    # ]:
-    #     raise NotImplementedError
-
-    # @abstractmethod
-    # def receive(
-    #     self,
-    #     a1: torch.Tensor,
-    #     a1_scale: Optional[torch.Tensor],
-    #     a2_scale: Optional[torch.Tensor],
-    #     topk_weights: torch.Tensor,
-    #     topk_ids: torch.Tensor,
-    #     num_experts: int,
-    #     expert_map: Optional[torch.Tensor],
-    #     apply_router_weight_on_input: bool,
-    #     quant_config: FusedMoEQuantConfig,
-    # ) -> tuple[
-    #         torch.Tensor,
-    #         Optional[torch.Tensor],
-    #         Optional[ExpertTokensMetadata],
-    #         Optional[torch.Tensor],
-    #         Optional[torch.Tensor],
-    # ]:
-    #     raise NotImplementedError
 
     @property
     @abstractmethod
@@ -497,10 +480,12 @@ class FusedMoEModularKernel(torch.nn.Module):
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         fused_experts: FusedMoEPermuteExpertsUnpermute,
+        shared_experts: Optional[torch.nn.Module] = None
     ):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
+        self.shared_experts = shared_experts
         assert prepare_finalize.activation_format == \
             fused_experts.activation_formats[0], (
                 f"{prepare_finalize.__class__.__name__}."
@@ -780,20 +765,44 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
-        # TODO: if not supports shared_experts, call shared_experts explicitly here
+        # TODO: shared_experts chunking?
 
-        (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
-         _expert_topk_weights, shared_output) = self.prepare_finalize.prepare(
-             a1,
-             a1_scale,
-             a2_scale,
-             topk_weights,
-             topk_ids,
-             global_num_experts,
-             expert_map,
-             apply_router_weight_on_input,
-             self.fused_experts.quant_config,
-         )
+        if (not self.prepare_finalize.has_prepare_no_receive() or
+            self.shared_experts is None):
+            if self.shared_experts is not None:
+                shared_output = self.shared_experts(a1)
+            else:
+                shared_output = None
+
+            (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
+             _expert_topk_weights) = self.prepare_finalize.prepare(
+                 a1,
+                 a1_scale,
+                 a2_scale,
+                 topk_weights,
+                 topk_ids,
+                 global_num_experts,
+                 expert_map,
+                 apply_router_weight_on_input,
+                 self.fused_experts.quant_config,
+             )
+        else:
+            receiver = self.prepare_finalize.prepare_no_receive(
+                 a1,
+                 a1_scale,
+                 a2_scale,
+                 topk_weights,
+                 topk_ids,
+                 global_num_experts,
+                 expert_map,
+                 apply_router_weight_on_input,
+                 self.fused_experts.quant_config,
+             )
+
+            shared_output = self.shared_experts(a1)
+
+            (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
+             _expert_topk_weights) = receiver()
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
