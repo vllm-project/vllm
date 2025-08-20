@@ -14,7 +14,7 @@ from huggingface_hub import get_safetensors_metadata, hf_hub_download
 from huggingface_hub import list_repo_files as hf_list_repo_files
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
-                                   HFValidationError, LocalEntryNotFoundError,
+                                   LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
                                    RevisionNotFoundError)
 from transformers import GenerationConfig, PretrainedConfig
@@ -335,6 +335,7 @@ def maybe_override_with_speculators_target_model(
         gguf_model_repo = Path(model).parent
     else:
         gguf_model_repo = None
+    kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
     config_dict, _ = PretrainedConfig.get_config_dict(
         model if gguf_model_repo is None else gguf_model_repo,
         revision=revision,
@@ -400,6 +401,7 @@ def get_config(
             raise ValueError(error_message) from e
 
     if config_format == ConfigFormat.HF:
+        kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
         config_dict, _ = PretrainedConfig.get_config_dict(
             model,
             revision=revision,
@@ -532,7 +534,7 @@ def try_get_local_file(model: Union[str, Path],
                                                      revision=revision)
             if isinstance(cached_filepath, str):
                 return Path(cached_filepath)
-        except HFValidationError:
+        except ValueError:
             ...
     return None
 
@@ -908,3 +910,20 @@ def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
             exc_info=e)
 
     return max_position_embeddings
+
+
+def get_model_path(model: Union[str, Path], revision: Optional[str] = None):
+    if os.path.exists(model):
+        return model
+    assert huggingface_hub.constants.HF_HUB_OFFLINE
+    common_kwargs = {
+        "local_files_only": huggingface_hub.constants.HF_HUB_OFFLINE,
+        "revision": revision,
+    }
+
+    if envs.VLLM_USE_MODELSCOPE:
+        from modelscope.hub.snapshot_download import snapshot_download
+        return snapshot_download(model_id=model, **common_kwargs)
+
+    from huggingface_hub import snapshot_download
+    return snapshot_download(repo_id=model, **common_kwargs)
