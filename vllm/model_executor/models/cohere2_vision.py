@@ -348,7 +348,7 @@ class Cohere2VisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             vllm_config=vllm_config,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Cohere2ForCausalLM"])
+            architectures=config.text_config.architectures)
 
     @property
     def dtype(self):
