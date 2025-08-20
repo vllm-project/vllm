@@ -150,9 +150,8 @@ def use_rocm_custom_paged_attention(
                 and (block_size == 16 or block_size == 32)
                 and (gqa_ratio >= 1 and gqa_ratio <= 16)
                 and max_seq_len <= 128 * 1024
-                and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
-                and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
-                         and envs.VLLM_ROCM_USE_AITER) and sinks is None)
+                and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN) and sinks is None)
+
     else:
         return (ON_GFX11_GFX12 and (not envs.VLLM_USE_V1 or sliding_window == 0
                                     or sliding_window == (-1, -1))
