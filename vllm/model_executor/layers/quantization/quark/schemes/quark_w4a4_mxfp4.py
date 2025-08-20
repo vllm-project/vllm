@@ -16,15 +16,12 @@ from vllm.platforms import current_platform
 
 try:
     from aiter.ops.shuffle import shuffle_weight
-    from aiter.ops.triton.gemm_afp4wfp4 import (
-        gemm_afp4wfp4, gemm_afp4wfp4_preshuffled_scales)
+    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
     from vllm.utils import direct_register_custom_op
     if envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
-        from aiter import gemm_a4w4
-        from aiter.utility.fp4_utils import (
-            dynamic_mxfp4_quant as dynamic_mxfp4_quant_asm)
+        from aiter import gemm_a4w4, per_1x32_f4_quant_hip
 
     def gemm_with_dynamic_quant(
         x: torch.Tensor,
@@ -36,12 +33,15 @@ try:
         M = x.shape[0]
         if envs.VLLM_TRITON_FP4_GEMM_USE_ASM:
             if x_scales is None:
-                x_q, x_s = dynamic_mxfp4_quant_asm(x, shuffle=True)
+                # use hip quant kernel for performance
+                x_q, x_s = per_1x32_f4_quant_hip(x, shuffle=True)
             else:
                 x_q = x
                 x_s = x_scales
 
-            y = torch.empty((M + 255) // 256 * 256,
+            # 32 alignment is enough for dim0 padding of output for
+            # gemm_a4w4 kernel
+            y = torch.empty((M + 31) // 32 * 32,
                             weight.shape[0],
                             device=x_q.device,
                             dtype=out_dtype)
