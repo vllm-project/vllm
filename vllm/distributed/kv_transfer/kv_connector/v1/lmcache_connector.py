@@ -9,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
+from vllm.plugins import ExtensionManager
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -20,6 +21,8 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+@ExtensionManager.register(base_cls=KVConnectorBase_V1,
+                           names=["LMCacheConnectorV1"])
 class LMCacheConnectorV1(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):

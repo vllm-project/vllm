@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
+from vllm.plugins import ExtensionManager
 from vllm.v1.attention.backends.mla.common import MLACommonMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -73,6 +74,8 @@ class SharedStorageConnectorMetadata(KVConnectorMetadata):
                               mm_hashes))
 
 
+@ExtensionManager.register(base_cls=KVConnectorBase_V1,
+                           names=["SharedStorageConnector"])
 class SharedStorageConnector(KVConnectorBase_V1):
     # NOTE: This is Simple debug implementation of the KV connector.
     # It save / load the KV cache to / from the disk.
