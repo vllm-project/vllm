@@ -311,9 +311,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             return super().maybe_make_prepare_finalize(moe)
 
         prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-            moe,
-            layer=self.layer,
-        )
+            moe)
         logger.debug_once("%s", prepare_finalize.__class__.__name__)
         return prepare_finalize
 
@@ -325,7 +323,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         experts = select_cutlass_fp8_gemm_impl(
             moe,
-            self.layer,
+            self.moe_quant_config,
         )
         logger.debug_once("Using %s", experts.__class__.__name__)
         return experts
@@ -481,7 +479,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
-        if self.flashinfer_moe_enabled:
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             return None
 
         return fp8_w8a8_moe_quant_config(
@@ -570,18 +568,19 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             else:
                 return flashinfer_cutlass_moe_fp8(
                     x,
+                    layer,
                     topk_weights,
                     topk_ids,
                     inplace=False,
                     activation=activation,
-                    quant_confg=quant_config, # XXXXXXXXXXXXXXXX
                     global_num_experts=global_num_experts,
                     expert_map=expert_map,
                     apply_router_weight_on_input=apply_router_weight_on_input,
                 )
-
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_experts)
+        assert self.moe_quant_config is not None
+
         return fused_experts(
             x,
             layer.w13_weight,
@@ -1044,7 +1043,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def maybe_make_prepare_finalize(
             self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
-
         if (self.allow_flashinfer and self.flashinfer_moe_backend
                 == FlashinferMoeBackend.CUTLASS):
             prepare_finalize = (
@@ -1364,7 +1362,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
-        if self.use_marlin:
+        if (self.use_marlin or self.flashinfer_moe_backend
+                == FlashinferMoeBackend.TENSORRT_LLM):
             return None
 
         return nvfp4_moe_quant_config(
@@ -1501,7 +1500,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 x, layer.w13_weight, layer.w2_weight), (
                     "Flashinfer CUTLASS Fused MoE not applicable!")
 
-            out = self.fused_experts(
+            return self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
@@ -1511,19 +1510,15 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 activation=activation,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
         elif (self.allow_flashinfer
               and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS):
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 flashinfer_cutlass_moe_fp4)
+            assert self.moe_quant_configis is not None
 
-            if self.moe_quant_configis is None:
-                self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-
-            out = flashinfer_cutlass_moe_fp4(
+            return flashinfer_cutlass_moe_fp4(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,

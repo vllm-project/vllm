@@ -196,7 +196,6 @@ def flashinfer_cutlass_moe_fp4(
         FlashInferCutlassMoEPrepareAndFinalize(use_dp=False),
         FlashInferExperts(
             out_dtype=hidden_states.dtype,
-            quant_dtype="nvfp4",
             quant_config=quant_config,
         ))
 

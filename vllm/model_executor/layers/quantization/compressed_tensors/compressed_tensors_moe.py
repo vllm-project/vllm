@@ -438,8 +438,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 x, layer.w13_weight, layer.w2_weight), (
                     "Flashinfer CUTLASS Fused MoE not applicable!")
 
-            if self.moe_quant_configis is None:
-                self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            assert self.moe_quant_config is not None
 
             return flashinfer_cutlass_moe_fp4(
                 hidden_states=x,
