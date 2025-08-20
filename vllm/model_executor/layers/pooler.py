@@ -617,8 +617,10 @@ class StepPooler(Pooler):
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
+        num_scheduled_tokens: torch.Tensor,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
-        pooled_data_lst = self.pooling(hidden_states, pooling_metadata)
+        pooled_data_lst = self.pooling(hidden_states, pooling_metadata,
+                                       num_scheduled_tokens)
         prompt_token_ids = get_prompt_token_ids(pooling_metadata)
 
         pooled_data = list[torch.Tensor]()
@@ -652,7 +654,8 @@ class StepPooler(Pooler):
         pooling_metadata: PoolingMetadata,
         num_scheduled_tokens: torch.Tensor,
     ) -> PoolerOutput:
-        pooled_data = self.extract_states(hidden_states, pooling_metadata)
+        pooled_data = self.extract_states(hidden_states, pooling_metadata,
+                                          num_scheduled_tokens)
         pooled_data = self.head(pooled_data, pooling_metadata)
         return build_output(pooled_data)
 

@@ -3324,10 +3324,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         dummy_block_table = torch.zeros((num_reqs, 1),
                                         dtype=torch.int32,
-                                        device=self.device)
+                                        pin_memory=self.pin_memory,
+                                        device="cpu").to(self.device,
+                                                         non_blocking=True)
         dummy_slot_mapping = torch.zeros((total_num_scheduled_tokens, ),
                                          dtype=torch.int32,
-                                         device=self.device)
+                                         pin_memory=self.pin_memory,
+                                         device="cpu").to(self.device,
+                                                          non_blocking=True)
 
         group_metadata = dict[str, tuple[CommonAttentionMetadata, Any]]()
 
