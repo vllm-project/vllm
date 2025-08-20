@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import Callable, Optional, final, Union
+from typing import Callable, Optional, Union, final
 
 import torch
 
@@ -141,12 +141,13 @@ class TopKWeightAndReduce(ABC):
         raise NotImplementedError
 
 
-ReceiverType = Callable[[], tuple[torch.Tensor,
-                                  Optional[torch.Tensor],
-                                  Optional[ExpertTokensMetadata],
-                                  Optional[torch.Tensor],
-                                  Optional[torch.Tensor],
-                                  ]]
+ReceiverType = Callable[[], tuple[
+    torch.Tensor,
+    Optional[torch.Tensor],
+    Optional[ExpertTokensMetadata],
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
+]]
 
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
@@ -169,11 +170,11 @@ class FusedMoEPrepareAndFinalize(ABC):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> tuple[
-        torch.Tensor,
-        Optional[torch.Tensor],
-        Optional[ExpertTokensMetadata],
-        Optional[torch.Tensor],
-        Optional[torch.Tensor],
+            torch.Tensor,
+            Optional[torch.Tensor],
+            Optional[ExpertTokensMetadata],
+            Optional[torch.Tensor],
+            Optional[torch.Tensor],
     ]:
         """
         Perform any quantization (and/or) dispatching needed
@@ -198,10 +199,10 @@ class FusedMoEPrepareAndFinalize(ABC):
           number of tokens assigned to each local expert.
         - Optional dispatched expert topk IDs
         - Optional dispatched expert topk weight
-        - Optional: shared expert output
         """
         raise NotImplementedError
 
+    # Add comments
     def has_prepare_no_receive(self) -> bool:
         return False
 
@@ -476,12 +477,10 @@ class FusedMoEModularKernel(torch.nn.Module):
     objects.
     """
 
-    def __init__(
-        self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
-        fused_experts: FusedMoEPermuteExpertsUnpermute,
-        shared_experts: Optional[torch.nn.Module] = None
-    ):
+    def __init__(self,
+                 prepare_finalize: FusedMoEPrepareAndFinalize,
+                 fused_experts: FusedMoEPermuteExpertsUnpermute,
+                 shared_experts: Optional[torch.nn.Module] = None):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
@@ -766,13 +765,12 @@ class FusedMoEModularKernel(torch.nn.Module):
             global_num_experts = local_num_experts
 
         # TODO: shared_experts chunking?
+        shared_output: torch.Tensor
 
-        if (not self.prepare_finalize.has_prepare_no_receive() or
-            self.shared_experts is None):
+        if (not self.prepare_finalize.has_prepare_no_receive()
+                or self.shared_experts is None):
             if self.shared_experts is not None:
                 shared_output = self.shared_experts(a1)
-            else:
-                shared_output = None
 
             (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
              _expert_topk_weights) = self.prepare_finalize.prepare(
@@ -788,17 +786,18 @@ class FusedMoEModularKernel(torch.nn.Module):
              )
         else:
             receiver = self.prepare_finalize.prepare_no_receive(
-                 a1,
-                 a1_scale,
-                 a2_scale,
-                 topk_weights,
-                 topk_ids,
-                 global_num_experts,
-                 expert_map,
-                 apply_router_weight_on_input,
-                 self.fused_experts.quant_config,
-             )
+                a1,
+                a1_scale,
+                a2_scale,
+                topk_weights,
+                topk_ids,
+                global_num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+                self.fused_experts.quant_config,
+            )
 
+            assert self.shared_experts is not None
             shared_output = self.shared_experts(a1)
 
             (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
@@ -850,7 +849,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             self.fused_experts.finalize_weight_and_reduce_impl(),
         )
 
-        if shared_output is None:
+        if self.shared_experts is None:
             return output
         else:
             return shared_output, output

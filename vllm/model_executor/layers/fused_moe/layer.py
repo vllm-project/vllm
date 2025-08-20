@@ -101,8 +101,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     @staticmethod
     def _maybe_make_prepare_finalize(
-        moe: FusedMoEConfig,
-    ) -> Optional[FusedMoEPrepareAndFinalize]:
+        moe: FusedMoEConfig, ) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
@@ -203,7 +202,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     # prepare_communication_buffer_for_model.
     def init_prepare_finalize(self, layer: torch.nn.Module):
         assert self.moe is not None
-        #print(f"SHARED EXPERTS {layer.shared_experts}")
         prepare_finalize = self.maybe_make_prepare_finalize(self.moe)
 
         if prepare_finalize is not None:
@@ -788,12 +786,8 @@ class FusedMoE(CustomOp):
         enable_eplb: bool = False,
         num_redundant_experts: int = 0,
         has_bias: bool = False,
-        # make a method instead?
-        shared_experts: Optional[torch.nn.Module] = None,
     ):
         super().__init__()
-        self.shared_experts = shared_experts
-        #print(f"SHARED EXPERTS {shared_experts}")
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
@@ -954,6 +948,10 @@ class FusedMoE(CustomOp):
                 (moe.max_num_tokens, num_experts),
                 dtype=moe.in_dtype,
                 device=torch.cuda.current_device())
+
+    @property
+    def shared_experts(self) -> Optional[torch.nn.Module]:
+        return None
 
     @property
     def tp_size(self):
@@ -1603,18 +1601,18 @@ class FusedMoE(CustomOp):
         # TODO: Once the OOM issue for the TPU backend is resolved, we will
         # switch to using the moe_forward custom op.
         if current_platform.is_tpu():
-            return self.forward_impl(hidden_states, router_logits)
+            outputs = self.forward_impl(hidden_states, router_logits)
         else:
-            outputs = torch.ops.vllm.moe_forward(
-                hidden_states, router_logits,
-                self.layer_name)
+            outputs = torch.ops.vllm.moe_forward(hidden_states, router_logits,
+                                                 self.layer_name)
 
-            if self.shared_experts is None:
-                assert len(outputs) == 1
-                return outputs[0][..., :og_hidden_states]
-            else:
-                assert len(outputs) == 2
-                return outputs[0][..., :og_hidden_states], outputs[1][..., :og_hidden_states]
+        if self.shared_experts is None:
+            assert len(outputs) == 1
+            return outputs[0][..., :og_hidden_states]
+        else:
+            assert len(outputs) == 2
+            return (outputs[0][..., :og_hidden_states],
+                    outputs[1][..., :og_hidden_states])
 
     def forward_impl_chunked(
         self,
@@ -1633,7 +1631,8 @@ class FusedMoE(CustomOp):
 
         full_fused_final_hidden_states = torch.empty_like(full_hidden_states)
         if self.shared_experts is not None:
-            full_shared_final_hidden_states = torch.empty_like(full_hidden_states)
+            full_shared_final_hidden_states = torch.empty_like(
+                full_hidden_states)
 
         def process_chunk(chunk_start, chunk_end, skip_result_store=False):
             chunk_size = chunk_end - chunk_start
@@ -1674,18 +1673,29 @@ class FusedMoE(CustomOp):
                 logical_replica_count=self.logical_replica_count,
             )
 
-            #print(f"XXXX {type(final_hidden_states)}")
+            # If there are shared experts and the first output of the tuple is
+            # None, it means the experts have not been called by `apply`, i.e.
+            # from a modular kernel, so we need to invoke them now.
+            if self.shared_experts is not None and not isinstance(
+                    final_hidden_states, tuple):
+                logger.info("INVOKE CHUNKED")
+                final_hidden_states = (
+                    self.shared_experts(staged_hidden_states),
+                    final_hidden_states,
+                )
 
             if not skip_result_store:
                 if self.shared_experts is None:
-                    full_fused_final_hidden_states[chunk_start:chunk_end, :].copy_(
-                        final_hidden_states, non_blocking=True)
+                    full_fused_final_hidden_states[
+                        chunk_start:chunk_end, :].copy_(final_hidden_states,
+                                                        non_blocking=True)
                 else:
-                    full_shared_final_hidden_states[chunk_start:chunk_end, :].copy_(
-                        final_hidden_states[0], non_blocking=True)
-                    full_fused_final_hidden_states[chunk_start:chunk_end, :].copy_(
-                        final_hidden_states[1], non_blocking=True)
-
+                    full_shared_final_hidden_states[
+                        chunk_start:chunk_end, :].copy_(final_hidden_states[0],
+                                                        non_blocking=True)
+                    full_fused_final_hidden_states[
+                        chunk_start:chunk_end, :].copy_(final_hidden_states[1],
+                                                        non_blocking=True)
 
         ctx = get_forward_context()
         # flashinfer_cutlass_kernels can handle: optional DP + TP/EP
@@ -1709,7 +1719,8 @@ class FusedMoE(CustomOp):
         if self.shared_experts is None:
             return full_fused_final_hidden_states
         else:
-            return full_shared_final_hidden_states, full_fused_final_hidden_states
+            return (full_shared_final_hidden_states,
+                    full_fused_final_hidden_states)
 
     def forward_impl(
         self,
@@ -1759,23 +1770,40 @@ class FusedMoE(CustomOp):
             logical_replica_count=self.logical_replica_count,
         )
 
+        # If there are shared experts and the first output of the tuple is
+        # None, it means the experts have not been called by `apply`, i.e.
+        # from a modular kernel, so we need to invoke them now.
+        if self.shared_experts is not None and not isinstance(
+                final_hidden_states, tuple):
+            logger.info("INVOKE IMPL")
+            final_hidden_states = (
+                self.shared_experts(hidden_states),
+                final_hidden_states,
+            )
+
         if do_naive_dispatch_combine:
             if self.shared_experts is None:
-                final_hidden_states = get_ep_group().combine(final_hidden_states)
+                final_hidden_states = get_ep_group().combine(
+                    final_hidden_states)
             else:
-                final_hidden_states[0] = get_ep_group().combine(final_hidden_states[0])
-                final_hidden_states[1] = get_ep_group().combine(final_hidden_states[1])
+                final_hidden_states = (
+                    get_ep_group().combine(final_hidden_states[0]),
+                    get_ep_group().combine(final_hidden_states[1]),
+                )
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             # Default set to False. (May have to add shared expert outputs.
             if self.shared_experts is None:
-                final_hidden_states = self.maybe_all_reduce_tensor_model_parallel(
-                    final_hidden_states)
+                final_hidden_states = (
+                    self.maybe_all_reduce_tensor_model_parallel(
+                        final_hidden_states))
             else:
-                final_hidden_states[0] = self.maybe_all_reduce_tensor_model_parallel(
-                    final_hidden_states[0])
-                final_hidden_states[1] = self.maybe_all_reduce_tensor_model_parallel(
-                    final_hidden_states[1])
+                final_hidden_states = (
+                    self.maybe_all_reduce_tensor_model_parallel(
+                        final_hidden_states[0]),
+                    self.maybe_all_reduce_tensor_model_parallel(
+                        final_hidden_states[1]),
+                )
 
         return final_hidden_states
 
@@ -1854,7 +1882,7 @@ def moe_forward_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     layer_name: str,
-) ->  list[torch.Tensor]:
+) -> list[torch.Tensor]:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     out = torch.empty_like(hidden_states)
