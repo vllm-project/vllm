@@ -823,7 +823,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             use_custom = use_rocm_custom_paged_attention(
                 decode_query.dtype, head_size, block_size, gqa_ratio,
                 decode_meta.max_decode_seq_len, self.sliding_window,
-                self.kv_cache_dtype, self.alibi_slopes)
+                self.kv_cache_dtype,
+                self.alibi_slopes) and not is_rocm_aiter_paged_attn_enabled()
 
             if use_custom:
                 max_seq_len = (decode_meta.max_decode_seq_len if self.attn_type
