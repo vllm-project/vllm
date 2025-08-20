@@ -39,6 +39,7 @@ from vllm.model_executor.utils import (get_moe_expert_mapping,
                                        get_packed_modules_mapping,
                                        set_weight_attrs)
 from vllm.platforms import current_platform
+from vllm.plugins import ExtensionManager
 
 # yapf conflicts with isort for this block
 
@@ -49,9 +50,6 @@ def is_moe_model(model: torch.nn.Module) -> bool:
     """Checks if the model contains FusedMoE layers."""
     return bool(any(
         isinstance(module, FusedMoE) for module in model.modules()))
-
-
-from vllm.plugins import ExtensionManager
 
 
 @ExtensionManager.register(base_cls=BaseModelLoader, names=["bitsandbytes"])

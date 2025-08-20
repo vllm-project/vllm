@@ -17,6 +17,7 @@ from vllm.model_executor.model_loader.tensorizer import (
 from vllm.model_executor.model_loader.utils import (get_model_architecture,
                                                     initialize_model,
                                                     set_default_torch_dtype)
+from vllm.plugins import ExtensionManager
 
 logger = init_logger(__name__)
 
@@ -31,9 +32,6 @@ def validate_config(config: dict):
     for k, v in config.items():
         if v is not None and k in BLACKLISTED_TENSORIZER_ARGS:
             raise ValueError(f"{k} is not an allowed Tensorizer argument.")
-
-
-from vllm.plugins import ExtensionManager
 
 
 @ExtensionManager.register(base_cls=BaseModelLoader, names=["tensorizer"])

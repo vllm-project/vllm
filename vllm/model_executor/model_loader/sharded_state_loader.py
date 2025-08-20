@@ -15,12 +15,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf, runai_safetensors_weights_iterator)
+from vllm.plugins import ExtensionManager
 from vllm.transformers_utils.s3_utils import glob as s3_glob
 from vllm.transformers_utils.utils import is_s3
 
 logger = init_logger(__name__)
-
-from vllm.plugins import ExtensionManager
 
 
 @ExtensionManager.register(base_cls=BaseModelLoader,

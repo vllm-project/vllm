@@ -15,17 +15,18 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
+from vllm.plugins import ExtensionManager
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("jamba")
+@ExtensionManager.register(base_cls=ToolParser, names=["jamba"])
 class JambaToolParser(ToolParser):
 
     def __init__(self, tokenizer: AnyTokenizer):

@@ -21,8 +21,9 @@ from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
 from vllm.entrypoints.openai.serving_models import LoRAModulePath
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.logger import init_logger
+from vllm.plugins import ExtensionManager
 from vllm.utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
@@ -202,7 +203,8 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
         frontend_kwargs["middleware"]["default"] = []
 
         # Special case: Tool call parser shows built-in options.
-        valid_tool_parsers = list(ToolParserManager.tool_parsers.keys())
+        valid_tool_parsers = ExtensionManager.get_valid_extension_names(
+            base_cls=ToolParser)
         parsers_str = ",".join(valid_tool_parsers)
         frontend_kwargs["tool_call_parser"]["metavar"] = (
             f"{{{parsers_str}}} or name registered in --tool-parser-plugin")

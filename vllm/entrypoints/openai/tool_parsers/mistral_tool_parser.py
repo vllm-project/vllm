@@ -18,10 +18,11 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser, ToolParserManager)
+    ToolParser)
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
+from vllm.plugins import ExtensionManager
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 
 logger = init_logger(__name__)
@@ -49,7 +50,7 @@ def _is_fn_name_regex_support(model_tokenizer: AnyTokenizer) -> bool:
         and model_tokenizer.version >= 11
 
 
-@ToolParserManager.register_module("mistral")
+@ExtensionManager.register(base_cls=ToolParser, names=["mixtral"])
 class MistralToolParser(ToolParser):
     """
     Tool call parser for Mistral 7B Instruct v0.3, intended for use with

@@ -14,15 +14,16 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser, ToolParserManager)
+    ToolParser)
 from vllm.logger import init_logger
+from vllm.plugins import ExtensionManager
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("xlam")
+@ExtensionManager.register(base_cls=ToolParser, names=["xlam"])
 class xLAMToolParser(ToolParser):
 
     def __init__(self, tokenizer: AnyTokenizer):

@@ -15,18 +15,19 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser, ToolParserManager)
+    ToolParser)
 from vllm.entrypoints.openai.tool_parsers.utils import (consume_space,
                                                         find_common_prefix,
                                                         is_complete_json,
                                                         partial_json_loads)
 from vllm.logger import init_logger
+from vllm.plugins import ExtensionManager
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("granite")
+@ExtensionManager.register(base_cls=ToolParser, names=["granite"])
 class GraniteToolParser(ToolParser):
     """
     Tool call parser for the granite 3.0 models. Intended

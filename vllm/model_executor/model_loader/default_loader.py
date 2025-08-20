@@ -22,10 +22,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     filter_files_not_needed_for_inference, get_lock, np_cache_weights_iterator,
     pt_weights_iterator, safetensors_weights_iterator)
 from vllm.platforms import current_platform
+from vllm.plugins import ExtensionManager
 
 logger = init_logger(__name__)
-
-from vllm.plugins import ExtensionManager
 
 
 @ExtensionManager.register(base_cls=BaseModelLoader,
