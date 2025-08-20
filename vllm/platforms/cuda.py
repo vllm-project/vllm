@@ -493,6 +493,26 @@ class CudaPlatformBase(Platform):
             supported = flash_attn_supports_fp8()
         return supported
 
+    @classmethod
+    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+            if not cls.has_device_capability(80):
+                capability = cls.get_device_capability()
+                gpu_name = cls.get_device_name()
+
+                if capability is None:
+                    compute_str = "does not have a compute capability"
+                else:
+                    version_str = capability.as_version_str()
+                    compute_str = f"has compute capability {version_str}"
+
+                raise ValueError(
+                    "Bfloat16 is only supported on GPUs "
+                    "with compute capability of at least 8.0. "
+                    f"Your {gpu_name} GPU {compute_str}. "
+                    "You can use float16 instead by explicitly setting the "
+                    "`dtype` flag in CLI, for example: --dtype=half.")
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
@@ -619,26 +639,6 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
             "NVLink detection not possible, as context support was"
             " not found. Assuming no NVLink available.")
         return False
-
-    @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
-        if torch_dtype == torch.bfloat16:  # noqa: SIM102
-            if not cls.has_device_capability(80):
-                capability = cls.get_device_capability()
-                gpu_name = cls.get_device_name()
-
-                if capability is None:
-                    compute_str = "does not have a compute capability"
-                else:
-                    version_str = capability.as_version_str()
-                    compute_str = f"has compute capability {version_str}"
-
-                raise ValueError(
-                    "Bfloat16 is only supported on GPUs "
-                    "with compute capability of at least 8.0. "
-                    f"Your {gpu_name} GPU {compute_str}. "
-                    "You can use float16 instead by explicitly setting the "
-                    "`dtype` flag in CLI, for example: --dtype=half.")
 
 
 # Autodetect either NVML-enabled or non-NVML platform
