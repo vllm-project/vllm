@@ -45,9 +45,10 @@ class RVLDummyInputsBuilder(LlavaDummyInputsBuilder[RVLProcessingInfo]):
             self.info.get_image_size_with_most_features())
 
         return {
-            "image": self._get_dummy_images(width=target_width,
-                                            height=target_height,
-                                            num_images=num_images),
+            "image":
+            self._get_dummy_images(width=target_width,
+                                   height=target_height,
+                                   num_images=num_images),
         }
 
 
