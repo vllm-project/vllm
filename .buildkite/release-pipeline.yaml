@@ -32,7 +32,7 @@ steps:
     depends_on: ~
 
   - label: "Build wheel - CUDA 12.6"
-    depends_on: block-build-cu118-wheel
+    depends_on: block-build-cu126-wheel
     id: build-wheel-cuda-12-6
     agents:
       queue: cpu_queue_postmerge
