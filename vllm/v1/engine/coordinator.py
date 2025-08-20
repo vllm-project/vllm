@@ -222,6 +222,8 @@ class DPCoordinatorProc:
                 events = dict(events)
                 wave_state_changed = False
 
+                # Dynamic scaling engines will send messages
+                # to the back socket. So just reply with "READY"
                 if publish_back in events:
                     buffer = publish_back.recv()
                     if buffer == b"\x01":
