@@ -7,7 +7,7 @@ from typing import ClassVar, Optional
 import torch
 
 import vllm._custom_ops as ops
-from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.backends.abstract import AttentionLayer, AttentionType
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
@@ -228,6 +228,9 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
                                            attn_metadata.decode.block_table,
                                            self._workspace.get_buf(),
                                            self.scale, self._num_kv_splits)
+
+        if self.kv_cache_dtype.startswith("fp8"):
+            o = o.to(torch.bfloat16)
 
         return self._v_up_proj(o)
 
