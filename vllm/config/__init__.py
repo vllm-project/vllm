@@ -3577,15 +3577,16 @@ class VllmConfig:
                 "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        if self.parallel_config.enable_microbatching and \
-            self.compilation_config.level >= CompilationLevel.PIECEWISE:
-            # Microbatching is not supported with piecewise compilation yet.
-            #  More specifically piecewise cuda-graphs
-            logger.warning_once(
-                "Piecewise compilation is not supported with "
-                "microbatching. Disabling piecewise compilation.")
+        if self.parallel_config.enable_microbatching:
+            cudagraph_mode = self.compilation_config.cudagraph_mode
+            if cudagraph_mode not in (CUDAGraphMode.NONE, 
+                                      CUDAGraphMode.FULL_DECODE_ONLY):
+                logger.warning_once(
+                    f"The specified cuda graph mode {cudagraph_mode} is not allowed with "
+                    "microbatching. Defaulting to FULL_DECODE_ONLY.")
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
             self.model_config.disable_cascade_attn = True
-            self.compilation_config.level = CompilationLevel.NO_COMPILATION
+            # self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         disable_chunked_prefill_reasons: list[str] = []
         if self.model_config and self.model_config.pooler_config:

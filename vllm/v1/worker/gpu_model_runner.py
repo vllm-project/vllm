@@ -1578,7 +1578,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
                 and not self.parallel_config.enable_microbatching
                 and num_tokens_unpadded <= self.cudagraph_batch_sizes[-1]):
-            # if False:
             # Use piecewise CUDA graphs.
             # Add padding to the batch size.
             num_tokens_padded = self.vllm_config.pad_for_cudagraph(
@@ -1647,8 +1646,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     # This doesn't actually pad the ubatch slices. It just shifts the
     # split point to the correct value so that padding can be applied
-    # to the second ubatch later. Should be called after ubatch
-    # slicing but before attention meta data creation
+    # to the second ubatch in pad_out_ubatch_second_stage. Should be 
+    # called after ubatch slicing but before attention meta data creation
     def pad_out_ubatch_first_stage(self, ubatch_slices: UBatchSlices,
                                    num_pad_tokens: int):
         original_num_tokens = ubatch_slices[1].token_slice.stop
@@ -1686,12 +1685,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Dummy batch. (hopefully we are the last one so we can just
         # update this to a one token batch and return)
 
-        if self.is_multimodal_model:
+        if self.supports_mm_inputs:
+            assert False
             input_ids = None
             inputs_embeds = self.inputs_embeds[tokens_slice]
+            # model_kwargs = {
+            #         **self._init_model_kwargs(num_tokens),
+            #         **self._dummy_mm_kwargs(num_reqs),
+            #     }
         else:
             input_ids = self.input_ids[tokens_slice]
             inputs_embeds = None
+            model_kwargs = self._init_model_kwargs(tokens_slice.stop - tokens_slice.start)
 
         if self.uses_mrope:
             positions = self.mrope_positions[:, tokens_slice]
@@ -1703,7 +1708,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             raise RuntimeError("It is not first rank")
 
-        return input_ids, positions, inputs_embeds, intermediate_tensors
+        return input_ids, positions, inputs_embeds, intermediate_tensors, model_kwargs
 
     def _get_model_inputs(self, tokens_slice: slice,
                           scheduler_output: Optional["SchedulerOutput"]):
@@ -1931,33 +1936,34 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 compute_stream=compute_stream,
                 num_tokens_across_dp=num_tokens_across_dp,
                 batch_descriptor=batch_descriptor,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE, # Disable picewise compilation
                 scheduler_output=scheduler_output,
                 is_dummy_run=is_dummy_run)
-            # if num_scheduled_tokens not in self.cudagraphs:
-                # and not skip_cuda_graphs and build_cuda_graph:
-                # if is_global_first_rank():
-                #     logger.info(f"CAPTURING {num_scheduled_tokens}")
-                # return self._capture_ubatches(ubatch_metadata, self.model)
-            # elif num_scheduled_tokens in self.cudagraphs:
-                    # and not skip_cuda_graphs:
-                # cudagraph_metadata = self.cudagraphs[num_scheduled_tokens]
-                # if is_global_first_rank():
-                #     logger.info(f"UBATCH REPLAY {num_scheduled_tokens}")
-                # cudagraph_metadata.cudagraph.replay()
-                # return cudagraph_metadata.outputs
-            # else:
-            if is_global_first_rank():
-                logger.info(f"RUNNING NORMALLY {num_scheduled_tokens}")
-            return self._run_ubatches(ubatch_metadata, self.model)
+            if num_scheduled_tokens not in self.cudagraphs \
+                and cudagraph_runtime_mode is CUDAGraphMode.FULL:
+                if is_global_first_rank():
+                    logger.debug(f"CAPTURING {num_scheduled_tokens}")
+                return self._capture_ubatches(ubatch_metadata, self.model)
+            elif num_scheduled_tokens in self.cudagraphs \
+                and cudagraph_runtime_mode is CUDAGraphMode.FULL:
+                cudagraph_metadata = self.cudagraphs[num_scheduled_tokens]
+                if is_global_first_rank():
+                    logger.debug(f"UBATCH REPLAY {num_scheduled_tokens}")
+                cudagraph_metadata.cudagraph.replay()
+                return cudagraph_metadata.outputs
+            else:
+                if is_global_first_rank():
+                    logger.debug(f"RUNNING NORMALLY {num_scheduled_tokens}")
+                return self._run_ubatches(ubatch_metadata, self.model)
         # run normal batch
         else:
             input_ids, positions, inputs_embeds, intermediate_tensors, model_kwargs = \
                 self.model_inputs(slice(0, num_scheduled_tokens),
                                        scheduler_output, is_dummy_run)
             if is_global_first_rank():
-                logger.info(f"RUNNING FULL BATCH {num_scheduled_tokens}")
-            # skip_cuda_graphs = self.parallel_config.enable_microbatching
+                logger.debug(f"RUNNING FULL BATCH {num_scheduled_tokens}")
+            if self.parallel_config.enable_microbatching:
+                cudagraph_runtime_mode = CUDAGraphMode.NONE
             with set_forward_context(attn_metadata,
                                      vllm_config=self.vllm_config,
                                      num_tokens=num_scheduled_tokens or 1,
@@ -2505,7 +2511,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # CudagraphWraper and CudagraphDispatcher of vllm.
 
         # wrap the model with full cudagraph wrapper if needed.
-        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs() \
+            and not self.parallel_config.enable_microbatching:
             self.model = CUDAGraphWrapper(self.model,
                                           self.vllm_config,
                                           runtime_mode=CUDAGraphMode.FULL)
@@ -2727,18 +2734,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ubatch_enabled = self.parallel_config.enable_microbatching
         should_ubatch = False
         if ubatch_enabled:
-            # should_ubatch = num_tokens >= \
-            #     self.parallel_config.microbatching_token_threshold and \
-            #     allow_microbatching and capture_attn_cudagraph
-            should_ubatch = False
+            should_ubatch = num_tokens >= \
+                self.parallel_config.microbatching_token_threshold and \
+                allow_microbatching
             should_ubatch = self.should_ubatch(should_ubatch)
         assert cudagraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
 
         # Padding for DP
-        assert not should_ubatch
-        num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
+        num_tokens_across_dp = None
+        num_pad = 0
+        if not should_ubatch:
+            num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
         num_tokens += num_pad
 
         # If cudagraph_mode.decode_mode() == FULL and
@@ -2756,6 +2764,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # for GQA/MQA.
         max_query_len = self.uniform_decode_query_len if uniform_decode else \
                                                                 num_tokens
+        if allow_microbatching:
+            assert self.uniform_decode_query_len == 1
+            assert uniform_decode is True
+            assert max_query_len == 1
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
@@ -2780,13 +2792,37 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
 
-        attn_metadata: Optional[dict[str, Any]] = None
+        ubatch_slices = None
+        # We currently only microbatch if the number of tokens is
+        # over a certain threshold.
+        # logger.info("PADDING DUMMY DONE")
+        if should_ubatch:
+            # We only support decode-only cudagraphs
+            assert num_reqs == num_tokens
+            assert num_tokens % 2 == 0
+            num_tokens_per_ubatch = num_tokens // 2
+            dp_size = self.vllm_config.parallel_config.data_parallel_size
+            num_tokens_across_dp = torch.tensor([num_tokens_per_ubatch] *
+                                                dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+            ubatch_slices = [
+                UbatchSlice(slice(0, num_reqs // 2), slice(0,
+                                                           num_tokens // 2)),
+                UbatchSlice(slice(num_reqs // 2, num_reqs),
+                            slice(num_tokens // 2, num_tokens))
+            ]
+
+        # attn_metadata: Optional[dict[str, Any]] = None
+        attn_metadata: Optional[PerLayerAttnMetadata] = None
 
         # If force_attention is True, we always capture attention. Otherwise,
         # it only happens for cudagraph_runtime_mode=FULL.
         if force_attention or cudagraph_runtime_mode == \
                 CUDAGraphMode.FULL:
             attn_metadata = {}
+            if ubatch_slices is not None:
+                attn_metadata = [dict() for _ in range(len(ubatch_slices))]
 
             # Make sure max_model_len is used at the graph capture time.
             self.seq_lens_np[:num_reqs] = self.max_model_len
@@ -2812,44 +2848,29 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     slot_mapping=self.input_batch.
                     block_table[kv_cache_group_id].slot_mapping[:num_tokens],
                     causal=True)
-
+                assert common_attn_metadata.max_query_len == 1
                 for attn_group in self.attn_groups[kv_cache_group_id]:
-                    attn_metadata_i = attn_group.get_metadata_builder()\
-                        .build_for_cudagraph_capture(common_attn_metadata)
-                    for layer_name in kv_cache_group_spec.layer_names:
-                        attn_metadata[layer_name] = attn_metadata_i
+                    if ubatch_slices is not None:
+                        common_attn_metadata_list = split_attn_metadata(
+                            ubatch_slices, common_attn_metadata)
+                        for ubid, common_attn_metadata in enumerate(
+                                common_attn_metadata_list):
+                            # Force query len to be 1 here.
+                            common_attn_metadata.max_query_len = 1
+                            attn_metadata_i = (attn_group\
+                                               .get_metadata_builder(ubatch_id=ubid)\
+                                               .build_for_cudagraph_capture(common_attn_metadata))
+                            for layer_name in kv_cache_group_spec.layer_names:
+                                assert type(attn_metadata) is list
+                                attn_metadata[ubid][layer_name] = attn_metadata_i
+                    else:
+                        attn_metadata_i = attn_group.get_metadata_builder()\
+                            .build_for_cudagraph_capture(common_attn_metadata)
+                        for layer_name in kv_cache_group_spec.layer_names:
+                            attn_metadata[layer_name] = attn_metadata_i
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
-            if self.supports_mm_inputs:
-                input_ids = None
-                inputs_embeds = self.inputs_embeds[:num_tokens]
-                model_kwargs = {
-                    **self._init_model_kwargs(num_tokens),
-                    **self._dummy_mm_kwargs(num_reqs),
-                }
-            else:
-                input_ids = self.input_ids[:num_tokens]
-                inputs_embeds = None
-                model_kwargs = self._init_model_kwargs(num_tokens)
-
-            if self.uses_mrope:
-                positions = self.mrope_positions[:, :num_tokens]
-            else:
-                positions = self.positions[:num_tokens]
-
-            if get_pp_group().is_first_rank:
-                intermediate_tensors = None
-            else:
-                if self.intermediate_tensors is None:
-                    self.intermediate_tensors = (
-                        self.model.make_empty_intermediate_tensors(
-                            batch_size=self.max_num_tokens,
-                            dtype=self.model_config.dtype,
-                            device=self.device))
-
-                intermediate_tensors = self.sync_and_slice_intermediate_tensors(
-                    num_tokens, None, False)
             if cudagraph_runtime_mode == CUDAGraphMode.NONE:
                 batch_descriptor = None
             else:
@@ -2863,20 +2884,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     f"Cudagraph runtime mode mismatch at dummy_run. "
                     f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}.")
 
-            with self.maybe_randomize_inputs(input_ids), set_forward_context(
-                    attn_metadata,
-                    self.vllm_config,
-                    num_tokens=num_tokens,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    batch_descriptor=batch_descriptor):
-                outputs = self.model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                    **model_kwargs,
-                )
+            outputs = self._run_model(
+                attn_metadata,
+                num_tokens,
+                scheduler_output=None,
+                ubatch_slices=ubatch_slices,
+                is_dummy_run=True,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                batch_descriptor=batch_descriptor)
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
@@ -3202,6 +3218,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 desc="Capturing CUDA graphs ({}, {})".format(
                     "decode" if uniform_decode else "mixed prefill-decode",
                     cudagraph_runtime_mode.name))
+        enable_microbatching = self.parallel_config.enable_microbatching
+        if enable_microbatching:
+            assert cudagraph_runtime_mode is CUDAGraphMode.FULL
+            assert uniform_decode is True
         # We skip EPLB here since we don't want to record dummy metrics
         for num_tokens in compilation_cases:
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
@@ -3216,10 +3236,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                                 force_attention=force_attention,
                                 uniform_decode=uniform_decode,
+                                allow_microbatching=enable_microbatching,
                                 skip_eplb=True)
             self._dummy_run(num_tokens,
                             cudagraph_runtime_mode=cudagraph_runtime_mode,
                             uniform_decode=uniform_decode,
+                            allow_microbatching=enable_microbatching,
                             skip_eplb=True)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
@@ -3348,7 +3370,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if builder.cudagraph_support.value < min_cg_support.value:
                 min_cg_support = builder.cudagraph_support
                 min_cg_builder_name = builder.__class__.__name__
-
         # Flexible resolve the cudagraph mode
         cudagraph_mode = self.compilation_config.cudagraph_mode
         # check cudagraph for mixed batch is supported
