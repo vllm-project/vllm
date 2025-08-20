@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=registry-sc-harbor.amd.com/framework/compute-rocm-rel-7.0:24_ubuntu22.04_py3.10_pytorch_lw_release-2.8_77a67608
+ARG BASE_IMAGE=registry-sc-harbor.amd.com/framework/compute-rocm-rel-7.0:38_ubuntu22.04_py3.10_pytorch_release-2.8_b2fb6885
 # ARG HIPBLASLT_BRANCH="aa0bda7b"
 # ARG HIPBLAS_COMMON_BRANCH="9b80ba8e"
 # ARG LEGACY_HIPBLASLT_OPTION=
@@ -18,7 +18,7 @@ FROM ${BASE_IMAGE} AS base
 ENV PATH=/opt/rocm/llvm/bin:$PATH
 ENV ROCM_PATH=/opt/rocm
 ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
-ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201
+ARG PYTORCH_ROCM_ARCH=gfx942;gfx950;
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 # ENV AITER_ROCM_ARCH=gfx942;gfx950
 
@@ -127,8 +127,8 @@ RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
-# RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-#     cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 # RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
 #     cp /install/*.whl /app/debs
 
@@ -142,8 +142,8 @@ RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
     pip install /install/*.whl
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     pip install /install/*.whl
-# RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
-#     pip install /install/*.whl
+RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
+    pip install /install/*.whl
 # RUN --mount=type=bind,from=build_aiter,src=/app/install/,target=/install \
 #     pip install /install/*.whl
 
@@ -171,6 +171,6 @@ RUN echo "BASE_IMAGE: ${BASE_IMAGE}" > /app/versions.txt \
     && echo "PYTORCH_VISION_BRANCH: ${PYTORCH_VISION_BRANCH}" >> /app/versions.txt \
     && echo "PYTORCH_REPO: ${PYTORCH_REPO}" >> /app/versions.txt \
     && echo "PYTORCH_VISION_REPO: ${PYTORCH_VISION_REPO}" >> /app/versions.txt \
-    && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt \
-    && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
-    && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt
+    && echo "FA_BRANCH: ${FA_BRANCH}" >> /app/versions.txt
+    # && echo "AITER_BRANCH: ${AITER_BRANCH}" >> /app/versions.txt \
+    # && echo "AITER_REPO: ${AITER_REPO}" >> /app/versions.txt
