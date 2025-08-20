@@ -1354,9 +1354,9 @@ def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):
     return idx
 
 def make_tool_call_id(id_type:str='random', func_name=None, idx=None):
-    if id_type=='random':
-        return f"chatcmpl-tool-{random_uuid()}"
-    elif id_type=='kimi_k2':
+
+    if id_type=='kimi_k2':
         return f'functions.{func_name}:{idx}'
     else:
-        raise ValueError(f'Invalid tool call id type: {id_type}')
+        # by default return random
+        return f"chatcmpl-tool-{random_uuid()}"
