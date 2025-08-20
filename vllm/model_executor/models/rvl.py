@@ -12,18 +12,18 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageSize
 from vllm.multimodal.inputs import MultiModalDataDict
 from .utils import WeightsMapper
-from .llava_onevision import LlavaOnevisionForConditionalGeneration, LlavaOnevisionLikeConfig
+from .llava_onevision import LlavaOnevisionForConditionalGeneration
 from .llava_next import LlavaNextProcessingInfo, LlavaDummyInputsBuilder, LlavaNextMultiModalProcessor
 
 
 class RVLProcessingInfo(LlavaNextProcessingInfo):
     
-    def get_hf_config(self) -> LlavaOnevisionLikeConfig:
+    def get_hf_config(self):
         return self.ctx.get_hf_config()
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None}
-    
+    def get_hf_processor(self, **kwargs: object):
+        return self.ctx.get_hf_processor(**kwargs)
+
     def _get_num_unpadded_features(
         self,
         *,
@@ -53,35 +53,9 @@ class RVLProcessingInfo(LlavaNextProcessingInfo):
         unpadded_features = current_height * current_width
         newline_features = current_height
 
-    
         return (unpadded_features, newline_features)
 
-    def get_image_size_with_most_features(self) -> ImageSize:
-        # NOTE: This hardcoded value is found via processor tests
-        return ImageSize(width=1153, height=944)
 
-    def _get_num_frame_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-    ) -> int:
-        hf_config = self.get_hf_config()
-        spatial_pool_stride = getattr(hf_config, "spatial_pool_stride", 2)
-
-        vision_encoder_info = self.get_vision_encoder_info()
-        patch_grid_length = vision_encoder_info.get_patch_grid_length()
-        pooled_grid_length = math.ceil(patch_grid_length / spatial_pool_stride)
-
-        return pooled_grid_length * pooled_grid_length
-        
-    def get_max_image_tokens(self) -> int:
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        return self.get_num_image_tokens(
-            image_width=target_width,
-            image_height=target_height,
-        )
 
 class RVLDummyInputsBuilder(
         LlavaDummyInputsBuilder[RVLProcessingInfo]):
