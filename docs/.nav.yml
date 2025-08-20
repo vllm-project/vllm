@@ -1,25 +1,17 @@
 nav:
-  - Home: 
-    - vLLM: README.md
+  - Home: README.md
+  - User Guide:
+    - usage/README.md
     - Getting Started:
       - getting_started/quickstart.md
       - getting_started/installation
     - Examples:
+      - examples/README.md
       - Offline Inference: examples/offline_inference
       - Online Serving: examples/online_serving
       - Others: examples/others
-    - Quick Links:
-      - User Guide: usage/README.md
-      - Developer Guide: contributing/README.md
-      - API Reference: api/README.md
-      - CLI Reference: cli/README.md
-    - Timeline:
-      - Roadmap: https://roadmap.vllm.ai
-      - Releases: https://github.com/vllm-project/vllm/releases
-  - User Guide:
-    - Summary: usage/README.md
-    - usage/v1_guide.md
     - General:
+      - usage/v1_guide.md
       - usage/*
     - Inference and Serving:
       - serving/offline_inference.md
@@ -32,7 +24,7 @@ nav:
       - deployment/integrations
     - Training: training
     - Configuration:
-      - Summary: configuration/README.md
+      - configuration/README.md
       - configuration/*
     - Models:
       - models/supported_models.md
@@ -45,11 +37,11 @@ nav:
       - features/*
       - features/quantization
   - Developer Guide:
-    - Summary: contributing/README.md
+    - contributing/README.md
     - General:
       - glob: contributing/*
         flatten_single_child_sections: true
-    - Model Implementation: 
+    - Model Implementation:
       - contributing/model/README.md
       - contributing/model/basic.md
       - contributing/model/registration.md
@@ -58,11 +50,9 @@ nav:
     - CI: contributing/ci
     - Design Documents: design
   - API Reference:
-    - Summary: api/summary.md
-    - Contents:
-      - api/vllm/*
-  - CLI Reference:
-    - Summary: cli/README.md
+    - api/README.md
+    - api/vllm/*
+  - CLI Reference: cli
   - Community:
     - community/*
     - Blog: https://blog.vllm.ai

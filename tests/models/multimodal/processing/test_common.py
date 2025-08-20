@@ -162,6 +162,7 @@ def _test_processing_correctness(
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
     "mllama": False,
     "ovis": False,
+    "ovis2_5": False,
     "paligemma": False,
     "ultravox": False,
     "whisper": False,
@@ -271,6 +272,7 @@ def _test_processing_correctness_one(
     "microsoft/Florence-2-base",
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",
+    "google/gemma-3n-E2B-it",
     "zai-org/glm-4v-9b",
     "zai-org/GLM-4.1V-9B-Thinking",
     "ibm-granite/granite-speech-3.3-2b",
@@ -300,6 +302,7 @@ def _test_processing_correctness_one(
     "AIDC-AI/Ovis1.6-Gemma2-9B",
     "AIDC-AI/Ovis1.6-Llama3.2-3B",
     "AIDC-AI/Ovis2-1B",
+    "AIDC-AI/Ovis2.5-2B",
     "google/paligemma-3b-mix-224",
     "google/paligemma2-3b-ft-docci-448",
     "microsoft/Phi-3.5-vision-instruct",
@@ -315,7 +318,7 @@ def _test_processing_correctness_one(
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     "openai/whisper-large-v3",
     "omni-research/Tarsier-7b",
-    "omni-research/Tarsier2-Recap-7b"
+    "omni-research/Tarsier2-Recap-7b",
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
@@ -327,6 +330,8 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
+    if model_id == "google/gemma-3n-E2B-it":
+        pytest.skip("Skipping gemma-3n-E2B-it due to transformers #39911 bug.")
     _test_processing_correctness(
         model_id,
         hit_rate=hit_rate,
@@ -367,10 +372,16 @@ def _assert_inputs_equal(
     if ignore_mm_keys is None:
         ignore_mm_keys = set()
 
-    assert "mm_kwargs" in a and "mm_kwargs" in b, msg
+    a_rest = {k: v for k, v in a.items() if k != "mm_kwargs"}
+    b_rest = {k: v for k, v in b.items() if k != "mm_kwargs"}
+
+    assert a_rest == b_rest, msg
+
+    a_data = a["mm_kwargs"].get_data()
+    b_data = b["mm_kwargs"].get_data()
 
     for key in ignore_mm_keys:
-        a["mm_kwargs"].pop(key, None)
-        b["mm_kwargs"].pop(key, None)
+        a_data.pop(key, None)
+        b_data.pop(key, None)
 
-    assert a == b, msg
+    assert a_data == b_data, msg

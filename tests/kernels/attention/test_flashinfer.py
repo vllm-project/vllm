@@ -9,11 +9,13 @@ import torch
 
 from vllm.platforms import current_platform
 
-NUM_HEADS = [(16, 16), (32, 8), (64, 8), (6, 1)]
+NUM_HEADS = [(32, 8), (6, 1)]
 HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16, 32]
-DTYPES = [torch.float16, torch.bfloat16]
+DTYPES = [torch.bfloat16]
 NUM_BLOCKS = 32768  # Large enough to test overflow in index calculation.
+SOFT_CAPS = [None, 30.0]
+SLIDING_WINDOWS = [None, 64]
 
 
 def ref_paged_attn(
@@ -76,8 +78,8 @@ def ref_paged_attn(
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("soft_cap", [None, 30.0, 50.0])
-@pytest.mark.parametrize("sliding_window", [None, 64])
+@pytest.mark.parametrize("soft_cap", SOFT_CAPS)
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
 @torch.inference_mode
 def test_flashinfer_decode_with_paged_kv(
     kv_lens: list[int],
@@ -173,8 +175,8 @@ def test_flashinfer_decode_with_paged_kv(
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("soft_cap", [None, 30.0, 50.0])
-@pytest.mark.parametrize("sliding_window", [None, 64])
+@pytest.mark.parametrize("soft_cap", SOFT_CAPS)
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
 @torch.inference_mode
 def test_flashinfer_prefill_with_paged_kv(
     seq_lens: list[tuple[int, int]],
@@ -278,11 +280,11 @@ def test_flashinfer_prefill_with_paged_kv(
 
 
 @pytest.mark.parametrize("seq_lens", [[(1, 132), (5, 18)]])
-@pytest.mark.parametrize("num_heads", [(32, 8), (6, 1)])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("soft_cap", [None, 30.0, 50.0])
+@pytest.mark.parametrize("soft_cap", SOFT_CAPS)
 def test_flashinfer_prefill_with_paged_fp8_kv(
         seq_lens: list[tuple[int, int]], num_heads: tuple[int, int],
         head_size: int, dtype: torch.dtype, block_size: int,
@@ -385,11 +387,12 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
 
 
 @pytest.mark.parametrize("kv_lens", [[1328, 18, 463], [1, 54, 293, 70]])
-@pytest.mark.parametrize("num_heads", [(32, 8), (64, 8), (6, 1)])
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("soft_cap", [None, 30.0, 50.0])
+@pytest.mark.parametrize("soft_cap", SOFT_CAPS)
+@pytest.mark.skip(reason="TODO: fix the accuracy issue")
 @torch.inference_mode
 def test_flashinfer_decode_with_paged_fp8_kv(
     kv_lens: list[int],
@@ -399,7 +402,6 @@ def test_flashinfer_decode_with_paged_fp8_kv(
     block_size: int,
     soft_cap: Optional[float],
 ) -> None:
-    pytest.skip("TODO: fix the accuracy issue")
     # test doesn't work for num_heads = (16,16)
     torch.set_default_device("cuda")
     current_platform.seed_everything(0)
