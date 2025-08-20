@@ -93,10 +93,10 @@ def _silu_mul_fp8_quant_deep_gemm(
         x = x * (1.0 / (1.0 + tl.exp(-x)))
         y = x * y2
 
-        _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
-        scale_raw = _absmax / fp8_max
-        y_s = tl.math.exp2(tl.ceil(
-            tl.log2(scale_raw))) if use_ue8m0 else scale_raw
+        y_s = tl.maximum(tl.max(tl.abs(y)), eps) / fp8_max
+        if use_ue8m0:
+            y_s = tl.math.exp2(tl.ceil(tl.log2(y_s)))
+
         y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
         tl.store(y_q_ptr + base_yq_offset + cols * stride_yq_h, y_q, mask=mask)
@@ -178,7 +178,7 @@ def silu_mul_fp8_quant_deep_gemm(
         fp8_max,
         is_blackwell_deep_gemm_e8m0_used(),
         BLOCK=group_size,
-        NUM_STAGES=8,
+        NUM_STAGES=4,
         num_warps=1,
     )
 
