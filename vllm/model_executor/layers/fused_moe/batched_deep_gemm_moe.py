@@ -74,21 +74,21 @@ def _silu_mul_fp8_quant_deep_gemm(
     cols = cols.to(tl.int64)
     mask_h = cols < BLOCK
 
-    for t in tl.range(0, n_tokens, num_stages=NUM_STAGES):
-        base_i_offset = (e * stride_i_e + t * stride_i_t +
-                         g * GROUP_SIZE * stride_i_h)
-        base_yq_offset = (e * stride_yq_e + t * stride_yq_t +
-                          g * GROUP_SIZE * stride_yq_h)
-        base_ys_offset = e * stride_ys_e + t * stride_ys_t + g * stride_ys_g
+    base_i_offset = e * stride_i_e + g * GROUP_SIZE * stride_i_h
+    base_x_offset = base_i_offset + cols * stride_i_h
+    base_y2_offset = base_i_offset + H * stride_i_h + cols * stride_i_h
+    base_yq_offset = (e * stride_yq_e + g * GROUP_SIZE * stride_yq_h +
+                      cols * stride_yq_h)
+    base_ys_offset = e * stride_ys_e + g * stride_ys_g
 
+    for t in tl.range(0, n_tokens, num_stages=NUM_STAGES):
         mask = mask_h
-        x = tl.load(input_ptr + base_i_offset + cols * stride_i_h,
+        x = tl.load(input_ptr + base_x_offset + t * stride_i_t,
                     mask=mask,
                     other=0.0).to(tl.float32)
-        y2 = tl.load(input_ptr + base_i_offset + H * stride_i_h +
-                     cols * stride_i_h,
+        y2 = tl.load(input_ptr + base_y2_offset + t * stride_i_t,
                      mask=mask,
-                     other=0.0).to(tl.float32)
+                     other=0.0)
 
         x = x * (1.0 / (1.0 + tl.exp(-x)))
         y = x * y2
@@ -99,24 +99,24 @@ def _silu_mul_fp8_quant_deep_gemm(
 
         y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
-        tl.store(y_q_ptr + base_yq_offset + cols * stride_yq_h, y_q, mask=mask)
-        tl.store(y_s_ptr + base_ys_offset, y_s)
+        tl.store(y_q_ptr + base_yq_offset + t * stride_yq_t, y_q, mask=mask)
+        tl.store(y_s_ptr + base_ys_offset + t * stride_ys_t, y_s)
 
 
 def silu_mul_fp8_quant_deep_gemm(
-    y: torch.Tensor,  # (E, T, 2*H) float32
+    y: torch.Tensor,  # (E, T, 2*H)
     tokens_per_expert: torch.Tensor,  # (E,) number of valid tokens per expert
     group_size: int = 128,
     eps: float = 1e-10,
-):
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
 
     y has shape (E, T, 2*H). The first half of the last dimension is 
     silu-activated, multiplied by the second half, then quantized into FP8.
 
     Returns `(y_q, y_s)` where
-    * `y_q` is the FP8 tensor of shape `(E, T, H)`, same layout as `y[..., :H]`.
-    * `y_s` has shape `(E, T, H // group_size)` and strides `(T*G, 1, T)`
+    * `y_q`: FP8 tensor, shape (E, T, H), same layout as y[..., :H]
+    * `y_s`: FP32 tensor, shape (E, T, H // group_size), strides (T*G, 1, T)
     """
     assert y.ndim == 3, "y must be (E, T, 2*H)"
     E, T, H2 = y.shape
@@ -148,7 +148,7 @@ def silu_mul_fp8_quant_deep_gemm(
 
     stride_cnt_e = tokens_per_expert.stride()[0]
 
-    # static grid over experts and H-groups.
+    # Static grid over experts and H-groups.
     # A loop inside the kernel handles the token dim
     grid = (E * G, )
 
