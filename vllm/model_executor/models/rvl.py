@@ -53,6 +53,7 @@ class RVLDummyInputsBuilder(LlavaDummyInputsBuilder[RVLProcessingInfo]):
 
 
 class RVLMultiModalProjector(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         self.pre_norm = nn.LayerNorm(config.vision_config.hidden_size,
