@@ -32,7 +32,7 @@ def compare_data_columns(
     cols_per_file = []
     for f in files:
         try:
-            df_tmp = pd.read_json(f, typ="frame")
+            df_tmp = pd.read_json(f, orient="records")
         except Exception as err:
             raise ValueError(f"Failed to read {f}") from err
         cols_per_file.append(set(df_tmp.columns))
@@ -50,7 +50,7 @@ def compare_data_columns(
     meta_added = False
 
     for file in files:
-        df = pd.read_json(file, typ="frame")
+        df = pd.read_json(file, orient="records")
 
         # Keep rows that actually have the compared metric (same as original behavior)
         if drop_column in df.columns:
