@@ -33,6 +33,14 @@ become available.
         <code>wget http://images.cocodataset.org/zips/train2017.zip</code>
       </td>
     </tr>
+        <tr>
+      <td><strong>ShareGPT4Video (Video)</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td>
+        <code>git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video</code>
+      </td>
+    </tr>
     <tr>
       <td><strong>BurstGPT</strong></td>
       <td style="text-align: center;">✅</td>
@@ -194,6 +202,7 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 ```bash
 vllm bench serve \
   --backend openai-chat \
+  --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
@@ -230,6 +239,7 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 ```bash
 vllm bench serve \
   --backend openai-chat \
+  --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
@@ -244,6 +254,7 @@ vllm bench serve \
 ```bash
 vllm bench serve \
   --backend openai-chat \
+  --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
@@ -609,7 +620,7 @@ vllm bench serve \
   --prefix-repetition-prefix-len 512 \
   --prefix-repetition-suffix-len 128 \
   --prefix-repetition-num-prefixes 5 \
-  --prefix-repetition-output-len 128 
+  --prefix-repetition-output-len 128
 ```
 
 </details>
@@ -677,6 +688,33 @@ python benchmarks/benchmark_serving.py \
   --model Qwen/Qwen2.5-VL-7B-Instruct \
   --dataset-name sharegpt \
   --dataset-path /path/to/ShareGPT4V/sharegpt4v_instruct_gpt4-vision_cap100k.json \
+  --num-prompts 100 \
+  --save-result \
+  --result-dir ~/vllm_benchmark_results \
+  --save-detailed \
+  --endpoint /v1/chat/completion
+```
+
+### Videos (ShareGPT4Video)
+
+Start vLLM:
+
+```bash
+python -m vllm.entrypoints.openai.api_server \
+  --model Qwen/Qwen2.5-VL-7B-Instruct \
+  --dtype bfloat16 \
+  --limit-mm-per-prompt '{"video": 1}' \
+  --allowed-local-media-path /path/to/sharegpt4video/videos
+```
+
+Send requests with videos:
+
+```bash
+python benchmarks/benchmark_serving.py \
+  --backend openai-chat \
+  --model Qwen/Qwen2.5-VL-7B-Instruct \
+  --dataset-name sharegpt \
+  --dataset-path /path/to/ShareGPT4Video/llava_v1_5_mix665k_with_video_chatgpt72k_share4video28k.json \
   --num-prompts 100 \
   --save-result \
   --result-dir ~/vllm_benchmark_results \
