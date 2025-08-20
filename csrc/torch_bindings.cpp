@@ -241,14 +241,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // custom types:
   // https://docs.google.com/document/d/18fBMPuOJ0fY5ZQ6YyrHUppw9FA332CpNtgB6SOIgyuA
 
-  // Marlin (Dense) Optimized Quantized GEMM for GPTQ.
-  ops.def(
-      "marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "
-      "Tensor! workspace, SymInt size_m, SymInt size_n, SymInt size_k) -> "
-      "Tensor",
-      {stride_tag});
-  // conditionally compiled so impl in source file
-
   // Marlin_24 (Sparse) Optimized Quantized GEMM for GPTQ.
   ops.def(
       "gptq_marlin_24_gemm(Tensor a, Tensor b_q_weight, Tensor b_meta, "
@@ -353,15 +345,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("ggml_moe_get_block_size", &ggml_moe_get_block_size);
 
 #ifndef USE_ROCM
-  // marlin_qqq_gemm for QQQ.
-  ops.def(
-      "marlin_qqq_gemm(Tensor a, Tensor b_q_weight, "
-      "Tensor s_tok, Tensor s_ch, Tensor s_group, "
-      "Tensor! workspace, SymInt size_m, SymInt size_n, "
-      "SymInt size_k) -> Tensor",
-      {stride_tag});
-  // conditionally compiled so impl registration is in source file
-
   // CUTLASS nvfp4 block scaled GEMM
   ops.def(
       "cutlass_scaled_fp4_mm(Tensor! out, Tensor a, Tensor b,"
