@@ -30,7 +30,6 @@ from ..utils import dummy_hf_overrides
 
 ARCH_TO_SKIP = {
     "MolmoForCausalLM": "incompatible requirements",
-    "MiniMaxVL01ForConditionalGeneration": "broken model",
 }
 ARCH_NEEDS_EXTRAS = [
     "InternVLChatModel",
@@ -128,7 +127,7 @@ def create_batched_mm_kwargs(
     )["mm_kwargs"]
     items = [
         item for modality in supported_mm_limits
-        for item in mm_kwargs.get_items(modality)
+        for item in mm_kwargs[modality]
     ]
     return group_mm_kwargs_by_modality(items)
 
