@@ -169,7 +169,7 @@ llm = LLM(
     - Step3 (<gh-pr:22697>)
 
 !! important
-    Batch-level DP is not to be confused with request-level DP
+    Batch-level DP is not to be confused with API request-level DP
     (which is instead controlled by `data_parallel_size`).
 
 ## Input Processing

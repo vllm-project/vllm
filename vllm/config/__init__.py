@@ -438,8 +438,8 @@ class ModelConfig:
     - `"data"`: Within the same vLLM engine, split the batched input data
         across TP ranks to process the data in parallel, while hosting
         the full weights on each TP rank.
-        This batch-level DP is not to be confused with request-level DP
-        (which is controlled by `--data-parallel-size`).
+        This batch-level DP is not to be confused with API request-level
+        DP (which is controlled by `--data-parallel-size`).
         This is only supported on a per-model basis and falls back to
         `"weights"` if the encoder does not support DP."""
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
@@ -2542,8 +2542,8 @@ class MultiModalConfig:
     - `"data"`: Within the same vLLM engine, split the batched input data
         across TP ranks to process the data in parallel, while hosting
         the full weights on each TP rank.
-        This batch-level DP is not to be confused with request-level DP
-        (which is controlled by `--data-parallel-size`).
+        This batch-level DP is not to be confused with API request-level
+        DP (which is controlled by `--data-parallel-size`).
         This is only supported on a per-model basis and falls back to
         `"weights"` if the encoder does not support DP.
     """
