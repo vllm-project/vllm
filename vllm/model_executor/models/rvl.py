@@ -11,11 +11,8 @@ from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict
 
-from .llava_next import (
-    LlavaDummyInputsBuilder,
-    LlavaNextMultiModalProcessor,
-    LlavaNextProcessingInfo,
-)
+from .llava_next import (LlavaDummyInputsBuilder, LlavaNextMultiModalProcessor,
+                         LlavaNextProcessingInfo)
 from .llava_onevision import LlavaOnevisionForConditionalGeneration
 from .utils import WeightsMapper
 
@@ -45,22 +42,20 @@ class RVLDummyInputsBuilder(LlavaDummyInputsBuilder[RVLProcessingInfo]):
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = (
-            self.info.get_image_size_with_most_features()
-        )
+            self.info.get_image_size_with_most_features())
 
         return {
-            "image": self._get_dummy_images(
-                width=target_width, height=target_height, num_images=num_images
-            ),
+            "image": self._get_dummy_images(width=target_width,
+                                            height=target_height,
+                                            num_images=num_images),
         }
 
 
 class RVLMultiModalProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.pre_norm = torch.nn.LayerNorm(
-            config.vision_config.hidden_size, eps=1e-06
-        )
+        self.pre_norm = torch.nn.LayerNorm(config.vision_config.hidden_size,
+                                           eps=1e-06)
         self.linear_1 = nn.Linear(
             config.vision_config.hidden_size,
             config.text_config.hidden_size,
