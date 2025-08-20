@@ -90,7 +90,7 @@ class Attention(nn.Module):
         x = self.pre_attn(x)
         x = self.rms_norm_ref(x)
         attn_output = torch.empty_like(x)
-        torch.ops.silly.attention(x, x, x, attn_output)
+        torch.ops.silly_multiple.attention(x, x, x, attn_output)
         x = attn_output
         x = self.rms_norm_ref(x)
         x = self.post_attn(x)
