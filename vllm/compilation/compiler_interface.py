@@ -64,16 +64,17 @@ class CompilerInterface:
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        runtime_shape: Optional[int] = None,
+        compile_range: Optional[tuple[int, int]] = None,
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
         """
         Compile the graph with the given example inputs and compiler config,
-        with a runtime shape. If the `runtime_shape` is None, it means
+        with a runtime shape. If the `compile_range` is None, it means
         the `example_inputs` have a dynamic shape. Otherwise, the
-        `runtime_shape` specifies the shape of the inputs. Right now we only
-        support one variable shape for all inputs, which is the batchsize
-        (number of tokens) during inference.
+        `compile_range` specifies the range of the inputs, 
+        it could be concrete size, e.g. (4, 4).
+        Right now we only support one variable shape for all inputs,
+         which is the batchsize (number of tokens) during inference.
 
         Dynamo will make sure `graph(*example_inputs)` is valid.
 
@@ -98,7 +99,7 @@ class CompilerInterface:
              graph: fx.GraphModule,
              example_inputs: list[Any],
              graph_index: int,
-             runtime_shape: Optional[int] = None) -> Callable:
+             compile_range: Optional[tuple[int, int]] = None) -> Callable:
         """
         Load the compiled function from the handle.
         Raises an error if the handle is invalid.
@@ -188,22 +189,22 @@ class InductorStandaloneAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        runtime_shape: Optional[int] = None,
+        compile_range: Optional[tuple[int, int]] = None,
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
         compilation_counter.num_inductor_compiles += 1
         current_config = {}
         if compiler_config is not None:
             current_config.update(compiler_config)
-        set_inductor_config(current_config, runtime_shape)
+        set_inductor_config(current_config, compile_range)
 
-        if isinstance(runtime_shape, int):
+        if isinstance(compile_range, tuple):
             dynamic_shapes = "from_example_inputs"
         else:
             dynamic_shapes = "from_tracing_context"
 
         from torch._inductor import standalone_compile
-        with pass_context(runtime_shape):
+        with pass_context(compile_range):
             compiled_graph = standalone_compile(
                 graph,
                 example_inputs,
@@ -223,7 +224,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
              graph: fx.GraphModule,
              example_inputs: list[Any],
              graph_index: int,
-             runtime_shape: Optional[int] = None) -> Callable:
+             compile_range: Optional[tuple[int, int]] = None) -> Callable:
         assert isinstance(handle, tuple)
         assert isinstance(handle[0], str)
         assert isinstance(handle[1], str)
@@ -283,7 +284,7 @@ class InductorAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        runtime_shape: Optional[int] = None,
+        compile_range: Optional[tuple[int, int]] = None,
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
         compilation_counter.num_inductor_compiles += 1
@@ -296,7 +297,7 @@ class InductorAdaptor(CompilerInterface):
         current_config["fx_graph_cache"] = True
         current_config["fx_graph_remote_cache"] = False
 
-        set_inductor_config(current_config, runtime_shape)
+        set_inductor_config(current_config, compile_range)
 
         # inductor can inplace modify the graph, so we need to copy it
         # see https://github.com/pytorch/pytorch/issues/138980
@@ -433,7 +434,7 @@ class InductorAdaptor(CompilerInterface):
                     torch._functorch.config.patch(
                         enable_remote_autograd_cache=False))
 
-            with pass_context(runtime_shape):
+            with pass_context(compile_range):
                 compiled_graph = compile_fx(
                     graph,
                     example_inputs,
@@ -547,9 +548,9 @@ class InductorAdaptor(CompilerInterface):
             return contextlib.nullcontext()
 
 
-def set_inductor_config(config, runtime_shape):
-    if isinstance(runtime_shape, int):
-        # for a specific batchsize, tuning triton kernel parameters
+def set_inductor_config(config, compile_range):
+    if isinstance(compile_range, tuple):
+        # for a specific range of batchsizes, tuning triton kernel parameters
         # can be beneficial
         config["max_autotune"] = True
         config["coordinate_descent_tuning"] = True

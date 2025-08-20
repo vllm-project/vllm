@@ -43,9 +43,9 @@ class PostGradPassManager(CustomGraphPass):
         self.passes: list[VllmInductorPass] = []
 
     def __call__(self, graph: fx.Graph):
-        shape = get_pass_context().runtime_shape
+        compile_range = get_pass_context().compile_range
         for pass_ in self.passes:
-            if pass_.is_applicable_for_shape(shape):
+            if pass_.is_applicable_for_range(compile_range):
                 pass_(graph)
 
         # always run fix_functionalization last
