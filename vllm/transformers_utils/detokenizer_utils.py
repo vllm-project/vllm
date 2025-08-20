@@ -23,27 +23,32 @@ def _convert_tokens_to_string_with_added_encoders(
     # NOTE(woosuk): The following code is slow because it runs a for loop over
     # the output_tokens. In Python, running a for loop over a list can be slow
     # even when the loop body is very simple.
+    # Performance improvements: avoid repeated attribute and function lookups;
+    # localize frequently used objects;
+
     sub_texts: list[str] = []
     current_sub_text: list[str] = []
-    all_special_tokens = set(tokenizer.all_special_tokens)
+    convert_tokens_to_string = tokenizer.convert_tokens_to_string
+    added_vocab_set = set(tokenizer.get_added_vocab())
+    all_special_tokens = set(
+        tokenizer.all_special_tokens) if skip_special_tokens else ()
+
     for token in output_tokens:
-        if skip_special_tokens and token in all_special_tokens:
+        # Use precomputed set for skip-special check
+        if token in all_special_tokens:
             continue
-        if token in tokenizer.get_added_vocab():
+        if token in added_vocab_set:
             if current_sub_text:
-                sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
-                sub_texts.append(sub_text)
-                current_sub_text = []
+                sub_texts.append(convert_tokens_to_string(current_sub_text))
+                current_sub_text.clear()
             sub_texts.append(token)
         else:
             current_sub_text.append(token)
     if current_sub_text:
-        sub_text = tokenizer.convert_tokens_to_string(current_sub_text)
-        sub_texts.append(sub_text)
+        sub_texts.append(convert_tokens_to_string(current_sub_text))
     if spaces_between_special_tokens:
         return " ".join(sub_texts)
-    else:
-        return "".join(sub_texts)
+    return "".join(sub_texts)
 
 
 # 5 is an arbitrary value that should work for all
