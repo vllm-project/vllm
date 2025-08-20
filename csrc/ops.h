@@ -236,7 +236,8 @@ void get_cutlass_moe_mm_data(
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
     const int64_t num_experts, const int64_t n, const int64_t k,
-    const std::optional<torch::Tensor>& blockscale_offsets, bool force_no_swap);
+    const std::optional<torch::Tensor>& blockscale_offsets, bool force_no_swap,
+    bool should_fuse);
 
 void get_cutlass_moe_mm_problem_sizes(
     const torch::Tensor& topk_ids, torch::Tensor& problem_sizes1,
@@ -286,7 +287,10 @@ void scaled_fp4_experts_quant(
 void per_token_group_quant_fp8(const torch::Tensor& input,
                                torch::Tensor& output_q, torch::Tensor& output_s,
                                int64_t group_size, double eps, double fp8_min,
-                               double fp8_max, bool scale_ue8m0);
+                               double fp8_max, bool scale_ue8m0, bool transpose,
+                               const torch::Tensor& expert_offsets,
+                               const torch::Tensor& problem_sizes, bool reorder,
+                               const torch::Tensor& a_map);
 
 void per_token_group_quant_int8(const torch::Tensor& input,
                                 torch::Tensor& output_q,

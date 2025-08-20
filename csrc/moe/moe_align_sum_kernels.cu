@@ -111,8 +111,8 @@ __global__ void moe_sum_kernel(
     scalar_t* __restrict__ out,          // [..., d]
     const scalar_t* __restrict__ input,  // [..., topk, d]
     const int d) {
-  const int64_t token_idx = blockIdx.x;
-  for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
+  const uint32_t token_idx = blockIdx.x;
+  for (uint32_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
     scalar_t x = 0.0;
 #pragma unroll
     for (int k = 0; k < TOPK; ++k) {
@@ -285,7 +285,6 @@ void moe_sum(torch::Tensor& input,   // [num_tokens, topk, hidden_size]
   dim3 block(std::min(hidden_size, 1024));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(output));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
   switch (topk) {
     case 2:
       VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {

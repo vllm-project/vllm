@@ -14,6 +14,11 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
 
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+]
+print(CUDA_DEVICES)
+
 MNK_FACTORS = [
     (1, 256, 128),
     (1, 16384, 1024),
@@ -35,11 +40,6 @@ MNK_FACTORS = [
     (512, 16384, 128),
     (512, 24576, 128),
 ]
-
-CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
-]
-
 # -1 means full extent in that dimension
 TENSORWISE_GROUP_SHAPE = (-1, -1)
 PER_TOKEN_GROUP_SHAPE = (1, -1)

@@ -378,6 +378,9 @@ def per_token_group_quant_fp8(
     column_major_scales: bool = False,
     out_q: Optional[torch.Tensor] = None,
     use_ue8m0: Optional[bool] = None,
+    expert_offsets: Optional[torch.Tensor] = None,
+    problem_sizes: Optional[torch.Tensor] = None,
+    idx_map: Optional[torch.Tensor] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Function to perform per-token-group quantization on an input tensor `x`.
     It converts the tensor values into signed float8 values and returns the
@@ -409,7 +412,10 @@ def per_token_group_quant_fp8(
     assert out_q is None or out_q.shape == x.shape
     x_q = out_q
     if x_q is None:
-        x_q = torch.empty_like(x, device=x.device, dtype=dtype)
+        x_q_shape = x.shape
+        if idx_map is not None:
+            x_q_shape = idx_map.shape[:1] + x_q_shape[1:]
+        x_q = torch.empty(x_q_shape, device=x.device, dtype=dtype)
 
     # Allocate the scale tensor in either row- or column-major format.
     if column_major_scales:
@@ -417,13 +423,20 @@ def per_token_group_quant_fp8(
         x_s = torch.empty(shape, device=x.device,
                           dtype=torch.float32).permute(-1, -2)
     else:
-        shape = x.shape[:-1] + (x.shape[-1] // group_size, )
+        if idx_map is None:
+            shape = x.shape[:-1] + (x.shape[-1] // group_size, )
+        else:
+            shape = idx_map.shape[:1] + (x.shape[-1] // group_size, )
         x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
 
     # prefer CUDA kernel if available
     if current_platform.is_cuda() and x.is_contiguous():
+        transpose = expert_offsets is not None
+        reorder = idx_map is not None
         torch.ops._C.per_token_group_fp8_quant(x, x_q, x_s, group_size, eps,
-                                               fp8_min, fp8_max, use_ue8m0)
+                                               fp8_min, fp8_max, use_ue8m0,
+                                               transpose, expert_offsets,
+                                               problem_sizes, reorder, idx_map)
         return x_q, x_s
 
     # TRITON FALLBACK

@@ -8,7 +8,6 @@ from typing import Optional
 
 # Import DeepGEMM functions
 import torch
-from deep_gemm import calc_diff, ceil_div
 
 # Import vLLM functions
 from vllm import _custom_ops as ops
@@ -27,6 +26,19 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import scaled_dequantize
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
+
+
+def calc_diff(x: torch.Tensor, y: torch.Tensor):
+    x, y = x.double(), y.double()
+    denominator = (x * x + y * y).sum()
+    sim = 2 * (x * y).sum() / denominator
+    return 1 - sim
+
+
+def ceil_div(x: int, y: int) -> int:
+    return (x + y - 1) // y
+
+
 
 vllm_config = VllmConfig(parallel_config=ParallelConfig(
     pipeline_parallel_size=1))
@@ -250,6 +262,7 @@ def benchmark_shape(e: int,
                                            use_int8_w8a8=False,
                                            use_int8_w8a16=False,
                                            use_int4_w4a16=False,
+                                           use_mxfp4_w4a4=False,
                                            per_act_token_quant=False,
                                            block_shape=[128, 128])
         return m_fused_moe(

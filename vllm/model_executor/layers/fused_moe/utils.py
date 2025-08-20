@@ -109,12 +109,13 @@ def _fp4_quantize(
                         is_sf_swizzled_layout=is_sf_swizzled_layout)
 
 
-def _fp8_quantize(
-    A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    per_act_token: bool,
-    block_shape: Optional[list[int]] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
+def _fp8_quantize(A: torch.Tensor,
+                  A_scale: Optional[torch.Tensor],
+                  per_act_token: bool,
+                  block_shape: Optional[list[int]] = None,
+                  expert_offsets=None,
+                  problem_sizes=None,
+                  idx_map=None) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Perform fp8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
@@ -122,13 +123,21 @@ def _fp8_quantize(
     if block_shape is None:
         # TODO(luka): use QuantFP8 custom op
         #  https://github.com/vllm-project/vllm/issues/20711
+        # Scaled FP8 quant. Per tensor so column/row-wide?
+        #  use_per_token_if_dynamic
+        # print('ops.scaled_fp8_quant') # Not called
         A, A_scale = ops.scaled_fp8_quant(
             A, A_scale, use_per_token_if_dynamic=per_act_token)
     else:
         assert not per_act_token
         assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]
-        A, A_scale = per_token_group_quant_fp8(A, block_k)
+        # print('per_token_group_quant_fp8') # Called
+        A, A_scale = per_token_group_quant_fp8(A,
+                                               block_k,
+                                               expert_offsets=expert_offsets,
+                                               problem_sizes=problem_sizes,
+                                               idx_map=idx_map)
         assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
 
     return A, A_scale

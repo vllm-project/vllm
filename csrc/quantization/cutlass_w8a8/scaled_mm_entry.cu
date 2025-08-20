@@ -82,7 +82,8 @@ void get_cutlass_moe_mm_data_caller(
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
     const int64_t num_experts, const int64_t n, const int64_t k,
-    const std::optional<torch::Tensor>& blockscale_offsets, bool force_no_swap);
+    const std::optional<torch::Tensor>& blockscale_offsets, bool force_no_swap,
+    bool should_fuse);
 
 void get_cutlass_moe_mm_problem_sizes_caller(
     const torch::Tensor& topk_ids, torch::Tensor& problem_sizes1,
@@ -330,17 +331,17 @@ void get_cutlass_moe_mm_data(
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
     const int64_t num_experts, const int64_t n, const int64_t k,
-    const std::optional<torch::Tensor>& blockscale_offsets,
-    bool force_no_swap) {
+    const std::optional<torch::Tensor>& blockscale_offsets, bool force_no_swap,
+    bool should_fuse) {
   // This function currently gets compiled only if we have a valid cutlass moe
   // mm to run it for.
   int32_t version_num = get_sm_version_num();
 #if (defined ENABLE_CUTLASS_MOE_SM90 && ENABLE_CUTLASS_MOE_SM90) || \
     (defined ENABLE_CUTLASS_MOE_SM100 && ENABLE_CUTLASS_MOE_SM100)
-  get_cutlass_moe_mm_data_caller(topk_ids, expert_offsets, problem_sizes1,
-                                 problem_sizes2, input_permutation,
-                                 output_permutation, num_experts, n, k,
-                                 blockscale_offsets, force_no_swap);
+  get_cutlass_moe_mm_data_caller(
+      topk_ids, expert_offsets, problem_sizes1, problem_sizes2,
+      input_permutation, output_permutation, num_experts, n, k,
+      blockscale_offsets, force_no_swap, should_fuse);
   return;
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(
