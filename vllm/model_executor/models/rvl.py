@@ -94,8 +94,7 @@ class RForConditionalGeneration(LlavaOnevisionForConditionalGeneration):
             "model.multi_modal_projector.": "multi_modal_projector.",
             "model.image_newline": "image_newline",
             "lm_head.": "language_model.lm_head.",
-        }
-    )
+        })
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
