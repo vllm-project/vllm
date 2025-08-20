@@ -902,10 +902,13 @@ class Scheduler(SchedulerInterface):
                         finished_requests=finished_set)
             finished_req_ids.clear()
 
-        if engine_core_outputs:
+        if (stats := self.make_stats(spec_decoding_stats)) is not None:
             # Return stats to only one of the front-ends.
-            next(iter(engine_core_outputs.values())).scheduler_stats = (
-                self.make_stats(spec_decoding_stats))
+            if (eco := next(iter(engine_core_outputs.values()), None)) is None:
+                # We must return the stats even if there are no request
+                # outputs this step.
+                engine_core_outputs[0] = eco = EngineCoreOutputs()
+            eco.scheduler_stats = stats
 
         return engine_core_outputs
 
