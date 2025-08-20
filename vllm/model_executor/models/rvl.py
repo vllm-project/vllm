@@ -1,20 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import math
 from collections.abc import Mapping
-from typing import Optional
 import torch
 import torch.nn as nn
 from transformers.activations import GELUActivation
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.parse import ImageSize
 from vllm.multimodal.inputs import MultiModalDataDict
 from .utils import WeightsMapper
 from .llava_onevision import LlavaOnevisionForConditionalGeneration
 from .llava_next import LlavaNextProcessingInfo, LlavaDummyInputsBuilder, LlavaNextMultiModalProcessor
-
 
 class RVLProcessingInfo(LlavaNextProcessingInfo):
 
@@ -92,4 +88,3 @@ class RForConditionalGeneration(LlavaOnevisionForConditionalGeneration):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_config
         self.multi_modal_projector = RVLMultiModalProjector(config)
- 
