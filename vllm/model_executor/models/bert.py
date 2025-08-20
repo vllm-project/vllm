@@ -99,10 +99,8 @@ class BertPooler(Pooler):
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
-        num_scheduled_tokens: torch.Tensor,
     ) -> Union[torch.Tensor, list[torch.Tensor]]:
-        pooled_output = self.pooling(hidden_states, pooling_metadata,
-                                     num_scheduled_tokens)
+        pooled_output = self.pooling(hidden_states, pooling_metadata)
 
         if isinstance(pooled_output, list):
             pooled_output = [self._head(output) for output in pooled_output]

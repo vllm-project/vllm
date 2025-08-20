@@ -149,16 +149,14 @@ class PoolingModelRunner(
         if not self.is_driver_worker:
             return []
 
-        num_scheduled_tokens = torch.tensor(
-            model_input.pooling_metadata.prompt_lens,
-            device="cpu",
-            dtype=torch.long,
-        )
+        pooling_metadata = model_input.pooling_metadata
+        pooling_metadata.build_pooling_cursor(
+            num_scheduled_tokens=model_input.pooling_metadata.prompt_lens,
+            device=hidden_or_intermediate_states.device)
 
         return [
             self.model.pooler(hidden_states=hidden_or_intermediate_states,
-                              pooling_metadata=model_input.pooling_metadata,
-                              num_scheduled_tokens=num_scheduled_tokens)
+                              pooling_metadata=model_input.pooling_metadata)
         ]
 
     def make_model_input_from_broadcasted_tensor_dict(

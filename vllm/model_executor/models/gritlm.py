@@ -172,7 +172,6 @@ class GritLMMeanPool(nn.Module):
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
-        num_scheduled_tokens: list[int],
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         prompt_lens = get_prompt_lens(hidden_states, pooling_metadata)
         instr_lens = torch.tensor(
@@ -210,10 +209,8 @@ class GritLMPooler(Pooler):
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-        num_scheduled_tokens: torch.Tensor,
     ) -> PoolerOutput:
-        pooled_data = self.pooling(hidden_states, pooling_metadata,
-                                   num_scheduled_tokens)
+        pooled_data = self.pooling(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
         return build_output(pooled_data)
 
