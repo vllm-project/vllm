@@ -58,22 +58,16 @@ class PoolingMetadata:
 
 def build_pooling_cursor(num_scheduled_tokens: list[int],
                          prompt_lens: list[int], device: torch.device):
-    first = []
-    last = []
-    index = []
-
-    offset = 0
-    for i, n in enumerate(num_scheduled_tokens):
-        index.append(i)
-        first.append(offset)
-        last.append(offset + n - 1)
-        offset += n
-
-    first = torch.tensor(first, device="cpu").to(device, non_blocking=True)
-    last = torch.tensor(last, device="cpu").to(device, non_blocking=True)
+    n_seq = len(num_scheduled_tokens)
+    index = list(range(n_seq))
     prompt_lens = torch.tensor(prompt_lens, device="cpu")
     num_scheduled_tokens = torch.tensor(num_scheduled_tokens, device="cpu")
-
+    cumsum = torch.zeros(n_seq + 1, dtype=torch.int64, device="cpu")
+    torch.cumsum(num_scheduled_tokens, dim=0, out=cumsum[1:])
+    first = torch.tensor(cumsum[:n_seq], device="cpu").to(device,
+                                                          non_blocking=True)
+    last = torch.tensor(cumsum[1:] - 1, device="cpu").to(device,
+                                                         non_blocking=True)
     return PoolingCursor(index=index,
                          first=first,
                          last=last,

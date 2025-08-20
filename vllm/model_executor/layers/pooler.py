@@ -240,7 +240,7 @@ class PoolingMethod(nn.Module, ABC):
 
     def forward(
         self,
-        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+        hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         pooling_cursor = pooling_metadata.pooling_cursor

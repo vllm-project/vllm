@@ -150,6 +150,8 @@ class PoolingModelRunner(
             return []
 
         pooling_metadata = model_input.pooling_metadata
+        assert pooling_metadata is not None
+
         pooling_metadata.build_pooling_cursor(
             num_scheduled_tokens=model_input.pooling_metadata.prompt_lens,
             device=hidden_or_intermediate_states.device)
