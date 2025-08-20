@@ -13,7 +13,6 @@ from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
 from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
@@ -228,7 +227,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.q_data_type = self.kv_cache_dtype
         else:
             self.kv_cache_dtype = self.kv_cache_spec.dtype
-        
+
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
         # Global hyperparameters shared by all attention layers
@@ -1004,8 +1003,8 @@ def fast_plan_decode(
             False,  # causal
         )
     except Exception as e:
-            raise RuntimeError(f"Error in tensor core plan: {e}") from e
-    
+        raise RuntimeError(f"Error in tensor core plan: {e}") from e
+
     self._pos_encoding_mode = pos_encoding_mode
     self._window_left = window_left
     self._logits_soft_cap = logits_soft_cap
