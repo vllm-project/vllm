@@ -21,6 +21,7 @@ from vllm.utils import direct_register_custom_op
 from .vllm_inductor_pass import VllmInductorPass
 
 FP8_DTYPE = current_platform.fp8_dtype()
+SUPPORTS_FP8 = current_platform.supports_fp8()
 
 if find_spec("flashinfer"):
     try:
@@ -167,8 +168,9 @@ class ScaledMMReduceScatterPattern(BasePattern):
 
             return gemm_rs
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
+        if SUPPORTS_FP8:
+            pm.register_replacement(pattern, replacement, self.get_inputs(),
+                                    pm.fwd_only, pm_pass)
 
 
 class AllGatherScaledMMPattern(BasePattern):
@@ -224,8 +226,9 @@ class AllGatherScaledMMPattern(BasePattern):
             )
             return mm_outputs
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
+        if SUPPORTS_FP8:
+            pm.register_replacement(pattern, replacement, self.get_inputs(),
+                                    pm.fwd_only, pm_pass)
 
 
 class CutlassScaledMMReduceScatterPattern(BasePattern):
@@ -279,8 +282,9 @@ class CutlassScaledMMReduceScatterPattern(BasePattern):
 
             return gemm_rs
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
+        if SUPPORTS_FP8:
+            pm.register_replacement(pattern, replacement, self.get_inputs(),
+                                    pm.fwd_only, pm_pass)
 
 
 class AllGatherCutlassScaledMMPattern(BasePattern):
@@ -342,8 +346,9 @@ class AllGatherCutlassScaledMMPattern(BasePattern):
             )
             return mm_outputs
 
-        pm.register_replacement(pattern, replacement, self.get_inputs(),
-                                pm.fwd_only, pm_pass)
+        if SUPPORTS_FP8:
+            pm.register_replacement(pattern, replacement, self.get_inputs(),
+                                    pm.fwd_only, pm_pass)
 
 
 class AsyncTPPass(VllmInductorPass):
