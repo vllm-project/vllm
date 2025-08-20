@@ -3,8 +3,8 @@
 
 import dataclasses
 import gc
-import threading
 import itertools
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Iterator
@@ -32,8 +32,10 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
-from vllm.forward_context import (BatchDescriptor, DPMetadata, create_forward_context,
-                                  override_forward_context, set_forward_context)
+from vllm.forward_context import (BatchDescriptor, DPMetadata,
+                                  create_forward_context,
+                                  override_forward_context,
+                                  set_forward_context)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -60,8 +62,7 @@ from vllm.v1.attention.backends.mamba_selectors import get_mamba_attn_backend
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport, AttentionMetadataBuilder, CommonAttentionMetadata,
     UbatchSlice, make_kv_sharing_fast_prefill_attention_metadata,
-    make_local_attention_virtual_batches, split_attn_metadata, 
-    reorder_batch_to_split_decodes_and_prefills)
+    reorder_batch_to_split_decodes_and_prefills, split_attn_metadata)
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
@@ -258,7 +259,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # The batch sizes in the config are in descending order.
         self.cudagraph_batch_sizes = list(
             reversed(self.compilation_config.cudagraph_capture_sizes))
-        
+
         self.cudagraphs = {}  # type: ignore
 
         # Cache the device properties.
@@ -771,8 +772,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self, scheduler_output: "SchedulerOutput"
     ) -> tuple[PerLayerAttnMetadata, torch.Tensor,
                Optional[SpecDecodeMetadata], np.ndarray,
-               Optional[CommonAttentionMetadata], int, Optional[UBatchSlices], int,
-               Optional[torch.Tensor]]:
+               Optional[CommonAttentionMetadata], int, Optional[UBatchSlices],
+               int, Optional[torch.Tensor]]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
@@ -993,14 +994,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         builder,
                     )
 
-
                 if ubatch_slices is not None:
                     common_attn_metadata_list = split_attn_metadata(
                         ubatch_slices, common_attn_metadata)
                     for ubid, common_attn_metadata in enumerate(
                             common_attn_metadata_list):
                         assert common_attn_metadata.max_query_len == 1
-                        attn_metadata_i = (attn_group.get_metadata_builder(ubatch_id=ubid).build(
+                        attn_metadata_i = (attn_group.get_metadata_builder(
+                            ubatch_id=ubid).build(
                                 common_prefix_len=common_prefix_len,
                                 common_attn_metadata=common_attn_metadata))
                         for layer_name in kv_cache_group_spec.layer_names:
@@ -1031,8 +1032,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                     for layer_name in attn_group.layer_names:
                         if (self.cache_config.kv_sharing_fast_prefill
-                                and layer_name
-                                in self.kv_sharing_fast_prefill_eligible_layers):
+                                and layer_name in
+                                self.kv_sharing_fast_prefill_eligible_layers):
                             attn_metadata[layer_name] = fast_prefill_metadata
                             continue
                         attn_metadata[layer_name] = attn_metadata_i
@@ -1043,8 +1044,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return (attn_metadata, logits_indices, spec_decode_metadata,
                 num_scheduled_tokens, spec_decode_common_attn_metadata,
-                max_num_scheduled_tokens, ubatch_slices,
-                num_pad_tokens, num_tokens_after_padding)
+                max_num_scheduled_tokens, ubatch_slices, num_pad_tokens,
+                num_tokens_after_padding)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1466,10 +1467,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             cumulative_index += 1 + num_spec_tokens
         grammar_bitmask = sorted_bitmask
 
-        # If the grammar bitmask and the logits have the same shape
+        # If the length of out indices and the logits have the same shape
         # we don't need to pass indices to the kernel,
         # since the bitmask is already aligned with the logits.
-        skip_out_indices = grammar_bitmask.shape[0] == logits.shape[0]
+        skip_out_indices = len(out_indices) == logits.shape[0]
 
         # Serialization of np.ndarray is much more efficient than a tensor,
         # so we receive it in that format.
@@ -1646,7 +1647,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     # This doesn't actually pad the ubatch slices. It just shifts the
     # split point to the correct value so that padding can be applied
-    # to the second ubatch in pad_out_ubatch_second_stage. Should be 
+    # to the second ubatch in pad_out_ubatch_second_stage. Should be
     # called after ubatch slicing but before attention meta data creation
     def pad_out_ubatch_first_stage(self, ubatch_slices: UBatchSlices,
                                    num_pad_tokens: int):
@@ -1686,7 +1687,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # update this to a one token batch and return)
 
         if self.supports_mm_inputs:
-            assert False
+            raise AssertionError()
             input_ids = None
             inputs_embeds = self.inputs_embeds[tokens_slice]
             # model_kwargs = {
@@ -1696,7 +1697,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             input_ids = self.input_ids[tokens_slice]
             inputs_embeds = None
-            model_kwargs = self._init_model_kwargs(tokens_slice.stop - tokens_slice.start)
+            model_kwargs = self._init_model_kwargs(tokens_slice.stop -
+                                                   tokens_slice.start)
 
         if self.uses_mrope:
             positions = self.mrope_positions[:, tokens_slice]
@@ -1708,7 +1710,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             raise RuntimeError("It is not first rank")
 
-        return input_ids, positions, inputs_embeds, intermediate_tensors, model_kwargs
+        return (input_ids, positions, inputs_embeds, intermediate_tensors,
+                model_kwargs)
 
     def _get_model_inputs(self, tokens_slice: slice,
                           scheduler_output: Optional["SchedulerOutput"]):
@@ -1725,7 +1728,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mm_embeds = []
 
         if self.supports_mm_inputs and get_pp_group().is_first_rank:
-            assert False # TODO Sage fix this 
+            raise AssertionError()  # TODO Sage fix this
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
@@ -1746,7 +1749,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # then the embedding layer is not included in the CUDA graph.
             input_ids = self.input_ids[tokens_slice]
             inputs_embeds = None
-            model_kwargs = self._init_model_kwargs(tokens_slice.stop - tokens_slice.start)
+            model_kwargs = self._init_model_kwargs(tokens_slice.stop -
+                                                   tokens_slice.start)
         if self.uses_mrope:
             positions = self.mrope_positions[:, tokens_slice]
         else:
@@ -1757,7 +1761,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                 tokens_slice, intermediate_tensors, True)
-        return input_ids, positions, inputs_embeds, intermediate_tensors, model_kwargs
+        return (input_ids, positions, inputs_embeds, intermediate_tensors,
+                model_kwargs)
 
     def model_inputs(self, tokens_slice: slice,
                      scheduler_output: Optional["SchedulerOutput"],
@@ -1772,7 +1777,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _make_ubatch_metadata(self, ubatch_slices, attn_metadata,
                               compute_stream, num_tokens_across_dp,
                               batch_descriptor, cudagraph_runtime_mode,
-                              scheduler_output, is_dummy_run) -> list[UbatchMetadata]:
+                              scheduler_output,
+                              is_dummy_run) -> list[UbatchMetadata]:
 
         # Create one forward context per ubatch
         forward_contexts = []
@@ -1798,8 +1804,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         ubatch_metadata: list[UbatchMetadata] = []
         for i, ubatch_slice in enumerate(ubatch_slices):
-            input_ids, positions, inputs_embeds, intermediate_tensors, model_kwargs = \
-                self.model_inputs(
+            input_ids, positions, inputs_embeds, intermediate_tensors, \
+                model_kwargs = self.model_inputs(
                     ubatch_slice.token_slice, scheduler_output, is_dummy_run)
             ubatch_metadata.append(
                 UbatchMetadata(context=ubatch_ctxs[i],
@@ -1936,47 +1942,48 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 compute_stream=compute_stream,
                 num_tokens_across_dp=num_tokens_across_dp,
                 batch_descriptor=batch_descriptor,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE, # Disable picewise compilation
+                cudagraph_runtime_mode=CUDAGraphMode.
+                NONE,  # Disable picewise compilation
                 scheduler_output=scheduler_output,
                 is_dummy_run=is_dummy_run)
             if num_scheduled_tokens not in self.cudagraphs \
                 and cudagraph_runtime_mode is CUDAGraphMode.FULL:
                 if is_global_first_rank():
-                    logger.debug(f"CAPTURING {num_scheduled_tokens}")
+                    logger.debug("CAPTURING %s", num_scheduled_tokens)
                 return self._capture_ubatches(ubatch_metadata, self.model)
             elif num_scheduled_tokens in self.cudagraphs \
                 and cudagraph_runtime_mode is CUDAGraphMode.FULL:
                 cudagraph_metadata = self.cudagraphs[num_scheduled_tokens]
                 if is_global_first_rank():
-                    logger.debug(f"UBATCH REPLAY {num_scheduled_tokens}")
+                    logger.debug("UBATCH REPLAY %s", num_scheduled_tokens)
                 cudagraph_metadata.cudagraph.replay()
                 return cudagraph_metadata.outputs
             else:
                 if is_global_first_rank():
-                    logger.debug(f"RUNNING NORMALLY {num_scheduled_tokens}")
+                    logger.debug("RUNNING NORMALLY %s", num_scheduled_tokens)
                 return self._run_ubatches(ubatch_metadata, self.model)
         # run normal batch
         else:
-            input_ids, positions, inputs_embeds, intermediate_tensors, model_kwargs = \
-                self.model_inputs(slice(0, num_scheduled_tokens),
-                                       scheduler_output, is_dummy_run)
+            input_ids, positions, inputs_embeds, intermediate_tensors, \
+                model_kwargs = self.model_inputs(slice(0, num_scheduled_tokens),
+                                                 scheduler_output,
+                                                 is_dummy_run)
             if is_global_first_rank():
-                logger.debug(f"RUNNING FULL BATCH {num_scheduled_tokens}")
+                logger.debug("RUNNING FULL BATCH %s", num_scheduled_tokens)
             if self.parallel_config.enable_microbatching:
                 cudagraph_runtime_mode = CUDAGraphMode.NONE
-            with set_forward_context(attn_metadata,
-                                     vllm_config=self.vllm_config,
-                                     num_tokens=num_scheduled_tokens or 1,
-                                     num_tokens_across_dp=num_tokens_across_dp,
-                                     batch_descriptor=batch_descriptor,
-                                     cudagraph_runtime_mode=cudagraph_runtime_mode):
-                return self.model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                    **model_kwargs
-                )
+            with set_forward_context(
+                    attn_metadata,
+                    vllm_config=self.vllm_config,
+                    num_tokens=num_scheduled_tokens or 1,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    batch_descriptor=batch_descriptor,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode):
+                return self.model(input_ids=input_ids,
+                                  positions=positions,
+                                  intermediate_tensors=intermediate_tensors,
+                                  inputs_embeds=inputs_embeds,
+                                  **model_kwargs)
 
     def _pool(
         self,
@@ -2037,8 +2044,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                 self.vllm_config)
 
         # Prepare the decoder inputs.
-        (attn_metadata, logits_indices, spec_decode_metadata, 
-         num_scheduled_tokens_np, spec_decode_common_attn_metadata, 
+        (attn_metadata, logits_indices, spec_decode_metadata,
+         num_scheduled_tokens_np, spec_decode_common_attn_metadata,
          max_query_len, ubatch_slices, num_pad_tokens,
          num_tokens_after_padding) = self._prepare_inputs(scheduler_output)
 
@@ -2082,8 +2089,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ubatch_slices=ubatch_slices,
             num_tokens_across_dp=num_tokens_after_padding,
             batch_descriptor=batch_descriptor,
-            cudagraph_runtime_mode=cudagraph_runtime_mode
-        )
+            cudagraph_runtime_mode=cudagraph_runtime_mode)
         # self.maybe_wait_for_kv_save()
         # finished_sending, finished_recving = (
         #     self.get_finished_kv_transfers(scheduler_output))
@@ -2674,7 +2680,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     high=self.model_config.get_vocab_size(),
                     dtype=input_ids.dtype)
 
-            logger.debug("Randomizing dummy data for DP Rank")
+            logger.debug_once("Randomizing dummy data for DP Rank")
             input_ids.copy_(rand_input_ids()[:input_ids.size(0)],
                             non_blocking=True)
             yield
@@ -2730,7 +2736,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             uniform_decode: If True, the batch is a uniform decode batch.
             skip_eplb: If True, skip EPLB state update.
             is_profile: If True, this is a profile run.
-        """        
+        """
         ubatch_enabled = self.parallel_config.enable_microbatching
         should_ubatch = False
         if ubatch_enabled:
@@ -2862,8 +2868,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                .build_for_cudagraph_capture(common_attn_metadata))
                             for layer_name in kv_cache_group_spec.layer_names:
                                 assert type(attn_metadata) is list
-                                attn_metadata[ubid][layer_name] = attn_metadata_i
+                                attn_metadata[ubid][
+                                    layer_name] = attn_metadata_i
                     else:
+                        assert isinstance(attn_metadata, dict)
                         attn_metadata_i = attn_group.get_metadata_builder()\
                             .build_for_cudagraph_capture(common_attn_metadata)
                         for layer_name in kv_cache_group_spec.layer_names:
@@ -3290,9 +3298,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.vllm_config,
                     self.device,
                 )
-                attn_group = AttentionGroup(attn_backend,
-                                            [attn_metadata_builder_i, attn_metadata_builder_2],
-                                            layer_names)
+                attn_group = AttentionGroup(
+                    attn_backend,
+                    [attn_metadata_builder_i, attn_metadata_builder_2],
+                    layer_names)
                 attn_groups.append(attn_group)
             return attn_groups
 

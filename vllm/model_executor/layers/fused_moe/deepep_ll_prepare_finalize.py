@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
 import deep_ep
 import torch
@@ -82,7 +82,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         a1_scale: Optional[torch.Tensor],
         a2_scale: Optional[torch.Tensor],
         a1_dtype: torch.dtype,
-        quant_dtype: Optional[torch.dtype],
+        quant_dtype: Union[torch.dtype, str, None],
         per_act_token_quant: bool,
         block_shape: Optional[list[int]],
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -116,12 +116,16 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return x, x_scales
 
     def prepare(
-        self, a1: torch.Tensor, a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor], topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor, num_experts: int,
-        expert_map: Optional[torch.Tensor], apply_router_weight_on_input: bool,
+        self,
+        a1: torch.Tensor,
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-        extra_prepare_args: Optional[dict[str, Any]]
     ) -> tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
                Optional[torch.Tensor]]:
@@ -129,8 +133,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         hidden_size = a1.size(1)
         ubatch_ctx = get_current_ubatch_context()
         a2a_idx = ubatch_ctx.id if ubatch_ctx is not None else 0
-        do_recv_hook = True if ubatch_ctx is not None and \
-                       ubatch_ctx.enable_async_comms else False
+        do_recv_hook = bool(ubatch_ctx is not None
+                            and ubatch_ctx.enable_async_comms)
 
         if self.use_fp8_dispatch:
             assert hidden_size % 128 == 0, \
@@ -160,7 +164,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                                                 async_finish=False,
                                                 return_recv_hook=do_recv_hook)
         self.handles[a2a_idx] = handle
-        yield_and_switch_from_comm_to_compute(schedule="default", recv_hook=recv_hook)
+        yield_and_switch_from_comm_to_compute(schedule="default",
+                                              recv_hook=recv_hook)
 
         expert_x, expert_x_scale = self._do_quant(
             expert_x, a1_scale, a2_scale, a1.dtype, quant_config.quant_dtype,
@@ -171,19 +176,23 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         return (expert_x, expert_x_scale, expert_tokens_meta, None, None)
 
-    def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
-                 topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 apply_router_weight_on_input: bool,
-                 weight_and_reduce_impl: mk.TopKWeightAndReduce,
-                 extra_finalize_args: Optional[dict[str, Any]]) -> None:
+    def finalize(
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+    ) -> None:
         assert isinstance(
             weight_and_reduce_impl, TopKWeightAndReduceDelegate
         ), ("Weight application and reduction happens in the combine kernel.")
         ubatch_ctx = get_current_ubatch_context()
         a2a_idx = ubatch_ctx.id if ubatch_ctx is not None else 0
         handle = self.handles[a2a_idx]
-        do_recv_hook = True if ubatch_ctx is not None and \
-                       ubatch_ctx.enable_async_comms else False
+        do_recv_hook = bool(ubatch_ctx is not None
+                            and ubatch_ctx.enable_async_comms)
         assert handle is not None
 
         combine_topk_weights = topk_weights
@@ -193,12 +202,14 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # TODO (varun) : Enable zero copy mode
         yield_and_switch_from_compute_to_comm(schedule="default")
-        _, _, recv_hook = self.buffers[a2a_idx].low_latency_combine(fused_expert_output,
-                                                      topk_ids,
-                                                      combine_topk_weights,
-                                                      handle,
-                                                      async_finish=False,
-                                                      zero_copy=False,
-                                                      return_recv_hook=do_recv_hook,
-                                                      out=output)
-        yield_and_switch_from_comm_to_compute(schedule="default", recv_hook=recv_hook)
+        _, _, recv_hook = self.buffers[a2a_idx].low_latency_combine(
+            fused_expert_output,
+            topk_ids,
+            combine_topk_weights,
+            handle,
+            async_finish=False,
+            zero_copy=False,
+            return_recv_hook=do_recv_hook,
+            out=output)
+        yield_and_switch_from_comm_to_compute(schedule="default",
+                                              recv_hook=recv_hook)
