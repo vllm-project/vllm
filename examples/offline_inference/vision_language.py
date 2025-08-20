@@ -1438,6 +1438,7 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
 
 # R-4B
 def run_r_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
     model_name = "YannQi/R-4B"
 
     prompts = [
