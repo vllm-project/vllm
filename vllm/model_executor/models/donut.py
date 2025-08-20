@@ -344,6 +344,13 @@ class DonutForConditionalGeneration(nn.Module, SupportsMultiModal,
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings,
+    ) -> torch.Tensor:
+        return _flatten_embeddings(multimodal_embeddings)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -370,7 +377,8 @@ class DonutForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = None
         if encoder_input_ids.numel() > 0:
             vision_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = _flatten_embeddings(vision_embeddings)
+            inputs_embeds = self.get_input_embeddings(encoder_input_ids,
+                                                      vision_embeddings)
 
         hidden_states = self.decoder(input_ids,
                                      positions,
