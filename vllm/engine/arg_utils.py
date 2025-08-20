@@ -15,6 +15,7 @@ from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
                     Literal, Optional, Type, TypeVar, Union, cast, get_args,
                     get_origin)
 
+import huggingface_hub
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
@@ -39,7 +40,7 @@ from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
-from vllm.transformers_utils.config import is_interleaved
+from vllm.transformers_utils.config import get_model_path, is_interleaved
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
@@ -457,6 +458,13 @@ class EngineArgs:
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
+        # when use hf offline,replace model id to local model path
+        if huggingface_hub.constants.HF_HUB_OFFLINE:
+            model_id = self.model
+            self.model = get_model_path(self.model, self.revision)
+            logger.info(
+                "HF_HUB_OFFLINE is True, replace model_id [%s] " \
+                "to model_path [%s]",model_id, self.model)
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
