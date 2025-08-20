@@ -102,7 +102,7 @@ def _test_processing_correctness(
         partial(random_video,
                 rng,
                 min_frames=2,
-                max_frames=8,
+                max_frames=16,
                 min_wh=128,
                 max_wh=256),
         "audio":
