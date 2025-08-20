@@ -1098,6 +1098,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     expert_map=expert_map,
                     apply_router_weight_on_input=apply_router_weight_on_input,
                 )
+        # self.fused_experts is set in init_prepare_finalize,
+        # do not delete this branch
         elif self.fused_experts is not None:
             return self.fused_experts(
                 hidden_states=x,
