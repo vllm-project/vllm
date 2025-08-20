@@ -24,12 +24,11 @@ class PoolingMetadata:
     """
 
     def __init__(
-        self,
-        seq_groups: list[tuple[list[int], PoolingParams]],
-        seq_data: dict[int, Any],  # Specific data related to sequences
-        prompt_lens: list[int],
-        pooling_cursor:Optional[PoolingCursor] =None
-    ) -> None:
+            self,
+            seq_groups: list[tuple[list[int], PoolingParams]],
+            seq_data: dict[int, Any],  # Specific data related to sequences
+            prompt_lens: list[int],
+            pooling_cursor: Optional[PoolingCursor] = None) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
         self.prompt_lens = prompt_lens
@@ -46,12 +45,15 @@ class PoolingMetadata:
             seq_groups=self.seq_groups[indices],
             seq_data=dict(list(self.seq_data.items())[indices]),
             prompt_lens=self.prompt_lens[indices],
-            pooling_cursor=None if self.pooling_cursor is None else
-            self.pooling_cursor[indices],
+            pooling_cursor=None
+            if self.pooling_cursor is None else self.pooling_cursor[indices],
         )
 
-    def build_pooling_cursor(self, num_scheduled_tokens: list[int], device: torch.device):
-        self.pooling_cursor = build_pooling_cursor(num_scheduled_tokens, self.prompt_lens, device=device)
+    def build_pooling_cursor(self, num_scheduled_tokens: list[int],
+                             device: torch.device):
+        self.pooling_cursor = build_pooling_cursor(num_scheduled_tokens,
+                                                   self.prompt_lens,
+                                                   device=device)
 
 
 @dataclass
