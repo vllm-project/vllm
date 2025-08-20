@@ -16,7 +16,6 @@ from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
-from .kimi_audio import KimiAudioConfig, WhisperVQConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
 from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
@@ -29,6 +28,8 @@ from vllm.transformers_utils.configs.step3_vl import (Step3TextConfig,
                                                       Step3VisionEncoderConfig,
                                                       Step3VLConfig)
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
+
+from .kimi_audio import KimiAudioConfig, WhisperVQConfig
 
 __all__ = [
     "ChatGLMConfig",

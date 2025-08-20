@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://huggingface.co/moonshotai/Kimi-Audio-7B-Instruct/blob/main/configuration_moonshot_kimia.py
-from transformers.models.whisper.configuration_whisper import WhisperConfig
 from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
+from transformers.models.whisper.configuration_whisper import WhisperConfig
 
 
 class KimiAudioConfig(Qwen2Config):
+
     def __init__(
         self,
         vocab_size=163840,
@@ -56,8 +57,7 @@ class KimiAudioConfig(Qwen2Config):
         self.kimia_mimo_audiodelaytokens = kimia_mimo_audiodelaytokens
         # vocab
         self.kimia_mimo_transformer_from_layer_index = (
-            kimia_mimo_transformer_from_layer_index
-        )
+            kimia_mimo_transformer_from_layer_index)
         self.kimia_audio_output_vocab = kimia_audio_output_vocab
         self.kimia_text_output_vocab = kimia_text_output_vocab
         self.num_audio_special_tokens = num_audio_special_tokens
@@ -69,10 +69,10 @@ class KimiAudioConfig(Qwen2Config):
         self.kimia_media_begin = kimia_media_begin
         self.kimia_media_end = kimia_media_end
 
-        
+
 class WhisperVQConfig(WhisperConfig):
     model_type = "whisper_vq"
-    
+
     def __init__(self,
                  pooling_kernel_size=None,
                  pooling_type="max",
