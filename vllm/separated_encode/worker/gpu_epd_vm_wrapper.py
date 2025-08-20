@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class DisaggVModelGPURunnerWrapper(GPUModelRunner):
+class DisaggEncodeGPURunnerWrapper(GPUModelRunner):
     """
     GPU model runner wrapper for disaggregated Vision/Encoder processing.
     
@@ -76,6 +76,11 @@ class DisaggVModelGPURunnerWrapper(GPUModelRunner):
         """
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
+        
+        for (req_id, input_id) in scheduler_output.free_encoder_input_ids:
+            self.encoder_cache[req_id].pop(input_id)
+            if not self.encoder_cache[req_id]:
+                self.encoder_cache.pop(req_id)
 
         for new_req_data in scheduler_output.scheduled_new_reqs:
             self.requests[new_req_data.req_id] = CachedRequestState(
@@ -117,11 +122,8 @@ class DisaggVModelGPURunnerWrapper(GPUModelRunner):
             for input_id in mm_input_ids:
                 encoder_output = self.encoder_cache[req_id][input_id]\
                     .to("cpu", dtype = torch.float32).numpy()
-                self.encoder_cache[req_id].pop(input_id)
                 self.ec_connector.add_encoder_cache(req_id, input_id,
                                                     encoder_output)
-            if not self.encoder_cache[req_id]:
-                self.encoder_cache.pop(req_id)
 
         transfered_ids = self.ec_connector.get_transfered_ids()
         # logger.info(f"Arif: Transfered ids: {transfered_ids}")

@@ -19,7 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.separated_encode.sched.encoder_cache_preallocator import (
-    SyncEncoderCachePreallocator, AsyncEncoderCachePreallocator
+    SyncEncoderCachePreallocator
 )
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
@@ -179,8 +179,7 @@ class Scheduler(SchedulerInterface):
         ):
             # Set max_num_encoder_input_tokens to avoid
             # encoder execution on PD or P instance.
-            self.ec_preallocator: Union[
-                SyncEncoderCachePreallocator, AsyncEncoderCachePreallocator]
+            self.ec_preallocator: SyncEncoderCachePreallocator
             self.max_num_encoder_input_tokens = 0
             self.separated_encode = True            
             self.ec_preallocator = SyncEncoderCachePreallocator(

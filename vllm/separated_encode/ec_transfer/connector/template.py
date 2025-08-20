@@ -74,15 +74,24 @@ class ECConnectorTemplate(ABC):
         self.send_executors = ThreadPoolExecutor(
             max_workers=self.epd_disagg_config.connector_workers_num
         )
+
+        # Sanity check
+        assert self.epd_disagg_config.connector_workers_num > 0
+
+        # Arif: max_workers num must match with limiting semaphore value
+        # otherwise receive busy loop will infinitely create tasks for
+        # the self.recv_executors  
         self.recv_executors = ThreadPoolExecutor(
-            max_workers=self.epd_disagg_config.connector_workers_num
+            max_workers=self.epd_disagg_config.connector_workers_num + 1
         )
         self.send_worker = threading.Thread(target=self._send_event_loop)
         self.recv_worker = threading.Thread(target=self._recv_event_loop)
         self.target_recv_callback = callback_mapping.get(
             (self.inter_instance_type, self.intra_instance_type))
+        
+        
         self.limiting_semaphore = threading.Semaphore(
-            self.epd_disagg_config.connector_workers_num
+            self.epd_disagg_config.connector_workers_num + 1
         )
 
         # Used on model runner of encode instance:

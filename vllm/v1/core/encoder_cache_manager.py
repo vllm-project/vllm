@@ -278,6 +278,7 @@ class EncoderCacheManager:
     def deallocate(self, req_id: str, input_id: int, encoder_cache_size: int):
         self.num_free_slots += encoder_cache_size
         self.cached[req_id].discard(input_id)
+        self.freed.append((req_id, input_id))
         if len(self.cached[req_id]) == 0:
             del self.cached[req_id]
 

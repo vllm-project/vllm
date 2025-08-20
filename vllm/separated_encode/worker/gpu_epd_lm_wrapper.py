@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-class DisaggLModelGPURunnerWrapper(GPUModelRunner):
+class DisaggPrefillDecodeGPURunnerWrapper(GPUModelRunner):
     """
     GPU model runner wrapper for disaggregated Language Model processing.
     

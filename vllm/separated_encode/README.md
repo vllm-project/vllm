@@ -68,9 +68,9 @@ The separated encode overall process in 1E1PD with proxy scenario:
 sequenceDiagram
     participant P as Proxy
     participant ES as Encode Scheduler
-    participant EVW as DisaggVModelGPURunnerWrapper
+    participant EVW as DisaggEncodeGPURunnerWrapper
     participant Redis as Redis
-    participant PDW as DisaggLModelGPURunnerWrapper
+    participant PDW as DisaggPrefillDecodeGPURunnerWrapper
     participant PDS as Prefill+Decode Scheduler
 
     P->>ES: Request
@@ -184,7 +184,7 @@ As the scheduler processes tokens, it continuously updates the multimodal input 
 
 Two concrete implementations provide different allocation strategies:
 
-AsyncEncoderCachePreallocator provides asynchronous approach that immediately triggers preallocation callbacks upon receiving encoder cache metadata. This implementation maintains minimal state and always accepts encoder cache, this allows to avoid additional request state tracking and synchronous approach. 
+~~AsyncEncoderCachePreallocator provides asynchronous approach that immediately triggers preallocation callbacks upon receiving encoder cache metadata. This implementation maintains minimal state and always accepts encoder cache, this allows to avoid additional request state tracking and synchronous approach.~~ Removed temporarily.
 
 SyncEncoderCachePreallocator implements a synchronous approach with  state tracking. It tracks active requests, pending preallocation requests, waiting preallocation metadata, and ignored preallocation entries, to decide whether instance needs to accept encoder cache, or we can reject it and use data from KV cache.
 
@@ -249,7 +249,7 @@ Such an implementation with is designed to avoid redundant processing or injecti
 
 The implementation introduces specialized GPU model runner wrappers for disaggregated architecture, focusing on distinct roles for multimodal encoding and text generation. These wrappers are built on top of the GPUModelRunner for better compatibility with future changes in GPUModelRunner. As long as the v1 interface for GPU Model Runner remains unchanged, the wrappers do not require updates, wrapper simply call the original methods, instantiate the encoder cache connector, track information, and modify the model runner output with EPD-related information.
 
-#### DisaggVModelGPURunnerWrapper (Encode Instance)
+#### DisaggEncodeGPURunnerWrapper (Encode Instance)
 
 This wrapper runs on encode instances and processes multimodal inputs. It executes encoder models and sends the results to other instances through encoder cache connector.
 
@@ -257,7 +257,7 @@ The encode instance doesn't need KV cache since it only runs vision part of MLLM
 
 During execution, the wrapper executes encoding for scheduled multimodal inputs, converts outputs to numpy arrays and inserts enocder cache to encoder cache connector, also it stores. Since no text generation happens here, it returns a mostly empty ModelRunnerOutput with additional transfer status information in ModelRunnerOutput, this information is used in encoder scheduler to free the space in encoder cache manager.
 
-#### DisaggLModelGPURunnerWrapper (Prefill/(Prefill+Decode) Instance)
+#### DisaggPrefillDecodeGPURunnerWrapper (Prefill/(Prefill+Decode) Instance)
 
 This wrapper runs on prefill or (prefill+decode) instances where the Language Model is exectued. It receives encoder cache from encode instances and injects them into the normal inference pipeline.
 

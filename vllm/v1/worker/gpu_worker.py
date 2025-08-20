@@ -24,9 +24,9 @@ from vllm.model_executor import set_random_seed
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.separated_encode.worker.gpu_epd_lm_wrapper import (
-    DisaggLModelGPURunnerWrapper)
+    DisaggPrefillDecodeGPURunnerWrapper)
 from vllm.separated_encode.worker.gpu_epd_vm_wrapper import (
-    DisaggVModelGPURunnerWrapper)
+    DisaggEncodeGPURunnerWrapper)
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
@@ -207,15 +207,15 @@ class Worker(WorkerBase):
         set_random_seed(self.model_config.seed)
 
         # Construct the model runner
-        self.model_runner: Union[DisaggVModelGPURunnerWrapper, GPUModelRunner,
-                                 DisaggLModelGPURunnerWrapper]
+        self.model_runner: Union[DisaggEncodeGPURunnerWrapper, GPUModelRunner,
+                                 DisaggPrefillDecodeGPURunnerWrapper]
         model_runner_class = GPUModelRunner
         if self.separated_encode:
             if self.instance_type == "encode":
-                model_runner_class = DisaggVModelGPURunnerWrapper
+                model_runner_class = DisaggEncodeGPURunnerWrapper
             elif (self.instance_type == "prefill+decode"
                   or self.instance_type == "prefill"):
-                model_runner_class = DisaggLModelGPURunnerWrapper
+                model_runner_class = DisaggPrefillDecodeGPURunnerWrapper
         self.model_runner = model_runner_class(self.vllm_config, self.device)
 
         if self.rank == 0:
