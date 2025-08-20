@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     NixlConnectorWorker)
 from vllm.forward_context import ForwardContext
 from vllm.sampling_params import SamplingParams
+from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
 from .utils import create_request, create_scheduler, create_vllm_config
 
@@ -227,7 +228,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
             NixlAgentMetadata(
                 engine_id=self.REMOTE_ENGINE_ID,
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
-                kv_caches_base_addr={0},
+                kv_caches_base_addr=[0],
                 num_blocks=1,
                 block_len=self.block_len,
                 attn_backend_name=self.backend_name,
@@ -457,7 +458,7 @@ class TestNixlHandshake:
             meta = NixlAgentMetadata(
                 engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
                 agent_metadata=FakeNixlWrapper.AGENT_METADATA,
-                kv_caches_base_addr={0},
+                kv_caches_base_addr=[0],
                 num_blocks=1,
                 block_len=worker.block_len,
                 attn_backend_name=worker.backend_name,
@@ -578,23 +579,13 @@ def test_register_kv_caches(dist_init):
 
     vllm_config = create_vllm_config()
 
-    # Create test kv cache tensors
-    num_blocks = 2
-    block_size = 16
-    num_kv_heads = 4
-    head_size = 64
-    shared_tensor = torch.zeros(2,
-                                num_blocks,
-                                block_size,
-                                num_kv_heads,
-                                head_size,
-                                dtype=torch.float16)
-    unique_tensor = torch.zeros(2,
-                                num_blocks,
-                                block_size,
-                                num_kv_heads,
-                                head_size,
-                                dtype=torch.float16)
+    # Create test kv cache tensors using proper backend shape
+    kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(num_blocks=2,
+                                                              block_size=16,
+                                                              num_kv_heads=4,
+                                                              head_size=64)
+    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
     kv_caches = {
         "layer0": shared_tensor,
         "layer1": unique_tensor,
@@ -644,12 +635,12 @@ def test_register_kv_caches(dist_init):
         blocks_data, _ = mock_wrapper_instance.get_xfer_descs.call_args[0]
 
         # Validate blocks_data structure and size
-        expected_blocks_count = num_blocks * 4
+        expected_blocks_count = 8
         assert len(blocks_data) == expected_blocks_count, \
             f"Expected {expected_blocks_count} blocks, " \
             f"got {len(blocks_data)}"
 
-        expected_block_len = expected_tensor_size // num_blocks
+        expected_block_len = expected_tensor_size // 2
         for i, block_entry in enumerate(blocks_data):
             block_start_addr, block_len, tp_rank = block_entry
             assert block_len == expected_block_len, \

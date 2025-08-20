@@ -70,7 +70,7 @@ class NixlAgentMetadata(
         dict=True):
     engine_id: str
     agent_metadata: bytes
-    kv_caches_base_addr: set[int]
+    kv_caches_base_addr: list[int]
     num_blocks: int
     block_len: int
     attn_backend_name: str
@@ -483,7 +483,7 @@ class NixlConnectorWorker:
 
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         # rank will still only pull from a single remote TP worker.
-        self.kv_caches_base_addr: dict[EngineId, set[int]] = {}
+        self.kv_caches_base_addr: dict[EngineId, list[int]] = {}
 
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
@@ -705,7 +705,7 @@ class NixlConnectorWorker:
 
         caches_data = []
         # With hybrid allocator, layers can share a kv cache tensor
-        seen_base_addresses = set()
+        seen_base_addresses = []
         xfer_buffers = (self.host_xfer_buffers
                         if self.use_host_buffer else kv_caches)
 
@@ -730,7 +730,7 @@ class NixlConnectorWorker:
                 if base_addr in seen_base_addresses:
                     continue
 
-                seen_base_addresses.add(base_addr)
+                seen_base_addresses.append(base_addr)
                 curr_tensor_size_bytes = cache.numel() * cache.element_size()
 
                 if tensor_size_bytes is None:
