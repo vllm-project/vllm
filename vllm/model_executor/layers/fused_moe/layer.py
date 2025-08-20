@@ -1424,6 +1424,11 @@ class FusedMoE(CustomOp):
         self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
         self.logical_replica_count = logical_replica_count[moe_layer_idx]
 
+    def ensure_moe_quant_config(self):
+        if self.quant_method.moe_quant_config is None:
+            self.quant_method.moe_quant_config = (
+                self.quant_method.get_fused_moe_quant_config(self))
+
     @staticmethod
     def select_experts(
         hidden_states: torch.Tensor,
@@ -1614,6 +1619,8 @@ class FusedMoE(CustomOp):
         assert (
             self.batched_router_logits.size(-1) == full_router_logits.size(-1))
 
+        self.ensure_moe_quant_config()
+
         full_final_hidden_states = torch.empty_like(full_hidden_states)
 
         def process_chunk(chunk_start, chunk_end, skip_result_store=False):
@@ -1682,6 +1689,9 @@ class FusedMoE(CustomOp):
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         assert self.quant_method is not None
+
+        self.ensure_moe_quant_config()
+
         # Route to the chunked forward path using the FlashInfer Cutlass kernel
         # only when data parallelism (DP) is enabled.
         use_flashinfer_cutlass_kernels = (
