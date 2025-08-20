@@ -287,10 +287,9 @@ class DonutForConditionalGeneration(nn.Module, SupportsMultiModal,
             actual_dims = tuple(d.shape)
 
             if actual_dims != expected_dims:
-                expected_expr = tuple(*map(str, expected_dims))
                 raise ValueError(
                     "The expected shape of pixel values per batch "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
+                    f"is {expected_dims}. You supplied {actual_dims}.")
 
         for d in data:
             _validate_shape(d)
