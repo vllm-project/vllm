@@ -24,7 +24,7 @@ from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
 
 PoolingMetadata = Union[V0PoolingMetadata, V1PoolingMetadata]
 PoolingFn = Callable[
-    [Union[torch.Tensor, list[torch.Tensor]], PoolingMetadata],
+    [Union[torch.Tensor, list[torch.Tensor]], PoolingMetadata, torch.Tensor],
     Union[torch.Tensor, list[torch.Tensor]]]
 ClassifierFn = Callable[[torch.Tensor], torch.Tensor]
 
@@ -118,6 +118,7 @@ class Pooler(nn.Module, ABC):
         self,
         hidden_states: Union[list[torch.Tensor], torch.Tensor],
         pooling_metadata: PoolingMetadata,
+        num_scheduled_tokens: torch.Tensor,
     ) -> PoolerOutput:
         raise NotImplementedError
 
@@ -234,10 +235,12 @@ class PoolingMethod(nn.Module, ABC):
         self,
         hidden_states: torch.Tensor,
         prompt_len: Optional[torch.Tensor] = None,
+        num_scheduled_tokens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Note:
-            `prompt_len=None` means `prompt_len=len(hidden_states)`.
+            Assume `prompt_len` and `num_scheduled_tokens` are both CPU tensors;
+            comparing them will not cause CUDA sync.
         """
         raise NotImplementedError
 
@@ -246,23 +249,31 @@ class PoolingMethod(nn.Module, ABC):
         self,
         hidden_states: torch.Tensor,
         prompt_lens: torch.Tensor,
+        num_scheduled_tokens: torch.Tensor,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
+        """
+        Note:
+            Assume `prompt_len` and `num_scheduled_tokens` are both CPU tensors;
+            comparing them will not cause CUDA sync.
+        """
         raise NotImplementedError
 
     def forward(
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
+        num_scheduled_tokens: torch.Tensor,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         prompt_lens = get_prompt_lens(hidden_states, pooling_metadata)
 
         if isinstance(hidden_states, list):
             return [
-                self.forward_one(h, prompt_len)
-                for h, prompt_len in zip(hidden_states, prompt_lens)
+                self.forward_one(h, pl, nt) for h, pl, nt in zip(
+                    hidden_states, prompt_lens, num_scheduled_tokens)
             ]
 
-        return self.forward_all(hidden_states, prompt_lens)
+        return self.forward_all(hidden_states, prompt_lens,
+                                num_scheduled_tokens)
 
 
 class CLSPool(PoolingMethod):
@@ -274,8 +285,9 @@ class CLSPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         prompt_len: Optional[torch.Tensor] = None,
+        num_scheduled_tokens: Optional[int] = None,
     ) -> torch.Tensor:
-        assert prompt_len is None or prompt_len == hidden_states.shape[0], \
+        assert prompt_len is None or prompt_len == num_scheduled_tokens, \
             "partial prefill not supported with CLS pooling"
 
         return hidden_states[0]
@@ -284,7 +296,11 @@ class CLSPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         prompt_lens: torch.Tensor,
+        num_scheduled_tokens: list[int],
     ) -> Union[list[torch.Tensor], torch.Tensor]:
+        assert prompt_lens is None or prompt_lens == num_scheduled_tokens, \
+            "partial prefill not supported with CLS pooling"
+
         first_token_flat_indices = torch.zeros_like(prompt_lens)
         first_token_flat_indices[1:] += torch.cumsum(prompt_lens, dim=0)[:-1]
         return hidden_states[first_token_flat_indices]
@@ -299,6 +315,7 @@ class LastPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         prompt_len: Optional[torch.Tensor] = None,
+        num_scheduled_tokens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return hidden_states[-1]
 
@@ -306,8 +323,9 @@ class LastPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         prompt_lens: torch.Tensor,
+        num_scheduled_tokens: torch.Tensor,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
-        last_token_flat_indices = torch.cumsum(prompt_lens, dim=0) - 1
+        last_token_flat_indices = torch.cumsum(num_scheduled_tokens, dim=0) - 1
         return hidden_states[last_token_flat_indices]
 
 
@@ -320,8 +338,9 @@ class AllPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         prompt_len: Optional[torch.Tensor] = None,
+        num_scheduled_tokens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        assert prompt_len is None or prompt_len == hidden_states.shape[0], \
+        assert prompt_len is None or prompt_len == num_scheduled_tokens, \
             "partial prefill not supported with ALL pooling"
 
         return hidden_states
@@ -330,7 +349,12 @@ class AllPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         prompt_lens: torch.Tensor,
+        num_scheduled_tokens: torch.Tensor,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
+
+        assert prompt_lens is None or prompt_lens == num_scheduled_tokens, \
+            "partial prefill not supported with ALL pooling"
+
         return list(hidden_states.split_with_sizes(prompt_lens.tolist()))
 
 
@@ -343,8 +367,9 @@ class MeanPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         prompt_len: Optional[torch.Tensor] = None,
+        num_scheduled_tokens: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        assert prompt_len is None or prompt_len == hidden_states.shape[0], \
+        assert prompt_len is None or prompt_len == num_scheduled_tokens, \
             "partial prefill not supported with MEAN pooling"
 
         return hidden_states.mean(dim=0, dtype=torch.float32)
@@ -353,7 +378,12 @@ class MeanPool(PoolingMethod):
         self,
         hidden_states: torch.Tensor,
         prompt_lens: torch.Tensor,
+        num_scheduled_tokens: torch.Tensor,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
+
+        assert prompt_lens is None or prompt_lens == num_scheduled_tokens, \
+            "partial prefill not supported with MEAN pooling"
+
         # Use float32 for torch.cumsum in MeanPool,
         # otherwise precision will be lost significantly.
         cumsum = torch.cumsum(hidden_states, dim=0, dtype=torch.float32)
@@ -567,8 +597,10 @@ class SimplePooler(Pooler):
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
+        num_scheduled_tokens: torch.Tensor,
     ) -> PoolerOutput:
-        pooled_data = self.pooling(hidden_states, pooling_metadata)
+        pooled_data = self.pooling(hidden_states, pooling_metadata,
+                                   num_scheduled_tokens)
         pooled_data = self.head(pooled_data, pooling_metadata)
         return build_output(pooled_data)
 
@@ -618,6 +650,7 @@ class StepPooler(Pooler):
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
+        num_scheduled_tokens: torch.Tensor,
     ) -> PoolerOutput:
         pooled_data = self.extract_states(hidden_states, pooling_metadata)
         pooled_data = self.head(pooled_data, pooling_metadata)
@@ -660,8 +693,10 @@ class ClassifierPooler(Pooler):
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
+        num_scheduled_tokens: torch.Tensor,
     ) -> PoolerOutput:
-        pooled_data = self.pooling(hidden_states, pooling_metadata)
+        pooled_data = self.pooling(hidden_states, pooling_metadata,
+                                   num_scheduled_tokens)
 
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
@@ -714,15 +749,10 @@ class DispatchPooler(Pooler):
         self,
         hidden_states: Union[torch.Tensor, list[torch.Tensor]],
         pooling_metadata: PoolingMetadata,
+        num_scheduled_tokens: torch.Tensor,
     ) -> PoolerOutput:
         poolers_by_task = self.poolers_by_task
-
-        if isinstance(hidden_states, list):
-            hidden_states_lst = hidden_states
-        else:
-            prompt_lens = get_prompt_lens(hidden_states, pooling_metadata)
-
-            hidden_states_lst = list(hidden_states.split(prompt_lens.tolist()))
+        hidden_states_lst = list(hidden_states.split(num_scheduled_tokens.tolist()))
 
         outputs = list[PoolingSequenceGroupOutput]()
         offset = 0
@@ -736,6 +766,7 @@ class DispatchPooler(Pooler):
             group_output: PoolerOutput = pooler(
                 hidden_states_lst[offset:offset + num_items],
                 pooling_metadata[offset:offset + num_items],
+                num_scheduled_tokens[offset:offset + num_items],
             )
 
             outputs.extend(group_output.outputs)

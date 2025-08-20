@@ -1473,17 +1473,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         "Either all or none of the requests in" \
         " a batch must be pooling request"
 
-        extracted_hidden_states = list(
-            torch.split(hidden_states[:num_scheduled_tokens],
-                        num_scheduled_tokens_np.tolist()))
-
+        hidden_states = hidden_states[:num_scheduled_tokens]
         pooling_metadata = self.input_batch.pooling_metadata
-        seq_lens = self.seq_lens[:self.input_batch.num_reqs].to("cpu", non_blocking=True)
+        seq_lens = self.seq_lens[:self.input_batch.num_reqs].to(
+            "cpu", non_blocking=True)
 
         # Pooling models D2H & synchronize occurs in pooler.py:build_output
         raw_pooler_output = self.model.pooler(
-            hidden_states=extracted_hidden_states,
-            pooling_metadata=pooling_metadata)
+            hidden_states=hidden_states,
+            pooling_metadata=pooling_metadata,
+            num_scheduled_tokens=torch.from_numpy(num_scheduled_tokens_np),
+        )
 
         pooler_output: list[Optional[torch.Tensor]] = []
         for raw_output, seq_len, prompt_len in zip(
@@ -2520,12 +2520,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
 
-        hidden_states_list = list(
-            torch.split(hidden_states, num_scheduled_tokens_list))
         req_num_tokens = num_tokens // num_reqs
 
         dummy_prompt_lens = torch.tensor(
-            [h.shape[0] for h in hidden_states_list],
+            num_scheduled_tokens_list,
             device=self.device,
         )
         dummy_token_ids = torch.zeros((num_reqs, req_num_tokens),
@@ -2543,9 +2541,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooling_params=[dummy_pooling_params] * num_reqs,
         )
 
+        num_scheduled_tokens = torch.tensor(num_scheduled_tokens_list,
+                                            device="cpu", dtype=torch.long,)
+
         try:
-            return model.pooler(hidden_states=hidden_states_list,
-                                pooling_metadata=dummy_metadata)
+            return model.pooler(hidden_states=hidden_states,
+                                pooling_metadata=dummy_metadata,
+                                num_scheduled_tokens=num_scheduled_tokens,
+                                )
         except RuntimeError as e:
             if 'out of memory' in str(e):
                 raise RuntimeError(
