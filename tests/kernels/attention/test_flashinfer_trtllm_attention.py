@@ -136,9 +136,7 @@ def test_flashinfer_trtllm_decode_with_baseline(
 
     # Baseline Decode
     wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-        workspace_buffer,
-        kv_layout,
-        use_tensor_cores=True)
+        workspace_buffer, kv_layout, use_tensor_cores=True)
     wrapper.plan(kv_indptr,
                  kv_indices,
                  kv_last_page_lens,
