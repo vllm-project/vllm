@@ -258,6 +258,7 @@ TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal["raw_logprobs", "raw_logits", "processed_logprobs",
                        "processed_logits"]
+MMEncoderTPMode = Literal["weights", "data"]
 
 
 @config
@@ -438,6 +439,19 @@ class ModelConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended)."""
+    mm_encoder_tp_mode: MMEncoderTPMode = "weights"
+    """Indicates how to optimize multi-modal encoder inference using
+    tensor parallelism (TP).
+
+    - `"weights"`: Within the same vLLM engine, split the weights of
+        each layer across TP ranks. (default TP behavior)
+    - `"data"`: Within the same vLLM engine, split the batched input data
+        across TP ranks to process the data in parallel, while hosting
+        the full weights on each TP rank.
+        This batch-level DP is not to be confused with API request-level
+        DP (which is controlled by `--data-parallel-size`).
+        This is only supported on a per-model basis and falls back to
+        `"weights"` if the encoder does not support DP."""
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -856,8 +870,10 @@ class ModelConfig:
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 mm_processor_cache_gb=self.mm_processor_cache_gb,
+                mm_encoder_tp_mode=self.mm_encoder_tp_mode,
                 interleave_mm_strings=self.interleave_mm_strings,
-                skip_mm_profiling=self.skip_mm_profiling)
+                skip_mm_profiling=self.skip_mm_profiling,
+            )
 
         return None
 
@@ -2514,6 +2530,22 @@ class MultiModalConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended).
+    """
+
+    mm_encoder_tp_mode: MMEncoderTPMode = "weights"
+    """
+    Indicates how to optimize multi-modal encoder inference using
+    tensor parallelism (TP).
+
+    - `"weights"`: Within the same vLLM engine, split the weights of
+        each layer across TP ranks. (default TP behavior)
+    - `"data"`: Within the same vLLM engine, split the batched input data
+        across TP ranks to process the data in parallel, while hosting
+        the full weights on each TP rank.
+        This batch-level DP is not to be confused with API request-level
+        DP (which is controlled by `--data-parallel-size`).
+        This is only supported on a per-model basis and falls back to
+        `"weights"` if the encoder does not support DP.
     """
 
     interleave_mm_strings: bool = False
