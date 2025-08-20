@@ -41,12 +41,9 @@ REQS_PER_LOGITPROC = 50
 STR_NO_LOGITPROC = "none"
 
 # ThinkingTokenBudgetLogitsProcessor testing constants
-REASONING_EFFORT = "low"
+THINKING_TOKEN_BUDGET = 5
 THINK_START_TOKEN_ID = 999
 THINK_END_TOKEN_ID = 998
-LOW_EFFORT_TOKEN_BUDGET = 5
-MEDIUM_EFFORT_TOKEN_BUDGET = 10
-HIGH_EFFORT_TOKEN_BUDGET = 20
 
 # LogitsProcessor subclass or "none"
 LogitprocType = Union[type[LogitsProcessor], str]
@@ -98,9 +95,6 @@ class MockReasoningConfig:
     """Mock reasoning config for testing ThinkingTokenBudgetLogitsProcessor."""
     think_start_token_ids = [THINK_START_TOKEN_ID]
     think_end_token_ids = [THINK_END_TOKEN_ID]
-    low_effort_token_budget = LOW_EFFORT_TOKEN_BUDGET
-    medium_effort_token_budget = MEDIUM_EFFORT_TOKEN_BUDGET
-    high_effort_token_budget = HIGH_EFFORT_TOKEN_BUDGET
 
     def is_thinking_enabled(self) -> bool:
         return True
@@ -405,7 +399,7 @@ def _min_tokens_validate(
 
 def _thinking_budget_params(kwargs: dict) -> None:
     """Set SamplingParams kwargs for thinking token budget tests"""
-    kwargs["reasoning_effort"] = REASONING_EFFORT
+    kwargs["thinking_token_budget"] = THINKING_TOKEN_BUDGET
 
 
 def _thinking_budget_validate(
@@ -425,31 +419,26 @@ def _thinking_budget_validate(
     state = tb_processor._state.get(batch_index)
     params = request_params.params
 
-    # Validate reasoning effort configuration
-    if hasattr(params, 'reasoning_effort') and params.reasoning_effort:
-        # State should exist for requests with reasoning_effort
+    # Validate thinking token budget configuration
+    if hasattr(params,
+               'thinking_token_budget') and params.thinking_token_budget:
+        # State should exist for requests with thinking_token_budget
         if state is None:
             _raise_error_invalid(msg_suffix=(
                 f"Expected state for batch {batch_index} "
-                f"with reasoning_effort={params.reasoning_effort}"),
+                f"with thinking_token_budget={params.thinking_token_budget}"),
                                  batch_index=batch_index,
                                  request_params=request_params,
                                  step_idx=step_idx)
 
-        # Validate budget calculation
-        expected_budget = {
-            "low": LOW_EFFORT_TOKEN_BUDGET,
-            "medium": MEDIUM_EFFORT_TOKEN_BUDGET,
-            "high": HIGH_EFFORT_TOKEN_BUDGET
-        }.get(params.reasoning_effort, LOW_EFFORT_TOKEN_BUDGET)
-
+        # Validate budget matches what was set
+        expected_budget = params.thinking_token_budget
         actual_budget = state["thinking_token_budget"]
 
         if actual_budget != expected_budget:
             _raise_error_invalid(
                 msg_suffix=(f"Budget mismatch: expected {expected_budget}, "
-                            f"got {actual_budget} "
-                            f"for effort {params.reasoning_effort}"),
+                            f"got {actual_budget}"),
                 batch_index=batch_index,
                 request_params=request_params,
                 step_idx=step_idx)
