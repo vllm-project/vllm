@@ -882,8 +882,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.config = config
         self.multimodal_config = multimodal_config
-        self.use_data_parallel = (vllm_config.parallel_config.
-                                  enable_multimodal_encoder_data_parallel)
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         if multimodal_config.get_limit_per_prompt("image"):
             self.vision_model = Step3VisionTransformer(
