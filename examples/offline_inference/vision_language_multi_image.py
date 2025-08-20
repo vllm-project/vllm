@@ -562,7 +562,7 @@ def load_r_vl(question: str, image_urls: list[str]) -> ModelRequestData:
         }
     ]
 
-    processor = AutoProcessor.from_pretrained(model_name)
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
 
     prompt = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
