@@ -58,6 +58,7 @@ def create_common_attn_metadata(
                             dtype=torch.int32,
                             device=device)
     seq_lens_cpu = seq_lens.cpu()
+    max_seq_len = int(seq_lens_cpu.max())
 
     # Create computed tokens (context length for each sequence)
     context_lens = [
@@ -101,6 +102,7 @@ def create_common_attn_metadata(
         num_reqs=batch_spec.batch_size,
         num_actual_tokens=num_tokens,
         max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
         causal=True,
