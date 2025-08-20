@@ -258,7 +258,7 @@ TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 
 
-class LogprobsMode(str, enum.Enum):
+class LogprobsMode(enum.Enum):
     RAW_LOGITS = "raw_logits"
     RAW_LOGPROBS = "raw_logprobs"
     PROCESSED_LOGITS = "processed_logits"

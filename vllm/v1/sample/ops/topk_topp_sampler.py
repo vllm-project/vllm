@@ -36,7 +36,9 @@ class TopKTopPSampler(nn.Module):
         self.logprobs_mode = logprobs_mode
         # flashinfer optimization does not apply if intermediate
         # logprobs/logits after top_k/top_p need to be returned
-        if "processed" not in logprobs_mode and current_platform.is_cuda():
+        if logprobs_mode not in (LogprobsMode.PROCESSED_LOGITS,
+                                 LogprobsMode.PROCESSED_LOGPROBS
+                                 ) and current_platform.is_cuda():
             if is_flashinfer_available:
                 flashinfer_version = flashinfer.__version__
                 if version.parse(flashinfer_version) < version.parse("0.2.3"):
