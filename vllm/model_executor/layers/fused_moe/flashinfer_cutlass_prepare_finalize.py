@@ -5,18 +5,28 @@ from typing import Optional
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.distributed import get_dp_group
+from vllm.distributed import (get_dp_group, get_ep_group)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
+from flashinfer.comm.trtllm_alltoall import (MoEAlltoallInfo, MnnvlMoe)
 
+
+def get_global_num_tokens_cpu():
+    cu_sizes = get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
+    sizes = [cu_sizes[0].item()]
+    for i in range(1, len(cu_sizes)):
+        sizes.append((cu_sizes[i] - cu_sizes[i - 1]).item())
+    return sizes
 
 def get_local_sizes():
     return get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
 
-
+enable_flashinfer_fp4_allgather = True
+enable_flashinfer_alltoall = False
+assert enable_flashinfer_fp4_allgather + enable_flashinfer_alltoall <= 1
 class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def __init__(
@@ -66,25 +76,56 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             assert topk == 1, \
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
+        
+        if not self.use_dp:
+            a1q, a1q_scale = moe_kernel_quantize_input(
+                a1,
+                self.a1_gscale,
+                quant_config.quant_dtype,
+                quant_config.per_act_token_quant,
+                quant_config.block_shape,
+                # Swizzling after communication
+                is_fp4_scale_swizzled=not self.use_dp,
+            )
+        else:
+            if enable_flashinfer_alltoall:
+                global_num_tokens_cpu = get_global_num_tokens_cpu()
+                top_k = topk_ids.size(1)
+                print("xxxx"*100)
+                print(f"ep_size:{self.ep_size}, {self.ep_rank}")
 
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1,
-            self.a1_gscale,
-            quant_config.quant_dtype,
-            quant_config.per_act_token_quant,
-            quant_config.block_shape,
-            # Swizzling after communication
-            is_fp4_scale_swizzled=not self.use_dp,
-        )
-        if self.use_dp:
-            topk_weights, topk_ids, a1q, a1q_scale = \
-                get_dp_group().all_gatherv(
-                    [topk_weights, topk_ids, a1q, a1q_scale],
-                    dim=0,
-                    sizes=get_local_sizes(),
+                # TODO(shuw): need to consider chunking for global_num_tokens_cpu
+                all2all_manager = get_ep_group().device_communicator.all2all_manager
+                a1, topk_ids, topk_weights = all2all_manager.dispatch(
+                    get_dp_group().device_communicator,
+                    global_num_tokens_cpu,
+                    a1,
+                    topk_ids,
+                    topk_weights,
+                    top_k,
+                    num_experts,
+                    self.ep_rank,
+                    self.ep_size,
                 )
-            a1_m, a1_n = a1q.shape
-            a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
+            
+            a1q, a1q_scale = moe_kernel_quantize_input(
+                a1,
+                self.a1_gscale,
+                quant_config.quant_dtype,
+                quant_config.per_act_token_quant,
+                quant_config.block_shape,
+                is_fp4_scalar_swizzled=not self.use_dp  # delay swizzle to after comm
+            )
+
+            if enable_flashinfer_fp4_allgather:
+                topk_weights, topk_ids, a1q, a1q_scale = \
+                    get_dp_group().all_gatherv(
+                        [topk_weights, topk_ids, a1q, a1q_scale],
+                        dim=0,
+                        sizes=get_local_sizes(),
+                    )
+                a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
+
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
@@ -94,6 +135,20 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  weight_and_reduce_impl: mk.TopKWeightAndReduce) -> None:
 
         if self.use_dp:
-            fused_expert_output = get_dp_group().reduce_scatterv(
-                fused_expert_output, dim=0, sizes=get_local_sizes())
+            if enable_flashinfer_fp4_allgather:
+                fused_expert_output = get_dp_group().reduce_scatterv(
+                    fused_expert_output, dim=0, sizes=get_local_sizes())
+            
+            if enable_flashinfer_alltoall:
+                all2all_manager = get_ep_group().device_communicator.all2all_manager
+                top_k = topk_ids.size(1)
+                token_count = fused_expert_output.shape[0]
+                _ = all2all_manager.combine(
+                    fused_expert_output,
+                    # TODO(shuw): need to consider chunking for global_num_tokens_cpu
+                    ep_rank=self.ep_rank,
+                    ep_size=self.ep_size,
+                    top_k=top_k,
+                    token_count=token_count,
+                )
         output.copy_(fused_expert_output)

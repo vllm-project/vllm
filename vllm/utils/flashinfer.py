@@ -96,6 +96,32 @@ autotune = _lazy_import_wrapper(
     "autotune",
     fallback_fn=lambda *args, **kwargs: contextlib.nullcontext())
 
+@functools.cache
+def has_flashinfer_comm() -> bool:
+    """Return ``True`` if FlashInfer comm module is available."""
+    return has_flashinfer() and importlib.util.find_spec(
+        "flashinfer.comm") is not None
+
+@functools.cache
+def has_flashinfer_all2all() -> bool:
+    """Return ``True`` if FlashInfer mnnvl all2all is available."""
+    if not has_flashinfer_comm():
+        return False
+
+    # Check if all required functions are available
+    required_functions = [
+        ("flashinfer.comm", "Mapping"),
+        ("flashinfer.comm.mnnvl", "MnnvlMemory"),
+        ("flashinfer.comm.trtllm_alltoall", "MnnvlMoe"),
+        ("flashinfer.comm.trtllm_alltoall", "MoEAlltoallInfo"),
+    ]
+
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
+
 
 @functools.cache
 def has_flashinfer_moe() -> bool:
@@ -297,6 +323,8 @@ __all__ = [
     "trtllm_fp4_block_scale_moe",
     "autotune",
     "has_flashinfer_moe",
+    "has_flashinfer_comm",
+    "has_flashinfer_all2all",
     "has_flashinfer_cutlass_fused_moe",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
