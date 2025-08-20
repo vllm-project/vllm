@@ -96,9 +96,14 @@ class BasevLLMParameter(Parameter):
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         self._assert_and_load(loaded_weight)
 
-    # support parameter subclasses in torch.compile, see
-    # https://github.com/pytorch/pytorch/issues/160886
-    __torch_function__ = torch._C._disabled_torch_function_impl
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        # support parameter subclasses in torch.compile, see
+        # https://github.com/pytorch/pytorch/issues/160886
+        if kwargs is None:
+            kwargs = {}
+
+        return super().__torch_function__(func, types, args, kwargs)
 
 
 class _ColumnvLLMParameter(BasevLLMParameter):
