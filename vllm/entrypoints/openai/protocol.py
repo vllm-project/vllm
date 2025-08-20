@@ -1634,6 +1634,8 @@ class FunctionCall(OpenAIBaseModel):
 
 
 class ToolCall(OpenAIBaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str = Field(default_factory=random_tool_call_id)
     type: Literal["function"] = "function"
     function: FunctionCall
@@ -1646,6 +1648,8 @@ class DeltaFunctionCall(BaseModel):
 
 # a tool call delta where everything is optional
 class DeltaToolCall(OpenAIBaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: Optional[str] = None
     type: Optional[Literal["function"]] = None
     index: int
