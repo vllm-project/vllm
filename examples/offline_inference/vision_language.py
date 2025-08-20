@@ -1442,8 +1442,7 @@ def run_r_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "YannQi/R-4B"
 
     prompts = [
-            f"<|im_start|>user <image>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
+        f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
             for question in questions
         ]
 
