@@ -17,43 +17,12 @@ from .llava_next import LlavaNextProcessingInfo, LlavaDummyInputsBuilder, LlavaN
 
 
 class RVLProcessingInfo(LlavaNextProcessingInfo):
-    
+
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(**kwargs)
-
-    def _get_num_unpadded_features(
-        self,
-        *,
-        original_height: int,
-        original_width: int,
-        npatches: int,
-        num_patch_height: int,
-        num_patch_width: int,
-    ) -> tuple[int, int]:
-        current_height = npatches * num_patch_height
-        current_width = npatches * num_patch_width
-
-        aspect_ratio = original_width / original_height
-        current_aspect_ratio = current_width / current_height
-
-        if aspect_ratio > current_aspect_ratio:
-            new_height = int(
-                round(original_height * (current_width / original_width), 7))
-            padding = (current_height - new_height) // 2
-            current_height = current_height - (2 * padding)
-        else:
-            new_width = int(
-                round(original_width * (current_height / original_height), 7))
-            padding = (current_width - new_width) // 2
-            current_width = current_width - (2 * padding)
-
-        unpadded_features = current_height * current_width
-        newline_features = current_height
-
-        return (unpadded_features, newline_features)
 
 
 
