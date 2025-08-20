@@ -2541,14 +2541,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooling_params=[dummy_pooling_params] * num_reqs,
         )
 
-        num_scheduled_tokens = torch.tensor(num_scheduled_tokens_list,
-                                            device="cpu", dtype=torch.long,)
+        num_scheduled_tokens = torch.tensor(
+            num_scheduled_tokens_list,
+            device="cpu",
+            dtype=torch.long,
+        )
 
         try:
-            return model.pooler(hidden_states=hidden_states,
-                                pooling_metadata=dummy_metadata,
-                                num_scheduled_tokens=num_scheduled_tokens,
-                                )
+            return model.pooler(
+                hidden_states=hidden_states,
+                pooling_metadata=dummy_metadata,
+                num_scheduled_tokens=num_scheduled_tokens,
+            )
         except RuntimeError as e:
             if 'out of memory' in str(e):
                 raise RuntimeError(

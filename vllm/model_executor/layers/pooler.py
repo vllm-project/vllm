@@ -752,7 +752,8 @@ class DispatchPooler(Pooler):
         num_scheduled_tokens: torch.Tensor,
     ) -> PoolerOutput:
         poolers_by_task = self.poolers_by_task
-        hidden_states_lst = list(hidden_states.split(num_scheduled_tokens.tolist()))
+        hidden_states_lst = list(
+            hidden_states.split(num_scheduled_tokens.tolist()))
 
         outputs = list[PoolingSequenceGroupOutput]()
         offset = 0

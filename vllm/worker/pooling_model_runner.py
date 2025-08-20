@@ -11,7 +11,7 @@ from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces_base import VllmModelForPooling
-from vllm.model_executor.pooling_metadata import PoolingMetadata, PoolingTensors
+from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MultiModalKwargs
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
@@ -149,8 +149,11 @@ class PoolingModelRunner(
         if not self.is_driver_worker:
             return []
 
-        num_scheduled_tokens = torch.tensor(model_input.pooling_metadata.prompt_lens,
-                                                                device="cpu", dtype=torch.long,)
+        num_scheduled_tokens = torch.tensor(
+            model_input.pooling_metadata.prompt_lens,
+            device="cpu",
+            dtype=torch.long,
+        )
 
         return [
             self.model.pooler(hidden_states=hidden_or_intermediate_states,
