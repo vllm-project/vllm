@@ -667,8 +667,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_RESOLVER_CACHE_DIR":
     lambda: os.getenv("VLLM_LORA_RESOLVER_CACHE_DIR", None),
 
-    # Enables torch profiler if set. Path to the directory where torch profiler
-    # traces are saved. Note that it must be an absolute path.
+    # Enables torch profiler if set.
+    # Both AsyncLLM's CPU traces as well as workers'
+    # traces (CPU & GPU) will be saved under this directory.
+    # Note that it must be an absolute path.
     "VLLM_TORCH_PROFILER_DIR":
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
              .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
