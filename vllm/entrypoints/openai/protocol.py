@@ -1025,6 +1025,11 @@ class CompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, the output will follow the context free grammar."),
     )
+    structural_tag: Optional[str] = Field(
+        default=None,
+        description=(
+            "If specified, the output will follow the structural tag schema."),
+    )
     guided_decoding_backend: Optional[str] = Field(
         default=None,
         description=(
