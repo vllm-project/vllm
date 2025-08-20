@@ -5,8 +5,8 @@ import asyncio
 import copy
 import pickle
 from contextlib import contextmanager, suppress
-from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
-                    Optional, Union, cast)
+from typing import (Any, AsyncGenerator, Dict, Iterable, Iterator, List,
+                    Mapping, Optional, Union, cast)
 
 import cloudpickle
 import psutil
@@ -404,8 +404,12 @@ class MQLLMEngineClient(EngineClient):
             error_message="Unable to start RPC Server",
             socket=socket)
 
-    async def abort(self, request_id: str):
+    async def abort(self, request_id: Union[str, Iterable[str]]):
         """Send an ABORT_REQUEST signal to the RPC Server"""
+
+        if not isinstance(request_id, str):
+            raise RuntimeError("Only single-request abort supported in"
+                               " deprecated V0")
 
         with suppress(MQClientClosedError):
             await self._send_one_way_rpc_request(

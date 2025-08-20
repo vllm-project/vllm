@@ -141,6 +141,7 @@ _TEXT_GENERATION_MODELS = {
     # [Encoder-decoder]
     "BartModel": ("bart", "BartForConditionalGeneration"),
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
+    "MBartForConditionalGeneration": ("bart", "MBartForConditionalGeneration"),
 }
 
 _EMBEDDING_MODELS = {
@@ -230,6 +231,7 @@ _MULTIMODAL_MODELS = {
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "Ovis": ("ovis", "Ovis"),
+    "Ovis2_5": ("ovis2_5", "Ovis2_5"),
     "PaliGemmaForConditionalGeneration": ("paligemma", "PaliGemmaForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
@@ -262,6 +264,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     # TODO: Re-enable this once tests/models/test_initialization.py is fixed, see PR #22333 #22611  # noqa: E501
     # "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
+    "EagleDeepSeekMTPModel": ("deepseek_eagle", "EagleDeepseekV3ForCausalLM"),
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "MedusaModel": ("medusa", "Medusa"),
