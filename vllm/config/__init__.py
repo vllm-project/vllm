@@ -433,10 +433,13 @@ class ModelConfig:
     """Indicates how to optimize multi-modal encoder inference using
     tensor parallelism (TP).
 
-    - `"weights"`: Split the weights of each layer across TP ranks. (default)
-    - `"data"`: Split the input data across TP ranks. This can be thought of
-        as a form of intra-request DP, and is not to be confused with
-        inter-request DP (which is controlled by `--data-parallel-size`).
+    - `"weights"`: Within the same vLLM engine, split the weights of
+        each layer across TP ranks. (default TP behavior)
+    - `"data"`: Within the same vLLM engine, split the batched input data
+        across TP ranks to process the data in parallel, while hosting
+        the full weights on each TP rank.
+        This batch-level DP is not to be confused with request-level DP
+        (which is controlled by `--data-parallel-size`).
         This is only supported on a per-model basis and falls back to
         `"weights"` if the encoder does not support DP."""
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
@@ -2534,10 +2537,13 @@ class MultiModalConfig:
     Indicates how to optimize multi-modal encoder inference using
     tensor parallelism (TP).
 
-    - `"weights"`: Split the weights of each layer across TP ranks. (default)
-    - `"data"`: Split the input data across TP ranks. This can be thought of
-        as a form of intra-request DP, and is not to be confused with
-        inter-request DP (which is controlled by `--data-parallel-size`).
+    - `"weights"`: Within the same vLLM engine, split the weights of
+        each layer across TP ranks. (default TP behavior)
+    - `"data"`: Within the same vLLM engine, split the batched input data
+        across TP ranks to process the data in parallel, while hosting
+        the full weights on each TP rank.
+        This batch-level DP is not to be confused with request-level DP
+        (which is controlled by `--data-parallel-size`).
         This is only supported on a per-model basis and falls back to
         `"weights"` if the encoder does not support DP.
     """

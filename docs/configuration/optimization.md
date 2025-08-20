@@ -129,7 +129,7 @@ Data parallelism replicates the entire model across multiple GPU sets and proces
 Data parallelism can be combined with the other parallelism strategies and is set by `data_parallel_size=N`.
 Note that MoE layers will be sharded according to the product of the tensor parallel size and data parallel size.
 
-### Intra-request DP for Multi-Modal Encoders
+### Batch-level DP for Multi-Modal Encoders
 
 By default, TP is used to shard the weights of multi-modal encoders just like for language decoders,
 in order to reduce the memory and compute load on each GPU.
@@ -138,16 +138,10 @@ However, since the size of multi-modal encoders is very small compared to langua
 there is relatively little gain from TP. On the other hand, TP incurs significant communication
 overhead because of all-reduce being performed after every layer.
 
-Given this, it may be advantageous to instead shard the input data using TP, essentially
+Given this, it may be advantageous to instead shard the batched input data using TP, essentially
 performing intra-request DP. This has been shown to improve the throughput by around 10% for
 `tensor_parallel_size=8`. For vision encoders that use hardware-unoptimized Conv3D operations,
-intra-request DP can provide another 40% increase to throughput compared to regular TP.
-
-Supported models:
-
-- Llama4 (<gh-pr:18368>)
-- Qwen2.5-VL (<gh-pr:22742>)
-- Step3 (<gh-pr:22697>)
+batch-level DP can provide another 40% increase to throughput compared to regular TP.
 
 You can enable this by setting `mm_encoder_tp_mode="data"`, for example:
 
@@ -158,7 +152,7 @@ llm = LLM(
     model="Qwen/Qwen2.5-VL-72B-Instruct",
     # Create two EngineCore instances, one per DP rank
     data_parallel_size=2,
-    # Within each DP instance:
+    # Within each EngineCore instance:
     # The vision encoder uses TP=4 (not DP=2) to shard the input data
     # The language decoder uses TP=4 to shard the weights as usual
     tensor_parallel_size=4,
@@ -166,8 +160,16 @@ llm = LLM(
 )
 ```
 
+!! note
+    The availablilty of batch-level DP is based on model implementation.
+    Currently, the following models support `mm_encoder_tp_mode="data"`:
+
+    - Llama4 (<gh-pr:18368>)
+    - Qwen2.5-VL (<gh-pr:22742>)
+    - Step3 (<gh-pr:22697>)
+
 !! important
-    Intra-request DP is not to be confused with inter-request DP
+    Batch-level DP is not to be confused with request-level DP
     (which is instead controlled by `data_parallel_size`).
 
 ## Input Processing
