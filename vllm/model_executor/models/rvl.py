@@ -6,17 +6,14 @@ from collections.abc import Mapping
 from typing import Optional
 import torch
 import torch.nn as nn
-
 from transformers.activations import GELUActivation
-
 from vllm.config import VllmConfig
-from .utils import WeightsMapper
-                    
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import ImageSize
-from vllm.multimodal import MultiModalDataDict
-from .llava_onevision import LlavaOnevisionForConditionalGeneration, LlavaOnevisionMultiModalProcessor, LlavaOnevisionLikeConfig
-from .llava_next import LlavaNextProcessingInfo, LlavaDummyInputsBuilder
+from vllm.multimodal.inputs import MultiModalDataDict
+from .utils import WeightsMapper
+from .llava_onevision import LlavaOnevisionForConditionalGeneration, LlavaOnevisionLikeConfig
+from .llava_next import LlavaNextProcessingInfo, LlavaDummyInputsBuilder, LlavaNextMultiModalProcessor
 
 
 class RVLProcessingInfo(LlavaNextProcessingInfo):
@@ -114,8 +111,6 @@ class RVLDummyInputsBuilder(
         }
 
 
-
-from transformers.activations import GELUActivation
 class RVLMultiModalProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -135,7 +130,7 @@ class RVLMultiModalProjector(nn.Module):
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    LlavaOnevisionMultiModalProcessor,
+    LlavaNextMultiModalProcessor,
     info=RVLProcessingInfo,
     dummy_inputs=RVLDummyInputsBuilder)
 class RForConditionalGeneration(LlavaOnevisionForConditionalGeneration):
