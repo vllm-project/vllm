@@ -16,6 +16,7 @@ from vllm.transformers_utils.configs.eagle import EAGLEConfig
 from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.kimi_vl import KimiVLConfig
+from vllm.transformers_utils.configs.kimi_audio import KimiAudioConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
 from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
@@ -39,6 +40,7 @@ __all__ = [
     "MLPSpeculatorConfig",
     "MoonViTConfig",
     "KimiVLConfig",
+    "KimiAudioConfig",
     "NemotronConfig",
     "NemotronHConfig",
     "Nemotron_Nano_VL_Config",

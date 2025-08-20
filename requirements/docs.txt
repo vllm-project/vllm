@@ -29,5 +29,6 @@ setproctitle
 torch
 transformers
 zmq
+librosa
 uvloop
 prometheus-client
