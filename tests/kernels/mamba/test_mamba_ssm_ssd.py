@@ -330,41 +330,38 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
                 exhausted[i] = False
 
 
-@pytest.mark.parametrize("chunk_size", [8, 128])
-@pytest.mark.parametrize("max_seqlen", [16, 270])
-def test_mamba_chunk_scan_cont_batch_prefill_chunking(max_seqlen, chunk_size):
+@pytest.mark.parametrize("chunk_size", [8, 256])
+@pytest.mark.parametrize("seqlens", [
+    (16, 2, 8, 13),
+    (270, 88, 212, 203),
+])
+def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
+    max_seqlen = max(seqlens)
     # This test can have larger error for longer sequences
     if max_seqlen > 256:
         atol, rtol = 1e-2, 5e-3
     else:
         atol, rtol = 5e-3, 5e-3
 
-    batch_size = 4
+    num_sequences = len(seqlens)
     n_heads = 16
     d_head = 64
     itype = torch.float32
 
     last_taken = {}
     exhausted = {}
-    device = "cuda"
-    current_platform.seed_everything(0)
-    per_example_seqlens = torch.randint(1,
-                                        max_seqlen + 1, (batch_size, ),
-                                        dtype=torch.int32,
-                                        device=device)
-    per_example_seqlens[0] = max_seqlen
     _, cu_seqlens, seq_idx, (A, dt, X, B, C) = next(
-        generate_continuous_batched_examples(
-            [tuple(per_example_seqlens.tolist())],
-            batch_size,
-            max_seqlen,
-            last_taken,
-            exhausted,
-            n_heads,
-            d_head,
-            itype,
-            device,
-            return_ref=False))
+        generate_continuous_batched_examples([seqlens],
+                                             num_sequences,
+                                             max_seqlen,
+                                             last_taken,
+                                             exhausted,
+                                             n_heads,
+                                             d_head,
+                                             itype,
+                                             return_ref=False))
+    seqlens = torch.tensor(seqlens, dtype=torch.int32, device=X.device)
+    device = X.device
 
     ## full seqlen computation
     chunk_indices, chunk_offsets = \
@@ -390,7 +387,7 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(max_seqlen, chunk_size):
 
     ## chunked seqlen computation
     # first chunk
-    chunked_seqlens = per_example_seqlens // 2
+    chunked_seqlens = seqlens // 2
     chunked_cu_seqlens = torch.cat([
         torch.tensor([0], device=device),
         torch.cumsum(chunked_seqlens, dim=0)
@@ -405,7 +402,7 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(max_seqlen, chunk_size):
     dt_chunked = torch.zeros_like(dt)[:, :chunked_input_seq_len, ...]
     B_chunked = torch.zeros_like(B)[:, :chunked_input_seq_len, ...]
     C_chunked = torch.zeros_like(C)[:, :chunked_input_seq_len, ...]
-    for i in range(batch_size):
+    for i in range(num_sequences):
         # fmt: off
         chunk_f = lambda x, i: x[:, cu_seqlens[i]:cu_seqlens[i] + chunked_seqlens[i], ...]  # noqa: E501
 
@@ -437,7 +434,7 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(max_seqlen, chunk_size):
     )
 
     # remaining chunk
-    remaining_chunked_seqlens = per_example_seqlens - chunked_seqlens
+    remaining_chunked_seqlens = seqlens - chunked_seqlens
     remaining_chunked_cu_seqlens = torch.cat([
         torch.tensor([0], device=device),
         torch.cumsum(remaining_chunked_seqlens, dim=0)
@@ -454,7 +451,7 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(max_seqlen, chunk_size):
     remaining_dt_chunked = torch.zeros_like(dt)[:, :remaining_chunked_input_seq_len, ...]  # noqa: E501
     remaining_B_chunked = torch.zeros_like(B)[:, :remaining_chunked_input_seq_len, ...]  # noqa: E501
     remaining_C_chunked = torch.zeros_like(C)[:, :remaining_chunked_input_seq_len, ...]  # noqa: E501
-    for i in range(batch_size):
+    for i in range(num_sequences):
         remaining_chunk_f = lambda x, i: x[:, cu_seqlens[i] + chunked_seqlens[i]:cu_seqlens[i+1], ...]  # noqa: E501
 
         remaining_X_chunked[:, remaining_chunked_cu_seqlens[i]:remaining_chunked_cu_seqlens[i+1], ...] = remaining_chunk_f(X, i)  # noqa: E501
@@ -468,7 +465,7 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(max_seqlen, chunk_size):
         pt2[:,remaining_chunked_cu_seqlens[i]:remaining_chunked_cu_seqlens[i+1],...],
         ],
         dim=1)
-    concat_batch_f = lambda pt1, pt2: torch.cat([concat_chunk_f(pt1, pt2, i) for i in range(batch_size)], dim=1)  # noqa: E501
+    concat_batch_f = lambda pt1, pt2: torch.cat([concat_chunk_f(pt1, pt2, i) for i in range(num_sequences)], dim=1)  # noqa: E501
     # fmt: on
 
     assert concat_batch_f(X_chunked, remaining_X_chunked).equal(X)
@@ -502,7 +499,7 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(max_seqlen, chunk_size):
     Y = concat_batch_f(Y_partial, Y_chunked)
 
     # kernel chunked is same as kernel overall
-    for i in range(batch_size):
+    for i in range(num_sequences):
         Y_seq = Y[:, cu_seqlens[i]:cu_seqlens[i + 1], ...]
         Y_ref_seq = Y_ref[:, cu_seqlens[i]:cu_seqlens[i + 1], ...]
         torch.testing.assert_close(
