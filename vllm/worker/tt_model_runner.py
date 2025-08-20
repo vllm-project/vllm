@@ -188,10 +188,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         else:
             self.dp_kv_cache = False
 
-        if self.llama_tg:
-            self.async_torch_proc = True
-        else:
-            self.async_torch_proc = False
+        self.async_torch_proc = self.sample_on_device_mode is not None
 
         if self.dp_kv_cache:
             # Map request id strs to seq group ids
@@ -199,7 +196,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             self.empty_slots = list(range(self.scheduler_config.max_num_seqs))
             self.seq_groups_to_batch_slot: Dict[int, int] = {}
             if self.async_torch_proc:
-                self.cached_read_events: List[Any] = [
+                self.cached_read_events: List[List[Any]] = [
                 ]  # Only used for multi-step execution
                 self.perm_table_tensor: List[torch.Tensor] = []
 
@@ -544,10 +541,12 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             for i in range(num_outputs):
                 next_token_ids = self.cached_step_outputs.pop(0)
                 if is_decode and self.async_torch_proc:
-                    read_event = self.cached_read_events.pop(0)
-                    ttnn.event_synchronize(read_event)
-                    next_token_ids = ttnn.to_torch(
-                        ttnn.get_device_tensors(next_token_ids)[0])[0, 0, 0, :]
+                    read_events = self.cached_read_events.pop(0)
+                    for event in read_events:
+                        ttnn.event_synchronize(event)
+                    next_token_ids = self.model.process_decode_output_host(
+                        next_token_ids,
+                        is_tokens=(self.sample_on_device_mode is not None))
                     if self.dp_kv_cache:
                         # permute the tt_out
                         next_token_ids = next_token_ids[
@@ -596,10 +595,12 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         if step_idx > 0:
             next_token_ids = self.cached_step_outputs.pop(0)
             if self.async_torch_proc:
-                read_event = self.cached_read_events.pop(0)
-                ttnn.event_synchronize(read_event)
-                next_token_ids = ttnn.to_torch(
-                    ttnn.get_device_tensors(next_token_ids)[0])[0, 0, 0, :]
+                read_events = self.cached_read_events.pop(0)
+                for event in read_events:
+                    ttnn.event_synchronize(event)
+                next_token_ids = self.model.process_decode_output_host(
+                    next_token_ids,
+                    is_tokens=(self.sample_on_device_mode is not None))
                 if self.dp_kv_cache:
                     # permute the tt_out
                     next_token_ids = next_token_ids[self.perm_table_tensor.pop(
@@ -780,12 +781,15 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 # trigger output processor on host while device is executing
                 # next step
                 self._send_prev_step_async_out(model_input, step_idx)
-            tt_out = self.model.read_decode_output(
-                tt_out,
-                model_input.unpadded_batch_size,
-                is_tokens=(self.sample_on_device_mode is not None))
             if self.async_torch_proc:
-                tt_out, read_event = tt_out
+                tt_out, read_event = self.model.read_decode_output(
+                    tt_out, async_read=True)
+            else:
+                # outputs ttnn host tensors
+                tt_out = self.model.read_decode_output(tt_out)
+                # outputs torch tensor
+                tt_out = self.model.process_decode_output_host(
+                    tt_out, is_tokens=(self.sample_on_device_mode is not None))
             if self.dp_kv_cache and not self.async_torch_proc:
                 tt_out = tt_out[perm_table_tensor]
 
