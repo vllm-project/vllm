@@ -46,32 +46,31 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+from transformers.activations import ACT2FN
+from transformers.models.qwen2.modeling_qwen2 import (Qwen2PreTrainedModel,
+                                                      Qwen2RMSNorm)
 
-from transformers.models.qwen2.modeling_qwen2 import (
-    Qwen2RMSNorm,
-    Qwen2PreTrainedModel,
-)
-from vllm.distributed import get_pp_group
-from vllm.config import CacheConfig, VllmConfig
-from vllm.sequence import IntermediateTensors
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.attention import AttentionType
+from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader)
-from transformers.activations import ACT2FN
-from .utils import (PPMissingLayer, LayerFn, is_pp_missing_parameter,
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.sequence import IntermediateTensors
+
+from ...transformers_utils.configs import KimiAudioConfig
+from .qwen2 import Qwen2Attention
+from .utils import (LayerFn, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory,
                     maybe_offload_to_cpu)
-from .qwen2 import Qwen2Attention
-from ...transformers_utils.configs import KimiAudioConfig
 
 
 class MoonshotMLP(nn.Module):
+
     def __init__(
         self,
         hidden_size: int,
@@ -105,11 +104,12 @@ class MoonshotMLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
-    
+
 
 class MoonshotDecoderLayer(nn.Module):
+
     def __init__(
-        self, 
+        self,
         config: KimiAudioConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -123,7 +123,7 @@ class MoonshotDecoderLayer(nn.Module):
         dual_chunk_attention_config = getattr(config,
                                               "dual_chunk_attention_config",
                                               None)
-        
+
         attn_type = AttentionType.DECODER
         self.self_attn = Qwen2Attention(
             hidden_size=self.hidden_size,
@@ -173,23 +173,28 @@ class MoonshotDecoderLayer(nn.Module):
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
-    
+
 
 class VQAdaptor(nn.Module):
+
     def __init__(self, config):
         super().__init__()
         self.layers = nn.Sequential(
-            nn.Linear(config.kimia_adaptor_input_dim, config.hidden_size, bias=True),
+            nn.Linear(config.kimia_adaptor_input_dim,
+                      config.hidden_size,
+                      bias=True),
             nn.SiLU(),
             nn.Dropout(0.0),
             nn.Linear(config.hidden_size, config.hidden_size, bias=True),
-            nn.LayerNorm(config.hidden_size, eps=config.rms_norm_eps, bias=True),
+            nn.LayerNorm(config.hidden_size,
+                         eps=config.rms_norm_eps,
+                         bias=True),
         )
 
     def forward(self, x):
         return self.layers(x)
-    
-    
+
+
 def make_layers(
     num_hidden_layers: int,
     num_all_layers: int,
@@ -214,7 +219,8 @@ def make_layers(
 
 
 def get_pp_indices_kimia(num_hidden_layers: int, num_all_layers: int,
-                         mimo_layer_idx: int, pp_rank: int, pp_size: int) -> tuple[int, int]:
+                         mimo_layer_idx: int, pp_rank: int,
+                         pp_size: int) -> tuple[int, int]:
     """Calculate layer indices for pipeline parallelism in Kimia dual-stream architecture.
     
     Kimia model implements a dual-stream transformer architecture for audio-text processing:
@@ -244,7 +250,7 @@ def get_pp_indices_kimia(num_hidden_layers: int, num_all_layers: int,
     """
     num_remaining = num_all_layers - num_hidden_layers
     is_creating_mimo = (num_remaining > num_hidden_layers)
-    
+
     if is_creating_mimo:
         mimo_layers = num_hidden_layers
         text_layers = num_remaining
@@ -253,14 +259,15 @@ def get_pp_indices_kimia(num_hidden_layers: int, num_all_layers: int,
         mimo_layers = num_remaining
     layers_per_rank = num_all_layers // pp_size
     remainder = num_all_layers % pp_size
-    
+
     if pp_rank < pp_size - remainder:
         global_start = pp_rank * layers_per_rank
         global_end = global_start + layers_per_rank
     else:
-        global_start = pp_rank * layers_per_rank + (pp_rank - (pp_size - remainder))
+        global_start = pp_rank * layers_per_rank + (pp_rank -
+                                                    (pp_size - remainder))
         global_end = global_start + layers_per_rank + 1
-    
+
     if is_creating_mimo:
         mimo_global_start = text_layers
         if global_end <= mimo_global_start:
@@ -271,7 +278,7 @@ def get_pp_indices_kimia(num_hidden_layers: int, num_all_layers: int,
         else:
             start_layer = 0
             end_layer = global_end - mimo_global_start
-        
+
         start_layer = max(0, min(start_layer, mimo_layers))
         end_layer = max(0, min(end_layer, mimo_layers))
     else:
@@ -283,10 +290,10 @@ def get_pp_indices_kimia(num_hidden_layers: int, num_all_layers: int,
         else:
             start_layer = global_start
             end_layer = text_layers
-        
+
         start_layer = max(0, min(start_layer, text_layers))
         end_layer = max(0, min(end_layer, text_layers))
-    
+
     return (start_layer, end_layer)
 
 
@@ -301,8 +308,7 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.kimia_mimo_transformer_from_layer_index = (
-            config.kimia_mimo_transformer_from_layer_index
-        )
+            config.kimia_mimo_transformer_from_layer_index)
 
         if get_pp_group().is_first_rank or (config.tie_word_embeddings
                                             and get_pp_group().is_last_rank):
@@ -323,8 +329,7 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
                                                 cache_config=cache_config,
                                                 quant_config=quant_config,
                                                 prefix=prefix),
-            prefix=f"{prefix}.layers"
-        )
+            prefix=f"{prefix}.layers")
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -339,11 +344,11 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
                                                 cache_config=cache_config,
                                                 quant_config=quant_config,
                                                 prefix=prefix),
-            prefix=f"{prefix}.mimo_layers"
-        )
+            prefix=f"{prefix}.mimo_layers")
 
         if get_pp_group().is_last_rank:
-            self.mimo_norm = Qwen2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+            self.mimo_norm = Qwen2RMSNorm(config.hidden_size,
+                                          eps=config.rms_norm_eps)
         else:
             self.mimo_norm = PPMissingLayer()
 
@@ -374,7 +379,7 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
             residual = intermediate_tensors["residual"]
             mimo_hidden_states = intermediate_tensors.get("mimo_hidden_states")
             mimo_residual = intermediate_tensors.get("mimo_residual")
-        
+
         for layer in self.layers[self.start_layer:self.end_layer]:
             hidden_states, residual = layer(
                 positions,
@@ -382,7 +387,8 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
                 residual,
             )
 
-        for layer in self.mimo_layers[self.mimo_start_layer:self.mimo_end_layer]:
+        for layer in self.mimo_layers[self.mimo_start_layer:self.
+                                      mimo_end_layer]:
             mimo_hidden_states, mimo_residual = layer(
                 positions,
                 mimo_hidden_states,
@@ -395,11 +401,12 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
                 "mimo_hidden_states": mimo_hidden_states,
                 "mimo_residual": mimo_residual,
             })
-        
+
         # NOTE: Current vLLM does not support multi-modal outputs,
         # so we only return the final hidden states of the MIMO stream.
         hidden_states, _ = self.norm(hidden_states, residual)
-        mimo_hidden_states, _ = self.mimo_norm(mimo_hidden_states, mimo_residual)
+        mimo_hidden_states, _ = self.mimo_norm(mimo_hidden_states,
+                                               mimo_residual)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -439,7 +446,7 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
                         W = loaded_weight.T
                         chunk_size = W.size(1) // 2
                         start = shard_id * chunk_size
-                        end   = (shard_id + 1) * chunk_size
+                        end = (shard_id + 1) * chunk_size
                         param.data[:, start:end].copy_(W[:, start:end])
                 else:
                     loader(param, loaded_weight, shard_id)
@@ -449,7 +456,8 @@ class MoonshotKimiaModel(Qwen2PreTrainedModel):
                 if name not in params_dict:
                     continue
                 param = params_dict[name]
-                loader = getattr(param, "weight_loader", None) or default_weight_loader
+                loader = getattr(param, "weight_loader",
+                                 None) or default_weight_loader
                 loader(param, loaded_weight)
                 loaded.add(name)
         return loaded

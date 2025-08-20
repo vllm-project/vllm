@@ -3,6 +3,7 @@
 
 import contextlib
 import copy
+import json
 import os
 import warnings
 from functools import lru_cache
@@ -11,6 +12,7 @@ from types import MethodType
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import huggingface_hub
+from tokenizers.tiktoken import TikTokenTokenizer
 from transformers import (AutoTokenizer, PreTrainedTokenizer,
                           PreTrainedTokenizerFast)
 
@@ -235,13 +237,20 @@ def get_tokenizer(
                                                     **kwargs)
     else:
         try:
-            tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer_name,
-                *args,
-                trust_remote_code=trust_remote_code,
-                revision=revision,
-                **kwargs,
-            )
+            config_path = Path(tokenizer_name) / "tokenizer_config.json"
+            if config_path.exists():
+                with open(config_path) as f:
+                    if json.load(f).get("tokenizer_class") == (
+                            "TikTokenTokenizer"):
+                        tokenizer = TikTokenTokenizer(tokenizer_name, **kwargs)
+            else:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    tokenizer_name,
+                    *args,
+                    trust_remote_code=trust_remote_code,
+                    revision=revision,
+                    **kwargs,
+                )
         except ValueError as e:
             # If the error pertains to the tokenizer class not existing or not
             # currently being imported,

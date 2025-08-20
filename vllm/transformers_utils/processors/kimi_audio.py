@@ -1,24 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # adapted from https://github.com/MoonshotAI/Kimi-Audio/tree/master/kimia_infer/api/prompt_manager.py
-from typing import Union
-
 import os
+from dataclasses import dataclass
+from functools import cache
+from subprocess import CalledProcessError, run
+from typing import Optional, Union, cast
+
 import numpy as np
-import librosa
 import torch
 import torch.nn.functional as F
+from multimodal.inputs import NestedTensors
 from torch import nn
-from subprocess import CalledProcessError, run
-from typing import Dict, List
-from dataclasses import dataclass
-from functools import lru_cache
-from typing import Optional, Union
+from transformers import AutoConfig, AutoProcessor, ProcessorMixin
 from transformers.models.whisper.modeling_whisper import WhisperModel
-from transformers.feature_extraction_utils import BatchFeature
 from transformers.processing_utils import ProcessingKwargs
-from transformers import AutoProcessor
+from transformers.tokenization_utils_base import TextInput
+
+from vllm.utils import PlaceholderModule
+
 from ...transformers_utils.tokenizers import Glm4Tokenizer
+
+try:
+    import librosa
+except ImportError:
+    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
 # hard-coded audio hyperparameters
 SAMPLE_RATE = 16000
@@ -66,16 +72,15 @@ def pad_or_trim(array, length: int = N_SAMPLES, *, axis: int = -1):
     """
     if torch.is_tensor(array):
         if array.shape[axis] > length:
-            array = array.index_select(
-                dim=axis, index=torch.arange(length, device=array.device)
-            )
+            array = array.index_select(dim=axis,
+                                       index=torch.arange(length,
+                                                          device=array.device))
 
         if array.shape[axis] < length:
             pad_widths = [(0, 0)] * array.ndim
             pad_widths[axis] = (0, length - array.shape[axis])
-            array = F.pad(
-                array, [pad for sizes in pad_widths[::-1] for pad in sizes]
-            )
+            array = F.pad(array,
+                          [pad for sizes in pad_widths[::-1] for pad in sizes])
     else:
         if array.shape[axis] > length:
             array = array.take(indices=range(length), axis=axis)
@@ -88,8 +93,9 @@ def pad_or_trim(array, length: int = N_SAMPLES, *, axis: int = -1):
     return array
 
 
-@lru_cache(maxsize=None)
-def mel_filters(device, n_mels: int = 128) -> torch.Tensor:
+@cache
+def mel_filters(device: Union[str, torch.device],
+                n_mels: int = 128) -> torch.Tensor:
     """
     load the mel filterbank matrix for projecting STFT into a Mel spectrogram.
     Allows decoupling librosa dependency; saved using:
@@ -100,8 +106,8 @@ def mel_filters(device, n_mels: int = 128) -> torch.Tensor:
         )
     """
     with np.load(
-        os.path.join(os.path.dirname(__file__), "mel_filters.npz")  # todo
-        # os.path.join("assets", "mel_filters.npz")
+            os.path.join(os.path.dirname(__file__), "mel_filters.npz")  # todo
+            # os.path.join("assets", "mel_filters.npz")
     ) as f:
         return torch.from_numpy(f[f"mel_{n_mels}"]).to(device)
 
@@ -138,17 +144,20 @@ def log_mel_spectrogram(
     if not torch.is_tensor(audio):
         if isinstance(audio, str):
             audio = load_audio(audio)
-        audio = torch.from_numpy(audio)
+        audio = torch.from_numpy(np.asarray(audio))
 
+    audio = cast(torch.Tensor, audio)
     if device is not None:
         audio = audio.to(device)
     if padding > 0:
         audio = F.pad(audio, (0, padding))
     window = torch.hann_window(N_FFT).to(audio.device)
-    stft = torch.stft(
-        audio, N_FFT, HOP_LENGTH, window=window, return_complex=True
-    )
-    magnitudes = stft[..., :-1].abs() ** 2
+    stft = torch.stft(audio,
+                      N_FFT,
+                      HOP_LENGTH,
+                      window=window,
+                      return_complex=True)
+    magnitudes = stft[..., :-1].abs()**2
 
     filters = mel_filters(audio.device, n_mels)
     mel_spec = filters @ magnitudes
@@ -160,9 +169,11 @@ def log_mel_spectrogram(
 
 
 class WhisperEncoder(nn.Module):
-    def __init__(
-        self, model_path, mel_batch_size=40, unfreeze_online_whisper_model=False
-    ):
+
+    def __init__(self,
+                 model_path,
+                 mel_batch_size=40,
+                 unfreeze_online_whisper_model=False):
         super().__init__()
         self.speech_encoder = WhisperModel.from_pretrained(model_path).encoder
         self.unfreeze_online_whisper_model = unfreeze_online_whisper_model
@@ -177,7 +188,7 @@ class WhisperEncoder(nn.Module):
         time_step = 0
         audios = []
         while time_step * 16000 < audio.shape[0]:
-            audio_segment = audio[time_step * 16000 : (time_step + 30) * 16000]
+            audio_segment = audio[time_step * 16000:(time_step + 30) * 16000]
             audios.append(audio_segment)
             time_step += 30
 
@@ -187,8 +198,8 @@ class WhisperEncoder(nn.Module):
             # import pdb; pdb.set_trace()
             assert audio_segment.shape[0] <= 480000
             L = audio_segment.shape[0]
-            # to match huggingface logic, with use attention mask to 
-            # control the length and the slice with mask[:, ::160], 
+            # to match huggingface logic, with use attention mask to
+            # control the length and the slice with mask[:, ::160],
             # also match the glm4 12.5 logic
             token_len = (L - 1) // (160 * 8) + 1
 
@@ -198,24 +209,23 @@ class WhisperEncoder(nn.Module):
             if kimia_whisper_clip_silence:
                 input_seq_lens_list = [token_len * 4]
                 input_seq_lens = torch.LongTensor(input_seq_lens_list).to(
-                    self.speech_encoder.conv1.weight.device
-                )
+                    self.speech_encoder.conv1.weight.device)
                 audio_embedding = self.speech_encoder(
-                    mel.unsqueeze(0)
-                    .to(self.speech_encoder.conv1.weight.device)
-                    .to(torch.bfloat16),
+                    mel.unsqueeze(0).to(
+                        self.speech_encoder.conv1.weight.device).to(
+                            torch.bfloat16),
                     return_dict=True,
                     input_seq_lens=input_seq_lens,
                 ).last_hidden_state
             else:
                 audio_embedding = self.speech_encoder(
-                    mel.unsqueeze(0)
-                    .to(self.speech_encoder.conv1.weight.device)
-                    .to(torch.bfloat16),
+                    mel.unsqueeze(0).to(
+                        self.speech_encoder.conv1.weight.device).to(
+                            torch.bfloat16),
                     return_dict=True,
                 ).last_hidden_state
                 # audio_embedding: [1, 3000, 1280]
-                audio_embedding = audio_embedding[:, : token_len * 4, :]
+                audio_embedding = audio_embedding[:, :token_len * 4, :]
             final_audio_embedding.append(audio_embedding)
 
         final_audio_embedding = torch.cat(final_audio_embedding, dim=1)
@@ -225,15 +235,6 @@ class WhisperEncoder(nn.Module):
     def tokenize_waveform(self, audio, kimia_whisper_clip_silence=False):
         audio_embedding = self.forward(audio, kimia_whisper_clip_silence)
         return audio_embedding.cpu()
-
-
-class KimiAudioProcessorKwargs(ProcessingKwargs, total=False):
-    _defaults = {
-        "text_kwargs": {
-            "padding": False,
-        },
-        "audio_kwargs": {},
-    }
 
 
 @dataclass
@@ -274,8 +275,7 @@ def instantiate_extra_tokens(tokenizer):
         kimia_text_eos=map_fn("<|im_kimia_text_eos|>"),  # 19
         kimia_user_msg_start=map_fn("<|im_kimia_user_msg_start|>"),  # 22
         kimia_assistant_msg_start=map_fn(
-            "<|im_kimia_assistant_msg_start|>"
-        ),  # 23
+            "<|im_kimia_assistant_msg_start|>"),  # 23
         kimia_speech_ct_id=map_fn("<|im_kimia_speech_ct_id|>"),  # 27
         kimia_speech_ctd_id=map_fn("<|im_kimia_speech_ctd_id|>"),  # 28
         pad=tokenizer.pad_id,
@@ -283,6 +283,7 @@ def instantiate_extra_tokens(tokenizer):
 
 
 class KimiAContent:
+
     def __init__(
         self,
         audio_token_ids=None,
@@ -336,15 +337,13 @@ class KimiAContent:
     ):
         self.audio_token_ids = [index] + self.audio_token_ids
         self.is_continuous_mask = [is_continuous] + self.is_continuous_mask
-        self.audio_token_loss_mask = [
-            audio_token_loss_mask
-        ] + self.audio_token_loss_mask
+        self.audio_token_loss_mask = [audio_token_loss_mask
+                                      ] + self.audio_token_loss_mask
 
     def text_prepend(self, index: int, text_token_loss_mask: bool = False):
         self.text_token_ids = [index] + self.text_token_ids
-        self.text_token_loss_mask = [
-            text_token_loss_mask
-        ] + self.text_token_loss_mask
+        self.text_token_loss_mask = [text_token_loss_mask
+                                     ] + self.text_token_loss_mask
 
     def audio_pretend(
         self,
@@ -353,18 +352,15 @@ class KimiAContent:
         audio_token_loss_mask: bool = False,
     ):
         self.audio_token_ids = ids + self.audio_token_ids
-        self.is_continuous_mask = [is_continuous] * len(
-            ids
-        ) + self.is_continuous_mask
-        self.audio_token_loss_mask = [audio_token_loss_mask] * len(
-            ids
-        ) + self.audio_token_loss_mask
+        self.is_continuous_mask = [is_continuous
+                                   ] * len(ids) + self.is_continuous_mask
+        self.audio_token_loss_mask = [audio_token_loss_mask
+                                      ] * len(ids) + self.audio_token_loss_mask
 
     def text_pretend(self, ids: list[int], text_token_loss_mask: bool = False):
         self.text_token_ids = ids + self.text_token_ids
-        self.text_token_loss_mask = [text_token_loss_mask] * len(
-            ids
-        ) + self.text_token_loss_mask
+        self.text_token_loss_mask = [text_token_loss_mask
+                                     ] * len(ids) + self.text_token_loss_mask
 
     def merge(self, other: "KimiAContent"):
         self.audio_token_ids.extend(other.audio_token_ids)
@@ -374,7 +370,10 @@ class KimiAContent:
         self.text_token_loss_mask.extend(other.text_token_loss_mask)
         self.continuous_feature.extend(other.continuous_feature)
 
-    def to_tensor(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def to_tensor(
+        self,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+               torch.Tensor]:
         return (
             torch.tensor([self.audio_token_ids], dtype=torch.long),
             torch.tensor([self.text_token_ids], dtype=torch.long),
@@ -384,21 +383,46 @@ class KimiAContent:
         )
 
     def is_valid(self) -> bool:
-        return (
-            len(self.audio_token_ids)
-            == len(self.text_token_ids)
-            == len(self.is_continuous_mask)
-            == len(self.audio_token_loss_mask)
-            == len(self.text_token_loss_mask)
-        )
+        return (len(self.audio_token_ids) == len(self.text_token_ids) == len(
+            self.is_continuous_mask) == len(self.audio_token_loss_mask) == len(
+                self.text_token_loss_mask))
 
 
-class KimiAudioProcessor:
+class KimiAudioProcessorKwargs(ProcessingKwargs, total=False):
+    _defaults = {
+        "text_kwargs": {
+            "padding": False,
+        },
+        "audio_kwargs": {},
+    }
+
+
+def ndarray_to_int_list(arr: np.ndarray) -> list[int]:
+    """
+    Convert a 1-D numpy array that encodes integer token ids (possibly float 
+    dtype but integer-valued) into a Python list[int]. Raise if array looks 
+    like audio waveform.
+    """
+    if not isinstance(arr, np.ndarray):
+        raise TypeError("expected numpy ndarray")
+    if arr.ndim != 1:
+        arr = arr.ravel()
+
+    if np.issubdtype(arr.dtype, np.floating):
+        # check all values are exact integers (x % 1 == 0)
+        if not np.all(np.equal(np.mod(arr, 1), 0)):
+            raise ValueError(
+                "ndarray looks like waveform/floats, not integer token ids")
+    return arr.astype(np.int64).tolist()
+
+
+# TODO(HelloWorldU): Add batch inference support
+class KimiAudioProcessor(ProcessorMixin):
     r"""
     Lightweight processor:
-    - audio_tokenizer: has method `tokenize(audio_path=...)` -> 
+    - audio_tokenizer: has method `tokenize(audio_path=...)` ->
     torch.Tensor (1, N) of discrete audio token ids (before offset)
-    - text_tokenizer: huggingface tokenizer-like, 
+    - text_tokenizer: huggingface tokenizer-like,
     has `encode` or `encode_plus` and `convert_tokens_to_ids`
     """
 
@@ -408,38 +432,75 @@ class KimiAudioProcessor:
 
     def __init__(
         self,
-        kimia_text_audiodelaytokens,
-        kimia_token_offset,
+        kimia_text_audiodelaytokens=5,
+        kimia_token_offset=152064,
         audio_tokenizer=None,
         text_tokenizer=None,
         chat_template=None,
     ):
-        self.audio_tokenizer = audio_tokenizer or Glm4Tokenizer(
-            "THUDM/glm-4-voice-tokenizer"
-        )
+        self.audio_tokenizer = audio_tokenizer
         self.text_tokenizer = text_tokenizer
         self.chat_template = chat_template
         self.extra_tokens = instantiate_extra_tokens(self.text_tokenizer)
         self.kimia_text_audiodelaytokens = kimia_text_audiodelaytokens
         self.kimia_token_offset = kimia_token_offset
+        # Just for simple distinguish
+        self.audio_token_id = -1
 
-    def _tokenize_audio(self, wav_path) -> List[int]:
-        wav_tokens = self.audio_tokenizer.tokenize(audio_path=wav_path)
-        wav_tokens = wav_tokens + self.kimia_token_offset
-        wav_tokens_list = wav_tokens.squeeze(0).cpu().numpy().tolist()
-        return wav_tokens_list
-
-    def _tokenize_text(self, text: str) -> List[int]:
+    def _tokenize_text(self, text: str) -> list[int]:
         if text is None:
             return None
         if hasattr(self.text_tokenizer, "encode"):
             return self.text_tokenizer.encode(text, bos=False, eos=False)
         else:
-            return self.text_tokenizer(text, add_special_tokens=False)[
-                "input_ids"
-            ]
+            return self.text_tokenizer(text,
+                                       add_special_tokens=False)["input_ids"]
 
-    def extract_whisper_feat(self, wav: torch.Tensor | str) -> torch.Tensor:
+    def _tokenize_audio(self, wav_path) -> list[int]:
+        # handle audio placeholder here, using sequence
+        # with same length as actual audio tensor
+        if self.audio_tokenizer is None:
+            self.audio_tokenizer = Glm4Tokenizer("THUDM/glm-4-voice-tokenizer")
+        if not hasattr(self, "whisper_model_config"):
+            self.whisper_model_config = AutoConfig.from_pretrained(
+                self.tokenizer_path)
+
+        count = self.get_num_audio_tokens(wav_path, self.whisper_model_config)
+        wav_tokens = torch.full((count, ),
+                                self.audio_token_id,
+                                dtype=torch.long)
+        wav_tokens = wav_tokens.cpu().tolist()
+        return wav_tokens
+
+    def get_num_audio_tokens(self,
+                             audio_path: str,
+                             model_config,
+                             hop_length=160) -> int:
+        import soundfile as sf
+        audio_info = sf.info(audio_path)
+        audio_length = int(audio_info.frames)
+
+        if model_config is None:
+            raise ValueError("model_config for WhisperVQEncoder is None")
+
+        pooling_kernel_size = model_config.pooling_kernel_size or 1
+        conv1_stride = model_config.conv1.stride[0]
+        conv2_stride = model_config.conv2.stride[0]
+        total_downsample = conv1_stride * conv2_stride * pooling_kernel_size
+
+        total_tokens = 0
+        stride = total_downsample * hop_length
+
+        for i in range(0, audio_length, 30 * 16000):
+            segment_length = min(30 * 16000, audio_length - i)
+            padded_length = ((segment_length + stride - 1) // stride) * stride
+            n_frames = padded_length // hop_length
+            n_tokens = n_frames // total_downsample
+            total_tokens += n_tokens
+
+        return total_tokens
+
+    def get_audio_waves(self, wav: Union[torch.Tensor, str]) -> torch.Tensor:
         if isinstance(wav, str):
             wav = librosa.load(wav, sr=16000)[0]
 
@@ -448,6 +509,7 @@ class KimiAudioProcessor:
             wav_tensor = wav
         else:
             raise ValueError(f"Invalid wav type: {type(wav)}")
+        wav_tensor = cast(torch.Tensor, wav_tensor)
         return wav_tensor
 
     def tokenize_message(
@@ -468,18 +530,14 @@ class KimiAudioProcessor:
         if tokenize_role:
             if role == "user":
                 kimia_content_msg.audio_append(
-                    self.extra_tokens.kimia_user_msg_start
-                )
+                    self.extra_tokens.kimia_user_msg_start)
                 kimia_content_msg.text_append(
-                    self.extra_tokens.kimia_text_blank
-                )
+                    self.extra_tokens.kimia_text_blank)
             elif role == "assistant":
                 kimia_content_msg.audio_append(
-                    self.extra_tokens.kimia_assistant_msg_start
-                )
+                    self.extra_tokens.kimia_assistant_msg_start)
                 kimia_content_msg.text_append(
-                    self.extra_tokens.kimia_text_blank
-                )
+                    self.extra_tokens.kimia_text_blank)
             else:
                 raise NotImplementedError(f"role: {role}")
 
@@ -489,13 +547,11 @@ class KimiAudioProcessor:
 
             kimia_content_msg.text_extend(text_tokens, has_loss)
             kimia_content_msg.audio_extend(
-                [self.extra_tokens.kimia_text_blank] * len(text_tokens)
-            )
+                [self.extra_tokens.kimia_text_blank] * len(text_tokens))
 
             if role == "assistant":
-                kimia_content_msg.text_append(
-                    self.extra_tokens.kimia_text_eos, has_loss
-                )  # eos for text stream
+                kimia_content_msg.text_append(self.extra_tokens.kimia_text_eos,
+                                              has_loss)  # eos for text stream
                 kimia_content_msg.audio_append(
                     self.extra_tokens.kimia_text_blank,
                     audio_token_loss_mask=False,
@@ -515,89 +571,94 @@ class KimiAudioProcessor:
                 audio_token_loss_mask=has_loss,
             )
             kimia_content_msg.audio_append(
-                self.extra_tokens.media_end, audio_token_loss_mask=has_loss
-            )  # EOS for audio stream
+                self.extra_tokens.media_end,
+                audio_token_loss_mask=has_loss)  # EOS for audio stream
             kimia_content_msg.text_extend(
-                [self.extra_tokens.kimia_text_blank] * (len(speech_tokens) + 2)
-            )
+                [self.extra_tokens.kimia_text_blank] *
+                (len(speech_tokens) + 2))
 
             if has_ct_token:
                 if output_type == "text":
                     kimia_content_msg.audio_append(
-                        self.extra_tokens.kimia_speech_ct_id
-                    )
+                        self.extra_tokens.kimia_speech_ct_id)
                 else:
                     kimia_content_msg.audio_append(
-                        self.extra_tokens.kimia_speech_ctd_id
-                    )
+                        self.extra_tokens.kimia_speech_ctd_id)
                 kimia_content_msg.text_append(
-                    self.extra_tokens.kimia_text_blank
-                )
+                    self.extra_tokens.kimia_text_blank)
 
             if extract_whisper_feature:
-                whisper_feature = self.extract_whisper_feat(audio_path)
-                kimia_content_msg.continuous_feature.append(whisper_feature)
+                audio_waves = self.get_audio_waves(audio_path)
+                kimia_content_msg.continuous_feature.append(audio_waves)
+        # Not support currently, as official library does utilize this branch
         elif message["message_type"] == "audio-text":
             audio_path, text = message["content"]
             speech_tokens = self._tokenize_audio(audio_path)
             text_tokens = self._tokenize_text(text)
 
             kimia_content_msg.audio_extend(
-                [self.extra_tokens.kimia_text_blank]
-                * self.kimia_text_audiodelaytokens
-            )
+                [self.extra_tokens.kimia_text_blank] *
+                self.kimia_text_audiodelaytokens)
             kimia_content_msg.audio_extend(speech_tokens, is_continuous=False)
             kimia_content_msg.text_extend(text_tokens)
             text_pad_tokens = (
-                self.kimia_text_audiodelaytokens
-                + len(speech_tokens)
-                - len(text_tokens)
-            ) * [self.extra_tokens.kimia_text_blank]
+                self.kimia_text_audiodelaytokens + len(speech_tokens) -
+                len(text_tokens)) * [self.extra_tokens.kimia_text_blank]
             kimia_content_msg.text_extend(text_pad_tokens)
 
-        elif message["message_type"] == None:
+        elif message["message_type"] is None:
             pass
         else:
             raise NotImplementedError(
-                f"message_type: \
-                                      {message['message_type']}"
-            )
+                f"message_type: {message['message_type']}")
 
         if has_msg_end_token:
-            kimia_content_msg.audio_append(
-                self.extra_tokens.msg_end, audio_token_loss_mask=False
-            )
+            kimia_content_msg.audio_append(self.extra_tokens.msg_end,
+                                           audio_token_loss_mask=False)
             kimia_content_msg.text_append(self.extra_tokens.kimia_text_blank)
 
-        assert (
-            kimia_content_msg.is_valid()
-        ), f"kimia_content_msg is not valid: {kimia_content_msg}"
+        assert (kimia_content_msg.is_valid()
+                ), f"kimia_content_msg is not valid: {kimia_content_msg}"
 
         return kimia_content_msg
 
-    def __call__(
+    def handle_prompt(self, messages: list[KimiAContent]) -> dict:
+        audio_input_ids, text_input_ids, is_continuous_mask, _, _ = (
+            messages.to_tensor())
+        audio_features: list[torch.Tensor] = messages.continuous_feature
+
+        # Consturct text prompt ids, mm_data and mm_processor_kwargs
+        text_input_ids = text_input_ids.cpu().tolist()
+        mm_data = dict(audio_input_ids=audio_input_ids.cpu().tolist(), )
+        mm_processor_kwargs = dict(
+            audio_input_ids=audio_input_ids.cpu().tolist(),
+            is_continuous_mask=is_continuous_mask.cpu().tolist(),
+            whisper_input_feature=[f.cpu().numpy() for f in audio_features],
+        )
+
+        return {
+            "prompt_token_ids": text_input_ids,
+            "multi_modal_data": {
+                "audio": mm_data
+            },
+            "mm_processor_kwargs": mm_processor_kwargs,
+        }
+
+    def get_prompt(
         self,
-        messages: List[Dict],
+        messages: list[dict],
         output_type: str = "text",
         add_assistant_start_msg: bool = True,
-    ) -> Dict:
-        """
-        Build the same outputs that KimiAContent.to_tensor() currently returns:
-        returns dict {
-            "audio_input_ids": torch.LongTensor (B, S),
-            # "text_input_ids": torch.LongTensor (B, S),
-            "is_continuous_mask": List[torch.BoolTensor (B, S)],
-            "continuous_feature": List[ndarray or torch.Tensor]
-        }
-        """
+    ) -> dict:
         assert output_type in ["text", "both"]
 
-        msgs: List[KimiAContent] = []
+        msgs: list[KimiAContent] = []
         tokenize_role = True
         has_ct_token = False
         has_msg_end_token = False
 
         previous_role = None
+
         for msg_idx, message in enumerate(messages):
             assert message["role"] in ["user", "assistant"]
 
@@ -645,91 +706,65 @@ class KimiAudioProcessor:
 
             msgs.append(assistant_start_msg)
 
-        ret_msg = msgs[0]
+        return self.handle_prompt(msgs)
 
-        for msg in msgs[1:]:
-            ret_msg.merge(msg)
+    def __call__(
+        self,
+        text: Optional[Union[TextInput, list[TextInput]]] = None,
+        audios: Optional[Union[np.ndarray, list[np.ndarray]]] = None,
+        **kwargs,
+    ) -> dict[str, NestedTensors]:
+        if text is None:
+            text = []
+        if not isinstance(text, list):
+            text = [text]
+        if audios is None:
+            audios = []
+        if not isinstance(audios, list):
+            audios = [audios]
 
-        audio_input_ids, text_input_ids, is_continuous_mask, _, _ = (
-            ret_msg.to_tensor()
-        )
-        audio_features = ret_msg.continuous_feature
+        text_input_ids = kwargs.get("prompt_token_ids")
+        is_continuous_mask = kwargs.get("is_continuous_mask")
+        whisper_input_feature = kwargs.get("whisper_input_feature")
 
-        data = dict(
-            audio_input_ids=audio_input_ids,
-            text_input_ids=text_input_ids,
-            is_continuous_mask=is_continuous_mask,
-            whisper_input_feature=audio_features,
-        )
-        return BatchFeature(data=data, tensor_type="pt")
+        # TODO(HelloWorldU): Add support for padding in a batch,
+        # currently we utilize single tensor as a batch input
+        text_tokens = torch.tensor(text_input_ids, dtype=torch.long)
+        audio_tokens = None
 
-    @property
-    # NOTE: we don't have default templates anymore, and the below 
-    # is kept only because the hub config is not yet updated!
-    def default_chat_template(self):
-        """
-        This default vicuna template formats inputs in the form of a chat 
-        history. For each message in the chat history:
-        * the template will output the role of the speaker followed 
-        by the content of the message.
-        * content is a list of strings and audios.
-        * If the content element is an audio, the template will 
-        output a sequence of <|AUDIO|> tokens
+        for audio in audios:
+            assert isinstance(audio, np.ndarray)
+            assert audio.ndim == 1
 
-        Example:
+            audio_list = ndarray_to_int_list(audio)
+            start_idx = None
+            end_idx = None
 
-        ```python
-        messages = [
-            {'role': 'system', 'content': 'You are a helpful assistant.'},
-            {"role": "user", "content": [
-                {"type": "audio", "audio_url": "https://qianwen-res.oss-cn-bei
-                jing.aliyuncs.com/Qwen2-Audio/audio/glass-breaking-151256.mp3"},
-                {"type": "text", "text": "What's that sound?"},
-            ]},
-            {"role": "assistant", "content": "It is the sound of glass 
-            shattering."},
-            {"role": "user", "content": [
-                {"type": "audio", "audio_url": "https://qianwen-res.oss-cn-beij
-                ing.aliyuncs.com/Qwen2-Audio/audio/f2641_0_throatclearing.wav"},
-                {"type": "text", "text": "How about this one?"},
-            ]},
-        ]
+            for idx, tok in enumerate(audio_list):
+                if tok == self.extra_tokens.media_begin:
+                    start_idx = idx
+                elif tok == self.extra_tokens.media_end:
+                    end_idx = idx
+                if (start_idx is not None and end_idx is not None
+                        and start_idx < end_idx):
+                    token_list = audio_list[start_idx + 1:end_idx]
+                    wav_tokens = self.audio_tokenizer.tokenize(
+                        speech=token_list)
+                    wav_tokens = wav_tokens + self.kimia_token_offset
+                    wav_tokens_list = wav_tokens.squeeze(0).cpu().tolist()
+                    audio_tokens = (audio_list[:start_idx] + wav_tokens_list +
+                                    audio_list[end_idx:])
+                    break
 
-        result = template.render(messages=messages, add_generation_prompt=True)
-        ```
-        """
-        # fmt: off
-        return (
-            "{% set audio_count = namespace(value=0) %}"
-            "{% for message in messages %}"
-                "{% if loop.first and message['role'] != 'system' %}"
-                    "<|im_start|>system\nYou are a helpful assistant.\
-                    <|im_end|>\n"
-                "{% endif %}"
-                "<|im_start|>{{ message['role'] }}\n"
-                "{% if message['content'] is string %}"
-                    "{{ message['content'] }}<|im_end|>\n"
-                "{% else %}"
-                    "{% for content in message['content'] %}"
-                        "{% if 'audio' in content or 'audio_url' in content or "
-                        "message['type'] == 'audio' or content"
-                        "['type'] == 'audio' %}"
-                            "{% set audio_count.value = "
-                            "audio_count.value + 1 %}"
-                            "Audio {{ audio_count.value }}: \
-                            <|audio_bos|><|AUDIO|><|audio_eos|>\n"
-                        "{% elif 'text' in content %}"
-                            "{{ content['text'] }}"
-                        "{% endif %}"
-                    "{% endfor %}"
-                    "<|im_end|>\n"
-                "{% endif %}"
-            "{% endfor %}"
-            "{% if add_generation_prompt %}"
-                "<|im_start|>assistant\n"
-            "{% endif %}"
-        )
-        # fmt: on
+        if audio_tokens:
+            audio_tokens = torch.tensor(audio_tokens, dtype=torch.long)
+
+        return {
+            "audio_input_ids": audio_tokens,
+            "text_input_ids": text_tokens,
+            "is_continuous_mask": is_continuous_mask,
+            "whisper_input_feature": whisper_input_feature,
+        }
 
 
 AutoProcessor.register("KimiAudioProcessor", KimiAudioProcessor)
