@@ -250,8 +250,7 @@ class AyaVisionMultiModalProcessor(
         image_processor = hf_processor.image_processor
 
         def get_replacement(item_idx: int):
-            images: ImageProcessorItems = mm_items.get("image",
-                                                       ImageProcessorItems)
+            images = mm_items.get_items("image", ImageProcessorItems)
             image_size: ImageSize = images.get_image_size(item_idx)
             num_patches = self.info.get_num_patches(
                 image_width=image_size.width,
