@@ -352,7 +352,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Attention layers that are only in the KVCacheConfig of the runner
         # (e.g., KV sharing, encoder-only attention), but not in the
         # KVCacheConfig of the scheduler.
-        self.runner_only_kv_layers: set[str] = set()
+        self.runner_only_attn_layers: set[str] = set()
 
         # Cached outputs.
         self._draft_token_ids: Optional[Union[list[list[int]],
@@ -911,9 +911,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         kv_cache_group_spec.kv_cache_spec,
                         builder,
                     )
-
-                common_attn_metadata = builder.patch_common_attn_metadata(
-                    common_attn_metadata, scheduler_output)
 
                 attn_metadata_i = (builder.build(
                     common_prefix_len=common_prefix_len,
@@ -2975,7 +2972,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
             for layer_name in group.layer_names:
-                if layer_name in self.runner_only_kv_layers:
+                if layer_name in self.runner_only_attn_layers:
                     continue
                 layer_names.add(layer_name)
         assert layer_names == set(kv_cache_raw_tensors.keys(
@@ -3015,7 +3012,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for kv_cache_spec, group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             for layer_name in group.layer_names:
-                if layer_name in self.runner_only_kv_layers:
+                if layer_name in self.runner_only_attn_layers:
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
                 assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
@@ -3138,7 +3135,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 kv_cache_config.kv_cache_groups,
                 kv_caches,
                 self.attn_groups,
-                self.runner_only_kv_layers,
+                self.runner_only_attn_layers,
             )
             attn_layers = get_layers_from_vllm_config(self.vllm_config,
                                                       Attention)
@@ -3197,7 +3194,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     dtype=self.kv_cache_dtype,
                     use_mla=use_mla)
                 encoder_only_attn_specs[attn_spec].append(layer_name)
-                self.runner_only_kv_layers.add(layer_name)
+                self.runner_only_attn_layers.add(layer_name)
         if len(encoder_only_attn_specs) > 0:
             assert len(
                 encoder_only_attn_specs

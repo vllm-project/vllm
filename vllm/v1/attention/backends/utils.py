@@ -20,7 +20,8 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionMetadata)
 from vllm.attention.layer import Attention
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
@@ -551,17 +552,14 @@ def make_local_attention_virtual_batches(
 def subclass_attention_metadata_builder(
     name_prefix: str,
     builder_cls: type[AttentionMetadataBuilder[M]],
-    patch_common_attn_metadata: Callable[
-        [
-            AttentionMetadataBuilder[M], CommonAttentionMetadata,
-            "SchedulerOutput"
-        ],
-        CommonAttentionMetadata,
+    build: Callable[
+        [AttentionMetadataBuilder[M], CommonAttentionMetadata],
+        AttentionMetadata,
     ],
 ) -> type[AttentionMetadataBuilder[M]]:
     """
     Return a new subclass of `builder_cls` whose .build(...) method
-    first calls build_preprocess_fn(common_attn_metadata) on the metadata.
+    is monkey patched to a custom build function.
     """
     name: str = name_prefix + builder_cls.__name__  # type: ignore
 
@@ -569,7 +567,7 @@ def subclass_attention_metadata_builder(
         name,
         (builder_cls, ),  # inherit from the original
         {
-            "patch_common_attn_metadata": patch_common_attn_metadata,
+            "build": build,
         })
     return Wrapped  # type: ignore
 

@@ -6,13 +6,13 @@ from typing import List, Optional
 import torch
 
 from vllm import envs
-from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionMetadata)
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig, QuantizationConfig
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata, make_local_attention_virtual_batches,
     subclass_attention_backend, subclass_attention_metadata_builder)
-from vllm.v1.core.sched.output import SchedulerOutput
 
 from ..layer import Attention
 
@@ -25,14 +25,15 @@ def create_chunked_local_attention_backend(
 ) -> type[AttentionBackend]:
     prefix = f"ChunkedLocalAttention_{attention_chunk_size}_{block_size}_"
 
-    def patch_common_attn_metadata(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        scheduler_output: "SchedulerOutput",
-    ) -> CommonAttentionMetadata:
-        return make_local_attention_virtual_batches(attention_chunk_size,
-                                                    common_attn_metadata,
-                                                    block_size)
+    def build(self,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              fast_build: bool = False) -> AttentionMetadata:
+        common_attn_metadata = make_local_attention_virtual_batches(
+            attention_chunk_size, common_attn_metadata, block_size)
+        return super(self.__class__,
+                     self).build(common_prefix_len, common_attn_metadata,
+                                 fast_build)
 
     # Dynamically create a new attention backend that wraps the
     # underlying attention backend but applies
@@ -40,7 +41,7 @@ def create_chunked_local_attention_backend(
     builder_cls = subclass_attention_metadata_builder(
         name_prefix=prefix,
         builder_cls=underlying_attn_backend.get_builder_cls(),
-        patch_common_attn_metadata=patch_common_attn_metadata)
+        build=build)
     attn_backend = subclass_attention_backend(
         name_prefix=prefix,
         attention_backend_cls=underlying_attn_backend,
