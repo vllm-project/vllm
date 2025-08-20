@@ -191,7 +191,17 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
             yield a, b
             a = b
 
-    cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+    try:
+        cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+    except (OSError, KeyError, TypeError):
+        # HACK: Python 3.13+ workaround - set missing __firstlineno__
+        # Workaround can be removed after we upgrade to pydantic==2.12.0
+        with open(inspect.getfile(cls)) as f:
+            for i, line in enumerate(f):
+                if f"class {cls.__name__}" in line and ":" in line:
+                    cls.__firstlineno__ = i + 1
+                    break
+        cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
 
     if not isinstance(cls_node, ast.ClassDef):
         raise TypeError("Given object was not a class.")
@@ -1453,7 +1463,8 @@ class ModelConfig:
         from vllm.distributed.utils import get_pp_indices
         if (self.hf_text_config.model_type == "deepseek_mtp"
                 or self.hf_config.model_type == "mimo_mtp"
-                or self.hf_config.model_type == "glm4_moe_mtp"):
+                or self.hf_config.model_type == "glm4_moe_mtp"
+                or self.hf_config.model_type == "ernie_mtp"):
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_nextn_predict_layers", 0)
         else:
@@ -1901,7 +1912,8 @@ class DeviceConfig:
 
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
-                            "mlp_speculator", "draft_model", "deepseek_mtp"]
+                            "mlp_speculator", "draft_model", "deepseek_mtp",
+                            "ernie_mtp"]
 
 
 @config
@@ -2034,6 +2046,16 @@ class SpeculativeConfig:
                 "architectures": ["Glm4MoeMTPModel"]
             })
 
+        if hf_config.model_type == "ernie4_5_moe":
+            hf_config.model_type = "ernie_mtp"
+        if hf_config.model_type == "ernie_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update({
+                "n_predict": n_predict,
+                "architectures": ["ErnieMTPModel"]
+            })
+            return hf_config
+
         return hf_config
 
     def __post_init__(self):
@@ -2052,8 +2074,8 @@ class SpeculativeConfig:
             if self.target_model_config and \
                 (self.target_model_config.hf_text_config.model_type \
                         == "deepseek_v3" or
-                    self.target_model_config.hf_text_config.model_type \
-                        == "mimo"):
+                    self.target_model_config.hf_text_config.model_type in
+                        ("mimo","ernie4_5_moe")):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
             elif self.method in ("ngram", "[ngram]"):
@@ -2148,6 +2170,15 @@ class SpeculativeConfig:
                     if self.num_speculative_tokens > 1:
                         logger.warning(
                                 "All Deepseek MTP models only have " \
+                                "one layer. Might need some code changes " \
+                                "to support multiple layers."
+                            )
+                elif (self.draft_model_config.hf_config.model_type ==
+                      "ernie_mtp"):
+                    self.method = "ernie_mtp"
+                    if self.num_speculative_tokens > 1:
+                        logger.warning(
+                                "All Ernie MTP models only have " \
                                 "one layer. Might need some code changes " \
                                 "to support multiple layers."
                             )
@@ -2366,7 +2397,7 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "deepseek_mtp")
+        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp")
 
     def __repr__(self) -> str:
         method = self.method
