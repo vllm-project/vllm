@@ -387,14 +387,6 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
     torch.ops._C.gptq_shuffle(q_weight, q_perm, bit)
 
 
-# marlin
-def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                b_scales: torch.Tensor, workspace: torch.Tensor, size_m: int,
-                size_n: int, size_k: int) -> torch.Tensor:
-    return torch.ops._C.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
-                                    size_n, size_k)
-
-
 # marlin_24
 def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                         b_meta: torch.Tensor, b_scales: torch.Tensor,
@@ -436,25 +428,6 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                use_fp32_reduce: bool = False,
                                is_zp_float: bool = False) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
-
-    @register_fake("_C::marlin_qqq_gemm")
-    def _marlin_qqq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
-                              s_tok: torch.Tensor, s_ch: torch.Tensor,
-                              s_group: torch.Tensor, workspace: torch.Tensor,
-                              size_m: torch.SymInt, size_n: torch.SymInt,
-                              size_k: torch.SymInt) -> torch.Tensor:
-        return torch.empty((size_m, size_n),
-                           dtype=torch.float16,
-                           device=a.device)
-
-    @register_fake("_C::marlin_gemm")
-    def _marlin_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
-                          b_scales: torch.Tensor, workspace: torch.Tensor,
-                          size_m: torch.SymInt, size_n: torch.SymInt,
-                          size_k: torch.SymInt) -> torch.Tensor:
-        return torch.empty((size_m, size_n),
-                           dtype=torch.float16,
-                           device=a.device)
 
     @register_fake("_C::awq_dequantize")
     def _awq_dequantize_fake(qweight: torch.Tensor, scales: torch.Tensor,
@@ -842,6 +815,28 @@ def get_cutlass_moe_mm_data(topk_ids: torch.Tensor,
                                                 output_permutation,
                                                 num_experts, n, k,
                                                 blockscale_offsets)
+
+
+def get_cutlass_moe_mm_problem_sizes(
+        topk_ids: torch.Tensor,
+        problem_sizes1: torch.Tensor,
+        problem_sizes2: torch.Tensor,
+        num_experts: int,
+        n: int,
+        k: int,
+        blockscale_offsets: Optional[torch.Tensor] = None):
+    """
+    Compute only the per-expert problem sizes needed by the two grouped matrix
+    multiplications used in CUTLASS-based fused MoE.
+
+    The function takes in topk_ids (token→expert mapping) and computes:
+    - problem_sizes1, problem_sizes2: M×N×K sizes of each expert's
+                                    multiplication for the two grouped MMs
+                                    used in the fused MoE operation.
+    """
+    return torch.ops._C.get_cutlass_moe_mm_problem_sizes(
+        topk_ids, problem_sizes1, problem_sizes2, num_experts, n, k,
+        blockscale_offsets)
 
 
 def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
@@ -1324,15 +1319,6 @@ def scaled_int8_quant(
     torch.ops._C.dynamic_scaled_int8_quant(output, input.contiguous(),
                                            input_scales, input_azp)
     return output, input_scales, input_azp
-
-
-# qqq ops
-def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                    s_tok: torch.Tensor, s_ch: torch.Tensor,
-                    s_group: torch.Tensor, workspace: torch.Tensor,
-                    size_m: int, size_n: int, size_k: int) -> torch.Tensor:
-    return torch.ops._C.marlin_qqq_gemm(a, b_q_weight, s_tok, s_ch, s_group,
-                                        workspace, size_m, size_n, size_k)
 
 
 # gguf
