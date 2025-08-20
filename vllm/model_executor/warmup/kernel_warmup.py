@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 
-def kernel_warmup(worker: "Worker", do_autotune: bool = False):
+def kernel_warmup(worker: "Worker"):
     # Deep GEMM warmup
     do_deep_gemm_warmup = (envs.VLLM_USE_DEEP_GEMM
                            and is_deep_gemm_supported()
@@ -32,11 +32,10 @@ def kernel_warmup(worker: "Worker", do_autotune: bool = False):
 
     # FlashInfer autotune for Blackwell (SM 10.0) GPUs
     if has_flashinfer() and current_platform.is_device_capability(100):
-        flashinfer_autotune(worker.model_runner, do_autotune)
+        flashinfer_autotune(worker.model_runner)
 
 
-def flashinfer_autotune(runner: "GPUModelRunner",
-                        do_autotune: bool = True) -> None:
+def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     """
     Autotune FlashInfer operations.
     FlashInfer have many implementations for the same operation,
@@ -48,7 +47,7 @@ def flashinfer_autotune(runner: "GPUModelRunner",
     """
     from vllm.utils.flashinfer import autotune
 
-    with torch.inference_mode(), autotune(do_autotune):
+    with torch.inference_mode(), autotune():
         # We skip EPLB here since we don't want to record dummy metrics
         # When autotuning with number of tokens m, flashinfer will autotune
         # operations for all number of tokens up to m.
