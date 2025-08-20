@@ -85,13 +85,12 @@ class OlmoAttention(nn.Module):
         self.clip_qkv = config.clip_qkv
 
         # Attention input projection. Projects x -> (q, k, v)
-        self.qkv_proj = QKVParallelLinear(
-            self.hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            bias=config.attention_bias,
-            quant_config=quant_config,
-        )
+        self.qkv_proj = QKVParallelLinear(self.hidden_size,
+                                          self.head_dim,
+                                          self.total_num_heads,
+                                          bias=config.attention_bias,
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.qkv_proj")
 
         # Rotary embeddings.
         self.rotary_emb = get_rope(
@@ -109,12 +108,11 @@ class OlmoAttention(nn.Module):
                               prefix=f"{prefix}.attn")
 
         # Attention output projection.
-        self.o_proj = RowParallelLinear(
-            self.hidden_size,
-            self.hidden_size,
-            bias=config.attention_bias,
-            quant_config=quant_config,
-        )
+        self.o_proj = RowParallelLinear(self.hidden_size,
+                                        self.hidden_size,
+                                        bias=config.attention_bias,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.o_proj")
 
     def forward(
         self,
@@ -138,11 +136,10 @@ class OlmoMLP(nn.Module):
     (plus another skip connection).
     """
 
-    def __init__(
-        self,
-        config: OlmoConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self,
+                 config: OlmoConfig,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -150,22 +147,20 @@ class OlmoMLP(nn.Module):
 
         # Feed-forward input projection.
         self.gate_up_proj = MergedColumnParallelLinear(
-            self.hidden_size,
-            [self.intermediate_size] * 2,
+            self.hidden_size, [self.intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
-        )
+            prefix=f"{prefix}.gate_up_proj")
 
         # Activation function.
         self.act_fn = SiluAndMul()
 
         # Feed-forward output projection.
-        self.down_proj = RowParallelLinear(
-            self.intermediate_size,
-            self.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-        )
+        self.down_proj = RowParallelLinear(self.intermediate_size,
+                                           self.hidden_size,
+                                           bias=False,
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.down_proj")
 
     def forward(
         self,
@@ -197,7 +192,7 @@ class OlmoDecoderLayer(nn.Module):
                                        prefix=f"{prefix}.self_attn")
 
         # MLP block.
-        self.mlp = OlmoMLP(config, quant_config)
+        self.mlp = OlmoMLP(config, quant_config, prefix=f"{prefix}.mlp")
 
         # LayerNorm
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
