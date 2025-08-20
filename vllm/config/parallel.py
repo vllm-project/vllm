@@ -89,7 +89,7 @@ class ParallelConfig:
     """Port for data parallel messaging."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
-    data_parallel_master_port_list: list[int] = field(default_factory=list)
+    _data_parallel_master_port_list: list[int] = field(default_factory=list)
     """List of port for data parallel messaging"""
     data_parallel_backend: str = "mp"
     """Backend to use for data parallel, either "mp" or "ray"."""
@@ -179,6 +179,11 @@ class ParallelConfig:
         including data parallelism."""
         return self.world_size * self.data_parallel_size
 
+    @property
+    def data_parallel_master_port_list(self) -> list[int]:
+        """provide a getter for this port list that is generated during init"""
+        return self._data_parallel_master_port_list
+
     def get_next_dp_init_port(self) -> int:
         """
         We might need to initialize process groups in multiple
@@ -188,8 +193,8 @@ class ParallelConfig:
         pop a new port from the prepared port list each time we need to
         initialize a new process group related to data parallelism.
         """
-        if len(self.data_parallel_master_port_list) > 0:
-            answer = self.data_parallel_master_port_list.pop()
+        if len(self._data_parallel_master_port_list) > 0:
+            answer = self._data_parallel_master_port_list.pop()
         else:
             answer = self.data_parallel_master_port
 
@@ -319,10 +324,10 @@ class ParallelConfig:
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
-            self.data_parallel_master_port_list = get_open_ports_list(5)
-            assert len(self.data_parallel_master_port_list) > 0
+            self._data_parallel_master_port_list = get_open_ports_list(5)
+            assert len(self._data_parallel_master_port_list) > 0
             self.data_parallel_master_port = \
-                self.data_parallel_master_port_list.pop()
+                self._data_parallel_master_port_list.pop()
 
             if not (0 <= self.data_parallel_rank < self.data_parallel_size):
                 raise ValueError(

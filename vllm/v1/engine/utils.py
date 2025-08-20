@@ -798,7 +798,7 @@ def wait_for_engine_startup(
                         parallel_config.data_parallel_master_ip,
                         "data_parallel_master_port":
                         parallel_config.data_parallel_master_port,
-                        "data_parallel_master_port_list":
+                        "_data_parallel_master_port_list":
                         parallel_config.data_parallel_master_port_list,
                         "data_parallel_size":
                         parallel_config.data_parallel_size,
