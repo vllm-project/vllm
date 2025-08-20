@@ -22,7 +22,7 @@ class RVLProcessingInfo(LlavaNextProcessingInfo):
         return self.ctx.get_hf_config()
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        return {"image": None, "video": None}
+        return {"image": None}
     
     def _get_num_unpadded_features(
         self,
