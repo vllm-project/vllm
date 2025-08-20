@@ -14,38 +14,16 @@ from typing import Any, Optional
 import pytest
 import torch
 from torch import nn
-from torch.library import Library
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
                          VllmConfig, set_current_vllm_config)
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.utils import direct_register_custom_op
 
-# create a library to hold the custom op
-silly_lib = Library("silly_toy_llama", "FRAGMENT")  # noqa
-
-
-def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    out: torch.Tensor) -> None:
-    out.copy_(q)
-    out += k
-    out += v
-
-
-def silly_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                         out: torch.Tensor) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="attention",
-    op_func=silly_attention,
-    mutates_args=["out"],
-    fake_impl=silly_attention_fake,
-    target_lib=silly_lib,
-)
+# Import shared test operations
+# The standard attention operation is automatically registered when imported
+import tests.compile.test_operations
 
 
 @dataclass
@@ -160,7 +138,7 @@ class LlamaAttention(nn.Module):
         k = k + positions.unsqueeze(1)
 
         attn_output = torch.empty_like(q)
-        torch.ops.silly_toy_llama.attention(q, k, v, attn_output)
+        torch.ops.silly.attention(q, k, v, attn_output)
 
         output = self.output_projection(attn_output)
         return output
