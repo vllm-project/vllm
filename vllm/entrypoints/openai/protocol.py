@@ -38,7 +38,7 @@ from typing_extensions import TypeAlias
 
 from vllm import envs
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
-                                         random_tool_call_id)
+                                         make_tool_call_id)
 from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam)
 from vllm.logger import init_logger
@@ -1634,7 +1634,7 @@ class FunctionCall(OpenAIBaseModel):
 
 
 class ToolCall(OpenAIBaseModel):
-    id: str = Field(default_factory=random_tool_call_id)
+    id: str = Field(default_factory=make_tool_call_id)
     type: Literal["function"] = "function"
     function: FunctionCall
 
