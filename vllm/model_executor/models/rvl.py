@@ -2,15 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Mapping
+
 import torch
 import torch.nn as nn
 from transformers.activations import GELUActivation
+
 from vllm.config import VllmConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalDataDict
-from .utils import WeightsMapper
+
+from .llava_next import (
+    LlavaDummyInputsBuilder,
+    LlavaNextMultiModalProcessor,
+    LlavaNextProcessingInfo,
+)
 from .llava_onevision import LlavaOnevisionForConditionalGeneration
-from .llava_next import LlavaNextProcessingInfo, LlavaDummyInputsBuilder, LlavaNextMultiModalProcessor
+from .utils import WeightsMapper
+
 
 class RVLProcessingInfo(LlavaNextProcessingInfo):
 
@@ -21,15 +29,13 @@ class RVLProcessingInfo(LlavaNextProcessingInfo):
         return self.ctx.get_hf_processor(**kwargs)
 
 
-
-class RVLDummyInputsBuilder(
-        LlavaDummyInputsBuilder[RVLProcessingInfo]):
+class RVLDummyInputsBuilder(LlavaDummyInputsBuilder[RVLProcessingInfo]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
-        image_token = '<image>'
-        
-        return image_token * num_images 
+        image_token = "<image>"
+
+        return image_token * num_images
 
     def get_dummy_mm_data(
         self,
@@ -38,25 +44,34 @@ class RVLDummyInputsBuilder(
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        target_width, target_height = \
+        target_width, target_height = (
             self.info.get_image_size_with_most_features()
-
+        )
 
         return {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images),
+            "image": self._get_dummy_images(
+                width=target_width, height=target_height, num_images=num_images
+            ),
         }
 
 
 class RVLMultiModalProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.pre_norm = torch.nn.LayerNorm(config.vision_config.hidden_size, eps=1e-06)
-        self.linear_1 = nn.Linear(config.vision_config.hidden_size, config.text_config.hidden_size, bias=True)
+        self.pre_norm = torch.nn.LayerNorm(
+            config.vision_config.hidden_size, eps=1e-06
+        )
+        self.linear_1 = nn.Linear(
+            config.vision_config.hidden_size,
+            config.text_config.hidden_size,
+            bias=True,
+        )
         self.act = GELUActivation()
-        self.linear_2 = nn.Linear(config.text_config.hidden_size, config.text_config.hidden_size, bias=True)
+        self.linear_2 = nn.Linear(
+            config.text_config.hidden_size,
+            config.text_config.hidden_size,
+            bias=True,
+        )
 
     def forward(self, image_feature: torch.Tensor) -> torch.Tensor:
         image_feature = self.pre_norm(image_feature)
@@ -67,22 +82,24 @@ class RVLMultiModalProjector(nn.Module):
         return hidden_states
 
 
-
 @MULTIMODAL_REGISTRY.register_processor(
     LlavaNextMultiModalProcessor,
     info=RVLProcessingInfo,
-    dummy_inputs=RVLDummyInputsBuilder)
+    dummy_inputs=RVLDummyInputsBuilder,
+)
 class RForConditionalGeneration(LlavaOnevisionForConditionalGeneration):
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
-            # mapping for new names in checkpoint saved after transformers v4.52
+            # mapping for new names in checkpoint saved after transformers
+            # v4.52
             "model.language_model.": "language_model.model.",
             "model.vision_tower.": "vision_tower.",
             "model.multi_modal_projector.": "multi_modal_projector.",
             "model.image_newline": "image_newline",
             "lm_head.": "language_model.lm_head.",
-        })
+        }
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
