@@ -311,8 +311,9 @@ class Worker(WorkerBase):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
 
-        # run autotuner before cuda graph capture.
-        kernel_warmup(self, do_autotune=True)
+        # Warmup and tune the kernels used during model execution before
+        # cuda graph capture.
+        kernel_warmup(self)
 
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
@@ -337,9 +338,6 @@ class Worker(WorkerBase):
             else:
                 self.model_runner._dummy_sampler_run(
                     hidden_states=last_hidden_states)
-
-        # Warmup kernels used during model execution
-        kernel_warmup(self, do_autotune=False)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
