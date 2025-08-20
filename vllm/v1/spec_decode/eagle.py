@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import ast
 from dataclasses import replace
 from typing import Optional
 
@@ -97,26 +96,12 @@ class EagleProposer:
             dtype=self.dtype,
             device=device)
 
-        # Parse the speculative token tree.
-        spec_token_tree = self.speculative_config.speculative_token_tree
-        self.tree_choices: list[tuple[int,
-                                      ...]] = ast.literal_eval(spec_token_tree)
-        tree_depth = len(self.tree_choices[-1])
-        # Precompute per-level properties of the tree.
-        num_drafts_per_level = [0] * tree_depth
-        for node in self.tree_choices:
-            num_drafts_per_level[len(node) - 1] += 1
-        self.cu_drafts_per_level = [num_drafts_per_level[0]]
-        self.child_drafts_per_level = [num_drafts_per_level[0]]
-        for level in range(1, tree_depth):
-            self.cu_drafts_per_level.append(self.cu_drafts_per_level[-1] +
-                                            num_drafts_per_level[level])
-            self.child_drafts_per_level.append(num_drafts_per_level[level] //
-                                               num_drafts_per_level[level - 1])
+        # Get tree drafter params.
+        self.tree_drafter_params = self.speculative_config.tree_drafter_params
         # Precompute draft position offsets in flattened tree.
         self.tree_draft_pos_offsets = torch.arange(
             1,
-            len(self.tree_choices) + 1,
+            len(self.tree_drafter_params.tree_choices) + 1,
             device=device,
             dtype=torch.int32,
         ).repeat(max_batch_size, 1)
@@ -134,7 +119,7 @@ class EagleProposer:
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embeds: Optional[list[torch.Tensor]] = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
@@ -205,15 +190,19 @@ class EagleProposer:
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
             # Draft using tree attention.
-            draft_token_ids_list = self.propose_tree(
+            draft_token_ids_list, draft_probs_list = self.propose_tree(
                 batch_size=batch_size,
                 logits=logits,
                 positions=positions,
                 hidden_states=hidden_states,
                 common_attn_metadata=common_attn_metadata,
             )
-            # [batch_size, num_tree_tokens]
-            return torch.cat(draft_token_ids_list, dim=1)
+            return (
+                # [batch_size, num_tree_tokens]
+                torch.cat(draft_token_ids_list, dim=1),
+                # [batch_size, num_tree_tokens]
+                torch.cat(draft_probs_list, dim=1)
+                if draft_probs_list is not None else None)
 
         draft_token_ids = logits.argmax(dim=-1)
 
@@ -323,7 +312,7 @@ class EagleProposer:
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
-        return draft_token_ids
+        return draft_token_ids, None
 
     def propose_tree(
         self,
@@ -335,22 +324,28 @@ class EagleProposer:
         # [num_tokens, hidden_size]
         hidden_states: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
-    ) -> list[torch.Tensor]:
+    ) -> tuple[list[torch.Tensor], Optional[list[torch.Tensor]]]:
         tree_attn_metadata_builder = \
             self.runner.attn_groups[0][0].metadata_builder
         assert isinstance(tree_attn_metadata_builder,
                           TreeAttentionMetadataBuilder)
 
-        total_num_drafts = self.cu_drafts_per_level[0]
+        cu_drafts_per_level = self.tree_drafter_params.cu_drafts_per_level
+        child_drafts_per_level = self.tree_drafter_params.child_drafts_per_level
+
+        total_num_drafts = cu_drafts_per_level[0]
         level_num_drafts = total_num_drafts
         # Sample a draft token for each child at the tree root level.
-        num_children = self.child_drafts_per_level[0]
+        num_children = child_drafts_per_level[0]
         if num_children == 1:
             draft_token_ids = logits.argmax(dim=-1).view(batch_size, -1)
         else:
             draft_token_ids = torch.topk(logits, num_children,
                                          dim=-1).indices.view(batch_size, -1)
         draft_token_ids_list = [draft_token_ids]
+        # Compute the draft probabilities for the drafted tokens.
+        draft_probs = logits.softmax(dim=-1, dtype=torch.float32)
+        draft_probs_list = [draft_probs.gather(dim=1, index=draft_token_ids)]
         draft_hidden_states = hidden_states.view(batch_size, 1, -1)
 
         # Initialize empty tensors for concatenation with the level outputs.
@@ -367,7 +362,7 @@ class EagleProposer:
         flattened_draft_positions = (
             positions.view(batch_size, -1) +
             self.tree_draft_pos_offsets[:batch_size, :])
-        tree_depth = len(self.cu_drafts_per_level)
+        tree_depth = len(cu_drafts_per_level)
         for level in range(tree_depth - 1):
             # Get draft positions for RoPE.
             draft_positions = positions + (level + 1)
@@ -479,7 +474,7 @@ class EagleProposer:
             )
 
             # Sample a draft token for each child at the next tree level.
-            num_children = self.child_drafts_per_level[level + 1]
+            num_children = child_drafts_per_level[level + 1]
             if num_children == 1:
                 draft_token_ids = logits.argmax(dim=-1).view(batch_size, -1)
             else:
@@ -487,12 +482,18 @@ class EagleProposer:
                                              dim=-1).indices.view(
                                                  batch_size, -1)
             draft_token_ids_list.append(draft_token_ids)
+            # Compute the draft probabilities for the drafted tokens.
+            draft_probs = logits.softmax(dim=-1, dtype=torch.float32).view(
+                batch_size, -1)
+            draft_probs_list.append(
+                draft_probs.gather(dim=1, index=draft_token_ids))
 
             # Update the # drafts counters for the next tree level.
-            level_num_drafts = self.cu_drafts_per_level[level +
-                                                        1] - total_num_drafts
-            total_num_drafts = self.cu_drafts_per_level[level + 1]
-        return draft_token_ids_list
+            level_num_drafts = cu_drafts_per_level[level +
+                                                   1] - total_num_drafts
+            total_num_drafts = cu_drafts_per_level[level + 1]
+
+        return (draft_token_ids_list, draft_probs_list)
 
     def prepare_inputs(
         self,

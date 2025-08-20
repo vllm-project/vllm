@@ -48,6 +48,7 @@ from vllm.transformers_utils.config import (
     try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
+from vllm.tree_drafter_params import TreeDrafterParams
 from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS, LayerBlockType,
                         LazyLoader, common_broadcastable_dtype, random_uuid)
 
@@ -2013,6 +2014,9 @@ class SpeculativeConfig:
         ParallelConfig] = None  # type: ignore
     """The parallel configuration for the draft model initialized internal."""
 
+    # params generated in the post-init stage for tree drafting.
+    tree_drafter_params: SkipValidation[TreeDrafterParams] = None
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2253,12 +2257,9 @@ class SpeculativeConfig:
                         (i + 1) * (0, )
                         for i in range(self.num_speculative_tokens)
                     ])
-                else:
-                    # Sort the token tree breadth-first.
-                    tree_choices = ast.literal_eval(
-                        self.speculative_token_tree)
-                    self.speculative_token_tree = str(
-                        sorted(tree_choices, key=lambda t: (len(t), t)))
+                # Construct tree drafter params from the serialized token tree.
+                self.tree_drafter_params = TreeDrafterParams.from_spec_token_tree(
+                    self.speculative_token_tree)
 
                 self.draft_tensor_parallel_size = \
                     SpeculativeConfig._verify_and_get_draft_tp(
@@ -2586,7 +2587,7 @@ class MultiModalConfig:
 
     skip_mm_profiling: bool = False
     """
-    When enabled, skips multimodal memory profiling and only profiles with 
+    When enabled, skips multimodal memory profiling and only profiles with
     language backbone model during engine initialization.
 
     This reduces engine startup time but shifts the responsibility to users for
@@ -2649,24 +2650,24 @@ class PoolerConfig:
     ## for embeddings models
     normalize: Optional[bool] = None
     """
-    Whether to normalize the embeddings outputs. 
+    Whether to normalize the embeddings outputs.
     """
     dimensions: Optional[int] = None
     """
-    Reduce the dimensions of embeddings if model 
+    Reduce the dimensions of embeddings if model
     support matryoshka representation.
     """
 
     ## for classification models
     activation: Optional[bool] = None
     """
-    Whether to apply activation function to the classification outputs. 
+    Whether to apply activation function to the classification outputs.
     """
 
     ## for reward models
     softmax: Optional[bool] = None
     """
-    Whether to apply softmax to the reward outputs. 
+    Whether to apply softmax to the reward outputs.
     """
     step_tag_id: Optional[int] = None
     """
@@ -2692,9 +2693,9 @@ class PoolerConfig:
 
     max_embed_len: Optional[int] = None
     """
-    Maximum input length allowed for embedding generation. When set, allows 
+    Maximum input length allowed for embedding generation. When set, allows
     inputs longer than max_embed_len to be accepted for embedding models.
-    This parameter enables accepting long inputs without requiring 
+    This parameter enables accepting long inputs without requiring
     VLLM_ALLOW_LONG_MAX_MODEL_LEN environment variable. When an input exceeds
     max_embed_len, it will be handled according to the original max_model_len
     validation logic. Defaults to None (i.e. set to max_model_len).
