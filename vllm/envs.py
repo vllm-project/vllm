@@ -107,6 +107,7 @@ if TYPE_CHECKING:
     VLLM_HPU_USE_DELAYED_SAMPLING: bool = False
     VLLM_HPU_FORCE_CHANNEL_FP8: bool = True
     VLLM_HPU_CONVERT_TO_FP8UZ: bool = True
+    VLLM_DETOKENIZE_ON_OPENAI_SERVER: bool = False
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
@@ -726,6 +727,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH":
     lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
+
+    # If set, vLLM will use the OpenAI server for detokenization.
+    "VLLM_DETOKENIZE_ON_OPENAI_SERVER":
+    lambda: os.environ.get("VLLM_DETOKENIZE_ON_OPENAI_SERVER", "false").lower(
+    ) in ("1", "true"),
 
     # Contiguous cache fetching to avoid using costly gather operation on
     # Gaudi3. This is only applicable to HPU contiguous cache. If set to true,
