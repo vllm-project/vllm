@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # vllm/_rope_fastpath.py
 # Prototype RoPE fast-path helper:
 # - Baseline: even/odd indexing
