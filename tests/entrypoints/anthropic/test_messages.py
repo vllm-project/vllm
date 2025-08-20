@@ -96,13 +96,15 @@ def test_anthropic_tool_call(client: anthropic.AsyncAnthropic):
         tools=[
             {
                 "name": "get_current_weather",
-                "description": "Useful for querying the weather in a specified city.",
+                "description": "Useful for querying the weather "
+                               "in a specified city.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "location": {
                             "type": "string",
-                            "description": "City or region, for example: New York, London, Tokyo, etc."
+                            "description": "City or region, for example: "
+                                           "New York, London, Tokyo, etc."
                         }
                     },
                     "required": ["location"]
@@ -118,7 +120,9 @@ def test_anthropic_tool_call(client: anthropic.AsyncAnthropic):
     print(f'Anthropic response: {resp.model_dump_json()}')
 
     @pytest.mark.asyncio
-    async def test_anthropic_tool_call_streaming(client: anthropic.AsyncAnthropic):
+    async def test_anthropic_tool_call_streaming(
+            client: anthropic.AsyncAnthropic
+    ):
         resp = await client.messages.create(
             model="claude-3-7-sonnet-latest",
             max_tokens=8192,
@@ -131,13 +135,15 @@ def test_anthropic_tool_call(client: anthropic.AsyncAnthropic):
             tools=[
                 {
                     "name": "get_current_weather",
-                    "description": "Useful for querying the weather in a specified city.",
+                    "description": "Useful for querying the weather "
+                                   "in a specified city.",
                     "input_schema": {
                         "type": "object",
                         "properties": {
                             "location": {
                                 "type": "string",
-                                "description": "City or region, for example: New York, London, Tokyo, etc."
+                                "description": "City or region, for example: "
+                                               "New York, London, Tokyo, etc."
                             }
                         },
                         "required": ["location"]
