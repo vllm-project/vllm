@@ -47,7 +47,7 @@ def ref_int8_scaled_mm(
     output = torch.mm((scale_a * a.to(dtype=torch.float32)),
                       (scale_b * b.to(dtype=torch.float32)))
     if bias is not None:
-        output += bias
+        output += bias.float()
 
     return output.to(dtype=output_type)
 
@@ -82,7 +82,7 @@ def onednn_int8_gemm_test_helper(primitive_cache_size: int,
         azp_adj = None
 
     if use_bias:
-        bias = torch.rand((n, ), device=device, dtype=torch.float) * 10
+        bias = torch.rand((n, ), device=device, dtype=out_dtype) * 10
     else:
         bias = None
 
@@ -92,7 +92,6 @@ def onednn_int8_gemm_test_helper(primitive_cache_size: int,
         out_dtype,
         not per_tensor_a_quant,
         use_azp,
-        bias,
         primitive_cache_size,
     )
 
@@ -101,6 +100,15 @@ def onednn_int8_gemm_test_helper(primitive_cache_size: int,
     baseline = ref_int8_scaled_mm(a, b, scale_a, scale_b, azp, bias, out_dtype)
 
     torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
+
+    if use_bias:
+        # To test runtime bias setting
+        out = torch.zeros((m, n), dtype=out_dtype)
+        ops.onednn_scaled_mm(handler, a, out, scale_a, azp, azp_adj, None)
+        baseline = ref_int8_scaled_mm(a, b, scale_a, scale_b, azp, None,
+                                      out_dtype)
+
+        torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
 
 
 @pytest.mark.parametrize("n,k", NK_FACTORS)

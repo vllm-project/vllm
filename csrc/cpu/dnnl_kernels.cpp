@@ -195,7 +195,7 @@ void dynamic_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,
 template <bool AZP, bool Bias, typename scalar_t>
 void dynamic_quant_epilogue(const float* input, scalar_t* output,
                             const float* a_scale, const int32_t* azp,
-                            const float* azp_adj, const float* bias,
+                            const float* azp_adj, const scalar_t* bias,
                             const int64_t num_tokens,
                             const int64_t hidden_size) {
   CPU_KERNEL_GUARD_IN(dynamic_quant_epilogue)
@@ -224,7 +224,8 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
           elems_fp32 = elems_fp32 - azp_adj_fp32 * token_zp_scale_vec;
         }
         if constexpr (Bias) {
-          cvt_vec_t bias_vec_fp32(bias + j);
+          load_vec_t bias_vec(bias + j);
+          cvt_vec_t bias_vec_fp32(bias_vec);
           elems_fp32 = elems_fp32 + bias_vec_fp32;
         }
         load_vec_t elems_out(elems_fp32);
@@ -237,7 +238,8 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
         elems_fp32 = elems_fp32 - azp_adj_fp32 * token_zp_scale_vec;
       }
       if constexpr (Bias) {
-        cvt_vec_t bias_vec_fp32(bias + j);
+        load_vec_t bias_vec(bias + j);
+        cvt_vec_t bias_vec_fp32(bias_vec);
         elems_fp32 = elems_fp32 + bias_vec_fp32;
       }
       load_vec_t elems_out(elems_fp32);
@@ -271,7 +273,8 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
             elems_fp32 = elems_fp32 - azp_adj_fp32 * token_zp_scale_vec;
           }
           if constexpr (Bias) {
-            cvt_vec_t bias_vec_fp32(bias + k);
+            load_vec_t bias_vec(bias + k);
+            cvt_vec_t bias_vec_fp32(bias_vec);
             elems_fp32 = elems_fp32 + bias_vec_fp32;
           }
           load_vec_t elems_out(elems_fp32);
@@ -285,7 +288,8 @@ void dynamic_quant_epilogue(const float* input, scalar_t* output,
             elems_fp32 = elems_fp32 - azp_adj_fp32 * token_zp_scale_vec;
           }
           if constexpr (Bias) {
-            cvt_vec_t bias_vec_fp32(bias + k);
+            load_vec_t bias_vec(bias + k);
+            cvt_vec_t bias_vec_fp32(bias_vec);
             elems_fp32 = elems_fp32 + bias_vec_fp32;
           }
           load_vec_t elems_out(elems_fp32);
@@ -301,7 +305,6 @@ int64_t create_onednn_scaled_mm_handler(
     const torch::Tensor& b,         // [IC, OC], column-major
     const torch::Tensor& b_scales,  // [1] or [OC]
     at::ScalarType output_type, bool dynamic_act_quant, bool use_azp,
-    const std::optional<torch::Tensor>& bias,  // [OC]
     int64_t primitive_cache_size) {
   TORCH_CHECK(b.dim() == 2);
   TORCH_CHECK(b.stride(0) == 1);  // Column-major
@@ -309,15 +312,6 @@ int64_t create_onednn_scaled_mm_handler(
 
   W8A8MatMulPrimitiveHandler::Args args;
   args.primitive_cache_size = primitive_cache_size;
-
-  if (!dynamic_act_quant && bias.has_value()) {
-    TORCH_CHECK(bias->numel() == b.size(1) && bias->is_contiguous() &&
-                bias->dim() == 1);
-    args.use_bias = true;
-    args.bias_ptr = bias->data_ptr<float>();
-  } else {
-    args.use_bias = false;
-  }
 
   if (b_scales.numel() == 1) {
     args.b_quantization_strategy =
@@ -381,40 +375,55 @@ void onednn_scaled_mm(
     TORCH_CHECK_EQ(a_scales.numel(), 1);
   }
 
+  W8A8MatMulPrimitiveHandler::ExecArgs exec_args;
+  exec_args.a_ptr = a.data_ptr<int8_t>();
+  exec_args.a_m_size = a.size(0);
+  exec_args.bias_ptr = nullptr;
+  exec_args.use_bias = false;
+  exec_args.a_scales_ptr = nullptr;
+  exec_args.a_zero_points_ptr = nullptr;
+
   VLLM_DISPATCH_FLOATING_TYPES(c.scalar_type(), "onednn_scaled_mm", [&] {
     if (ptr->get_input_scale_strategy() ==
         W8A8MatMulPrimitiveHandler::QuantizationStrategy::PER_TENSOR) {
-      ptr->execute(a.data_ptr<int8_t>(), a.size(0), a_scales.data_ptr<float>(),
-                   azp_ptr, c.data_ptr<scalar_t>());
+      if (bias.has_value()) {
+        exec_args.bias_ptr = bias->data_ptr<scalar_t>();
+        exec_args.bias_type = get_dnnl_type<scalar_t>();
+        exec_args.use_bias = true;
+      }
+      exec_args.a_scales_ptr = a_scales.data_ptr<float>();
+      exec_args.a_zero_points_ptr = azp_ptr;
+      exec_args.c_ptr = c.data_ptr<scalar_t>();
+      ptr->execute(exec_args);
     } else if (ptr->get_input_scale_strategy() ==
                W8A8MatMulPrimitiveHandler::QuantizationStrategy::PER_TOKEN) {
       torch::Tensor tmp_fp32_out =
           torch::empty_like(c, ::at::ScalarType::Float);
-      ptr->execute(a.data_ptr<int8_t>(), a.size(0), nullptr, nullptr,
-                   tmp_fp32_out.data_ptr<float>());
+      exec_args.c_ptr = tmp_fp32_out.data_ptr<float>();
+      ptr->execute(exec_args);
       if (bias.has_value()) {
         if (azp.has_value()) {
           dynamic_quant_epilogue<true, true>(
               tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
               a_scales.data_ptr<float>(), azp_ptr, azp_adj->data_ptr<float>(),
-              bias->data_ptr<float>(), c.size(0), c.size(1));
+              bias->data_ptr<scalar_t>(), c.size(0), c.size(1));
         } else {
           dynamic_quant_epilogue<false, true>(
               tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
               a_scales.data_ptr<float>(), azp_ptr, nullptr,
-              bias->data_ptr<float>(), c.size(0), c.size(1));
+              bias->data_ptr<scalar_t>(), c.size(0), c.size(1));
         }
       } else {
         if (azp.has_value()) {
           dynamic_quant_epilogue<true, false>(
               tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
               a_scales.data_ptr<float>(), azp_ptr, azp_adj->data_ptr<float>(),
-              nullptr, c.size(0), c.size(1));
+              (scalar_t*)nullptr, c.size(0), c.size(1));
         } else {
           dynamic_quant_epilogue<false, false>(
               tmp_fp32_out.data_ptr<float>(), c.data_ptr<scalar_t>(),
-              a_scales.data_ptr<float>(), azp_ptr, nullptr, nullptr, c.size(0),
-              c.size(1));
+              a_scales.data_ptr<float>(), azp_ptr, nullptr, (scalar_t*)nullptr,
+              c.size(0), c.size(1));
         }
       }
     } else {

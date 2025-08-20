@@ -1847,6 +1847,8 @@ class CPUDNNLGEMMHandler:
 
     def __init__(self) -> None:
         self.handler: Optional[int] = None
+        self.n = -1
+        self.k = -1
 
     def __del__(self):
         if self.handler is not None:
@@ -1854,17 +1856,17 @@ class CPUDNNLGEMMHandler:
 
 
 def create_onednn_scaled_mm(
-    weight: torch.Tensor,
+    weight: torch.Tensor,  # [K, N]
     weight_scales: torch.Tensor,
     output_type: torch.dtype,
     dynamic_quant: bool,
     use_azp: bool,
-    bias: Optional[torch.Tensor],
     primitive_cache_size: int = 128,
 ) -> CPUDNNLGEMMHandler:
     handler = CPUDNNLGEMMHandler()
+    handler.k, handler.n = weight.size()
     handler.handler = torch.ops._C.create_onednn_scaled_mm_handler(
-        weight, weight_scales, output_type, dynamic_quant, use_azp, bias,
+        weight, weight_scales, output_type, dynamic_quant, use_azp,
         primitive_cache_size)
     return handler
 

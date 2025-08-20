@@ -8,10 +8,11 @@ std::string init_cpu_threads_env(const std::string& cpu_ids);
 
 void release_dnnl_matmul_handler(int64_t handler);
 
-int64_t create_onednn_scaled_mm_handler(
-    const torch::Tensor& b, const torch::Tensor& b_scales,
-    at::ScalarType output_type, bool dynamic_act_quant, bool use_azp,
-    const std::optional<torch::Tensor>& bias, int64_t primitive_cache_size);
+int64_t create_onednn_scaled_mm_handler(const torch::Tensor& b,
+                                        const torch::Tensor& b_scales,
+                                        at::ScalarType output_type,
+                                        bool dynamic_act_quant, bool use_azp,
+                                        int64_t primitive_cache_size);
 
 void onednn_scaled_mm(torch::Tensor& c, const torch::Tensor& a,
                       const torch::Tensor& a_scales,
@@ -155,7 +156,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Create oneDNN W8A8 handler
   ops.def(
       "create_onednn_scaled_mm_handler(Tensor b, Tensor b_scales, ScalarType "
-      "output_type, bool dynamic_act_quant, bool use_azp, Tensor? bias, int "
+      "output_type, bool dynamic_act_quant, bool use_azp, int "
       "primitive_cache_size) -> int",
       &create_onednn_scaled_mm_handler);
 

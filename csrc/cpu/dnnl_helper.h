@@ -3,6 +3,7 @@
 
 #include <optional>
 #include <cassert>
+
 #include "oneapi/dnnl/dnnl.hpp"
 
 namespace c10 {
@@ -68,9 +69,7 @@ class DNNLMatMulPrimitiveHandler {
     dnnl_dim_t b_n_stride;
     dnnl_dim_t b_k_size;
     dnnl_dim_t b_k_stride;
-    bool use_bias;
     void* b_ptr;
-    void* bias_ptr;
     dnnl::memory::data_type c_type;
     size_t primitive_cache_size;
   };
@@ -91,7 +90,6 @@ class DNNLMatMulPrimitiveHandler {
   const dnnl_dim_t b_n_stride_;
   const dnnl_dim_t b_k_size_;
   const dnnl_dim_t b_k_stride_;
-  const bool use_bias_;
   dnnl::memory::data_type b_type_;
   dnnl::memory::data_type c_type_;
   std::unordered_map<int, dnnl::memory> memory_cache_;
@@ -117,7 +115,6 @@ class W8A8MatMulPrimitiveHandler : public DNNLMatMulPrimitiveHandler {
     dnnl_dim_t b_k_size;
     QuantizationStrategy a_qs;
     QuantizationStrategy b_qs;
-    bool use_bias;
     bool use_azp;
     dnnl::memory::data_type c_type;
 
@@ -125,10 +122,25 @@ class W8A8MatMulPrimitiveHandler : public DNNLMatMulPrimitiveHandler {
                            const ClassMatmulCacheKey& r);
   };
 
-  using MSizeCacheKey = dnnl_dim_t;
+  struct MSizeCacheKey {
+    dnnl_dim_t a_m_size;
+    bool use_bias;
+    dnnl::memory::data_type bias_type;
+
+    friend bool operator==(const MSizeCacheKey& l, const MSizeCacheKey& r);
+  };
+
   using MSizeCache = DNNLPrimitiveCache<MSizeCacheKey, dnnl::matmul>;
   using ClassMatmulCache =
       DNNLPrimitiveCache<ClassMatmulCacheKey, std::shared_ptr<MSizeCache>>;
+
+  struct ExecArgs : public MSizeCacheKey {
+    const int8_t* a_ptr;
+    const float* a_scales_ptr;
+    const int32_t* a_zero_points_ptr;
+    const void* bias_ptr;
+    void* c_ptr;
+  };
 
  public:
   W8A8MatMulPrimitiveHandler(const Args& args);
@@ -137,16 +149,15 @@ class W8A8MatMulPrimitiveHandler : public DNNLMatMulPrimitiveHandler {
 
   bool get_input_use_zero_point() const { return use_azp_; }
 
-  void execute(const int8_t* a, dnnl_dim_t a_m_size, const float* a_scales_ptr,
-               const int32_t* a_zero_points_ptr, void* c);
+  void execute(ExecArgs& args);
 
  private:
-  dnnl::matmul::primitive_desc create_primitive_desc(int64_t a_m_size,
+  dnnl::matmul::primitive_desc create_primitive_desc(const MSizeCacheKey& key,
                                                      bool first_time);
 
   void init_runtime_memory_cache(const Args& args);
 
-  dnnl::matmul get_matmul_cache(dnnl_dim_t a_m_size);
+  dnnl::matmul get_matmul_cache(const MSizeCacheKey& key);
 
  private:
   const bool use_azp_;

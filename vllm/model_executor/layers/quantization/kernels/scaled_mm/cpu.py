@@ -116,16 +116,6 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
         else:
             setattr(layer, self.azp_adj_name, None)
 
-        if not layer.skip_bias_add:
-            bias = layer.bias
-            if bias is not None:
-                replace_parameter(
-                    layer, "bias",
-                    torch.nn.Parameter(bias.float().data, requires_grad=False))
-                bias = layer.bias
-        else:
-            bias = None
-
         weight = getattr(layer, self.w_q_name)
         self.dnnl_handler = ops.create_onednn_scaled_mm(
             weight,
@@ -133,13 +123,11 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
             torch.get_default_dtype(),
             getattr(layer, self.i_s_name) is None,
             not self.config.input_symmetric,
-            bias,
             32,
         )
         # weight is prepacked and maintained by the dnnl_handler,
         # release the original weight
         setattr(layer, self.w_q_name, None)
-        self.onednn_output_size = weight.size(1)
         del weight
 
     def process_weights_for_sgl(self, layer: torch.nn.Module) -> None:
@@ -152,8 +140,8 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
 
         if layer.bias is not None:
             bias = layer.bias
-            replace_parameter(
-                layer, "bias",
+            layer.register_parameter(
+                "bias_fp32",
                 torch.nn.Parameter(bias.float().data, requires_grad=False))
 
         # WEIGHT SCALE
@@ -195,7 +183,7 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
             x, i_s, i_zp, self.config.input_symmetric)
 
         m = x.size(0)
-        n = self.onednn_output_size
+        n = self.dnnl_handler.n
         out = torch.empty((m, n), dtype=x.dtype)
         ops.onednn_scaled_mm(self.dnnl_handler, x_q, out, x_s, x_zp, azp_adj,
                              bias)
@@ -212,7 +200,7 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
             x,
             w_q,
             w_s,
-            bias,
+            layer.bias_fp32 if bias is not None else None,
             x.dtype,
             True,
         )

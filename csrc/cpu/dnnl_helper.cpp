@@ -112,7 +112,6 @@ DNNLMatMulPrimitiveHandler::DNNLMatMulPrimitiveHandler(
       b_n_stride_(args.b_n_stride),
       b_k_size_(args.b_k_size),
       b_k_stride_(args.b_k_stride),
-      use_bias_(args.use_bias),
       b_type_(b_type),
       c_type_(args.c_type),
       runtime_memory_ptrs_(8),
@@ -154,9 +153,17 @@ struct hash<W8A8MatMulPrimitiveHandler::ClassMatmulCacheKey> {
       const W8A8MatMulPrimitiveHandler::ClassMatmulCacheKey& val) const {
     return hash<dnnl_dim_t>()(val.b_n_size) ^ hash<dnnl_dim_t>()(val.b_k_size) ^
            hash<int>()(static_cast<int>(val.a_qs)) ^
-           hash<int>()(static_cast<int>(val.b_qs)) ^
-           hash<bool>()(val.use_bias) ^ hash<bool>()(val.use_azp) ^
+           hash<int>()(static_cast<int>(val.b_qs)) ^ hash<bool>()(val.use_azp) ^
            hash<int>()(static_cast<int>(val.c_type));
+  }
+};
+
+template <>
+struct hash<W8A8MatMulPrimitiveHandler::MSizeCacheKey> {
+  size_t operator()(
+      const W8A8MatMulPrimitiveHandler::MSizeCacheKey& val) const {
+    return hash<dnnl_dim_t>()(val.a_m_size) ^ hash<bool>()(val.use_bias) ^
+           hash<int>()(static_cast<int>(val.bias_type));
   }
 };
 }  // namespace std
@@ -164,8 +171,14 @@ struct hash<W8A8MatMulPrimitiveHandler::ClassMatmulCacheKey> {
 bool operator==(const W8A8MatMulPrimitiveHandler::ClassMatmulCacheKey& l,
                 const W8A8MatMulPrimitiveHandler::ClassMatmulCacheKey& r) {
   return l.b_n_size == r.b_n_size && l.b_k_size == r.b_k_size &&
-         l.a_qs == r.a_qs && l.b_qs == r.b_qs && l.use_bias == r.use_bias &&
-         l.use_azp == r.use_azp && l.c_type == r.c_type;
+         l.a_qs == r.a_qs && l.b_qs == r.b_qs && l.use_azp == r.use_azp &&
+         l.c_type == r.c_type;
+}
+
+bool operator==(const W8A8MatMulPrimitiveHandler::MSizeCacheKey& l,
+                const W8A8MatMulPrimitiveHandler::MSizeCacheKey& r) {
+  return l.use_bias == r.use_bias && l.a_m_size == r.a_m_size &&
+         l.bias_type == r.bias_type;
 }
 
 static std::shared_ptr<W8A8MatMulPrimitiveHandler::MSizeCache>
@@ -191,54 +204,59 @@ W8A8MatMulPrimitiveHandler::W8A8MatMulPrimitiveHandler(const Args& args)
   assert(b_qs_ != QuantizationStrategy::PER_TOKEN);
   if (a_qs_ == QuantizationStrategy::PER_TOKEN) {
     assert(!use_azp_);
-    assert(!use_bias_);
-  }
-  prepack_weight(
-      args.b_ptr,
-      create_primitive_desc(DNNL_RUNTIME_DIM_VAL, true).weights_desc());
+  };
+  prepack_weight(args.b_ptr,
+                 create_primitive_desc(
+                     MSizeCacheKey{.a_m_size = DNNL_RUNTIME_DIM_VAL,
+                                   .use_bias = false,
+                                   .bias_type = dnnl::memory::data_type::undef},
+                     true)
+                     .weights_desc());
   init_runtime_memory_cache(args);
 }
 
-void W8A8MatMulPrimitiveHandler::execute(const int8_t* a, dnnl_dim_t a_m_size,
-                                         const float* a_scales_ptr,
-                                         const int32_t* a_zero_points_ptr,
-                                         void* c) {
+void W8A8MatMulPrimitiveHandler::execute(ExecArgs& args) {
   auto&& [a_storage, a_mem_desc] = get_runtime_memory_ptr(0);
   auto&& [c_storage, c_mem_desc] = get_runtime_memory_ptr(1);
-  a_storage->set_data_handle((void*)a);
-  a_mem_desc->dims[0] = a_m_size;
-  c_storage->set_data_handle((void*)c);
-  c_mem_desc->dims[0] = a_m_size;
+  a_storage->set_data_handle((void*)args.a_ptr);
+  a_mem_desc->dims[0] = args.a_m_size;
+  c_storage->set_data_handle((void*)args.c_ptr);
+  c_mem_desc->dims[0] = args.a_m_size;
 
   if (a_qs_ == QuantizationStrategy::PER_TENSOR) {
     auto&& [a_scale_storage, a_scale_mem_desc] = get_runtime_memory_ptr(2);
-    a_scale_storage->set_data_handle((void*)a_scales_ptr);
+    a_scale_storage->set_data_handle((void*)args.a_scales_ptr);
   }
   if (use_azp_) {
     auto&& [a_zero_point_storage, a_zero_point_mem_desc] =
         get_runtime_memory_ptr(3);
-    a_zero_point_storage->set_data_handle((void*)a_zero_points_ptr);
+    a_zero_point_storage->set_data_handle((void*)args.a_zero_points_ptr);
   }
 
-  dnnl::matmul matmul = get_matmul_cache(a_m_size);
+  if (args.use_bias) {
+    auto&& [bias_storage, bias_mem_desc] = get_runtime_memory_ptr(4);
+    bias_storage->set_data_handle((void*)args.bias_ptr);
+  }
+
+  dnnl::matmul matmul = get_matmul_cache(args);
   matmul.execute(default_stream(), memory_cache_);
   default_stream().wait();
 }
 
-dnnl::matmul W8A8MatMulPrimitiveHandler::get_matmul_cache(dnnl_dim_t a_m_size) {
+dnnl::matmul W8A8MatMulPrimitiveHandler::get_matmul_cache(
+    const MSizeCacheKey& key) {
   if (m_size_cache_.get() == nullptr) {
     ClassMatmulCacheKey key = {.b_n_size = b_n_size_,
                                .b_k_size = b_k_size_,
                                .a_qs = a_qs_,
                                .b_qs = b_qs_,
-                               .use_bias = use_bias_,
                                .use_azp = use_azp_,
                                .c_type = c_type_};
     m_size_cache_ = get_w8a8_class_primitive_cache(key, primitive_cache_size_);
   }
-  return m_size_cache_->get_or_create(a_m_size, [&]() {
-    dnnl::matmul::primitive_desc desc =
-        this->create_primitive_desc(a_m_size, false);
+
+  return m_size_cache_->get_or_create(key, [&]() {
+    dnnl::matmul::primitive_desc desc = this->create_primitive_desc(key, false);
     return dnnl::matmul(desc);
   });
 }
@@ -278,17 +296,16 @@ void W8A8MatMulPrimitiveHandler::init_runtime_memory_cache(const Args& args) {
                      default_engine(), (void*)args.b_scales_ptr);
   }
 
-  // For PER_TOKEN, bias will be applied in epilogue
-  if (use_bias_ && a_qs_ == QuantizationStrategy::PER_TENSOR) {
-    memory_cache_[DNNL_ARG_BIAS] =
-        dnnl::memory({{b_n_size_}, dnnl::memory::data_type::f32, {1}},
-                     default_engine(), (void*)args.bias_ptr);
-  }
+  memory_cache_[DNNL_ARG_BIAS] =
+      dnnl::memory({{b_n_size_}, dnnl::memory::data_type::f32, {1}},
+                   default_engine(), nullptr);
+  set_runtime_memory_ptr(4, memory_cache_[DNNL_ARG_BIAS].get());
 }
 
 dnnl::matmul::primitive_desc W8A8MatMulPrimitiveHandler::create_primitive_desc(
-    int64_t a_m_size, bool first_time) {
-  dnnl::memory::desc a_md({a_m_size, b_k_size_}, dnnl::memory::data_type::s8,
+    const MSizeCacheKey& key, bool first_time) {
+  dnnl::memory::desc a_md({key.a_m_size, b_k_size_},
+                          dnnl::memory::data_type::s8,
                           dnnl::memory::format_tag::ab);
   dnnl::memory::desc b_md;
   if (first_time) {
@@ -298,7 +315,7 @@ dnnl::matmul::primitive_desc W8A8MatMulPrimitiveHandler::create_primitive_desc(
   } else {
     b_md = b_target_mem_desc_;
   }
-  dnnl::memory::desc c_md({a_m_size, b_n_size_}, c_type_,
+  dnnl::memory::desc c_md({key.a_m_size, b_n_size_}, c_type_,
                           dnnl::memory::format_tag::ab);
 
   dnnl::primitive_attr attr;
@@ -316,10 +333,10 @@ dnnl::matmul::primitive_desc W8A8MatMulPrimitiveHandler::create_primitive_desc(
     attr.set_scales_mask(DNNL_ARG_WEIGHTS, 2);
   }
 
-  // For PER_TOKEN, bias will be applied in epilogue
-  if (use_bias_ && a_qs_ == QuantizationStrategy::PER_TENSOR) {
-    dnnl::memory::desc bias_md({1, b_n_size_}, dnnl::memory::data_type::f32,
-                               {b_n_size_, 1});
+  if (key.use_bias) {
+    // For PER_TOKEN, bias will be applied in epilogue
+    assert(a_qs_ == QuantizationStrategy::PER_TENSOR);
+    dnnl::memory::desc bias_md({1, b_n_size_}, key.bias_type, {b_n_size_, 1});
     return dnnl::matmul::primitive_desc(default_engine(), a_md, b_md, bias_md,
                                         c_md, attr);
   } else {
