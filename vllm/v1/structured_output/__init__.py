@@ -604,16 +604,16 @@ class GrammarBitmaskPlaceholder:
         import numpy as np
 
         # Poll the shared memory flag until it's set
+        flag_shm = shared_memory.SharedMemory(name=GRAMMAR_READY_FLAG_SHM_NAME)
         while True:
-            flag_shm = shared_memory.SharedMemory(
-                name=GRAMMAR_READY_FLAG_SHM_NAME)
             flag_value = flag_shm.buf[0]
-            flag_shm.close()
 
             if flag_value == 1:  # Flag is set, bitmask is ready
                 break
 
             time.sleep(0.001)  # Short sleep to avoid busy waiting
+
+        flag_shm.close()
 
         bitmask_shm = shared_memory.SharedMemory(name=GRAMMAR_BITMASK_SHM_NAME)
         # Read shape info first

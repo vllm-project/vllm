@@ -1778,10 +1778,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         grammar_bitmask_placeholder: GrammarBitmaskPlaceholder = \
             scheduler_output.grammar_bitmask
-        assert grammar_bitmask_placeholder is not None
-        grammar_bitmask_tensor: torch.Tensor = (
-            grammar_bitmask_placeholder.result())
-        grammar_bitmask: np.ndarray = grammar_bitmask_tensor.numpy()
+        grammar_bitmask: np.ndarray = grammar_bitmask_placeholder.result()
 
         num_reqs, _ = logits.shape
 
