@@ -796,7 +796,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             structured_outputs=self.structured_outputs,
             logit_bias=self.logit_bias,
             bad_words= self.bad_words,
-            reasoning_effort=self.reasoning_effort,
             thinking_token_budget=self.thinking_token_budget,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
