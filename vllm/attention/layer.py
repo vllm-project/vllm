@@ -128,10 +128,16 @@ class Attention(nn.Module):
         self._q_scale = torch.tensor(1.0, dtype=torch.float32)
         self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
 
-        # We also keep the float32 versions of k/v_scale for attention
-        # backends that don't support tensors (Flashinfer)
+        # We also keep q/k/v_scale on host (cpu) memory for attention
+        # backends that require the scales to be on host instead of on device.
+        # e.g. Flashinfer
+        self._q_scale_float = 1.0
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
+
+        # The output scale on host memory. This should be the input scale of
+        # the quant op after this attention layer.
+        self._o_scale_float: Optional[float] = None
 
         self.use_mla = use_mla
         self.num_heads = num_heads
@@ -291,6 +297,7 @@ class Attention(nn.Module):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
         self._k_scale.copy_(torch.abs(key).max() / self.k_range)
         self._v_scale.copy_(torch.abs(value).max() / self.v_range)
+        self._q_scale_float = self._q_scale.item()
         self._k_scale_float = self._k_scale.item()
         self._v_scale_float = self._v_scale.item()
         # We only calculate the scales once
