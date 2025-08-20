@@ -11,16 +11,13 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import (_DEFAULT_FI_ALLREDUCE_MAX_INPUT_SIZE,
-                        _FI_ALLREDUCE_MAX_INPUT_SIZES,
-                        direct_register_custom_op)
-
+from vllm.utils import direct_register_custom_op
 from .inductor_pass import enable_fake_mode
 from .vllm_inductor_pass import VllmInductorPass
 
@@ -401,10 +398,10 @@ if flashinfer_comm is not None:
     # Max size of the input tensor per world size
     # to use flashinfer fused allreduce
     _FI_MAX_SIZES = {
-        2: 4 * MiB,  # 4MB
-        4: 1 * MiB,  # 1MB
-        6: 4 * MiB,  # 4MB
-        8: 4 * MiB,  # 4MB
+        2: 64 * MiB,  # 64MB
+        4: MiB,  # 1MB
+        6: MiB // 2,  # 512KB
+        8: MiB // 2,  # 512KB
     }
 
     try:
@@ -443,7 +440,10 @@ if flashinfer_comm is not None:
         element_size = allreduce_in.element_size()
         current_tensor_size = num_tokens * hidden_size * element_size
         max_fusion_size = max_token_num * hidden_size * element_size
-        use_flashinfer = current_tensor_size <= max_fusion_size
+        use_flashinfer = current_tensor_size <= min(
+            _FI_MAX_SIZES.get(world_size, _DEFAULT_FI_MAX_SIZE),
+            max_fusion_size,
+        )
         if use_flashinfer:
             assert (_FI_WORKSPACE_TENSOR is not None
                     ), "Flashinfer must be enabled when using flashinfer"
@@ -503,7 +503,6 @@ if flashinfer_comm is not None:
                     torch.ops._C.rms_norm(norm_out, allreduce_out, rms_gamma,
                                           rms_eps)
                 if scale_factor is not None:
-                    assert scale_out is not None
                     torch.ops._C.scaled_fp4_quant(quant_out, norm_out,
                                                   scale_out, scale_factor)
             if scale_factor is None or norm_out is not None:
@@ -866,7 +865,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
                 scale_factor=scale,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
-            # quant_out, rms_norm_residual
+            # # quant_out, rms_norm_residual
             return allreduce[4], allreduce[2]
 
         pm.register_replacement(pattern, replacement, get_inputs(),
@@ -1079,23 +1078,23 @@ class AllReduceFusionPass(VllmInductorPass):
                 "skipping allreduce fusion pass")
             return
         # Check if the world size is supported
-        if self.tp_size not in _FI_ALLREDUCE_MAX_INPUT_SIZES:
+        if self.tp_size not in _FI_MAX_SIZES:
             logger.warning(
                 "Flashinfer allreduce fusion is not "
                 "supported for world size %s",
                 self.tp_size,
             )
             return
-        self.max_num_token = min(
-            _FI_ALLREDUCE_MAX_INPUT_SIZES.get(
-                self.tp_size, _DEFAULT_FI_ALLREDUCE_MAX_INPUT_SIZE) //
-            (self.hidden_dim * (4 if use_fp32_lamport else 2)), config.
-            compilation_config.pass_config.fi_allreduce_fusion_max_token_num)
+        max_num_token = min(
+            _FI_MAX_SIZES.get(self.tp_size, _DEFAULT_FI_MAX_SIZE) //
+            (self.hidden_dim * self.tp_size * (4 if use_fp32_lamport else 2)),
+            config.compilation_config.pass_config.
+            fi_allreduce_fusion_max_token_num)
         self.ipc_handles, workspace_tensor = (
             flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
                 tp_rank=rank,
                 tp_size=self.tp_size,
-                max_token_num=self.max_num_token,
+                max_token_num=max_num_token,
                 hidden_dim=self.hidden_dim,
                 group=self.group,
                 use_fp32_lamport=use_fp32_lamport,
@@ -1107,9 +1106,11 @@ class AllReduceFusionPass(VllmInductorPass):
             rank=rank,
             world_size=self.tp_size,
             use_fp32_lamport=use_fp32_lamport,
-            max_token_num=self.max_num_token,
+            max_token_num=max_num_token,
         )
-        self.register_patterns()
+        self.is_custom_ops = "+quant_fp8" in config.compilation_config.custom_ops
+        with set_current_vllm_config(config), torch.device(self.device):
+            self.register_patterns()
 
     @enable_fake_mode
     def register_patterns(self):
@@ -1119,12 +1120,14 @@ class AllReduceFusionPass(VllmInductorPass):
                 self.model_dtype,
                 self.device,
                 self.allreduce_params,
+                self.is_custom_ops,
             ).register(self.patterns)
             AllReduceFusedAddRMSNormStaticQuantFP8Pattern(
                 epsilon,
                 self.model_dtype,
                 self.device,
                 self.allreduce_params,
+                self.is_custom_ops,
             ).register(self.patterns)
             if current_platform.has_device_capability(100):
                 AllReduceFusedRMSNormStaticQuantNVFP4Pattern(
@@ -1157,12 +1160,6 @@ class AllReduceFusionPass(VllmInductorPass):
             torch._inductor.pattern_matcher._seen_patterns.clear()
 
         self.disabled = False
-
-    def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
-        if shape is None:
-            return False
-        print(f"shape: {shape}, max_num_token: {self.max_num_token}")
-        return shape <= self.max_num_token
 
     def __call__(self, graph: fx.Graph):
         if self.disabled:
