@@ -32,7 +32,7 @@ RUN sed '/^[[:space:]]*torch/Id' requirements/build.txt > /tmp/vllm-build-no-tor
     python -m pip install -r /tmp/vllm-build-no-torch.txt
 
 # Build vLLM in editable mode with "empty" device to avoid GPU-specific builds
-RUN VLLM_TARGET_DEVICE=empty python -m pip install --no-build-isolation -e .
+RUN VLLM_TARGET_DEVICE=empty python -m pip install --no-build-isolation  .
 
 # -----------------------------
 # Build vLLM-Gaudi from source
@@ -40,7 +40,7 @@ RUN VLLM_TARGET_DEVICE=empty python -m pip install --no-build-isolation -e .
 WORKDIR /workspace
 RUN git clone --depth=1 https://github.com/vllm-project/vllm-gaudi /workspace/vllm-gaudi
 WORKDIR /workspace/vllm-gaudi
-RUN python -m pip install -e .
+RUN python -m pip install .
 
 # Default to interactive shell
 ENTRYPOINT ["/bin/bash"]
