@@ -60,7 +60,8 @@ class Sampler(nn.Module):
     9. Return the final `SamplerOutput`.
     """
 
-    def __init__(self, logprobs_mode: LogprobsMode = "raw_logprobs"):
+    def __init__(self,
+                 logprobs_mode: LogprobsMode = LogprobsMode.RAW_LOGPROBS):
         super().__init__()
         self.topk_topp_sampler = TopKTopPSampler(logprobs_mode)
         self.pin_memory = is_pin_memory_available()
@@ -77,9 +78,9 @@ class Sampler(nn.Module):
         # is used for sampling (after penalties and temperature scaling).
         num_logprobs = sampling_metadata.max_num_logprobs
         if num_logprobs is not None:
-            if self.logprobs_mode == "raw_logprobs":
+            if self.logprobs_mode == LogprobsMode.RAW_LOGPROBS:
                 raw_logprobs = self.compute_logprobs(logits)
-            elif self.logprobs_mode == "raw_logits":
+            elif self.logprobs_mode == LogprobsMode.RAW_LOGITS:
                 raw_logprobs = logits.clone()
 
         # Use float32 for the logits.
@@ -148,22 +149,17 @@ class Sampler(nn.Module):
 
         assert not (sampling_metadata.all_greedy
                     and sampling_metadata.all_random)
-        return_processed_logits = (
-            sampling_metadata.max_num_logprobs is not None
-            and self.logprobs_mode == "processed_logits")
-        return_processed_logprobs = (
-            sampling_metadata.max_num_logprobs is not None
-            and self.logprobs_mode == "processed_logprobs")
-        processed_logprobs = None
         if sampling_metadata.all_random:
             greedy_sampled = None
         else:
             greedy_sampled = self.greedy_sample(logits)
             if sampling_metadata.all_greedy:
-                if return_processed_logits:
-                    processed_logprobs = logits
-                elif return_processed_logprobs:
-                    processed_logprobs = self.compute_logprobs(logits)
+                processed_logprobs = None
+                if sampling_metadata.max_num_logprobs is not None:
+                    if self.logprobs_mode == LogprobsMode.PROCESSED_LOGITS:
+                        processed_logprobs = logits
+                    elif self.logprobs_mode == LogprobsMode.PROCESSED_LOGPROBS:
+                        processed_logprobs = self.compute_logprobs(logits)
                 return greedy_sampled, processed_logprobs
 
         assert sampling_metadata.temperature is not None

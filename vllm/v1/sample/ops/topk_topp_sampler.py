@@ -29,7 +29,9 @@ class TopKTopPSampler(nn.Module):
     Implementations may update the logits tensor in-place.
     """
 
-    def __init__(self, logprobs_mode: LogprobsMode = "raw_logprobs") -> None:
+    def __init__(
+            self,
+            logprobs_mode: LogprobsMode = LogprobsMode.RAW_LOGPROBS) -> None:
         super().__init__()
         self.logprobs_mode = logprobs_mode
         # flashinfer optimization does not apply if intermediate
@@ -88,9 +90,9 @@ class TopKTopPSampler(nn.Module):
         """
         logits = self.apply_top_k_top_p(logits, k, p)
         logits_to_return = None
-        if self.logprobs_mode == "processed_logits":
+        if self.logprobs_mode == LogprobsMode.PROCESSED_LOGITS:
             logits_to_return = logits
-        elif self.logprobs_mode == "processed_logprobs":
+        elif self.logprobs_mode == LogprobsMode.PROCESSED_LOGPROBS:
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
         return random_sample(probs, generators), logits_to_return
@@ -112,8 +114,9 @@ class TopKTopPSampler(nn.Module):
                                     "per-request generators. Falling back to "
                                     "PyTorch-native implementation.")
             return self.forward_native(logits, generators, k, p)
-        assert "processed" not in self.logprobs_mode, \
-            "FlashInfer does not support returning logits/logprobs"
+        assert self.logprobs_mode not in (
+            LogprobsMode.PROCESSED_LOGITS, LogprobsMode.PROCESSED_LOGPROBS
+        ), "FlashInfer does not support returning logits/logprobs"
         # flashinfer sampling functions expect contiguous logits.
         # In flex_attn/triton_attn fp32 inference, logits can be non-contiguous
         # because of slicing operation in logits_processor.
