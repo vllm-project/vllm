@@ -1190,6 +1190,7 @@ class CompletionRequest(OpenAIBaseModel):
             json_object=guided_json_object,
             backend=self.guided_decoding_backend,
             whitespace_pattern=self.guided_whitespace_pattern,
+            structural_tag=self.structural_tag,
         )
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
