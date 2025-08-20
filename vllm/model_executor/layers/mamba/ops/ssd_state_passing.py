@@ -136,8 +136,7 @@ def _state_passing_fwd_kernel(
                     logical_chunk_idx += seq_idx_chunk_end - seq_idx_chunk_start
                     # - load the chunk offset:
                     c_off = tl.load(chunk_offsets_ptr + logical_chunk_idx,
-                                    mask=logical_chunk_idx > -1 and
-                                    (logical_chunk_idx + 1) < chunk_meta_num,
+                                    mask=logical_chunk_idx < chunk_meta_num,
                                     other=0)
                     # - if offset is 0, then the sequence starts at the beginning of the chunk, and we don't need to subtract anything
                     if c_off > 0:
