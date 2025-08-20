@@ -139,7 +139,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         quant_config: FusedMoEQuantConfig,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+               Optional[torch.Tensor]]:
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -189,7 +189,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     block_shape=quant_config.block_shape)
 
         return (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
-                expert_topk_weights, None)
+                expert_topk_weights)
 
     def finalize(
         self,
