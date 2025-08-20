@@ -649,6 +649,26 @@ def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
         prompts=prompts,
     )
 
+# R-4B
+def run_r_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "YannQi/R-4B"
+
+    prompts = [
+            f"<|im_start|>user <image>\n{question}<|im_end|> \
+        <|im_start|>assistant\n"
+            for question in questions
+        ]
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=16384,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
 
 # Kimi-VL
 def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
@@ -1595,6 +1615,7 @@ model_example_map = {
     "interns1": run_interns1,
     "internvl_chat": run_internvl,
     "keye_vl": run_keye_vl,
+    "r_vl": run_r_vl,
     "kimi_vl": run_kimi_vl,
     "llama4": run_llama4,
     "llava": run_llava,
