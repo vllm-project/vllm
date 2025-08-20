@@ -70,13 +70,12 @@ def _silu_mul_fp8_quant_deep_gemm(
     # number of valid tokens for this expert
     n_tokens = tl.load(counts_ptr + e * stride_counts_e).to(tl.int64)
 
-    cols = tl.arange(0, BLOCK)
-    cols = cols.to(tl.int64)
+    cols = tl.arange(0, BLOCK).to(tl.int64)
     mask = cols < BLOCK
 
-    base_i_offset = e * stride_i_e + g * GROUP_SIZE * stride_i_h
-    base_gate_offset = base_i_offset + cols * stride_i_h
-    base_up_offset = base_i_offset + H * stride_i_h + cols * stride_i_h
+    base_input_offset = e * stride_i_e + g * GROUP_SIZE * stride_i_h
+    base_gate_offset = base_input_offset + cols * stride_i_h
+    base_up_offset = base_input_offset + H * stride_i_h + cols * stride_i_h
     base_yq_offset = (e * stride_yq_e + g * GROUP_SIZE * stride_yq_h +
                       cols * stride_yq_h)
     base_ys_offset = e * stride_ys_e + g * stride_ys_g
