@@ -104,6 +104,10 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         image_height: int,
         processor: Optional[Gemma3Processor],
     ) -> int:
+        # not supporting pan_and_scan
+        if is_hpu:
+            return 0
+
         if processor is None:
             processor = self.get_hf_processor()
 
