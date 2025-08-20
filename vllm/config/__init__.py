@@ -3361,12 +3361,6 @@ class ReasoningConfig:
     """Token ID that indicates the start of reasoning."""
     think_end_token_ids: Optional[list[int]] = None
     """Token ID that indicates the end of reasoning."""
-    low_effort_token_budget: int = 1024
-    """Token budget for low effort reasoning."""
-    medium_effort_token_budget: int = 2048
-    """Token budget for medium effort reasoning."""
-    high_effort_token_budget: int = 8192
-    """Token budget for high effort reasoning."""
 
     def is_thinking_enabled(self) -> bool:
         """Check if both start and end thinking token IDs
