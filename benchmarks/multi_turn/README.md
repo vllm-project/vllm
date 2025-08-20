@@ -115,14 +115,22 @@ Can be used to make sure that the total number of tokens in every request does n
 ```json
 {
     "distribution": "lognormal",
-    "mean": 6,
-    "sigma": 4,
-    "max": 1500
+    "average": 1000,
+    "max": 5000
 }
 ```
 
+You can parameterize the lognormal distribution in one of two ways:
+
+Using the average and optional median ratio:
+
+* `average` - target average value of the distribution.
+* `median_ratio` - the ratio of the median to the average; controls the skewness. Must be in the range (0, 1).
+
+Using the parameters of the underlying normal distribution:
+
 * `mean` - mean of the underlying normal distribution.
-* `sigma` - standard deviation.
+* `sigma` - standard deviation of the underlying normal distribution.
 
 #### zipf
 
