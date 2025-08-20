@@ -153,10 +153,12 @@ class OlmoMLP(nn.Module):
 
         # Feed-forward input projection.
         self.gate_up_proj = MergedColumnParallelLinear(
-            self.hidden_size, [self.intermediate_size] * 2,
+            self.hidden_size,
+            [self.intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj")
+            prefix=f"{prefix}.gate_up_proj",
+        )
 
         # Activation function.
         self.act_fn = SiluAndMul()
