@@ -102,7 +102,7 @@ def _test_processing_correctness(
         partial(random_video,
                 rng,
                 min_frames=2,
-                max_frames=8,
+                max_frames=16,
                 min_wh=128,
                 max_wh=256),
         "audio":
@@ -268,6 +268,7 @@ def _test_processing_correctness_one(
     "CohereForAI/aya-vision-8b",
     "Salesforce/blip2-opt-2.7b",
     "facebook/chameleon-7b",
+    "CohereLabs/command-a-vision-07-2025",
     "deepseek-ai/deepseek-vl2-tiny",
     "microsoft/Florence-2-base",
     "adept/fuyu-8b",
