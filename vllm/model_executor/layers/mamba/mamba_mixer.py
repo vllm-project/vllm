@@ -433,16 +433,16 @@ def split_batch_to_prefill_and_decode(
     num_decodes: int,
     num_padded_decodes: int,
 ) -> PrefillDecodeSplit:
-    num_actual_tokens = num_prefill_tokens + num_decode_tokens
+    num_actual_tokens = num_prefill_tokens + num_padded_decodes
 
     if envs.VLLM_USE_V1:
         # In v1, decode tokens come first, then prefill tokens.
         hidden_states_BC_d, hidden_states_BC_p = torch.split(
             hidden_states_BC[..., :num_actual_tokens],
-            [num_decode_tokens, num_prefill_tokens],
+            [num_padded_decodes, num_prefill_tokens],
             dim=-1)
         gate_d, gate_p = torch.split(gate[..., :num_actual_tokens],
-                                     [num_decode_tokens, num_prefill_tokens],
+                                     [num_padded_decodes, num_prefill_tokens],
                                      dim=-1)
 
         # num_padded_decodes accounts for CUDA graph padding when applicable
@@ -451,7 +451,7 @@ def split_batch_to_prefill_and_decode(
             [num_padded_decodes, num_prefills],
             dim=0)
         query_start_loc_p = (query_start_loc[-num_prefills - 1:] -
-                             num_decodes if num_prefills > 0 else None)
+                             num_padded_decodes if num_prefills > 0 else None)
         has_initial_states_p = has_initial_states[-num_prefills:] if (
             has_initial_states is not None and num_prefills > 0) else None
     else:
