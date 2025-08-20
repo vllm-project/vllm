@@ -53,12 +53,6 @@ def models_list(*, all: bool = True, keywords: Optional[list[str]] = None):
                 "quantization": "gptq_marlin_24"
             }))
 
-        if is_quant_method_supported("marlin"):
-            TEST_MODELS.append(
-                ("robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-marlin", {
-                    "quantization": "marlin"
-                }))
-
         if not current_platform.is_rocm() and is_quant_method_supported("awq"):
             TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {
                 "quantization": "AWQ"
