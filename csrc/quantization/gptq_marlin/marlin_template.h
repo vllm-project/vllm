@@ -479,7 +479,18 @@ __global__ void Marlin(
 
   int k_tiles = prob_k / 16 / thread_k_blocks;
   int n_tiles = prob_n / 16 / thread_n_blocks;
-  int iters = div_ceil(k_tiles * n_tiles * parallel, gridDim.x);
+
+  int global_mn_tiles = parallel * n_tiles;
+  int part1_mn_tiles = global_mn_tiles;
+  int part2_mn_iters = 0;
+  bool in_part2 = false;
+
+  if (global_mn_tiles > 4 * gridDim.x) {
+    part1_mn_tiles = global_mn_tiles % gridDim.x + gridDim.x * 3;
+    part2_mn_iters = (global_mn_tiles - part1_mn_tiles) / gridDim.x;
+  }
+
+  int iters = div_ceil(k_tiles * part1_mn_tiles, gridDim.x);
 
   if constexpr (!has_act_order && group_blocks != -1) {
     if (group_blocks >= thread_k_blocks) {
@@ -513,8 +524,8 @@ __global__ void Marlin(
     slice_col = slice_col_par % n_tiles;
     par_id = slice_col_par / n_tiles;
   }
-  if (parallel * n_tiles >= gridDim.x) {
-    // when parallel * n_tiles >= sms
+  if (part1_mn_tiles >= gridDim.x) {
+    // when part1_mn_tiles >= sms
     // then there are at most $sms$ conflict tile blocks
     locks_off = blockIdx.x;
   } else {
@@ -523,10 +534,10 @@ __global__ void Marlin(
 
   // Compute all information about the current slice which is required for
   // synchronization.
-  auto init_slice = [&](bool first_init = false) {
+  auto init_part1_slice = [&](bool first_init = false) {
     slice_iters =
         iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
-    if (slice_iters < 0 || slice_col_par >= n_tiles * parallel) slice_iters = 0;
+    if (slice_iters < 0 || slice_col_par >= part1_mn_tiles) slice_iters = 0;
     if (slice_iters == 0) return;
     if (slice_row + slice_iters > k_tiles) slice_iters = k_tiles - slice_row;
     slice_count = 1;
@@ -544,7 +555,7 @@ __global__ void Marlin(
         if (col_off > 0) slice_idx--;
       }
     }
-    if (parallel * n_tiles >= gridDim.x) {
+    if (part1_mn_tiles >= gridDim.x) {
       if (slice_count > 1 && slice_idx == slice_count - 1) {
         locks_off++;
       }
@@ -586,6 +597,36 @@ __global__ void Marlin(
                      threadIdx.x < prob_m);
     }
   };
+
+  auto init_part2_slice = [&]() {
+    if (part2_mn_iters) {
+      part2_mn_iters--;
+      par_id = slice_col_par / n_tiles;
+      slice_col = slice_col_par % n_tiles;
+      slice_iters = k_tiles;
+      if (is_a_8bit) {
+      __syncthreads();
+      cp_async1_pred(&sh_a_s[threadIdx.x], &a_scales_ptr[threadIdx.x],
+                     threadIdx.x < prob_m);
+      }
+    }
+  };
+
+  auto init_slice = [&](bool first_init = false) {
+    if (in_part2) {
+      init_part2_slice();
+    } else {
+      init_part1_slice(first_init);
+      if (slice_iters == 0 && part2_mn_iters) {
+        in_part2 = true;
+        slice_col_par = part1_mn_tiles + blockIdx.x;
+        slice_count = 0;
+        slice_idx = 0;
+        init_part2_slice();
+      }
+    }
+  };
+
   init_slice(true);
 
   // A sizes/strides
@@ -2027,8 +2068,12 @@ __global__ void Marlin(
         // only the last block in a slice actually writes the result
         write_result(last);
       slice_row = 0;
-      slice_col_par++;
-      slice_col++;
+      if (in_part2) {
+        slice_col_par += gridDim.x;
+      } else {
+        slice_col_par++;
+        slice_col++;
+      }
       is_first_matmul_in_slice = true;
       init_slice();
 

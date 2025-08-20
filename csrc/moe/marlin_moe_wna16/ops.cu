@@ -381,7 +381,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                bool is_k_full, bool has_zp, int num_groups, int group_size,
                int dev, cudaStream_t stream, int thread_k, int thread_n,
                int sms, bool use_atomic_add, bool use_fp32_reduce,
-               bool is_zp_float, int moe_blocks_per_exec) {
+               bool is_zp_float) {
   int thread_m_blocks = div_ceil(moe_block_size, 16);
   bool m_block_size_8 = moe_block_size == 8;
   bool is_a_8bit = a_type.size_bits() == 8;
@@ -484,7 +484,6 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
         num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float,
         max_shared_mem, is_a_8bit);
     thread_tfg = exec_cfg.tb_cfg;
-    // thread_tfg = {128, 128, 256};
   }
 
   int num_threads = thread_tfg.num_threads;
@@ -527,45 +526,14 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                        max_shared_mem);
-  int estimated_total_blocks;
-
-  if (prob_m * top_k / moe_block_size > num_experts) {
-    estimated_total_blocks = prob_m * top_k / moe_block_size * 1.5;
-  } else if (prob_m * top_k / moe_block_size * 2 > num_experts) {
-    estimated_total_blocks = num_experts * 1.5;
-  } else {
-    estimated_total_blocks = num_experts;
-  }
-
-  float avg_blocks_per_expert = prob_m * top_k / num_experts / moe_block_size;
-  if (moe_blocks_per_exec == -1) {
-    moe_blocks_per_exec = sms;
-    float exec_count = (float) estimated_total_blocks / (float) moe_blocks_per_exec;
-
-    while (true) {
-      bool is_greater_than_min = moe_blocks_per_exec > sms / 4;
-      bool is_divisable_by_2 = moe_blocks_per_exec / 2 * 2 == moe_blocks_per_exec;
-      bool is_too_large = exec_count < 5.0;
-      if (is_greater_than_min && is_divisable_by_2 && is_too_large) {
-        moe_blocks_per_exec = moe_blocks_per_exec / 2;
-        exec_count = (float) estimated_total_blocks / (float) moe_blocks_per_exec;
-      } else {
-        break;
-      }
-    }
-  }
-
-  for (int start_block_id = 0; start_block_id < estimated_total_blocks; start_block_id += moe_blocks_per_exec) {
-    if (start_block_id + moe_blocks_per_exec >= estimated_total_blocks) moe_blocks_per_exec += 65536;
-    // avoid ">>>" being formatted to "> > >"
-    // clang-format off
-    kernel<<<blocks, num_threads, max_shared_mem, stream>>>(
-        A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, a_s_ptr, b_s_ptr, g_s_ptr, zp_ptr, g_idx_ptr,
-        sorted_token_ids_ptr, expert_ids_ptr, num_tokens_past_padded_ptr,
-        topk_weights_ptr, top_k, mul_topk_weights, is_ep, num_groups, prob_m,
-        prob_n, prob_k, locks, has_bias, use_atomic_add, use_fp32_reduce, max_shared_mem, start_block_id, moe_blocks_per_exec);
-    // clang-format on
-  }
+  // avoid ">>>" being formatted to "> > >"
+  // clang-format off
+  kernel<<<blocks, num_threads, max_shared_mem, stream>>>(
+      A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, a_s_ptr, b_s_ptr, g_s_ptr, zp_ptr, g_idx_ptr,
+      sorted_token_ids_ptr, expert_ids_ptr, num_tokens_past_padded_ptr,
+      topk_weights_ptr, top_k, mul_topk_weights, is_ep, num_groups, prob_m,
+      prob_n, prob_k, locks, has_bias, use_atomic_add, use_fp32_reduce, max_shared_mem);
+  // clang-format on
 }
 
 }  // namespace MARLIN_NAMESPACE_NAME
@@ -585,7 +553,7 @@ torch::Tensor moe_wna16_marlin_gemm(
     int64_t moe_block_size, int64_t top_k, bool mul_topk_weights, bool is_ep,
     vllm::ScalarTypeId const& b_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
-    bool is_zp_float, int64_t moe_blocks_per_exec) {
+    bool is_zp_float) {
 
   vllm::ScalarTypeId a_type_id, c_type_id, s_type_id;
 
@@ -894,7 +862,7 @@ torch::Tensor moe_wna16_marlin_gemm(
     size_m, size_n, size_k,
     workspace.data_ptr(), a_type, b_type, c_type, s_type, has_bias, has_act_order, is_k_full, has_zp,
     num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-    thread_k, thread_n, sms, use_atomic_add, use_fp32_reduce, is_zp_float, moe_blocks_per_exec);
+    thread_k, thread_n, sms, use_atomic_add, use_fp32_reduce, is_zp_float);
 
   return c;
 }

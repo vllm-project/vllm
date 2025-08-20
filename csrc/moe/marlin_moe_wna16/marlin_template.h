@@ -412,7 +412,7 @@ __global__ void Marlin(
     bool has_bias,
     bool use_atomic_add,   // whether to use atomic add to reduce
     bool use_fp32_reduce,  // whether to use fp32 global reduce
-    int max_shared_mem, int start_block_id, int moe_blocks_per_exec) {
+    int max_shared_mem) {
   // Each threadblock processes one "stripe" of the B matrix with (roughly) the
   // same size, which might involve multiple column "slices" (of width 16 *
   // `thread_n_blocks`). Stripes are defined as shown in the 3x3 matrix 5 SM
@@ -426,8 +426,6 @@ __global__ void Marlin(
   // reductions as possible.
   int num_tokens_past_padded = num_tokens_past_padded_ptr[0];
   constexpr int moe_block_size = m_block_size_8 ? 8 : (16 * thread_m_blocks);
-  num_tokens_past_padded -= start_block_id * moe_block_size;
-  if (num_tokens_past_padded <= 0) return;
 
   using Adtype = MarlinScalarType<a_type_id>;
   using Cdtype = MarlinScalarType<c_type_id>;
@@ -490,8 +488,7 @@ __global__ void Marlin(
   const int b_bias_expert_stride = prob_n / 8;
 
   // parallel: num valid moe blocks
-  int parallel =
-      min(num_tokens_past_padded / moe_block_size, moe_blocks_per_exec);
+  int parallel = num_tokens_past_padded / moe_block_size;
   int num_valid_blocks = parallel;
   if (is_ep) {
     for (int i = 0; i < parallel; i++) {
@@ -503,7 +500,18 @@ __global__ void Marlin(
 
   int k_tiles = prob_k / 16 / thread_k_blocks;
   int n_tiles = prob_n / 16 / thread_n_blocks;
-  int iters = div_ceil(k_tiles * n_tiles * parallel, gridDim.x);
+
+  int global_mn_tiles = parallel * n_tiles;
+  int part1_mn_tiles = global_mn_tiles;
+  int part2_mn_iters = 0;
+  bool in_part2 = false;
+
+  if (global_mn_tiles > 4 * gridDim.x) {
+    part1_mn_tiles = global_mn_tiles % gridDim.x + gridDim.x * 3;
+    part2_mn_iters = (global_mn_tiles - part1_mn_tiles) / gridDim.x;
+  }
+
+  int iters = div_ceil(k_tiles * part1_mn_tiles, gridDim.x);
 
   if constexpr (!has_act_order && group_blocks != -1) {
     if (group_blocks >= thread_k_blocks) {
@@ -556,8 +564,8 @@ __global__ void Marlin(
     slice_col = slice_col_par % n_tiles;
     par_id = slice_col_par / n_tiles;
   }
-  if (parallel * n_tiles >= gridDim.x) {
-    // when parallel * n_tiles >= sms
+  if (part1_mn_tiles >= gridDim.x) {
+    // when part1_mn_tiles >= sms
     // then there are at most $sms$ conflict tile blocks
     locks_off = blockIdx.x;
   } else {
@@ -620,7 +628,7 @@ __global__ void Marlin(
 
     old_expert_id = expert_id;
     if (num_invalid_blocks > 0) {
-      int skip_count = block_id == -1 ? par_id + start_block_id : 0;
+      int skip_count = block_id == -1 ? par_id : 0;
       block_id++;
       for (int i = block_id; i < num_tokens_past_padded / moe_block_size; i++) {
         expert_id = expert_ids_ptr[i];
@@ -633,7 +641,7 @@ __global__ void Marlin(
         };
       }
     } else {
-      block_id = par_id + start_block_id;
+      block_id = par_id;
       expert_id = expert_ids_ptr[block_id];
     }
 
@@ -659,10 +667,10 @@ __global__ void Marlin(
 
   // Compute all information about the current slice which is required for
   // synchronization.
-  auto init_slice = [&](bool first_init = false) {
+  auto init_part1_slice = [&](bool first_init = false) {
     slice_iters =
         iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
-    if (slice_iters < 0 || slice_col_par >= n_tiles * parallel) slice_iters = 0;
+    if (slice_iters < 0 || slice_col_par >= part1_mn_tiles) slice_iters = 0;
     if (slice_iters == 0) return;
     if (slice_row + slice_iters > k_tiles) slice_iters = k_tiles - slice_row;
     slice_count = 1;
@@ -680,7 +688,7 @@ __global__ void Marlin(
         if (col_off > 0) slice_idx--;
       }
     }
-    if (parallel * n_tiles >= gridDim.x) {
+    if (part1_mn_tiles >= gridDim.x) {
       if (slice_count > 1 && slice_idx == slice_count - 1) {
         locks_off++;
       }
@@ -719,6 +727,37 @@ __global__ void Marlin(
       cp_async1_pred(&sh_a_s[threadIdx.x],
                      &a_scales_ptr[sh_rd_block_sorted_ids[threadIdx.x]],
                      threadIdx.x < block_num_valid_tokens);
+    }
+  };
+
+  auto init_part2_slice = [&]() {
+    if (part2_mn_iters) {
+      part2_mn_iters--;
+      par_id = slice_col_par / n_tiles;
+      slice_col = slice_col_par % n_tiles;
+      slice_iters = k_tiles;
+      update_next_moe_block_data();
+      if (is_a_8bit) {
+        __syncthreads();
+        cp_async1_pred(&sh_a_s[threadIdx.x],
+                      &a_scales_ptr[sh_rd_block_sorted_ids[threadIdx.x]],
+                      threadIdx.x < block_num_valid_tokens);
+      }
+    }
+  };
+
+  auto init_slice = [&](bool first_init = false) {
+    if (in_part2) {
+      init_part2_slice();
+    } else {
+      init_part1_slice(first_init);
+      if (slice_iters == 0 && part2_mn_iters) {
+        in_part2 = true;
+        slice_col_par = part1_mn_tiles + blockIdx.x;
+        slice_count = 0;
+        slice_idx = 0;
+        init_part2_slice();
+      }
     }
   };
 
@@ -2216,8 +2255,12 @@ __global__ void Marlin(
         write_result(last);
       int old_slice_row = slice_row;
       slice_row = 0;
-      slice_col_par++;
-      slice_col++;
+      if (in_part2) {
+        slice_col_par += gridDim.x;
+      } else {
+        slice_col_par++;
+        slice_col++;
+      }
       is_first_matmul_in_slice = true;
       init_slice();
 
@@ -2229,7 +2272,7 @@ __global__ void Marlin(
       // `prob_k > thread_k_blocks * 16 * stages * max_num_stage_groups`:
       //    when the required shared memory size is larger than
       //    the remaining shared memory
-      if (slice_col == 0 || old_slice_row ||
+      if (in_part2 || slice_col == 0 || old_slice_row ||
           prob_k > thread_k_blocks * 16 * stages * max_num_stage_groups) {
         should_load_a = true;
       } else {
