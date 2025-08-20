@@ -456,10 +456,7 @@ def test_all_logprobs(example_prompts, monkeypatch: pytest.MonkeyPatch):
                 assert len(logprob) == vocab_size
 
 
-@pytest.mark.parametrize("logprobs_mode", [
-    LogprobsMode.PROCESSED_LOGITS, LogprobsMode.PROCESSED_LOGPROBS,
-    LogprobsMode.RAW_LOGITS, LogprobsMode.RAW_LOGPROBS
-])
+@pytest.mark.parametrize("logprobs_mode", list(LogprobsMode))
 def test_logprobs_mode(logprobs_mode: LogprobsMode,
                        monkeypatch: pytest.MonkeyPatch):
     """Test with LLM engine with different logprobs_mode.
