@@ -844,6 +844,28 @@ def get_cutlass_moe_mm_data(topk_ids: torch.Tensor,
                                                 blockscale_offsets)
 
 
+def get_cutlass_moe_mm_problem_sizes(
+        topk_ids: torch.Tensor,
+        problem_sizes1: torch.Tensor,
+        problem_sizes2: torch.Tensor,
+        num_experts: int,
+        n: int,
+        k: int,
+        blockscale_offsets: Optional[torch.Tensor] = None):
+    """
+    Compute only the per-expert problem sizes needed by the two grouped matrix
+    multiplications used in CUTLASS-based fused MoE.
+
+    The function takes in topk_ids (token→expert mapping) and computes:
+    - problem_sizes1, problem_sizes2: M×N×K sizes of each expert's
+                                    multiplication for the two grouped MMs
+                                    used in the fused MoE operation.
+    """
+    return torch.ops._C.get_cutlass_moe_mm_problem_sizes(
+        topk_ids, problem_sizes1, problem_sizes2, num_experts, n, k,
+        blockscale_offsets)
+
+
 def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
     """
     Shuffle and expand the input tensor according to the dst2src_map and store the result in output_tensor.

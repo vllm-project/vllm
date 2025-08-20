@@ -10,7 +10,7 @@
 
 template <typename ElementAB, typename ElementC, typename ElementAccumulator>
 __global__ void get_group_gemm_starts(
-    int32_t* expert_offsets, ElementAB** a_offsets, ElementAB** b_offsets,
+    int64_t* expert_offsets, ElementAB** a_offsets, ElementAB** b_offsets,
     ElementC** out_offsets, ElementAccumulator** a_scales_offsets,
     ElementAccumulator** b_scales_offsets, ElementAB* a_base_as_int,
     ElementAB* b_base_as_int, ElementC* out_base_as_int,
@@ -34,7 +34,7 @@ __global__ void get_group_gemm_starts(
   else if (out_tensors.dtype() == TENSOR_C_TYPE) {                         \
     get_group_gemm_starts<cutlass::float_e4m3_t, C_TYPE, float>            \
         <<<1, num_experts, 0, stream>>>(                                   \
-            static_cast<int32_t*>(expert_offsets.data_ptr()),              \
+            static_cast<int64_t*>(expert_offsets.data_ptr()),              \
             static_cast<cutlass::float_e4m3_t**>(a_ptrs.data_ptr()),       \
             static_cast<cutlass::float_e4m3_t**>(b_ptrs.data_ptr()),       \
             static_cast<C_TYPE**>(out_ptrs.data_ptr()),                    \
@@ -61,6 +61,8 @@ void run_get_group_gemm_starts(
   TORCH_CHECK(b_tensors.dtype() == torch::kFloat8_e4m3fn);
   TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
   TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+  // expect int64_t to avoid overflow during offset calculations
+  TORCH_CHECK(expert_offsets.dtype() == torch::kInt64);
 
   int num_experts = static_cast<int>(expert_offsets.size(0));
   bool per_act_token = a_scales.numel() != 1;
