@@ -41,9 +41,7 @@ if __name__ == "__main__":
         tb = bench(rope_torch_baseline, hd=hd, device=dev) or 0.0
         tf = bench(rope_complex_fast, hd=hd, device=dev) or 0.0
         if tb and tf:
-            print(
-                f"hd={hd} base={tb:.4f}s fast={tf:.4f}s "
-                f"speedup={(tb/tf):.2f}x"
-            )
+            print(f"hd={hd} base={tb:.4f}s fast={tf:.4f}s "
+                  f"speedup={(tb/tf):.2f}x")
         else:
             print(f"hd={hd}: device={dev} no timing (no CUDA?)")
