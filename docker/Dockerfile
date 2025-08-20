@@ -139,21 +139,6 @@ RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 WORKDIR /workspace
 
 # install build and runtime dependencies
-
-# arm64 (GH200) build follows the practice of "use existing pytorch" build,
-# we need to install torch and torchvision from the nightly builds first,
-# pytorch will not appear as a vLLM dependency in all of the following steps
-# after this step
-RUN --mount=type=cache,target=/root/.cache/uv \
-    if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
-        uv pip install --system \
-            --index-url ${PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-            "torch==2.8.0.dev20250318+cu128" "torchvision==0.22.0.dev20250319";  \
-        uv pip install --system \
-            --index-url ${PYTORCH_CUDA_NIGHTLY_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-            --pre pytorch_triton==3.3.0+gitab727c40; \
-    fi
-
 COPY requirements/common.txt requirements/common.txt
 COPY requirements/cuda.txt requirements/cuda.txt
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -234,6 +219,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && sccache --show-stats; \
     fi
 
+ARG vllm_target_device="cuda"
+ENV VLLM_TARGET_DEVICE=${vllm_target_device}
 ENV CCACHE_DIR=/root/.cache/ccache
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/uv \
@@ -385,31 +372,45 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 
 # Install FlashInfer from source
 ARG FLASHINFER_GIT_REPO="https://github.com/flashinfer-ai/flashinfer.git"
-# Keep this in sync with https://github.com/vllm-project/vllm/blob/main/requirements/cuda.txt
-# We use `--force-reinstall --no-deps` to avoid issues with the existing FlashInfer wheel.
-ARG FLASHINFER_GIT_REF="v0.2.11"
+# Keep this in sync with "flashinfer" extra in setup.py
+ARG FLASHINFER_GIT_REF="v0.2.12"
+# Flag to control whether to compile FlashInfer AOT kernels
+# Set to "true" to enable AOT compilation:
+# docker build --build-arg FLASHINFER_AOT_COMPILE=true ...
+ARG FLASHINFER_AOT_COMPILE=false
 RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
   . /etc/environment
     git clone --depth 1 --recursive --shallow-submodules \
         --branch ${FLASHINFER_GIT_REF} \
         ${FLASHINFER_GIT_REPO} flashinfer
-    # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
-    # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
-    if [[ "${CUDA_VERSION}" == 11.* ]]; then
-        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
-    elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
-        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
-    else
-        # CUDA 12.8+ supports 10.0a and 12.0
-        FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
-    fi
-    echo "🏗️  Building FlashInfer for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
-    # Needed to build AOT kernels
     pushd flashinfer
-        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-            python3 -m flashinfer.aot
-        TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
-            uv pip install --system --no-build-isolation --force-reinstall --no-deps .
+        if [ "${FLASHINFER_AOT_COMPILE}" = "true" ]; then
+            # Exclude CUDA arches for older versions (11.x and 12.0-12.7)
+            # TODO: Update this to allow setting TORCH_CUDA_ARCH_LIST as a build arg.
+            if [[ "${CUDA_VERSION}" == 11.* ]]; then
+                FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9"
+            elif [[ "${CUDA_VERSION}" == 12.[0-7]* ]]; then
+                FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a"
+            else
+                # CUDA 12.8+ supports 10.0a and 12.0
+                FI_TORCH_CUDA_ARCH_LIST="7.5 8.0 8.9 9.0a 10.0a 12.0"
+            fi
+            echo "🏗️  Installing FlashInfer with AOT compilation for arches: ${FI_TORCH_CUDA_ARCH_LIST}"
+            # Build AOT kernels
+            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+                python3 -m flashinfer.aot
+            # Install with no-build-isolation since we already built AOT kernels
+            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+                uv pip install --system --no-build-isolation . \
+                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+            # Download pre-compiled cubins
+            TORCH_CUDA_ARCH_LIST="${FI_TORCH_CUDA_ARCH_LIST}" \
+                python3 -m flashinfer --download-cubin || echo "WARNING: Failed to download flashinfer cubins."
+        else
+            echo "🏗️  Installing FlashInfer without AOT compilation in JIT mode"
+            uv pip install --system . \
+                --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
+        fi
     popd
     rm -rf flashinfer
 BASH

@@ -62,6 +62,7 @@ if TYPE_CHECKING:
         QuantizationConfig)
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+    from vllm.v1.sample.logits_processor import LogitsProcessor
 
     HfOverrides = Union[dict, Callable[[type], type]]
 else:
@@ -72,6 +73,7 @@ else:
     BaseModelLoader = Any
     LoadFormats = Any
     TensorizerConfig = Any
+    LogitsProcessor = Any
     HfOverrides = Union[dict[str, Any], Callable[[type], type]]
 
     me_quant = LazyLoader("model_executor", globals(),
@@ -189,7 +191,17 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
             yield a, b
             a = b
 
-    cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+    try:
+        cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+    except (OSError, KeyError, TypeError):
+        # HACK: Python 3.13+ workaround - set missing __firstlineno__
+        # Workaround can be removed after we upgrade to pydantic==2.12.0
+        with open(inspect.getfile(cls)) as f:
+            for i, line in enumerate(f):
+                if f"class {cls.__name__}" in line and ":" in line:
+                    cls.__firstlineno__ = i + 1
+                    break
+        cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
 
     if not isinstance(cls_node, ast.ClassDef):
         raise TypeError("Given object was not a class.")
@@ -246,6 +258,7 @@ TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal["raw_logprobs", "raw_logits", "processed_logprobs",
                        "processed_logits"]
+MMEncoderTPMode = Literal["weights", "data"]
 
 
 @config
@@ -426,6 +439,19 @@ class ModelConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended)."""
+    mm_encoder_tp_mode: MMEncoderTPMode = "weights"
+    """Indicates how to optimize multi-modal encoder inference using
+    tensor parallelism (TP).
+
+    - `"weights"`: Within the same vLLM engine, split the weights of
+        each layer across TP ranks. (default TP behavior)
+    - `"data"`: Within the same vLLM engine, split the batched input data
+        across TP ranks to process the data in parallel, while hosting
+        the full weights on each TP rank.
+        This batch-level DP is not to be confused with API request-level
+        DP (which is controlled by `--data-parallel-size`).
+        This is only supported on a per-model basis and falls back to
+        `"weights"` if the encoder does not support DP."""
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -465,6 +491,9 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation."""
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
+    logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
+    """One or more logits processors' fully-qualified class names or class
+    definitions"""
 
     def compute_hash(self) -> str:
         """
@@ -841,8 +870,10 @@ class ModelConfig:
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 mm_processor_cache_gb=self.mm_processor_cache_gb,
+                mm_encoder_tp_mode=self.mm_encoder_tp_mode,
                 interleave_mm_strings=self.interleave_mm_strings,
-                skip_mm_profiling=self.skip_mm_profiling)
+                skip_mm_profiling=self.skip_mm_profiling,
+            )
 
         return None
 
@@ -1448,7 +1479,8 @@ class ModelConfig:
         from vllm.distributed.utils import get_pp_indices
         if (self.hf_text_config.model_type == "deepseek_mtp"
                 or self.hf_config.model_type == "mimo_mtp"
-                or self.hf_config.model_type == "glm4_moe_mtp"):
+                or self.hf_config.model_type == "glm4_moe_mtp"
+                or self.hf_config.model_type == "ernie_mtp"):
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_nextn_predict_layers", 0)
         else:
@@ -1896,7 +1928,8 @@ class DeviceConfig:
 
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
-                            "mlp_speculator", "draft_model", "deepseek_mtp"]
+                            "mlp_speculator", "draft_model", "deepseek_mtp",
+                            "ernie_mtp"]
 
 
 @config
@@ -2029,6 +2062,16 @@ class SpeculativeConfig:
                 "architectures": ["Glm4MoeMTPModel"]
             })
 
+        if hf_config.model_type == "ernie4_5_moe":
+            hf_config.model_type = "ernie_mtp"
+        if hf_config.model_type == "ernie_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update({
+                "n_predict": n_predict,
+                "architectures": ["ErnieMTPModel"]
+            })
+            return hf_config
+
         return hf_config
 
     def __post_init__(self):
@@ -2047,8 +2090,8 @@ class SpeculativeConfig:
             if self.target_model_config and \
                 (self.target_model_config.hf_text_config.model_type \
                         == "deepseek_v3" or
-                    self.target_model_config.hf_text_config.model_type \
-                        == "mimo"):
+                    self.target_model_config.hf_text_config.model_type in
+                        ("mimo","ernie4_5_moe")):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
             elif self.method in ("ngram", "[ngram]"):
@@ -2143,6 +2186,15 @@ class SpeculativeConfig:
                     if self.num_speculative_tokens > 1:
                         logger.warning(
                                 "All Deepseek MTP models only have " \
+                                "one layer. Might need some code changes " \
+                                "to support multiple layers."
+                            )
+                elif (self.draft_model_config.hf_config.model_type ==
+                      "ernie_mtp"):
+                    self.method = "ernie_mtp"
+                    if self.num_speculative_tokens > 1:
+                        logger.warning(
+                                "All Ernie MTP models only have " \
                                 "one layer. Might need some code changes " \
                                 "to support multiple layers."
                             )
@@ -2361,7 +2413,7 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "deepseek_mtp")
+        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp")
 
     def __repr__(self) -> str:
         method = self.method
@@ -2509,6 +2561,22 @@ class MultiModalConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended).
+    """
+
+    mm_encoder_tp_mode: MMEncoderTPMode = "weights"
+    """
+    Indicates how to optimize multi-modal encoder inference using
+    tensor parallelism (TP).
+
+    - `"weights"`: Within the same vLLM engine, split the weights of
+        each layer across TP ranks. (default TP behavior)
+    - `"data"`: Within the same vLLM engine, split the batched input data
+        across TP ranks to process the data in parallel, while hosting
+        the full weights on each TP rank.
+        This batch-level DP is not to be confused with API request-level
+        DP (which is controlled by `--data-parallel-size`).
+        This is only supported on a per-model basis and falls back to
+        `"weights"` if the encoder does not support DP.
     """
 
     interleave_mm_strings: bool = False
@@ -3535,15 +3603,6 @@ class VllmConfig:
                 # in V0 means the compilation level wins out.
                 self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        # if cudagraph_mode is not explicitly set by users, set default value
-        if self.compilation_config.cudagraph_mode is None:
-            if envs.VLLM_USE_V1 and self.compilation_config.level \
-                == CompilationLevel.PIECEWISE:
-                self.compilation_config.cudagraph_mode = \
-                    CUDAGraphMode.PIECEWISE
-            else:
-                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
         if self.compilation_config.pass_config.enable_async_tp:
@@ -3552,14 +3611,28 @@ class VllmConfig:
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
 
-        # disable cudagraph when enforce eager execution
-        if self.model_config is not None and self.model_config.enforce_eager:
-            logger.info("Cudagraph is disabled under eager mode")
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-        elif envs.VLLM_USE_V1:
-            self.compilation_config.cudagraph_num_of_warmups = 1
+        if current_platform.is_cuda_alike() or current_platform.is_xpu():
+            # if cudagraph_mode is not explicitly set by users, set default
+            # value
+            if self.compilation_config.cudagraph_mode is None:
+                if envs.VLLM_USE_V1 and self.compilation_config.level \
+                    == CompilationLevel.PIECEWISE:
+                    self.compilation_config.cudagraph_mode = \
+                        CUDAGraphMode.PIECEWISE
+                else:
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
-        self._set_cudagraph_sizes()
+            # disable cudagraph when enforce eager execution
+            if self.model_config is not None and \
+                    self.model_config.enforce_eager:
+                logger.info("Cudagraph is disabled under eager mode")
+                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            elif envs.VLLM_USE_V1:
+                self.compilation_config.cudagraph_num_of_warmups = 1
+
+            self._set_cudagraph_sizes()
+        else:
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if self.cache_config.cpu_offload_gb > 0 and \
             self.compilation_config.level != CompilationLevel.NO_COMPILATION \
@@ -3595,9 +3668,6 @@ class VllmConfig:
                 logger.info(reason)
             self.scheduler_config.chunked_prefill_enabled = False
             self.scheduler_config.long_prefill_token_threshold = 0
-            self.scheduler_config.max_num_batched_tokens = max(
-                self.scheduler_config.max_model_len,
-                DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
             if self.cache_config is not None:
                 self.cache_config.enable_prefix_caching = False
@@ -3618,7 +3688,7 @@ class VllmConfig:
         current_platform.check_and_update_config(self)
 
         # final check of cudagraph mode after platform-specific update
-        if envs.VLLM_USE_V1:
+        if envs.VLLM_USE_V1 and current_platform.is_cuda_alike():
             if self.compilation_config.cudagraph_mode == CUDAGraphMode.FULL \
                 and self.model_config is not None and \
                 not self.model_config.disable_cascade_attn:
