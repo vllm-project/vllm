@@ -22,8 +22,7 @@ def rope_torch_baseline(
     Assumes last dim == head_dim and head_dim is even.
     """
     assert q.shape[-1] % 2 == 0 and k.shape[-1] % 2 == 0, (
-        "head_dim must be even"
-    )
+        "head_dim must be even")
 
     # Split even/odd lanes.
     q1, q2 = q[..., ::2], q[..., 1::2]
@@ -67,8 +66,7 @@ def rope_complex_fast(
         return rope_torch_baseline(q, k, cos, sin)
 
     assert q.shape[-1] % 2 == 0 and k.shape[-1] % 2 == 0, (
-        "head_dim must be even"
-    )
+        "head_dim must be even")
 
     # Build complex rotation (cos + i*sin).
     # cos/sin must be broadcastable to the pair dimension.
