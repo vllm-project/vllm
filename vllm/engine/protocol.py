@@ -3,7 +3,7 @@
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, Iterable, Mapping, Optional, Union
+from typing import Any, AsyncGenerator, Iterable, Mapping, Optional, Union
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, ModelConfig, VllmConfig
@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
+from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -228,14 +229,14 @@ class EngineClient(ABC):
         """Generate outputs for a request from a pooling model."""
         ...
 
-    async def encode_with_mm_data_plugin(
+    async def encode_with_io_processor_plugin(
         self,
-        prompt: PromptType,
+        prompt: Any,
         pooling_params: PoolingParams,
         request_id: str,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-    ) -> PoolingRequestOutput:
+    ) -> Any:
         """
         Perform an encode request using the mulimodal
         data processor plugin
@@ -280,6 +281,9 @@ class EngineClient(ABC):
     ) -> AnyTokenizer:
         """Get the appropriate tokenizer for the request"""
         ...
+
+    async def get_io_processor(self) -> IOProcessor:
+        raise NotImplementedError
 
     @abstractmethod
     async def is_tracing_enabled(self) -> bool:

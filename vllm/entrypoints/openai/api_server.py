@@ -64,8 +64,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorInfo,
                                               ErrorResponse,
-                                              ImagesGenerationResponse,
-                                              ImagesPredictionRequest,
+                                              IOProcessorPluginRequest,
+                                              IOProcessorPluginResponse,
                                               LoadLoRAAdapterRequest,
                                               PoolingRequest, PoolingResponse,
                                               RerankRequest, RerankResponse,
@@ -85,11 +85,12 @@ from vllm.entrypoints.openai.serving_classification import (
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
-from vllm.entrypoints.openai.serving_images import ServingImagesPrediction
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     LoRAModulePath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
+from vllm.entrypoints.openai.serving_pooling_with_io_plugin import (
+    ServingPoolingWithIOPlugin)
 from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
@@ -227,7 +228,8 @@ async def build_async_engine_client_from_engine_args(
                 disable_log_stats=engine_args.disable_log_stats,
                 client_addresses=client_config,
                 client_count=client_count,
-                client_index=client_index)
+                client_index=client_index,
+                io_processor_plugin=engine_args.io_processor_plugin)
 
             # Don't keep the dummy data in memory
             await async_llm.reset_mm_cache()
@@ -442,8 +444,8 @@ def translation(request: Request) -> OpenAIServingTranslation:
     return request.app.state.openai_serving_translation
 
 
-def images_prediction(request: Request) -> ServingImagesPrediction:
-    return request.app.state.openai_serving_images_prediction
+def pooling_with_io_plugin(request: Request) -> ServingPoolingWithIOPlugin:
+    return request.app.state.serving_pooling_with_io_plugin
 
 
 def engine_client(request: Request) -> EngineClient:
@@ -809,7 +811,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
 
 
 #This entrypoint is not available in the OpenAI API, we define it.
-@router.post("/v1/images/prediction",
+@router.post("/plugin_pooling",
              responses={
                  HTTPStatus.BAD_REQUEST.value: {
                      "model": ErrorResponse
@@ -820,19 +822,20 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
              })
 @with_cancellation
 @load_aware_call
-async def create_images_prediction(request: ImagesPredictionRequest,
-                                   raw_request: Request):
-    handler = images_prediction(raw_request)
+async def create_pooling_with_io_plugin(request: IOProcessorPluginRequest,
+                                        raw_request: Request):
+    handler = pooling_with_io_plugin(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
-            message="The model does not support Images API")
+            message="The model does not support pooling"
+            "with IOProcessor plugin")
 
-    # image_data = await request.image.read()
-    generator = await handler.create_images_prediction(request, raw_request)
+    generator = await handler.create_pooling_with_io_plugin(
+        request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
-    elif isinstance(generator, ImagesGenerationResponse):
+    elif isinstance(generator, IOProcessorPluginResponse):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
@@ -1820,6 +1823,12 @@ async def init_app_state(
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
     ) if "encode" in supported_tasks else None
+    state.serving_pooling_with_io_plugin = ServingPoolingWithIOPlugin(
+        engine_client,
+        vllm_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+    ) if "encode" in supported_tasks else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
@@ -1864,12 +1873,6 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger,
     ) if "transcription" in supported_tasks else None
-    state.openai_serving_images_prediction = ServingImagesPrediction(
-        engine_client,
-        vllm_config,
-        state.openai_serving_models,
-        request_logger=request_logger,
-    ) if "encode" in supported_tasks else None
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0

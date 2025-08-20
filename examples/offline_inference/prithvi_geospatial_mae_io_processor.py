@@ -6,9 +6,6 @@ import os
 import torch
 
 from vllm import LLM
-from vllm.plugins.multimodal_data_processors.types import (
-    ImagePrompt,
-)
 from vllm.pooling_params import PoolingParams
 
 # This example shows how to perform an offline inference that generates
@@ -21,19 +18,15 @@ from vllm.pooling_params import PoolingParams
 
 def main():
     torch.set_default_dtype(torch.float16)
-
+    # os.environ["VLLM_USE_IO_PROCESSOR_PLUGIN"] = "prithvi_to_tiff_india"
     image_url = "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/India_900498_S2Hand.tif"  # noqa: E501
 
-    img_prompt = ImagePrompt(
+    img_prompt = dict(
         data=image_url,
         data_format="url",
         image_format="tiff",
-        out_format="b64_json",
+        out_data_format="b64_json",
     )
-    prompt = {
-        "prompt_token_ids": [1],
-        "multi_modal_data": {"image": dict(img_prompt)},
-    }
 
     llm = LLM(
         model="christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM",
@@ -44,17 +37,18 @@ def main():
         # to avoid the model going OOM.
         # The maximum number depends on the available GPU memory
         max_num_seqs=32,
+        io_processor_plugin="prithvi_to_tiff_india",
     )
 
     pooling_params = PoolingParams(task="encode", softmax=False)
 
-    output = llm.encode_with_mm_data_plugin(
-        prompt,
+    output = llm.encode_with_io_processor_plugin(
+        img_prompt,
         pooling_params=pooling_params,
     )
 
     print(output)
-    decoded_data = base64.b64decode(output[0].task_output.data)
+    decoded_data = base64.b64decode(output.data)
 
     file_path = os.path.join(os.getcwd(), "offline_prediction.tiff")
     with open(file_path, "wb") as f:

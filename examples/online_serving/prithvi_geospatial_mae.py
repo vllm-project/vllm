@@ -13,6 +13,7 @@ import requests
 # Reuirements :
 # - install plugin at:
 #   https://github.com/christian-pinto/prithvi_multimodal_processor_plugin
+# - set the os env variable VLLM_USE_IO_PROCESSOR_PLUGIN="prithvi_to_tiff_india"
 # - start vllm in serving mode with the below args
 #   --model='christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM'
 #   --task embed --trust-remote-code
@@ -24,18 +25,24 @@ def main():
     server_endpoint = "http://localhost:8000/v1/images/prediction"
 
     request_payload_url = {
-        "image": {"data": image_url, "data_format": "url"},
-        "image_format": "tiff",
-        "model": "christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM",
-        "response_format": "b64_json",
+        "data": {
+            "data": image_url,
+            "data_format": "url",
+            "image_format": "tiff",
+            "out_data_format": "b64_json",
+        },
         "priority": 0,
+        "model": "christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM",
     }
 
     ret = requests.post(server_endpoint, json=request_payload_url)
 
+    print(f"response.status_code: {ret.status_code}")
+    print(f"response.reason:{ret.reason}")
+
     response = ret.json()
 
-    decoded_image = base64.b64decode(response["image"]["data"])
+    decoded_image = base64.b64decode(response["data"]["data"])
 
     out_path = os.path.join(os.getcwd(), "online_prediction.tiff")
 

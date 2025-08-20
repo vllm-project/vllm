@@ -354,6 +354,7 @@ class EngineArgs:
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: int = MultiModalConfig.mm_processor_cache_gb
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
+    io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     # LoRA fields
     enable_lora: bool = False
@@ -1795,6 +1796,10 @@ class AsyncEngineArgs(EngineArgs):
                             action=argparse.BooleanOptionalAction,
                             default=not AsyncEngineArgs.enable_log_requests,
                             help='[DEPRECATED] Disable logging requests.',
+                            deprecated=True)
+        parser.add_argument('--io-processor-plugin',
+                            default=None,
+                            help='IOProcessor plugin to load.',
                             deprecated=True)
         current_platform.pre_register_and_update(parser)
         return parser

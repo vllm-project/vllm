@@ -6,7 +6,8 @@
 import json
 import time
 from http import HTTPStatus
-from typing import Annotated, Any, ClassVar, Literal, Optional, Union
+from typing import (Annotated, Any, ClassVar, Generic, Literal, Optional,
+                    TypeVar, Union)
 
 import regex as re
 import torch
@@ -2485,36 +2486,11 @@ class TranslationResponseVerbose(OpenAIBaseModel):
     """Extracted words and their corresponding timestamps."""
 
 
-class ImageData(OpenAIBaseModel):
-
-    data: Optional[str]
-
-    data_format: Literal["b64_json", "url"] = "b64_json"
+T = TypeVar("T")
 
 
-class ImagesPredictionRequest(OpenAIBaseModel):
-
-    image: ImageData
-    """
-    The image content:  it can be a URL or the base64 encoding of the image.
-    """
-
-    image_format: Literal["jpeg", "png", "tiff"]
-    """
-    The input image format
-    """
-
-    model: Optional[str]
-    """
-    The model to use for image generation
-    """
-
-    response_format: Literal["b64_json", "url"] = "b64_json"
-    """
-    The format in which the generated images are returned.
-    Must be one of url or b64_json. URLs are only valid for 60 minutes
-    after the image has been generated.
-    """
+class IOProcessorPluginRequest(OpenAIBaseModel, Generic[T]):
+    model: Optional[str] = None
 
     priority: int = Field(default=0)
     """
@@ -2522,22 +2498,26 @@ class ImagesPredictionRequest(OpenAIBaseModel):
     default: 0). Any priority other than 0 will raise an error
     if the served model does not use priority scheduling.
     """
+    data: T
+    """
+    When using plugins IOProcessor plugins, the actual input is processed
+    by the plugin itself. Hence, we use a generic type for the request data
+    """
 
     def to_pooling_params(self):
         return PoolingParams(task="encode")
 
 
-class ImagesGenerationResponse(OpenAIBaseModel):
+class IOProcessorPluginResponse(OpenAIBaseModel, Generic[T]):
 
-    created: int
+    request_id: Optional[str] = None
     """
-    The Unix timestamp (in seconds) of when the image was created
+    The request_id associated with this response
     """
+    created_at: int = Field(default_factory=lambda: int(time.time()))
 
-    image: ImageData
+    data: T
     """
-    The list of generated images
+    When using plugins IOProcessor plugins, the actual output is generated
+    by the plugin itself. Hence, we use a generic type for the response data
     """
-
-    image_format: Optional[Literal["jpeg", "png", "tiff"]] = None
-    """The output format of the image generation."""

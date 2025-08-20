@@ -49,7 +49,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorInfo,
                                               ErrorResponse,
-                                              ImagesPredictionRequest,
+                                              IOProcessorPluginRequest,
                                               PoolingResponse, RerankRequest,
                                               ResponsesRequest, ScoreRequest,
                                               ScoreResponse,
@@ -90,7 +90,7 @@ ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
 SpeechToTextRequest = Union[TranscriptionRequest, TranslationRequest]
 AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest, SpeechToTextRequest,
-                   ResponsesRequest, ImagesPredictionRequest]
+                   ResponsesRequest, IOProcessorPluginRequest]
 
 AnyResponse = Union[
     CompletionResponse,

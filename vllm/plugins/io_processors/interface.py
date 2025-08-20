@@ -3,16 +3,15 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 from vllm.config import VllmConfig
+from vllm.entrypoints.openai.protocol import IOProcessorPluginResponse
 from vllm.inputs.data import PromptType
 from vllm.outputs import PoolingRequestOutput
-from vllm.plugins.multimodal_data_processors.types import (
-    MultiModalRequestOutput)
 
 
-class MultimodalDataProcessor(ABC):
+class IOProcessor(ABC):
 
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
@@ -20,7 +19,7 @@ class MultimodalDataProcessor(ABC):
     @abstractmethod
     def pre_process(
         self,
-        prompts: Union[PromptType, Sequence[PromptType]],
+        prompt: Any,
         request_id: Optional[str] = None,
         **kwargs,
     ) -> Union[PromptType, Sequence[PromptType]]:
@@ -29,7 +28,7 @@ class MultimodalDataProcessor(ABC):
     @abstractmethod
     async def pre_process_async(
         self,
-        prompts: Union[PromptType, Sequence[PromptType]],
+        prompt: Any,
         request_id: Optional[str] = None,
         **kwargs,
     ) -> Union[PromptType, Sequence[PromptType]]:
@@ -39,7 +38,7 @@ class MultimodalDataProcessor(ABC):
     def post_process(self,
                      model_out: Sequence[Optional[PoolingRequestOutput]],
                      request_id: Optional[str] = None,
-                     **kwargs) -> Sequence[MultiModalRequestOutput]:
+                     **kwargs) -> Any:
         ...
 
     @abstractmethod
@@ -48,5 +47,14 @@ class MultimodalDataProcessor(ABC):
         model_out: Sequence[Optional[PoolingRequestOutput]],
         request_id: Optional[str] = None,
         **kwargs,
-    ) -> Sequence[MultiModalRequestOutput]:
+    ) -> Any:
+        ...
+
+    @abstractmethod
+    def parse_request(self, request: Any) -> Optional[Any]:
+        ...
+
+    @abstractmethod
+    def plugin_out_to_response(self,
+                               plugin_out: Any) -> IOProcessorPluginResponse:
         ...

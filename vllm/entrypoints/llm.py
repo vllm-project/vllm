@@ -47,8 +47,7 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import (ClassificationRequestOutput, EmbeddingRequestOutput,
                           PoolingRequestOutput, RequestOutput,
                           ScoringRequestOutput)
-from vllm.plugins.multimodal_data_processors import (
-    get_multimodal_data_processor, multimodal_plugin_outputs_to_pooling_output)
+from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, RequestOutputKind,
                                   SamplingParams)
@@ -203,6 +202,7 @@ class LLM:
                                            CompilationConfig]] = None,
         logits_processors: Optional[list[Union[str,
                                                type[LogitsProcessor]]]] = None,
+        io_processor_plugin: Optional[str] = None,
         **kwargs,
     ) -> None:
         """LLM constructor."""
@@ -301,9 +301,9 @@ class LLM:
 
         self.supported_tasks = supported_tasks
 
-        # Load the multimodal data processing plugin if any
-        self.multimodal_data_processor = get_multimodal_data_processor(
-            self.llm_engine.vllm_config)
+        # Load the Input/Output processor plugin if any
+        self.io_processor = get_io_processor(self.llm_engine.vllm_config,
+                                             io_processor_plugin)
 
     def get_tokenizer(
         self,
@@ -1151,9 +1151,9 @@ class LLM:
         return self.engine_class.validate_outputs(outputs,
                                                   PoolingRequestOutput)
 
-    def encode_with_mm_data_plugin(
+    def encode_with_io_processor_plugin(
         self,
-        prompts: Union[PromptType, Sequence[PromptType]],
+        prompt: Any,
         /,
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
@@ -1163,9 +1163,12 @@ class LLM:
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         pooling_task: PoolingTask = "encode",
         tokenization_kwargs: Optional[dict[str, Any]] = None,
-    ) -> list[PoolingRequestOutput]:
+    ) -> Any:
 
-        assert self.multimodal_data_processor is not None
+        assert self.io_processor is not None
+
+        # Validate the request data is valid for the loaded plugin
+        validated_prompt = self.io_processor.parse_request(prompt)
 
         model_config = self.llm_engine.model_config
         runner_type = model_config.runner_type
@@ -1176,8 +1179,8 @@ class LLM:
                 "use the model as a pooling model.")
 
         # obtain the actual model prompts from the pre-processor
-        processed_prompts = (self.multimodal_data_processor.pre_process(
-            prompts=prompts))
+        processed_prompts = (self.io_processor.pre_process(
+            prompt=validated_prompt))
 
         if pooling_params is None:
             # Use default pooling params.
@@ -1208,13 +1211,10 @@ class LLM:
             outputs, PoolingRequestOutput)
 
         # get the post-processed model outputs
-        processed_outputs = self.multimodal_data_processor.post_process(
+        processed_outputs = self.io_processor.post_process(
             model_out=model_outputs)
 
-        final_out = multimodal_plugin_outputs_to_pooling_output(
-            plugin_out=processed_outputs)
-
-        return final_out
+        return processed_outputs
 
     def embed(
         self,
