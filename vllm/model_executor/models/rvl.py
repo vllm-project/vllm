@@ -54,8 +54,8 @@ class RVLDummyInputsBuilder(LlavaDummyInputsBuilder[RVLProcessingInfo]):
 class RVLMultiModalProjector(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.pre_norm = torch.nn.LayerNorm(config.vision_config.hidden_size,
-                                           eps=1e-06)
+        self.pre_norm = nn.LayerNorm(config.vision_config.hidden_size,
+                                     eps=1e-06)
         self.linear_1 = nn.Linear(
             config.vision_config.hidden_size,
             config.text_config.hidden_size,
