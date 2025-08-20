@@ -19,7 +19,7 @@ from vllm.forward_context import set_forward_context
 from vllm.utils import direct_register_custom_op
 
 # create a library to hold the custom op
-silly_lib = Library("silly", "FRAGMENT")  # noqa
+silly_lib = Library("silly_multiple", "FRAGMENT")  # noqa
 
 BATCH_SIZE = 32
 MLP_SIZE = 128
@@ -188,7 +188,7 @@ def test_ignore_torch_compile_decorator():
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             x = x + x
             attn_output = torch.empty_like(x)
-            torch.ops.silly.attention(x, x, x, attn_output)
+            torch.ops.silly_multiple.attention(x, x, x, attn_output)
             x = attn_output
             x = x * 3
             return x

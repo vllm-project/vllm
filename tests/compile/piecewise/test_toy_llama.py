@@ -24,7 +24,7 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils import direct_register_custom_op
 
 # create a library to hold the custom op
-silly_lib = Library("silly", "FRAGMENT")  # noqa
+silly_lib = Library("silly_toy_llama", "FRAGMENT")  # noqa
 
 
 def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
@@ -160,7 +160,7 @@ class LlamaAttention(nn.Module):
         k = k + positions.unsqueeze(1)
 
         attn_output = torch.empty_like(q)
-        torch.ops.silly.attention(q, k, v, attn_output)
+        torch.ops.silly_toy_llama.attention(q, k, v, attn_output)
 
         output = self.output_projection(attn_output)
         return output

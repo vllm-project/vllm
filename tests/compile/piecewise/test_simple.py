@@ -20,7 +20,7 @@ from vllm.utils import direct_register_custom_op
 global_counter = 0
 
 # create a library to hold the custom op
-silly_lib = Library("silly", "FRAGMENT")  # noqa
+silly_lib = Library("silly_simple", "FRAGMENT")  # noqa
 
 
 def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
@@ -66,12 +66,12 @@ class SillyModel(nn.Module):
         x = x + 1
         x = x + 2
         out = torch.empty_like(x)
-        torch.ops.silly.attention(x, x, x, out)
+        torch.ops.silly_simple.attention(x, x, x, out)
         x = out
         x = x - 2
         x = x - 1
         out = torch.empty_like(x)
-        torch.ops.silly.attention(x, x, x, out)
+        torch.ops.silly_simple.attention(x, x, x, out)
         x = out
         x = x + 1
         return x
