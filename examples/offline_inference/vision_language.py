@@ -1443,8 +1443,8 @@ def run_r_vl(questions: list[str], modality: str) -> ModelRequestData:
 
     prompts = [
         f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
-            for question in questions
-        ]
+        for question in questions
+    ]
 
     engine_args = EngineArgs(
         model=model_name,
