@@ -290,10 +290,6 @@ class AiterFlashAttentionMetadataBuilder(
             cu_seq_lens = None
             num_actual_kv_tokens = 0
 
-        def schedule(batch_size, cu_query_lens, max_query_len, seqlens,
-                     max_seq_len, causal):
-            return None
-
         use_cascade = common_prefix_len > 0
 
         attn_metadata = AiterFlashAttentionMetadata(
@@ -381,6 +377,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
+        sinks: Optional[torch.Tensor] = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -410,6 +407,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "FlashAttentionImpl")
+        self.sinks = sinks
 
     def forward(
         self,
