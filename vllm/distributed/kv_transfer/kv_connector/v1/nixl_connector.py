@@ -32,7 +32,6 @@ from vllm.platforms import _Backend, current_platform
 from vllm.utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
@@ -191,13 +190,9 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     # Worker Side Methods
     ############################################################
-    def register_kv_caches(self,
-                           kv_caches: dict[str, torch.Tensor],
-                           kv_cache_config: Optional[KVCacheConfig] = None):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
-        assert kv_cache_config is not None, (
-            "NixlConnector requires a KVCacheConfig to be provided.")
-        self.connector_worker.register_kv_caches(kv_caches, kv_cache_config)
+        self.connector_worker.register_kv_caches(kv_caches)
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         assert self.connector_worker is not None
@@ -688,8 +683,7 @@ class NixlConnectorWorker:
 
         fut.add_done_callback(request_ready)
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor],
-                           kv_cache_config: KVCacheConfig):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
 
         if self.use_host_buffer:
@@ -704,26 +698,10 @@ class NixlConnectorWorker:
                 "host_xfer_buffer should not be initialized when "
                 f"kv_buffer_device is {self.kv_buffer_device}")
 
-        if not kv_cache_config.kv_cache_groups:
-            raise ValueError("KV cache config must contain at least one group")
-
-        self.device_kv_caches = kv_caches
-        self.num_blocks = kv_cache_config.num_blocks
-        self.dst_num_blocks[self.engine_id] = self.num_blocks
-
-        split_k_and_v = not (self.model_config.use_mla or self._use_pallas_v1
-                             or self._use_flashinfer)
-        self.block_len = kv_cache_config.kv_cache_groups[
-            0].kv_cache_spec.page_size_bytes
-        if split_k_and_v:
-            assert self.block_len % 2 == 0
-            self.block_len = self.block_len // 2
-        self.slot_size_bytes = self.block_len // self.block_size
-
         logger.info(
             "Registering KV_Caches. use_mla: %s, kv_buffer_device: %s, "
-            "use_host_buffer: %s, num_blocks: %s", self.model_config.use_mla,
-            self.kv_buffer_device, self.use_host_buffer, self.num_blocks)
+            "use_host_buffer: %s", self.use_mla, self.kv_buffer_device,
+            self.use_host_buffer)
 
         caches_data = []
         # With hybrid allocator, layers can share a kv cache tensor
@@ -739,17 +717,30 @@ class NixlConnectorWorker:
         # (roughly 8KB vs 5KB).
         # Conversely for FlashInfer, K and V are transferred in the same tensor
         # to better exploit the memory layout (ie num_blocks is the first dim).
+        split_k_and_v = not (self.use_mla or self._use_pallas_v1
+                             or self._use_flashinfer)
+        tensor_size_bytes = None
         for layer_name, cache_or_caches in xfer_buffers.items():
             cache_list = cache_or_caches if split_k_and_v else [
                 cache_or_caches
             ]
+
             for cache in cache_list:
                 base_addr = cache.data_ptr()
-                if base_addr not in seen_base_addresses:
-                    seen_base_addresses.add(base_addr)
-                    tensor_size_bytes = cache.numel() * cache.element_size()
-                    caches_data.append(
-                        (base_addr, tensor_size_bytes, self.tp_rank, ""))
+                if base_addr in seen_base_addresses:
+                    continue
+
+                seen_base_addresses.add(base_addr)
+                curr_tensor_size_bytes = cache.numel() * cache.element_size()
+
+                if tensor_size_bytes is None:
+                    tensor_size_bytes = curr_tensor_size_bytes
+                    self.num_blocks = cache.shape[0]
+
+                assert tensor_size_bytes == curr_tensor_size_bytes, \
+                    "All kv cache tensors must have the same size"
+                caches_data.append(
+                    (base_addr, tensor_size_bytes, self.tp_rank, ""))
 
         self.kv_caches_base_addr[self.engine_id] = seen_base_addresses
         self.num_regions = len(caches_data)
@@ -761,6 +752,17 @@ class NixlConnectorWorker:
         self.nixl_wrapper.register_memory(descs)
         logger.debug("Done registering descs")
         self._registered_descs.append(descs)
+
+        assert tensor_size_bytes is not None
+        assert self.num_blocks != 0
+        assert tensor_size_bytes % self.num_blocks == 0
+        self.block_len = tensor_size_bytes // self.num_blocks
+        self.slot_size_bytes = self.block_len // self.block_size
+        if self._use_flashinfer:
+            assert self.slot_size_bytes % 2 == 0
+            self.slot_size_bytes /= 2
+        self.device_kv_caches = kv_caches
+        self.dst_num_blocks[self.engine_id] = self.num_blocks
 
         # Register local/src descr for NIXL xfer.
         blocks_data = []

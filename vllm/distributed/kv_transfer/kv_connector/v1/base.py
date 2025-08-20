@@ -47,7 +47,6 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
@@ -127,16 +126,13 @@ class KVConnectorBase_V1(ABC):
         assert self._connector_metadata is not None
         return self._connector_metadata
 
-    def register_kv_caches(self,
-                           kv_caches: dict[str, torch.Tensor],
-                           kv_cache_config: Optional["KVCacheConfig"] = None):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
         Initialize with the KV caches. Useful for pre-registering the
         KV Caches in the KVConnector (e.g. for NIXL).
 
         Args: 
             kv_caches: dictionary of layer names, kv cache
-            kv_cache_config: optional KV cache configuration (required for NIXL)
         """
         return
 

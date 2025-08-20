@@ -1683,8 +1683,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 xs.mark_sharding(cache, self.mesh, (None, 'x', None, None))
 
         if has_kv_transfer_group():
-            get_kv_transfer_group().register_kv_caches(kv_caches,
-                                                       kv_cache_config)
+            get_kv_transfer_group().register_kv_caches(kv_caches)
             get_kv_transfer_group().set_host_xfer_buffer_ops(copy_kv_blocks)
 
     def reset_dynamo_cache(self):
