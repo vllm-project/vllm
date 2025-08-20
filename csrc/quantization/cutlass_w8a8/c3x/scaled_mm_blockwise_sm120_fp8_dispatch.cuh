@@ -14,9 +14,6 @@
 #include "cutlass/epilogue/dispatch_policy.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 
-#include "cutlass_extensions/gemm/dispatch_policy.hpp"
-#include "cutlass_extensions/gemm/collective/collective_builder.hpp"
-
 #include "cutlass_gemm_caller.cuh"
 
 namespace vllm {

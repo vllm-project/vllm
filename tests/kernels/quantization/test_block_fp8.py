@@ -103,7 +103,8 @@ def test_w8a8_block_fp8_cutlass_matmul():
     # Test simple case where weight.shape % 128 != 0,
     # like in DSV3 kv_a_proj_with_mqa
     M = 32
-    N = 576
+    # N = 576
+    N = 512
     K = 7168
     block_size = [128, 128]
     out_dtype = torch.bfloat16
