@@ -1402,6 +1402,8 @@ class FusedMoE(CustomOp):
         self.logical_replica_count = logical_replica_count[moe_layer_idx]
 
     @staticmethod
+    @torch.compile(dynamic=True,
+                   backend=current_platform.simple_compile_backend)
     def select_experts(
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
