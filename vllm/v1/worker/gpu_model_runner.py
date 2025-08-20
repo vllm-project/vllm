@@ -69,8 +69,8 @@ from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec, MambaSpec,
                                         SlidingWindowSpec)
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
-                             ModelRunnerOutput)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
+                             LogprobsTensors, ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -379,6 +379,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else None)
 
         self.reorder_batch_threshold: Optional[int] = None
+
+        # Cached outputs.
+        self._draft_token_ids: Optional[Union[list[list[int]],
+                                              torch.Tensor]] = None
 
     def _init_model_kwargs(self, num_tokens: int):
         model_kwargs = dict[str, Any]()
@@ -2027,7 +2031,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=[],
-            spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
@@ -2251,12 +2254,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if not self.speculative_config:
             # Speculative decoding is not enabled.
-            spec_token_ids = None
+            pass
         else:
             assert not ubatch_slices
             assert isinstance(attn_metadata, dict)
             assert spec_decode_common_attn_metadata is not None
-            spec_token_ids = self.propose_draft_token_ids(
+            self._draft_token_ids = self.propose_draft_token_ids(
                 scheduler_output,
                 valid_sampled_token_ids,
                 sampling_metadata,
@@ -2273,13 +2276,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
-            spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
             kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
         )
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        if self._draft_token_ids is None:
+            return None
+        req_ids = self.input_batch.req_ids
+        if isinstance(self._draft_token_ids, torch.Tensor):
+            draft_token_ids = self._draft_token_ids.tolist()
+        else:
+            draft_token_ids = self._draft_token_ids
+        self._draft_token_ids = None
+        return DraftTokenIds(req_ids, draft_token_ids)
 
     def propose_draft_token_ids(
         self,
@@ -2291,11 +2304,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         aux_hidden_states: Optional[torch.Tensor],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         common_attn_metadata: CommonAttentionMetadata,
-    ) -> list[list[int]]:
+    ) -> Union[list[list[int]], torch.Tensor]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
             assert isinstance(self.drafter, NgramProposer)
-            spec_token_ids = self.propose_ngram_draft_token_ids(
+            draft_token_ids = self.propose_ngram_draft_token_ids(
                 sampled_token_ids)
         elif self.speculative_config.method == "medusa":
             assert isinstance(self.drafter, MedusaProposer)
@@ -2313,7 +2326,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 indices = torch.tensor(indices, device=self.device)
                 hidden_states = sample_hidden_states[indices]
 
-            spec_token_ids = self.drafter.propose(
+            draft_token_ids = self.drafter.propose(
                 target_hidden_states=hidden_states,
                 sampling_metadata=sampling_metadata,
             )
@@ -2384,8 +2397,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
                 mm_embeds=mm_embeds,
             )
-            spec_token_ids = draft_token_ids.tolist()
-        return spec_token_ids
+        return draft_token_ids
 
     def propose_ngram_draft_token_ids(
         self,
