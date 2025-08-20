@@ -27,12 +27,12 @@ from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          DeviceConfig, DistributedExecutorBackend,
                          GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
-                         LoRAConfig, ModelConfig, ModelDType, ModelImpl,
-                         MultiModalConfig, ObservabilityConfig, ParallelConfig,
-                         PoolerConfig, PrefixCachingHashAlgo, RunnerOption,
-                         SchedulerConfig, SchedulerPolicy, SpeculativeConfig,
-                         TaskOption, TokenizerMode, VllmConfig, get_attr_docs,
-                         get_field)
+                         LoRAConfig, MambaDType, ModelConfig, ModelDType,
+                         ModelImpl, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
+                         RunnerOption, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, TaskOption, TokenizerMode,
+                         VllmConfig, get_attr_docs, get_field)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -43,6 +43,7 @@ from vllm.transformers_utils.config import is_interleaved
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
+from vllm.v1.sample.logits_processor import LogitsProcessor
 
 # yapf: enable
 
@@ -350,6 +351,7 @@ class EngineArgs:
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: int = MultiModalConfig.mm_processor_cache_gb
+    skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     # LoRA fields
     enable_lora: bool = False
     enable_lora_bias: bool = LoRAConfig.bias_enabled
@@ -421,6 +423,8 @@ class EngineArgs:
     override_attention_dtype: str = ModelConfig.override_attention_dtype
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
+    mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
+    mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
 
     additional_config: dict[str, Any] = \
         get_field(VllmConfig, "additional_config")
@@ -431,6 +435,10 @@ class EngineArgs:
 
     enable_multimodal_encoder_data_parallel: bool = \
         ParallelConfig.enable_multimodal_encoder_data_parallel
+
+    logits_processors: Optional[list[Union[
+        str, type[LogitsProcessor]]]] = ModelConfig.logits_processors
+    """Custom logitproc types"""
 
     async_scheduling: bool = SchedulerConfig.async_scheduling
     # DEPRECATED
@@ -546,6 +554,8 @@ class EngineArgs:
                                  **model_kwargs["model_impl"])
         model_group.add_argument("--override-attention-dtype",
                                  **model_kwargs["override_attention_dtype"])
+        model_group.add_argument("--logits-processors",
+                                 **model_kwargs["logits_processors"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -693,6 +703,10 @@ class EngineArgs:
                                  **cache_kwargs["calculate_kv_scales"])
         cache_group.add_argument("--kv-sharing-fast-prefill",
                                  **cache_kwargs["kv_sharing_fast_prefill"])
+        cache_group.add_argument("--mamba-cache-dtype",
+                                 **cache_kwargs["mamba_cache_dtype"])
+        cache_group.add_argument("--mamba-ssm-cache-dtype",
+                                 **cache_kwargs["mamba_ssm_cache_dtype"])
 
         # Multimodal related configs
         multimodal_kwargs = get_kwargs(MultiModalConfig)
@@ -716,6 +730,8 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--interleave-mm-strings",
             **multimodal_kwargs["interleave_mm_strings"])
+        multimodal_group.add_argument("--skip-mm-profiling",
+                                      **multimodal_kwargs["skip_mm_profiling"])
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -918,6 +934,7 @@ class EngineArgs:
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             interleave_mm_strings=self.interleave_mm_strings,
             media_io_kwargs=self.media_io_kwargs,
+            skip_mm_profiling=self.skip_mm_profiling,
             use_async_output_proc=not self.disable_async_output_proc,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
@@ -930,6 +947,7 @@ class EngineArgs:
             enable_sleep_mode=self.enable_sleep_mode,
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
+            logits_processors=self.logits_processors,
         )
 
     def validate_tensorizer_args(self):
@@ -1058,12 +1076,13 @@ class EngineArgs:
         # Set default arguments for V0 or V1 Engine.
         if use_v1:
             self._set_default_args_v1(usage_context, model_config)
-            # Disable chunked prefill for POWER (ppc64le)/ARM CPUs in V1
+            # Disable chunked prefill for POWER (ppc64le)/ARM/s390x CPUs in V1
             if current_platform.is_cpu(
             ) and current_platform.get_cpu_architecture() in (
-                    CpuArchEnum.POWERPC, CpuArchEnum.ARM):
+                    CpuArchEnum.POWERPC, CpuArchEnum.S390X, CpuArchEnum.ARM):
                 logger.info(
-                    "Chunked prefill is not supported for ARM and POWER CPUs; "
+                    "Chunked prefill is not supported for ARM and POWER "
+                    "and S390X CPUs; "
                     "disabling it for V1 backend.")
                 self.enable_chunked_prefill = False
         else:
@@ -1101,6 +1120,8 @@ class EngineArgs:
             cpu_offload_gb=self.cpu_offload_gb,
             calculate_kv_scales=self.calculate_kv_scales,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
+            mamba_cache_dtype=self.mamba_cache_dtype,
+            mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
         )
 
         ray_runtime_env = None
@@ -1584,9 +1605,6 @@ class EngineArgs:
                 self.enable_prefix_caching = incremental_prefill_supported
                 logger.info("(%s) prefix caching by default", action)
 
-        if not self.enable_chunked_prefill:
-            self.max_num_batched_tokens = model_config.max_model_len
-
         # V1 should use the new scheduler by default.
         # Swap it only if this arg is set to the original V0 default
         if self.scheduler_cls == EngineArgs.scheduler_cls:
@@ -1674,8 +1692,11 @@ class EngineArgs:
                     self.max_num_batched_tokens = \
                         default_max_num_batched_tokens[usage_context]
             else:
-                self.max_num_batched_tokens = default_max_num_batched_tokens[
-                    usage_context]
+                if not self.enable_chunked_prefill:
+                    self.max_num_batched_tokens = model_config.max_model_len
+                else:
+                    self.max_num_batched_tokens = \
+                        default_max_num_batched_tokens[usage_context]
             logger.debug(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens, use_context_value)
