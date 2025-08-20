@@ -258,8 +258,8 @@ class LoRAModel(AdapterModel):
                     tensors[module] = f.get_tensor(module)
         elif os.path.isfile(lora_bin_file_path) or os.path.isfile(
                 lora_pt_file_path):
-            # When a bin file is provided, we rely on config to find unexpected
-            # modules.
+            # When a bin/pt file is provided, we rely on config to find
+            # unexpected modules.
             unexpected_modules = []
             target_modules = peft_helper.target_modules
             if not isinstance(target_modules, list):
@@ -281,7 +281,10 @@ class LoRAModel(AdapterModel):
                     f" target modules in {expected_lora_modules}"
                     f" but received {unexpected_modules}."
                     f" Please verify that the loaded LoRA module is correct")
-            tensors = torch.load(lora_bin_file_path,
+            lora_file_path = (lora_bin_file_path
+                              if os.path.isfile(lora_bin_file_path) else
+                              lora_pt_file_path)
+            tensors = torch.load(lora_file_path,
                                  map_location=device,
                                  weights_only=True)
         else:
