@@ -253,28 +253,7 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
     else:
         assert bt.a.dtype == torch.int8
         assert bt.wtype == scalar_types.uint4b8
-
-        if bt.w_ch_s is not None:
-            s_ch = bt.w_ch_s.to(torch.float32)
-        else:
-            s_ch = torch.ones(bt.w_ref.shape[1], dtype=torch.float32, device=device)
-
-        if bt.w_tok_s is not None:
-            s_tok = bt.w_tok_s.to(torch.float32)
-        else:
-            s_tok = torch.ones(bt.a.shape[0], dtype=torch.float32, device=device)
-
-        fn = lambda: ops.marlin_qqq_gemm(
-            a=bt.a,
-            b_q_weight=w_q,
-            s_group=w_s,
-            s_tok=s_tok,
-            s_ch=s_ch,
-            workspace=workspace.scratch,
-            size_m=bt.a.shape[0],
-            size_n=bt.w_ref.shape[1],
-            size_k=bt.w_ref.shape[0],
-        )
+        raise NotImplementedError("QQQ is not supported anymore")
 
     return fn
 

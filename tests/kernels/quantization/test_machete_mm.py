@@ -95,23 +95,23 @@ TEST_TYPES = [
                  token_scale_type=None)
       for w_type in [scalar_types.uint4, scalar_types.uint8]
       for a_type in [torch.float16, torch.bfloat16]),
-    # QQQ style
-    *(TypeConfig(act_type=torch.int8,
-                 weight_type=scalar_types.uint4b8,
-                 output_type=torch.float16,
-                 group_scale_type=group_scale_type,
-                 group_zero_type=None,
-                 channel_scale_type=torch.float,
-                 token_scale_type=torch.float)
-      for group_scale_type in [None, torch.float16]),
-    *(TypeConfig(act_type=torch.float8_e4m3fn,
-                 weight_type=scalar_types.uint4b8,
-                 output_type=torch.float16,
-                 group_scale_type=group_scale_type,
-                 group_zero_type=None,
-                 channel_scale_type=torch.float,
-                 token_scale_type=torch.float)
-      for group_scale_type in [None, torch.float16]),
+    # # QQQ style
+    # *(TypeConfig(act_type=torch.int8,
+    #              weight_type=scalar_types.uint4b8,
+    #              output_type=torch.float16,
+    #              group_scale_type=group_scale_type,
+    #              group_zero_type=None,
+    #              channel_scale_type=torch.float,
+    #              token_scale_type=torch.float)
+    #   for group_scale_type in [None, torch.float16]),
+    # *(TypeConfig(act_type=torch.float8_e4m3fn,
+    #              weight_type=scalar_types.uint4b8,
+    #              output_type=torch.float16,
+    #              group_scale_type=group_scale_type,
+    #              group_zero_type=None,
+    #              channel_scale_type=torch.float,
+    #              token_scale_type=torch.float)
+    #   for group_scale_type in [None, torch.float16]),
 ]
 
 # TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
