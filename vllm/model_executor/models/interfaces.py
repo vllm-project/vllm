@@ -3,7 +3,7 @@
 
 from collections.abc import Iterable, Mapping, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
-                    Union, overload, runtime_checkable)
+                    TypeVar, Union, overload, runtime_checkable)
 
 import numpy as np
 import torch
@@ -641,11 +641,14 @@ def supports_cross_encoding(
     return is_pooling_model(model) and _supports_cross_encoding(model)
 
 
-def default_pooling_type(pooling_type: str) -> object:
+_T = TypeVar("_T", bound=type[torch.nn.Module])
+
+
+def default_pooling_type(pooling_type: str):
     """Set default_pooling_type decorator. """
 
-    def func(model: object):
-        model.default_pooling_type = pooling_type
+    def func(model: _T) -> _T:
+        model.default_pooling_type = pooling_type  # type: ignore
         return model
 
     return func
