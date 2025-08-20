@@ -517,13 +517,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                                    rtol=rtol,
                                    atol=atol)
 
-        if not all_close:
-            print(
-                f"[{backend_name}] output differs from SDPA baseline. "
-                f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})")
-            print(f"[{backend_name}] output: {backend_output}")
-            print(f"[{backend_name}] SDPA baseline: {sdpa_output}")
-
         assert all_close, (
             f"[{backend_name}] output differs from SDPA baseline. "
             f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})")
