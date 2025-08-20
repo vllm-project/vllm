@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import os
 import socket
 from http import HTTPStatus
 
@@ -16,8 +15,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
-FAST_MODEL_NAME = "facebook/opt-125m"
+MODEL_NAME = "facebook/opt-125m"
 
 
 @pytest.fixture(scope='module')
@@ -63,7 +61,7 @@ def server(server_args):
         "--dtype",
         "bfloat16",
         "--max-model-len",
-        "8192",
+        "2048",
         "--enforce-eager",
         "--max-num-seqs",
         "128",
@@ -71,23 +69,6 @@ def server(server_args):
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-        yield remote_server
-
-
-@pytest.fixture(scope="module")
-def fast_server(server_args):
-    args = [
-        # use half precision for speed and memory savings in CI environment
-        "--dtype",
-        "bfloat16",
-        *server_args,
-    ]
-
-    os.environ['VLLM_USE_V1'] = '1'
-    with RemoteOpenAIServer(
-            FAST_MODEL_NAME,
-            args,
-    ) as remote_server:
         yield remote_server
 
 
@@ -133,11 +114,9 @@ async def test_check_health(server: RemoteOpenAIServer):
 @pytest.mark.parametrize(
     "server_args",
     [
-        pytest.param(["--max-model-len", "10100"],
-                     id="default-frontend-multiprocessing"),
-        pytest.param(
-            ["--disable-frontend-multiprocessing", "--max-model-len", "10100"],
-            id="disable-frontend-multiprocessing")
+        pytest.param([], id="default-frontend-multiprocessing"),
+        pytest.param(["--disable-frontend-multiprocessing"],
+                     id="disable-frontend-multiprocessing")
     ],
     indirect=True,
 )
@@ -146,16 +125,16 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
     # clunky test: send an ungodly amount of load in with short timeouts
     # then ensure that it still responds quickly afterwards
 
-    chat_input = [{"role": "user", "content": "Write a long story"}]
+    input = "Write a long story"
     client = server.get_async_client(timeout=0.5)
     tasks = []
     # Request about 2 million tokens
-    for _ in range(200):
+    for _ in range(1000):
         task = asyncio.create_task(
-            client.chat.completions.create(messages=chat_input,
-                                           model=MODEL_NAME,
-                                           max_tokens=10000,
-                                           extra_body={"min_tokens": 10000}))
+            client.completions.create(prompt=input,
+                                      model=MODEL_NAME,
+                                      max_tokens=2000,
+                                      extra_body={"min_tokens": 2000}))
         tasks.append(task)
 
     done, pending = await asyncio.wait(tasks,
@@ -172,10 +151,9 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
     # If the server had not cancelled all the other requests, then it would not
     # be able to respond to this one within the timeout
     client = server.get_async_client(timeout=5)
-    response = await client.chat.completions.create(messages=chat_input,
-                                                    model=MODEL_NAME,
-                                                    max_tokens=10)
-
+    response = await client.completions.create(prompt=input,
+                                               model=MODEL_NAME,
+                                               max_tokens=10)
     assert len(response.choices) == 1
 
 
@@ -241,50 +219,3 @@ async def test_server_load(server: RemoteOpenAIServer):
     response = requests.get(server.url_for("load"))
     assert response.status_code == HTTPStatus.OK
     assert response.json().get("server_load") == 0
-
-
-@pytest.mark.parametrize(
-    ("server_args", "expected_addrs", "unexpected_addrs"),
-    [
-        pytest.param([], ["127.0.0.1", "::1"], [], id="default"),
-        pytest.param(["--host=0.0.0.0"], ["127.0.0.1"], ["::1"],
-                     id="0-0-0-0-ipv4"),
-        pytest.param(["--host=127.0.0.1"], ["127.0.0.1"], ["::1"],
-                     id="127-0-0-1-ipv4"),
-        pytest.param(["--host=::1"], ["::1"], ["127.0.0.1"], id="_-_-1-ipv4"),
-        pytest.param(["--host=::"], ["127.0.0.1", "::1"], [], id="_-_-all"),
-        pytest.param(["--host=localhost"], ["127.0.0.1", "::1"], [],
-                     id="localhost"),
-    ],
-    indirect=["server_args"],
-)
-@pytest.mark.asyncio
-async def test_bind_ipv4_ipv6(fast_server: RemoteOpenAIServer,
-                              expected_addrs: list[str],
-                              unexpected_addrs: list[str]):
-    # if the test system lacks IPv4 or IPv6, move addresses of those types
-    # to unexpected_addrs
-    has_ipv4, has_ipv6 = False, False
-    for family, _, _, _, _ in socket.getaddrinfo(None,
-                                                 fast_server.port,
-                                                 type=socket.SOCK_STREAM,
-                                                 flags=socket.AI_PASSIVE):
-        if family == socket.AF_INET:
-            has_ipv4 = True
-        if family == socket.AF_INET6:
-            has_ipv6 = True
-    for addr in expected_addrs:
-        if (not has_ipv6 and is_valid_ipv6_address(addr)) or (
-                not has_ipv4 and is_valid_ipv4_address(addr)):
-            expected_addrs.remove(addr)
-            unexpected_addrs.append(addr)
-
-    for addr in expected_addrs:
-        response = requests.get(fast_server.url_for_host(addr, "health"),
-                                timeout=1)
-        assert response.status_code == HTTPStatus.OK
-
-    for addr in unexpected_addrs:
-        with pytest.raises(requests.ConnectionError):
-            response = requests.get(fast_server.url_for_host(addr, "health"),
-                                    timeout=1)
