@@ -260,8 +260,7 @@ class CLSPool(PoolingMethod):
         assert not pooling_cursor.is_partial_prefill(), \
             "partial prefill not supported with CLS pooling"
 
-        first_token_flat_indices = pooling_cursor.start
-        return hidden_states[first_token_flat_indices]
+        return hidden_states[pooling_cursor.first]
 
 
 class LastPool(PoolingMethod):
@@ -274,8 +273,7 @@ class LastPool(PoolingMethod):
         hidden_states: torch.Tensor,
         pooling_cursor: PoolingCursor,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
-        last_token_flat_indices = pooling_cursor.end
-        return hidden_states[last_token_flat_indices]
+        return hidden_states[pooling_cursor.last]
 
 
 class AllPool(PoolingMethod):
@@ -292,7 +290,9 @@ class AllPool(PoolingMethod):
         assert not pooling_cursor.is_partial_prefill(), \
             "partial prefill not supported with ALL pooling"
 
-        return [hidden_states[c.start, c.end] for c in pooling_cursor]
+        hidden_states_lst = list(
+            hidden_states.split(pooling_cursor.num_scheduled_tokens.tolist()))
+        return [hidden_states_lst[i] for i in pooling_cursor.index]
 
 
 class MeanPool(PoolingMethod):
@@ -316,8 +316,8 @@ class MeanPool(PoolingMethod):
         # otherwise precision will be lost significantly.
         cumsum = torch.cumsum(hidden_states, dim=0, dtype=torch.float32)
 
-        start_indices = pooling_cursor.start
-        end_indices = pooling_cursor.start
+        start_indices = pooling_cursor.first
+        end_indices = pooling_cursor.last
         return (cumsum[end_indices] - cumsum[start_indices] +
                 hidden_states[start_indices]) / prompt_lens.unsqueeze(1)
 

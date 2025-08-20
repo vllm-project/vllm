@@ -10,15 +10,17 @@ from vllm.pooling_params import PoolingParams
 
 @dataclass
 class PoolingCursor:
-    start: torch.Tensor  # GPU Tensor
-    end: torch.Tensor  # GPU Tensor
+    index: list[int]
+    first: torch.Tensor  # GPU Tensor
+    last: torch.Tensor  # GPU Tensor
     prompt_lens: torch.Tensor  # CPU Tensor
     num_scheduled_tokens: torch.Tensor  # CPU Tensor
 
     def __getitem__(self, indices: slice):
         return PoolingCursor(
-            start=self.start[indices],
-            end=self.end[indices],
+            index=self.index[indices],
+            first=self.first[indices],
+            last=self.last[indices],
             prompt_lens=self.prompt_lens[indices],
             num_scheduled_tokens=self.num_scheduled_tokens[indices],
         )
@@ -56,21 +58,24 @@ class PoolingMetadata:
 
 def build_pooling_cursor(num_scheduled_tokens: list[int],
                          prompt_lens: list[int], device: torch.device):
-    start = []
-    end = []
+    first = []
+    last = []
+    index = []
 
     offset = 0
     for i, n in enumerate(num_scheduled_tokens):
-        start.append(offset)
-        end.append(offset + n)
+        index.append(i)
+        first.append(offset)
+        last.append(offset + n - 1)
         offset += n
 
-    start = torch.tensor(start, device="cpu").to(device, non_blocking=True)
-    end = torch.tensor(end, device="cpu").to(device, non_blocking=True)
+    first = torch.tensor(first, device="cpu").to(device, non_blocking=True)
+    last = torch.tensor(last, device="cpu").to(device, non_blocking=True)
     prompt_lens = torch.tensor(prompt_lens, device="cpu")
     num_scheduled_tokens = torch.tensor(num_scheduled_tokens, device="cpu")
 
-    return PoolingCursor(start=start,
-                         end=end,
+    return PoolingCursor(index=index,
+                         first=first,
+                         last=last,
                          prompt_lens=prompt_lens,
                          num_scheduled_tokens=num_scheduled_tokens)
