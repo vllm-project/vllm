@@ -58,16 +58,14 @@ class Mamba1AttentionMetadataBuilder(
 
         if num_prefills > 0:
             has_initial_states = context_lens_tensor > 0
-        elif num_decodes > 0 and num_decodes <= self.decode_cudagraph_max_bs:
-            if self.compilation_config.full_cuda_graph:
-                state_indices_for_decode = state_indices_tensor[:num_decodes]
-                padded_decodes = self.vllm_config.pad_for_cudagraph(
-                    num_decodes)
-                self.state_indices_tensor[:num_decodes].copy_(
-                    state_indices_for_decode, non_blocking=True)
-                state_indices_tensor = self.state_indices_tensor[:
-                                                                 padded_decodes]
-                state_indices_tensor[num_decodes:] = PAD_SLOT_ID
+        elif (num_decodes > 0 and num_decodes <= self.decode_cudagraph_max_bs
+              and self.compilation_config.full_cuda_graph):
+            state_indices_for_decode = state_indices_tensor[:num_decodes]
+            padded_decodes = self.vllm_config.pad_for_cudagraph(num_decodes)
+            self.state_indices_tensor[:num_decodes].copy_(
+                state_indices_for_decode, non_blocking=True)
+            state_indices_tensor = self.state_indices_tensor[:padded_decodes]
+            state_indices_tensor[num_decodes:] = PAD_SLOT_ID
 
         return Mamba1AttentionMetadata(
             query_start_loc=query_start_loc,
