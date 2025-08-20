@@ -407,6 +407,7 @@ class RandomDataset(BenchmarkDataset):
         range_ratio: float = DEFAULT_RANGE_RATIO,
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
+        **kwargs,
     ) -> list[SampleRequest]:
 
         input_lens, output_lens, offsets = self.get_sampling_params(
@@ -681,6 +682,7 @@ class RandomMultiModalDataset(RandomDataset):
         height: int = DEFAULT_HEIGHT,
         dimension_range_ratio: float = DEFAULT_DIMENSION_RANGE_RATIO,
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
+        **kwargs,
     ) -> list[SampleRequest]:
         input_lens, output_lens, offsets = self.get_sampling_params(
             num_requests, range_ratio, input_len, output_len, tokenizer
