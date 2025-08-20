@@ -24,8 +24,10 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, modular_triton_fused_moe)
 from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
     fused_moe as iterative_moe)
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_permute_bias)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    rand_marlin_weight_fp4_like)
+    rand_marlin_weight_mxfp4_like, rand_marlin_weight_nvfp4_like)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     marlin_quant_fp8_torch)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
@@ -36,7 +38,7 @@ from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
-NUM_EXPERTS = [8, 64]
+NUM_EXPERTS = [8, 64, 192]
 EP_SIZE = [1, 4]
 TOP_KS = [2, 6]
 
@@ -476,8 +478,11 @@ def marlin_moe_generate_valid_test_cases():
         if quant_type == scalar_types.float8_e4m3fn and \
                 group_size not in [-1, 128]:
             return False
-        if quant_type == scalar_types.float4_e2m1f and group_size != 16:
-            return False
+        if quant_type == scalar_types.float4_e2m1f:
+            if group_size not in [16, 32]:
+                return False
+            if dtype == torch.float16 and group_size == 32:
+                return False
         if quant_type != scalar_types.float4_e2m1f and group_size == 16:
             return False
 
@@ -520,31 +525,6 @@ def test_fused_marlin_moe(
     torch.cuda.manual_seed(0)
     has_zp = quant_type in [scalar_types.uint4, scalar_types.uint8]
 
-    if quant_type == scalar_types.float8_e4m3fn:
-        if group_size not in [-1, 128]:
-            return
-        if act_order:
-            return
-
-    # Filter act_order
-    if act_order:
-        if quant_type == scalar_types.float8_e4m3fn:
-            return
-        if group_size == -1:
-            return
-        if group_size in (k, n):
-            return
-        if has_zp:
-            return
-    else:
-        if not is_k_full:
-            return
-
-    if quant_type == scalar_types.float4_e2m1f and group_size != 16:
-        return
-    if quant_type != scalar_types.float4_e2m1f and group_size == 16:
-        return
-
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 20
     w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 20
@@ -569,13 +549,19 @@ def test_fused_marlin_moe(
 
     for i in range(w1.shape[0]):
         if quant_type == scalar_types.float4_e2m1f:
-            w_ref1, qweight1, scales1, global_scale1 = \
-                rand_marlin_weight_fp4_like(w1[i], group_size)
+            if group_size == 16:
+                w_ref1, qweight1, scales1, global_scale1 = \
+                    rand_marlin_weight_nvfp4_like(w1[i], group_size)
+            else:
+                w_ref1, qweight1, scales1 = \
+                    rand_marlin_weight_mxfp4_like(w1[i], group_size)
+                global_scale1 = None
 
             w_ref1_l.append(w_ref1.T)
             qweight1_l.append(qweight1)
             scales1_l.append(scales1)
-            global_scale1_l.append(global_scale1)
+            if global_scale1 is not None:
+                global_scale1_l.append(global_scale1)
         elif quant_type == scalar_types.float8_e4m3fn:
             w_ref1, qweight1, scales1 = marlin_quant_fp8_torch(
                 w1[i], group_size)
@@ -620,13 +606,19 @@ def test_fused_marlin_moe(
 
     for i in range(w2.shape[0]):
         if quant_type == scalar_types.float4_e2m1f:
-            w_ref2, qweight2, scales2, global_scale2 = \
-                rand_marlin_weight_fp4_like(w2[i], group_size)
+            if group_size == 16:
+                w_ref2, qweight2, scales2, global_scale2 = \
+                    rand_marlin_weight_nvfp4_like(w2[i], group_size)
+            else:
+                w_ref2, qweight2, scales2 = \
+                    rand_marlin_weight_mxfp4_like(w2[i], group_size)
+                global_scale2 = None
 
             w_ref2_l.append(w_ref2.T)
             qweight2_l.append(qweight2)
             scales2_l.append(scales2)
-            global_scale2_l.append(global_scale2)
+            if global_scale2 is not None:
+                global_scale2_l.append(global_scale2)
         elif quant_type == scalar_types.float8_e4m3fn:
             w_ref2, qweight2, scales2 = marlin_quant_fp8_torch(
                 w2[i], group_size)
@@ -677,6 +669,8 @@ def test_fused_marlin_moe(
         a,
         qweight1,
         qweight2,
+        None,
+        None,
         scales1,
         scales2,
         score,
@@ -684,6 +678,119 @@ def test_fused_marlin_moe(
         topk_ids,
         global_num_experts=e,
         expert_map=e_map,
+        global_scale1=global_scale1,
+        global_scale2=global_scale2,
+        g_idx1=g_idx1,
+        g_idx2=g_idx2,
+        sort_indices1=sort_indices1,
+        sort_indices2=sort_indices2,
+        w1_zeros=zeros1,
+        w2_zeros=zeros2,
+        quant_type_id=quant_type.id,
+        is_k_full=is_k_full)
+
+    torch.testing.assert_close(marlin_output, torch_output, atol=5e-2, rtol=0)
+
+
+@pytest.mark.flaky(reruns=2)
+@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
+@pytest.mark.parametrize("m", [1, 256])
+def test_fused_marlin_moe_with_bias(m):
+    torch.cuda.manual_seed(0)
+
+    e, topk = 32, 4
+    n, k = 2048, 2048
+    group_size = 128
+    act_order = False
+    is_k_full = True
+    quant_type = scalar_types.uint4b8
+    dtype = torch.half
+
+    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+    b_bias1 = torch.randn((e, 2 * n), device="cuda", dtype=dtype) / 10
+    b_bias2 = torch.randn((e, k), device="cuda", dtype=dtype) / 10
+
+    b_bias1_l = []
+    w_ref1_l = []
+    qweight1_l = []
+    scales1_l = []
+    g_idx1_l = []
+    sort_indices1_l = []
+
+    for i in range(w1.shape[0]):
+        test_perm = torch.randperm(k)
+        w_ref1, qweight1, scales1, g_idx1, sort_indices1, _ = \
+            marlin_quantize(w1[i].transpose(1, 0), quant_type,
+                            group_size, act_order, test_perm)
+
+        w_ref1_l.append(w_ref1.T)
+        qweight1_l.append(qweight1)
+        scales1_l.append(scales1)
+        g_idx1_l.append(g_idx1)
+        sort_indices1_l.append(sort_indices1)
+        b_bias1_l.append(marlin_permute_bias(b_bias1[i]))
+
+    w_ref1 = stack_and_dev(w_ref1_l)
+    qweight1 = stack_and_dev(qweight1_l).contiguous()
+    scales1 = stack_and_dev(scales1_l)
+    global_scale1 = None
+    g_idx1 = stack_and_dev(g_idx1_l) if g_idx1_l else None
+    zeros1 = None
+    sort_indices1 = stack_and_dev(sort_indices1_l) if sort_indices1_l else None
+    marlin_bias1 = stack_and_dev(b_bias1_l) if b_bias1_l else None
+
+    b_bias2_l = []
+    w_ref2_l = []
+    qweight2_l = []
+    scales2_l = []
+    g_idx2_l = []
+    sort_indices2_l = []
+
+    for i in range(w2.shape[0]):
+        test_perm = torch.randperm(n)
+        w_ref2, qweight2, scales2, g_idx2, sort_indices2, _ = \
+            marlin_quantize(w2[i].transpose(1, 0), quant_type,
+                            group_size, act_order, test_perm)
+
+        w_ref2_l.append(w_ref2.T)
+        qweight2_l.append(qweight2)
+        scales2_l.append(scales2)
+        g_idx2_l.append(g_idx2)
+        sort_indices2_l.append(sort_indices2)
+        b_bias2_l.append(marlin_permute_bias(b_bias2[i]))
+
+    w_ref2 = stack_and_dev(w_ref2_l)
+    qweight2 = stack_and_dev(qweight2_l).contiguous()
+    scales2 = stack_and_dev(scales2_l)
+    global_scale2 = None
+    g_idx2 = stack_and_dev(g_idx2_l) if g_idx2_l else None
+    zeros2 = None
+    sort_indices2 = stack_and_dev(sort_indices2_l) if sort_indices2_l else None
+    marlin_bias2 = stack_and_dev(b_bias2_l) if b_bias2_l else None
+
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+
+    topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+
+    with set_current_vllm_config(vllm_config):
+        torch_output = torch_moe(a, w_ref1, w_ref2, score, topk, b_bias1,
+                                 b_bias2)
+
+    marlin_output = torch.ops.vllm.fused_marlin_moe(
+        a,
+        qweight1,
+        qweight2,
+        marlin_bias1,
+        marlin_bias2,
+        scales1,
+        scales2,
+        score,
+        topk_weights,
+        topk_ids,
+        global_num_experts=e,
+        expert_map=None,
         global_scale1=global_scale1,
         global_scale2=global_scale2,
         g_idx1=g_idx1,

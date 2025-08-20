@@ -40,6 +40,7 @@ def _fwd_kernel(Q,
                 V,
                 K_cache,
                 V_cache,
+                sink_ptr,
                 B_Loc,
                 sm_scale,
                 k_scale,
@@ -84,6 +85,7 @@ def _fwd_kernel(Q,
                 num_unroll_request: tl.constexpr,
                 SKIP_DECODE: tl.constexpr,
                 USE_FP8: tl.constexpr,
+                USE_SINKS: tl.constexpr,
                 MAX_Q_LEN: tl.constexpr = 0,
                 MAX_CTX_LEN: tl.constexpr = 0,
                 FP8_MIN: tl.constexpr = float8_info.min,
@@ -132,7 +134,15 @@ def _fwd_kernel(Q,
                 other=0.0)  # [M,D]
 
     # initialize pointer to m and l
-    m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    if not USE_SINKS:
+        m_i = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    else:
+        m_i = tl.load(
+            sink_ptr + tl.full([BLOCK_M], cur_head, dtype=tl.int64),
+            mask=(offs_m < cur_batch_query_len),
+            other=float("-inf"),
+        ).to(dtype=tl.float32)
+
     l_i = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL_PADDED], dtype=tl.float32)  # [M,D]
 
@@ -742,7 +752,8 @@ def context_attention_fwd(q,
                           sliding_window=None,
                           sm_scale=None,
                           skip_decode=False,
-                          fp8_out_scale=None):
+                          fp8_out_scale=None,
+                          sinks=None):
 
     q_dtype_is_f32 = q.dtype is torch.float32
 
@@ -791,6 +802,7 @@ def context_attention_fwd(q,
         sliding_window = 0
 
     if alibi_slopes is not None:
+        assert sinks is None, "Sinks arg is not supported with alibi"
         # need to reduce num. blocks when using fp32
         # due to increased use of GPU shared memory
         # if q.dtype is torch.float32:
@@ -854,7 +866,7 @@ def context_attention_fwd(q,
     extra_kargs = {}
     if current_platform.is_rocm():
         if not_mi350():
-            extra_kargs = {"kpack": 2, "waves_per_eu": 2}
+            extra_kargs = {"kpack": 1, "waves_per_eu": 2}
         else:
             extra_kargs = {"waves_per_eu": 2}
 
@@ -866,6 +878,7 @@ def context_attention_fwd(q,
         v,
         k_cache,
         v_cache,
+        sinks,
         b_loc,
         sm_scale,
         k_scale,
@@ -913,5 +926,6 @@ def context_attention_fwd(q,
         num_unroll_request=1,
         num_warps=4,
         num_stages=1,
+        USE_SINKS=sinks is not None,
         **extra_kargs)
     return

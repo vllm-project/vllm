@@ -5,12 +5,12 @@ import enum
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, make_dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Generic, Optional,
+                    TypeVar)
 
 import numpy as np
 import torch
 
-from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils import cdiv
 
@@ -20,6 +20,8 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
 import vllm.envs as envs
+from vllm.attention.backends.abstract import AttentionBackend
+from vllm.attention.layer import Attention
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
@@ -254,7 +256,10 @@ def get_kv_cache_layout():
     # Override with format specified by the user.
     cache_layout = envs.VLLM_KV_CACHE_LAYOUT
     if cache_layout is None:
-        cache_layout = get_kv_connector_cache_layout()
+        if envs.VLLM_USE_TRTLLM_ATTENTION:
+            cache_layout = "HND"
+        else:
+            cache_layout = get_kv_connector_cache_layout()
     else:
         logger.info_once("`VLLM_KV_CACHE_LAYOUT` environment variable " \
         "detected. Setting KV cache layout to %s.", cache_layout)
@@ -272,12 +277,15 @@ def set_kv_cache_layout(cache_layout: str):
 class PerLayerParameters:
     """
     Currently, FlashInfer backend only support models in which all layers share
-    the same values for the following hyperparameters.
+    the same values for the following hyperparameters. Should not be used for
+    trtllm-gen backend since it supports different values for the following
+    hyperparameters.
     """
 
     window_left: int
     logits_soft_cap: Optional[float]
     sm_scale: float
+    has_sinks: bool = False
 
 
 def get_per_layer_parameters(
@@ -300,9 +308,11 @@ def get_per_layer_parameters(
         window_left = window_size[0] if window_size is not None else -1
         logits_soft_cap = getattr(impl, "logits_soft_cap", None)
         sm_scale = impl.scale
+        has_sinks = getattr(impl, "sinks", None) is not None
 
         per_layer_params[key] = PerLayerParameters(window_left,
-                                                   logits_soft_cap, sm_scale)
+                                                   logits_soft_cap, sm_scale,
+                                                   has_sinks)
 
     return per_layer_params
 
@@ -310,7 +320,8 @@ def get_per_layer_parameters(
 def infer_global_hyperparameters(
         per_layer_params: dict[str, PerLayerParameters]) -> PerLayerParameters:
     """
-    Currently, FlashInfer backend only support models in which all layers share
+    Currently, FlashInfer backend other than trtllm-gen 
+    only support models in which all layers share
     the same values for the following hyperparameters:
     - `window_left`
     - `logits_soft_cap`
@@ -324,15 +335,19 @@ def infer_global_hyperparameters(
 
     param_sets = list(per_layer_params.values())
     global_params = param_sets[0]
-    for params in param_sets:
-        if params.window_left != global_params.window_left:
-            raise ValueError(
-                "Window left is not the same for all layers. One potential fix "
-                "is to set disable_sliding_window=True")
-        assert params == global_params, (
-            "FlashInfer backend currently only supports models in which all "
-            "layers share the same values for the following hyperparameters: "
-            "`window_left`, `logits_soft_cap`, `sm_scale`.")
+
+    # trtllm attention doesn't need global hyper params so disable the check
+    if not envs.VLLM_USE_TRTLLM_ATTENTION:
+        for params in param_sets:
+            if params.window_left != global_params.window_left:
+                raise ValueError(
+                    "Window left is not the same for all layers. " \
+                    "One potential fix is to set disable_sliding_window=True")
+            assert params == global_params, (
+                "FlashInfer backend currently only supports models in which all"
+                "layers share the same values "
+                "for the following hyperparameters:"
+                "`window_left`, `logits_soft_cap`, `sm_scale`.")
 
     return global_params
 
@@ -520,6 +535,48 @@ def make_local_attention_virtual_batches(
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
     )
+
+
+def subclass_attention_metadata_builder(
+    name_prefix: str,
+    builder_cls: type[AttentionMetadataBuilder[M]],
+    build_preprocess_fn: Callable[[CommonAttentionMetadata],
+                                  CommonAttentionMetadata],
+) -> type[AttentionMetadataBuilder[M]]:
+    """
+    Return a new subclass of `builder_cls` whose .build(...) method
+    first calls build_preprocess_fn(common_attn_metadata) on the metadata.
+    """
+    name: str = name_prefix + builder_cls.__name__  # type: ignore
+
+    def build(self,
+              common_prefix_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              fast_build: bool = False):
+        return builder_cls.build(self, common_prefix_len,
+                                 build_preprocess_fn(common_attn_metadata),
+                                 fast_build)
+
+    Wrapped = type(
+        name,
+        (builder_cls, ),  # inherit from the original
+        {
+            "build": build,
+        })
+    return Wrapped  # type: ignore
+
+
+def subclass_attention_backend(
+        name_prefix: str, attention_backend_cls: type[AttentionBackend],
+        builder_cls: type[AttentionMetadataBuilder[M]]
+) -> type[AttentionBackend]:
+    """
+    Return a new subclass where `get_builder_cls` returns `builder_cls`.
+    """
+    name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
+
+    return type(name, (attention_backend_cls, ),
+                {"get_builder_cls": lambda: builder_cls})
 
 
 def split_decodes_and_prefills(

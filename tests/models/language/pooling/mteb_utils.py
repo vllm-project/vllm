@@ -162,7 +162,8 @@ def mteb_test_embed_models(hf_runner,
                            vllm_runner,
                            model_info: EmbedModelInfo,
                            vllm_extra_kwargs=None,
-                           hf_model_callback=None):
+                           hf_model_callback=None,
+                           atol=MTEB_RERANK_TOL):
     if not model_info.enable_test:
         # A model family has many models with the same architecture,
         # and we don't need to test each one.
@@ -176,9 +177,12 @@ def mteb_test_embed_models(hf_runner,
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:
 
+        model_config = vllm_model.llm.llm_engine.model_config
+
         if model_info.architecture:
-            assert (model_info.architecture
-                    in vllm_model.llm.llm_engine.model_config.architectures)
+            assert model_info.architecture in model_config.architectures
+        assert (model_config._model_info.default_pooling_type ==
+                model_info.default_pooling_type)
 
         vllm_main_score = run_mteb_embed_task(VllmMtebEncoder(vllm_model),
                                               MTEB_EMBED_TASKS)
@@ -198,7 +202,7 @@ def mteb_test_embed_models(hf_runner,
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
-    assert st_main_score == pytest.approx(vllm_main_score, abs=MTEB_EMBED_TOL)
+    assert st_main_score == pytest.approx(vllm_main_score, abs=atol)
 
 
 def run_mteb_rerank(cross_encoder, tasks, languages):
@@ -285,7 +289,12 @@ def mteb_test_rerank_models(hf_runner,
                      **vllm_extra_kwargs) as vllm_model:
 
         model_config = vllm_model.llm.llm_engine.model_config
+
+        if model_info.architecture:
+            assert (model_info.architecture in model_config.architectures)
         assert model_config.hf_config.num_labels == 1
+        assert (model_config._model_info.default_pooling_type ==
+                model_info.default_pooling_type)
 
         vllm_main_score = run_mteb_rerank(vllm_mteb_encoder(vllm_model),
                                           tasks=MTEB_RERANK_TASKS,

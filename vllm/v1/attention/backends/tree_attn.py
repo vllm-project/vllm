@@ -236,9 +236,9 @@ class TreeAttentionMetadataBuilder(
             # Use prefill for drafting at the root level.
             self.tree_attn_bias = torch.empty(0)
         else:
-            # Slice the tree attention bias for drafting.
-            query_len = common_attn_metadata.max_query_len
-            start, end = draft_index, draft_index + query_len
+            # Slice the tree attention bias for drafting. Exclude
+            # the root level.
+            start, end = 1, 1 + common_attn_metadata.max_query_len
             self.tree_attn_bias = self.tree_attn_bias[start:end,
                                                       start:end].contiguous()
 
@@ -316,7 +316,6 @@ class TreeAttentionImpl(AttentionImpl):
         logits_soft_cap: Optional[float] = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
-        use_irope: bool = False,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size

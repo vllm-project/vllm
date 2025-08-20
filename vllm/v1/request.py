@@ -5,7 +5,7 @@ import enum
 import time
 from typing import TYPE_CHECKING, Any, Optional, Union
 
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import is_list_of
@@ -24,7 +24,7 @@ class Request:
         self,
         request_id: str,
         prompt_token_ids: list[int],
-        multi_modal_inputs: Optional[list[MultiModalKwargs]],
+        multi_modal_kwargs: Optional[list[MultiModalKwargsItem]],
         multi_modal_hashes: Optional[list[str]],
         multi_modal_placeholders: Optional[list[PlaceholderRange]],
         sampling_params: Optional[SamplingParams],
@@ -84,15 +84,15 @@ class Request:
 
         # Multi-modal related
         self.mm_positions = multi_modal_placeholders or []
-        self.mm_inputs = multi_modal_inputs or []
+        self.mm_kwargs = multi_modal_kwargs or []
         self.mm_hashes: list[str] = multi_modal_hashes or []
-        self.num_encoder_inputs = len(self.mm_inputs)
+        self.num_encoder_inputs = len(self.mm_kwargs)
         self.has_encoder_inputs = self.num_encoder_inputs > 0
 
         # Sanity check
-        assert len(self.mm_inputs) == len(self.mm_positions)
+        assert len(self.mm_kwargs) == len(self.mm_positions)
         if self.mm_hashes:
-            assert len(self.mm_inputs) == len(self.mm_hashes)
+            assert len(self.mm_kwargs) == len(self.mm_hashes)
 
         # Read-only views
         # Prevent directly appending to these lists since
@@ -110,16 +110,15 @@ class Request:
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
-        if request.mm_inputs is not None:
-            assert isinstance(request.mm_inputs, list)
-            assert is_list_of(request.mm_inputs, MultiModalKwargs), (
-                "mm_inputs was not updated in EngineCore.add_request")
+        if request.mm_kwargs is not None:
+            assert is_list_of(request.mm_kwargs, MultiModalKwargsItem), (
+                "mm_kwargs was not updated in EngineCore.add_request")
 
         return cls(
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
-            multi_modal_inputs=request.mm_inputs,
+            multi_modal_kwargs=request.mm_kwargs,
             multi_modal_hashes=request.mm_hashes,
             multi_modal_placeholders=request.mm_placeholders,
             sampling_params=request.sampling_params,

@@ -247,6 +247,34 @@ class GraniteMoeHybridModelConfig(VerifyAndUpdateConfig):
             config.max_model_len)
 
 
+class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        decoding_config = vllm_config.decoding_config
+        if decoding_config.reasoning_backend == "":
+            decoding_config.reasoning_backend = "GptOss"
+
+        # Increase the max capture size from 512 to 1024 for performance.
+        # NOTE(woosuk): This will increase the number of CUDA graphs
+        # from 67 to 83.
+        scheduler_config = vllm_config.scheduler_config
+        if len(scheduler_config.cuda_graph_sizes) == 1:
+            max_capture_size = scheduler_config.cuda_graph_sizes[0]
+            # FIXME(woosuk): When using full cuda graph with FA3, the max
+            # supported size is 992.
+            if max_capture_size < 1024:
+                cuda_graph_sizes = [1, 2, 4]
+                # Step size 8 for small batch sizes
+                cuda_graph_sizes += [i for i in range(8, 256, 8)]
+                # Step size 16 for larger batch sizes
+                cuda_graph_sizes += [i for i in range(256, 1025, 16)]
+                scheduler_config.cuda_graph_sizes = cuda_graph_sizes
+                logger.info(
+                    "Overriding max cuda graph capture size to "
+                    "%d for performance.", 1024)
+
+
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 
     @classmethod
@@ -345,4 +373,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "GraniteMoeHybridForCausalLM": GraniteMoeHybridModelConfig,
+    "GptOssForCausalLM": GptOssForCausalLMConfig,
 }
