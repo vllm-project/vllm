@@ -468,6 +468,12 @@ class EngineArgs:
             logger.info(
                 "HF_HUB_OFFLINE is True, replace model_id [%s] " \
                 "to model_path [%s]",model_id, self.model)
+        if not envs.VLLM_USE_V1:
+            logger.warning(
+                "The vLLM V0 engine is deprecated and will be removed in " \
+                "v0.11.0. See https://github.com/vllm-project/vllm/issues/18571"
+                " for details."
+            )
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
