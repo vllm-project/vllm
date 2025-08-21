@@ -1600,19 +1600,23 @@ class FusedMoE(CustomOp):
                                   value=0.0)
         # TODO: Once the OOM issue for the TPU backend is resolved, we will
         # switch to using the moe_forward custom op.
-        if current_platform.is_tpu():
-            outputs = self.forward_impl(hidden_states, router_logits)
-        else:
-            outputs = torch.ops.vllm.moe_forward(hidden_states, router_logits,
-                                                 self.layer_name)
 
         if self.shared_experts is None:
-            assert len(outputs) == 1
-            return outputs[0][..., :og_hidden_states]
+            if current_platform.is_tpu():
+                fused_output = self.forward_impl(hidden_states, router_logits)
+            else:
+                fused_output = torch.ops.vllm.moe_forward(
+                    hidden_states, router_logits, self.layer_name)
+            return fused_output[..., :og_hidden_states]
         else:
-            assert len(outputs) == 2
-            return (outputs[0][..., :og_hidden_states],
-                    outputs[1][..., :og_hidden_states])
+            if current_platform.is_tpu():
+                shared_output, fused_output = self.forward_impl(
+                    hidden_states, router_logits)
+            else:
+                shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
+                    hidden_states, router_logits, self.layer_name)
+            return (shared_output[..., :og_hidden_states],
+                    fused_output[..., :og_hidden_states])
 
     def forward_impl_chunked(
         self,
@@ -1862,32 +1866,41 @@ def moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     layer_name: str,
-) -> list[torch.Tensor]:
+) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     assert self.quant_method is not None
-
-    out = self.forward_impl(hidden_states, router_logits)
-
-    if self.shared_experts is None:
-        return [out]
-    else:
-        assert isinstance(out, tuple)
-        return list(out)
+    assert self.shared_experts is None
+    return self.forward_impl(hidden_states, router_logits)
 
 
 def moe_forward_fake(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     layer_name: str,
-) -> list[torch.Tensor]:
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+def moe_forward_shared(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
+    assert self.quant_method is not None
+    assert self.shared_experts is not None
+    return self.forward_impl(hidden_states, router_logits)
+
+
+def moe_forward_shared_fake(
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    layer_name: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
     out = torch.empty_like(hidden_states)
-    if self.shared_experts is None:
-        return [out]
-    else:
-        return list(out)
+    return out, out
 
 
 direct_register_custom_op(
@@ -1895,6 +1908,15 @@ direct_register_custom_op(
     op_func=moe_forward,
     mutates_args=["hidden_states"],
     fake_impl=moe_forward_fake,
+    dispatch_key=current_platform.dispatch_key,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
+)
+
+direct_register_custom_op(
+    op_name="moe_forward_shared",
+    op_func=moe_forward_shared,
+    mutates_args=["hidden_states"],
+    fake_impl=moe_forward_shared_fake,
     dispatch_key=current_platform.dispatch_key,
     tags=(torch.Tag.needs_fixed_stride_order, ),
 )
