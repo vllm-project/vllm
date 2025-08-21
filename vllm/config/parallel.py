@@ -171,7 +171,7 @@ class ParallelConfig:
     rank: int = 0
     """Global rank in distributed setup."""
 
-    _data_parallel_master_port_list: Optional[list[int]] = None
+    _data_parallel_master_port_list: list[int] = field(default_factory=list)
     """List of open port auto-queried for data parallel messaging.
     Set to be private as it's not intended to be configured by users.
     """
