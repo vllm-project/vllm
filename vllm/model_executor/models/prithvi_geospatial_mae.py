@@ -47,7 +47,7 @@ from vllm.sequence import IntermediateTensors
 
 
 def mm_fields_config(
-    hf_inputs: BatchFeature, ) -> Mapping[str, MultiModalFieldConfig]:
+        hf_inputs: BatchFeature) -> Mapping[str, MultiModalFieldConfig]:
     return dict(
         pixel_values=MultiModalFieldConfig.shared(batch_size=1,
                                                   modality="image"),
