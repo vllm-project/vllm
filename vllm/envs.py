@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
-    VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: Optional[int] = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
@@ -464,11 +463,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_SAMPLER":
     lambda: bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
     if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ else None,
-
-    # If set, vllm will force flashinfer to use tensor cores;
-    # otherwise will use heuristic based on model architecture.
-    "VLLM_FLASHINFER_FORCE_TENSOR_CORES":
-    lambda: bool(int(os.getenv("VLLM_FLASHINFER_FORCE_TENSOR_CORES", "0"))),
 
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
@@ -1221,7 +1215,6 @@ def compute_hash() -> str:
         "VLLM_USE_AITER_UNIFIED_ATTENTION",
         "VLLM_ATTENTION_BACKEND",
         "VLLM_USE_FLASHINFER_SAMPLER",
-        "VLLM_FLASHINFER_FORCE_TENSOR_CORES",
         "VLLM_DISABLED_KERNELS",
         "VLLM_USE_DEEP_GEMM",
         "VLLM_USE_TRTLLM_FP4_GEMM",
