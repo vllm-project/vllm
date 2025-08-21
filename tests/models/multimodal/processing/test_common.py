@@ -316,6 +316,7 @@ def _test_processing_correctness_one(
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
     "Qwen/Qwen2.5-Omni-3B",
+    "YannQi/R-4B",
     "Skywork/Skywork-R1V-38B",
     "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
     "stepfun-ai/step3",
