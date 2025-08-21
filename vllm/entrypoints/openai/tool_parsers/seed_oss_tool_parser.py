@@ -88,7 +88,7 @@ class SeedOssToolParser(ToolParser):
         self.current_tool_index = 0
         self.is_tool_call_started = False
         self.header_sent = False
-        self.current_tool_id = None
+        self.current_tool_id = -1
         self.current_function_name = None
         self.current_param_name = None
         self.current_param_value = ""
@@ -157,7 +157,7 @@ class SeedOssToolParser(ToolParser):
                   or param_type.startswith("short")
                   or param_type.startswith("unsigned")):
                 try:
-                    param_value = int(param_value)
+                    param_value = int(param_value)  # type: ignore
                 except (ValueError, TypeError):
                     logger.warning(
                         "Parsed value '%s' of parameter '%s' is not an integer in tool "
@@ -169,7 +169,8 @@ class SeedOssToolParser(ToolParser):
                 try:
                     float_param_value = float(param_value)
                     param_value = float_param_value if float_param_value - int(
-                        float_param_value) != 0 else int(float_param_value)
+                        float_param_value) != 0 else int(
+                            float_param_value)  # type: ignore
                 except (ValueError, TypeError):
                     logger.warning(
                         "Parsed value '%s' of parameter '%s' is not a float in tool "
@@ -370,8 +371,8 @@ class SeedOssToolParser(ToolParser):
                 self.json_closed = False
 
                 # Check if there are more tool calls
-                tool_starts = current_text.count(self.tool_call_start_token)
-                if self.current_tool_index >= tool_starts:
+                if self.current_tool_index >= current_text.count(
+                        self.tool_call_start_token):
                     # No more tool calls
                     self.is_tool_call_started = False
                 # Continue processing next tool
@@ -422,7 +423,7 @@ class SeedOssToolParser(ToolParser):
         think_end_index = current_text.find(self.think_end_token) + len(
             self.think_end_token
         ) if self.think_end_token in current_text else 0
-        tool_starts = []
+        tool_starts: list[int] = []
         idx = think_end_index
         while True:
             idx = current_text.find(self.tool_call_start_token, idx)
@@ -455,7 +456,8 @@ class SeedOssToolParser(ToolParser):
                 if func_end != -1:
                     # Found complete function name
                     self.current_function_name = tool_text[func_start:func_end]
-                    self.current_tool_id = self._generate_tool_call_id()
+                    self.current_tool_id = self._generate_tool_call_id(
+                    )  # type: ignore
                     self.header_sent = True
                     self.in_function = True
 
