@@ -1,4 +1,4 @@
-# Logits Processor Support in vLLM
+# Logits Processors
 
 This document describes how the vLLM engine interacts with logits processors, and the programming model which vLLM supports for implementing logits processors.
 
@@ -18,7 +18,9 @@ In each engine step, the vLLM engine will (1) update each logits processor's int
 
 ### Updating logits processor internal state
 
-The vLLM model runner invokes each logits processor's `update_state()` method at the end of each engine step. This is necessary to ensure that logits processors' internal states are reorganized to match the new persistent batch state at the end of the current step. The pseudocode below shows that the vLLM model runner computes updates to the persistent batch state and then notifies each logits processor of the state changes:
+At the beginning of each engine step, the persistent batch adds, discards and reorders requests in response to the scheduler output. After the persistent batch has reorganized, the vLLM engine invokes each logits processor's `update_state()` method. This is necessary to ensure that logits processors' internal states are reorganized to match the new persistent batch state at the beginning of the engine step.
+
+The pseudocode below shows the process by which the vLLM model runner notifies each logits processor of changes in persistent batch state:
 
 ??? code "Model Runner Updates Logits Processor States"
 
@@ -38,8 +40,8 @@ The vLLM model runner invokes each logits processor's `update_state()` method at
 
             ...
 
-            # Update persistent batch to reflect new/finished requests & reordering
-            # of requests within batch
+            # ...update persistent batch to reflect new/finished requests & reordering
+            # of requests within batch...
 
             ...
 
@@ -68,8 +70,8 @@ The vLLM model runner invokes each logits processor's `update_state()` method at
 
     @dataclass(frozen=True)
     class BatchUpdate:
-        # Batch state-change data structure which is passed to logits processor
-        # update_state() method
+        # Batch state-change data structure which is passed to logits processors'
+        # update_state() methods
 
         batch_size: int
 
@@ -79,14 +81,11 @@ The vLLM model runner invokes each logits processor's `update_state()` method at
     
     ```
 
-    !!! note
-        `InputBatch.refresh_metadata()` generates a `BatchUpdate` data structure - representing the persistent batch state changes resulting from new, finished and reordered requests - and passes that data structure to the logits processors' `update_state()` methods.
-
 ### Applying logits processors to the model output logits
 
-The pseudocode below shows how the vLLM model runner invokes the sampler, which in turn invokes the logits processors' `apply()` methods against the model output logit processors.
+After updating persistent batch state, the vLLM model runner performs model inference to obtain logits. Then, the model runner invokes the sampler against the logits. In turn, part of the sampler's operation is to invoke the logits processors' `apply()` methods against the model output logit processors. This process is shown in the pseudocode below.
 
-Note that the sampler will access the logits processors via `SamplingMetadata.logitsprocs`. When the vLLM engine constructs `SamplingMetadata`, the reference to the list of logits processors is passed from the persistent batch data structure to `SamplingMetadata`.
+Note that the sampler will access the logits processors via `SamplingMetadata.logitsprocs`. When the vLLM engine constructs `SamplingMetadata` (not shown in the code below), the reference to the list of logits processors is passed from the persistent batch data structure to `SamplingMetadata`.
 
 ??? code "Apply logits processors to model output logits"
 
@@ -98,11 +97,18 @@ Note that the sampler will access the logits processors via `SamplingMetadata.lo
         ...
 
         def execute_model(self, scheduler_output, ...):
+            # (discussed in previous section)
+            self._update_states(scheduler_output)
 
             ...
 
+            # ...run model inference to obtain logits...
+
+            ...
+
+            # Invoke sampler, which applies logits processors
             sampler_output = self.sampler(logits=logits,
-                                        sampling_metadata=sampling_metadata)
+                                          sampling_metadata=sampling_metadata)
 
             ...
 
@@ -125,14 +131,14 @@ Note that the sampler will access the logits processors via `SamplingMetadata.lo
 
             ...
 
-            # Return sampler output data structure
+            # ...return sampler output data structure...
 
 
         def sample(self, logits, sampling_metadta)
 
             ...
 
-            # Exit early if all requests are greedy-sampling
+            # ...exit early if all requests are greedy-sampling...
 
             ...
 
@@ -142,16 +148,16 @@ Note that the sampler will access the logits processors via `SamplingMetadata.lo
 
             ...
 
-            # Perform sampling and return sampling result
+            # ...perform sampling and return sampling result...
     ``` 
 
-At sampling time, the engine saves compute by skipping "argmax-invariant" logits processors in the edge-case where all requests employ greedy sampling. Here, "argmax" is shorthand for the token ID with the highest logit value in a given row of the logits tensor (i.e. the token which the model weighted the highest for a given request).
+At sampling time, the sampler checks whether all requests in the persistent batch employ greedy sampling. If that is the case, the sampler saves compute by skipping "argmax-invariant" logits processors. Here, "argmax" is shorthand for the token ID with the highest logit value in a given row of the logits tensor (i.e. the token which the model weighted the highest for a given request).
 
 * An **argmax-invariant logits processor** is a logits processor (such as Min-P) which does not modify the argmax. For example, a logits processor which masks out the lowest-probability tokens will not change which token ID has the max logit. Greedy sampling always picks the highest-logit-value token ID, and so conceptually an argmax-invariant logits processor can be skipped for greedy sampling requests.
 
 * A **non-argmax-invariant logits processor** is a logits processor which may modify the argmax. For example, a logits processor which masks all tokens except for EOS after a certain number of steps in order to force decoding to terminate might end up masking the max-logit-value token and therefore change the argmax. Conceptually, these logits processors cannot be skipped for greedy sampling requests.
 
-The vLLM logits processor abstraction requires the engine to pass in state updates at batch granularity; therefore in practice state updates for argmax-invariant logits processors can only be skipped when the entire batch uses greedy sampling.
+The vLLM logits processor abstraction requires the engine to apply logits processors at batch granularity; therefore in practice the `apply()` calls to argmax-invariant logits processors can only be skipped when the entire batch uses greedy sampling.
 
 ## Logits Processor Programming Model
 
@@ -261,7 +267,7 @@ A vLLM logits processor must subclass `LogitsProcessor` and define (at minimum) 
     * `is_argmax_invariant()` is evaluated once at startup; if `True`, vLLM will skip applying this logits processor in a given step when all requests use greedy sampling
 
 * `update_state(self, batch_update: Optional["BatchUpdate"]) -> None`:
-    * Consume a `BatchUpdate` data structure representing persistent batch state changes at the end of the current engine step
+    * Consume a `BatchUpdate` data structure representing persistent batch state changes at the beginning of the current engine step
     * Batch update data structure may be `None`, signaling no state-change
 
 ### `BatchUpdate` data structure
@@ -360,7 +366,7 @@ The `BatchUpdate` abstraction models the persistent batch as a list of requests,
         New Batch: [A,D,C,B] # Swap B and D
         ```
 
-Additionally, the `BatchUpdate` data structure includes a representation (`batch_size`) of the size of the persistent batch at the end of the engine step.
+Additionally, the `BatchUpdate` data structure includes a representation (`batch_size`) of the size of the persistent batch at the beginning of the engine step.
 
 ### How the vLLM engine builds the `BatchUpdate` data structure
 
