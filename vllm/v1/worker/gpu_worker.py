@@ -315,9 +315,18 @@ class Worker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
-        if (not self.model_config.enforce_eager and not self.vllm_config.
-                compilation_config.use_cudagraph_delayed_capture):
+
+        # If use_delay_cudagraph_capture is False, we capture all
+        # the cudagraphs during the initialization. However, if
+        # use_delay_cudagraph_capture is True, we at least capture
+        # the cudagraph for the largest capture size so that
+        # future cudagraphs can reuse that memory
+        if (not self.vllm_config.compilation_config.use_delay_cudagraph_capture
+            ):
             self.model_runner.capture_model()
+        else:
+            self.model_runner.capture_model(
+                self.incomplete_cudagraph_capture.pop(0))
 
         # Warm up sampler and preallocate memory buffer for logits and other
         # sampling related tensors of max possible shape to avoid memory
@@ -390,8 +399,7 @@ class Worker(WorkerBase):
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
 
-        if (self.vllm_config.compilation_config.use_cudagraph_delayed_capture
-                and not self.model_config.enforce_eager
+        if (self.vllm_config.compilation_config.use_delay_cudagraph_capture
                 and len(self.incomplete_cudagraph_capture) > 0):
             self._delayed_cudagraph_capture(
                 scheduler_output.total_num_scheduled_tokens)

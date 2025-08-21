@@ -304,14 +304,11 @@ def bind_kv_cache(
 
 
 @contextmanager
-def freeze_gc(allow_collect: bool = True):
+def maybe_freeze_gc(allow_collect: bool = True):
     # Optimize garbage collection during CUDA graph capture.
-    # Clean up, then freeze all remaining objects from being included
+    # Freeze remaining objects from being included
     # in future collections.
 
-    # gc collector is a time consuming operation
-    if allow_collect:
-        gc.collect()
     should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
     if should_freeze:
         gc.freeze()
