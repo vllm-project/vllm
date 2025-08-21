@@ -68,7 +68,6 @@ class Llama4ImagePatchInputs(TensorSchema):
         - total_num_chunks: Batch size * number of chunks
         - num_channels: Number of channels
         - image_size: Size of each image
-        - ratio: Aspect ratio pair (where each pair is (ratio_h, ratio_w))
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -86,10 +85,11 @@ class Llama4ImagePatchInputs(TensorSchema):
     """
 
     aspect_ratios: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                             TensorShape("batch_size", "ratio")]
+                             TensorShape("batch_size", 2)]
     """
     A list of aspect ratios corresponding to the number of tiles
     in each dimension that each image in the batch corresponds to.
+    Each aspect ratio is a pair (ratio_h, ratio_w).
     """
 
 
