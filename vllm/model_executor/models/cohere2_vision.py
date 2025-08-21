@@ -170,6 +170,8 @@ class Cohere2VisionProcessingInfo(BaseProcessingInfo):
 
         # The current implementation of get_number_of_image_patches
         # is incorrect, so we patch it here.
+        # TODO: Revert once
+        # https://github.com/huggingface/transformers/pull/40312 is released.
         # return image_processor.get_number_of_image_patches(image_height,
         #                                                    image_width, {})
 
