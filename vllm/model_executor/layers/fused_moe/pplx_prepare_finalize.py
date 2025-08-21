@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, Optional, Union
+from typing import Optional, Union
 
 import pplx_kernels as pplx
 import torch
@@ -214,7 +214,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             do_recv=False,
         )
 
-        return lambda: self._receive(
+        return lambda: self._receiver(
             expert_num_tokens,
             expert_x,
             expert_x_scale,
@@ -225,7 +225,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             orig_a_scale_block_shape,
         )
 
-    def _receive(
+    def _receiver(
         self,
         expert_num_tokens: torch.Tensor,
         expert_x: torch.Tensor,
@@ -235,9 +235,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         bound_m: Optional[torch.Tensor],
         orig_a_scale_block_shape: Optional[int],
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
-               Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+    ) -> mk.PrepareResultType:
 
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
@@ -271,9 +269,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
-               Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+    ) -> mk.PrepareResultType:
         receiver = self.prepare_no_receive(
             a1,
             a1_scale,

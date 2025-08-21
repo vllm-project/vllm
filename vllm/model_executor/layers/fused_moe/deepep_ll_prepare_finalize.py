@@ -168,13 +168,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         a1_scale,
         a1_dtype,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[
-            torch.Tensor,
-            Optional[torch.Tensor],
-            Optional[mk.ExpertTokensMetadata],
-            Optional[torch.Tensor],
-            Optional[torch.Tensor],
-    ]:
+    ) -> mk.PrepareResultType:
         hook()
 
         expert_x, expert_x_scale = self._do_quant(
@@ -184,7 +178,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)
 
-        return (expert_x, expert_x_scale, expert_tokens_meta, None, None)
+        return expert_x, expert_x_scale, expert_tokens_meta, None, None
 
     def prepare(
         self,
@@ -197,13 +191,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[
-            torch.Tensor,
-            Optional[torch.Tensor],
-            Optional[mk.ExpertTokensMetadata],
-            Optional[torch.Tensor],
-            Optional[torch.Tensor],
-    ]:
+    ) -> mk.PrepareResultType:
         receiver = self.prepare_no_receive(a1, a1_scale, a2_scale,
                                            topk_weights, topk_ids, num_experts,
                                            expert_map,
