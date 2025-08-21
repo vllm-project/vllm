@@ -41,6 +41,8 @@ def fanout_existing_imports():
 
 def apply_patch():
     from loguru import logger
+    logger.remove()
+    logger.add(sys.stderr, level=os.environ.get("FLASHRL_LOGGING_LEVEL", "INFO"))
 
     # Check if patching is needed based on environment variables
     if "FLASHRL_CONFIG" in os.environ:
@@ -100,6 +102,10 @@ recorded_loader_keys = [
     '_assert_and_load',
 ]
 def patch_vllm_process_weights_after_loading():
+    from loguru import logger
+    logger.remove()
+    logger.add(sys.stderr, level=os.environ.get("FLASHRL_LOGGING_LEVEL", "INFO"))
+
     try:
         # Store the original process_weights_after_loading function
         from vllm.model_executor.model_loader import utils
@@ -586,6 +592,11 @@ def _build_hf_to_vllm_map_via_loader(model, weight_items, original_load_weights)
     return dict(hf_to_vllm)
 
 def patch_load_weights(self: "Worker"):
+    from loguru import logger
+    logger.remove()
+    logger.add(sys.stderr, level=os.environ.get("FLASHRL_LOGGING_LEVEL", "INFO"))
+
+
     config = os.environ.get("FLASHRL_CONFIG", None)
     if not config: 
         print("Skipping patch load weights...")
