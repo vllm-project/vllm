@@ -463,7 +463,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         page_size = self.page_size
         max_q_len = common_attn_metadata.max_query_len
-        max_seq_len = common_attn_metadata.seq_lens_cpu.max().item()
+        max_seq_len = common_attn_metadata.max_seq_len
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         block_table_tensor = common_attn_metadata.block_table_tensor

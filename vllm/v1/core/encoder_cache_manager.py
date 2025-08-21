@@ -207,8 +207,6 @@ def compute_text_encoder_budget(
 
     Args:
         scheduler_config: Scheduler configuration.
-        max_tokens_by_modality: The maximum number of tokens for each
-            non-text modality. Pass `None` for text-only models.
 
     Returns:
         - Compute budget for encoder execution, in unit of number of tokens 

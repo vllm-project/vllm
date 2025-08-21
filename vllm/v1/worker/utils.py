@@ -72,12 +72,11 @@ class MultiModalBudget:
         self.max_items_per_prompt_by_modality = max_items_per_prompt_by_modality
         self.max_items_per_batch_by_modality = max_items_per_batch_by_modality
 
-    def get_modality_with_max_tokens(self) -> tuple[str, int]:
+    def get_modality_with_max_tokens(self) -> str:
         max_tokens_by_modality = self.max_tokens_by_modality
-        modality, max_tokens = max(max_tokens_by_modality.items(),
-                                   key=lambda item: item[1])
+        modality, _ = max(max_tokens_by_modality.items(), key=lambda x: x[1])
 
-        return modality, max_tokens
+        return modality
 
     def get_encoder_budget(self) -> int:
         return min(self.encoder_compute_budget, self.encoder_cache_size)
