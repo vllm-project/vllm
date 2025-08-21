@@ -225,7 +225,7 @@ class CudaPlatformBase(Platform):
             #  we should probably consider factoring out V1 here
 
             from vllm.attention.ops.flashmla import is_flashmla_supported
-            from vllm.vllm_flash_attn.fa_utils import flash_attn_supports_mla
+            from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 
             use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
                 selected_backend is None and cls.is_device_capability(100)

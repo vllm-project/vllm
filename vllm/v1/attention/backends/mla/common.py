@@ -554,11 +554,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         prefill.prefill_main = self._fi_prefill_main
         prefill.prefill_chunks = self._fi_prefill_chunks
 
-    def _build_decode(self, block_table_tensor: torch.Tensor,
-                      seq_lens_cpu: torch.Tensor,
-                      seq_lens_device: torch.Tensor,
-                      query_start_loc_cpu: torch.Tensor,
-                      query_start_loc_device: torch.Tensor) -> MLACommonDecodeMetadata:
+    def _build_decode(
+            self, block_table_tensor: torch.Tensor, seq_lens_cpu: torch.Tensor,
+            seq_lens_device: torch.Tensor, query_start_loc_cpu: torch.Tensor,
+            query_start_loc_device: torch.Tensor) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
@@ -597,6 +596,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 

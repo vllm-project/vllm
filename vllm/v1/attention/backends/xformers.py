@@ -3,7 +3,7 @@
 """Attention layer with XFormersAttention."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, ClassVar, Optional
 
 import torch
 
@@ -196,6 +196,8 @@ class XFormersAttentionMetadata:
 
 class XFormersAttentionMetadataBuilder(
         AttentionMetadataBuilder[XFormersAttentionMetadata]):
+
+    reorder_batch_threshold: ClassVar[int] = 1
 
     def __init__(
         self,

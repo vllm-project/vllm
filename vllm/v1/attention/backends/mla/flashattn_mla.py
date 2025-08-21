@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, Optional
 import torch
 
 from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.utils.fa_utils import (flash_attn_supports_mla,
+                                           get_flash_attn_version)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonDecodeMetadata,
@@ -14,8 +16,6 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
 from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
-from vllm.vllm_flash_attn.fa_utils import (flash_attn_supports_mla,
-                                           get_flash_attn_version)
 
 if TYPE_CHECKING:
     pass
@@ -83,11 +83,11 @@ class FlashAttnMLAMetadataBuilder(
             )
         return None
 
-    def _build_decode(self, block_table_tensor: torch.Tensor,
-                      seq_lens_cpu: torch.Tensor,
-                      seq_lens_device: torch.Tensor,
-                      query_start_loc_cpu: torch.Tensor,
-                      query_start_loc_device: torch.Tensor) -> FlashAttnMLADecodeMetadata:
+    def _build_decode(
+            self, block_table_tensor: torch.Tensor, seq_lens_cpu: torch.Tensor,
+            seq_lens_device: torch.Tensor, query_start_loc_cpu: torch.Tensor,
+            query_start_loc_device: torch.Tensor
+    ) -> FlashAttnMLADecodeMetadata:
 
         query_lens_cpu = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])
         max_query_len = query_lens_cpu.max().item()
