@@ -34,6 +34,10 @@ if has_triton_kernels():
 if TYPE_CHECKING:
     from triton_kernels.matmul_ogs import PrecisionConfig
 
+"""
+code reference:
+https://github.com/triton-lang/triton/blob/dd1bbc52b34d202dfe5ffea1e04fb16166c5c04e/python/triton_kernels/bench/distributed.py#L264
+"""
 @triton.jit
 def pack_bitmatrix(
     bitmatrix,
@@ -103,7 +107,7 @@ def ep_routing_naive(
     mask = (expt_indx // num_local_expert) == ep_rank
     expt_indx -= ep_rank * num_local_expert
     expt_scal = expt_scal.masked_fill(~mask, 0)
-    expt_indx = expt_indx.masked_fill(~mask, E)
+    expt_indx = expt_indx.masked_fill(~mask, num_local_expert)
 
     expt_scal = expt_scal.reshape(-1)
     expt_indx = expt_indx.reshape(-1).to(torch.int32)
@@ -112,7 +116,7 @@ def ep_routing_naive(
     expt_indx, topk_indx = torch.sort(expt_indx, stable=True)
     gate_indx = torch.argsort(topk_indx, stable=True)
 
-    mask = expt_indx != E
+    mask = expt_indx != num_local_expert
     topk_indx[~mask] = -1
     gate_indx[gate_indx >= mask.sum()] = -1
     gate_scal = expt_scal[topk_indx]
@@ -160,8 +164,8 @@ def ep_routing_triton(
                                    n_rows=n_rows)
     expt_indx = expt_indx.int()
 
-    expt_indx, sort_indices = torch.sort(expt_indx, dim=1, stable=True)
-    expt_scal = torch.gather(expt_scal, 1, sort_indices)
+    # expt_indx, sort_indices = torch.sort(expt_indx, dim=1, stable=True)
+    # expt_scal = torch.gather(expt_scal, 1, sort_indices)
 
     assert E % ep_size == 0, "gpt-oss Triton kernel only \
                               support even sharded experts"
@@ -172,7 +176,7 @@ def ep_routing_triton(
     mask = (expt_indx // num_local_expert) == ep_rank
     expt_indx -= ep_rank * num_local_expert
     expt_scal = expt_scal.masked_fill(~mask, 0)
-    expt_indx = expt_indx.masked_fill(~mask, E)
+    expt_indx = expt_indx.masked_fill(~mask, num_local_expert)
 
     # Recover bitmatrix for local experts
     BLOCK_SIZE_M = 512

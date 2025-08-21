@@ -302,7 +302,6 @@ class Case:
 @pytest.mark.parametrize("num_token", [2])
 @pytest.mark.parametrize("tp, ep", [(1, 1), (2, 1), (4, 1), (8, 1), (1, 2),
                                     (1, 4), (1, 8)])
-# @pytest.mark.skip("now")
 def test_equiv(num_token, a_dtype, w_dtype, tp, ep):
     torch.cuda.manual_seed(42)
     M = num_token
@@ -325,7 +324,7 @@ def test_equiv(num_token, a_dtype, w_dtype, tp, ep):
         out_triton = torch.zeros_like(x_tri)
         for ep_rank, per_rank_ep_data in enumerate(triton_kernel_data):
             # we manually inject ep rank info, so no need for distributed launch
-            routing_data, gather_idx, scatter_idx = ep_routing_naive(
+            routing_data, gather_idx, scatter_idx = ep_routing_triton(
                 exp_data_tri,
                 topk,
                 sm_first=False,
