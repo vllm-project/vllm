@@ -12,8 +12,9 @@ class PolicyFactory:
             0:
             DefaultEplb,  # RandomLoadBalance: shuffle last physical expert on NPU 1 and 3
             1:
-            DynamicEplbV2,  # Dynamic EPLB policy:  expert replacement with constrained number of expert shuffle
+            DynamicEplb,  # Dynamic EPLB policy:  expert replacement with constrained number of expert shuffle
         }
 
         return policy.get(policy_type, DefaultEplb)(config)
+
 
