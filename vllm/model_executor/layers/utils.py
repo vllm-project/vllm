@@ -145,7 +145,8 @@ def cpu_unquantized_gemm(layer: torch.nn.Module,
 
 
 def dispatch_unquantized_gemm() -> Callable[
-    [torch.Tensor, torch.Tensor, Optional[torch.Tensor]], torch.Tensor]:
+    [torch.nn.Module, torch.Tensor, torch.Tensor, Optional[torch.Tensor]],
+    torch.Tensor]:
     if current_platform.is_rocm():
         return rocm_unquantized_gemm_wrapper()
     elif current_platform.is_cpu():

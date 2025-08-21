@@ -101,7 +101,7 @@ Supermicro AS-8125GS-TNMR2 with 2x AMD EPYC 9575F Processors, 2.25 TiB RAM, 8x A
 
 The vllm-dev docker image should work with any model supported by vLLM.  When running with FP8, AMD has quantized models available for a variety of popular models, or you can quantize models yourself using Quark.  If needed, the vLLM benchmark scripts will automatically download models and then store them in a Hugging Face cache directory for reuse in future tests. Alternatively, you can choose to download the model to the cache (or to another directory on the system) in advance.
 
-Many HuggingFace models, including Llama-3.1, have gated access.  You will need to set up an account at (https://huggingface.co), search for the model of interest, and request access if necessary. You will also need to create a token for accessing these models from vLLM: open your user profile (https://huggingface.co/settings/profile), select "Access Tokens", press "+ Create New Token", and create a new Read token.
+Many HuggingFace models, including Llama-3.1, have gated access.  You will need to set up an account at <https://huggingface.co>, search for the model of interest, and request access if necessary. You will also need to create a token for accessing these models from vLLM: open your user profile <https://huggingface.co/settings/profile>, select "Access Tokens", press "+ Create New Token", and create a new Read token.
 
 ### System optimization
 
@@ -207,6 +207,7 @@ export VLLM_USE_TRITON_FLASH_ATTN=0
 vLLM provides a number of engine options which can be changed to improve performance.  Refer to the [vLLM Engine Args](https://docs.vllm.ai/en/stable/usage/engine_args.html) documentation for the complete list of vLLM engine options.
 
 Below is a list of a few of the key vLLM engine arguments for performance; these can be passed to the vLLM benchmark scripts:
+
 - **--max-model-len** : Maximum context length supported by the model instance. Can be set to a lower value than model configuration value to improve performance and gpu memory utilization.
 - **--max-num-batched-tokens** : The maximum prefill size, i.e., how many prompt tokens can be packed together in a single prefill. Set to a higher value to improve prefill performance at the cost of higher gpu memory utilization. 65536 works well for LLama models.
 - **--max-num-seqs** : The maximum decode batch size (default 256). Using larger values will allow more prompts to be processed concurrently, resulting in increased throughput (possibly at the expense of higher latency).  If the value is too large, there may not be enough GPU memory for the KV cache, resulting in requests getting preempted.  The optimal value will depend on the GPU memory, model size, and maximum context length.
@@ -450,6 +451,7 @@ You should see some performance improvement about the e2e latency.
 `rocm/vllm-dev:main` image has experimental [AITER](https://github.com/ROCm/aiter) support, and can yield siginficant performance increase for some model/input/output/batch size configurations. To enable the feature make sure the following environment is set: `VLLM_ROCM_USE_AITER=1`, the default value is `0`. When building your own image follow the [Docker build steps](#Docker-manifest) using the [aiter_integration_final](https://github.com/ROCm/vllm/tree/aiter_integration_final) branch.
 
 Some use cases include:
+
 - amd/Mixtral-8x7B-Instruct-v0.1-FP8-KV
 - amd/Mixtral-8x22B-Instruct-v0.1-FP8-KV
 
@@ -511,45 +513,55 @@ Use AITER release candidate branch instead:
 ## Changelog
 
 20250605_aiter:
+
 - Updated to ROCm 6.4.1 and vLLM v0.9.0.1
 - AITER MHA
 - IBM 3d kernel for unified attention
 - Full graph capture for split attention
 
 20250521_aiter:
+
 - AITER V1 engine performance improvement
 
 20250513_aiter:
+
 - Out of memory bug fix
 - PyTorch fixes
 - Tunable ops fixes
 
 20250410_aiter:
+
 - 2-stage MoE
 - MLA from AITER
 
 20250325_aiter:
+
 - Improved DeepSeek-V3/R1 performance
 - Initial Gemma-3 enablement
 - Detokenizer disablement
 - Torch.compile support
 
 20250305_aiter:
+
 - AITER improvements
 - Support for FP8 skinny GEMM
 
 20250207_aiter:
+
 - More performant AITER
 - Bug fixes
 
 20250205_aiter:
+
 - [AITER](https://github.com/ROCm/aiter) support
 - Performance improvement for custom paged attention
 - Reduced memory overhead bug fix
 
 20250124:
+
 - Fix accuracy issue with 405B FP8 Triton FA
 - Fixed accuracy issue with TP8
 
 20250117:
+
 - [Experimental DeepSeek-V3 and DeepSeek-R1 support](#running-deepseek-v3-and-deepseek-r1)

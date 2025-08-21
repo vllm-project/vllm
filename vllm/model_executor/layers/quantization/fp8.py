@@ -784,6 +784,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
+            assert self.quant_config.weight_block_size is not None
             assert self.quant_config.activation_scheme == "dynamic"
             if current_platform.is_fp8_fnuz():
                 w13_weight, w13_weight_scale_inv, w13_input_scale = \
