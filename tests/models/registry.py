@@ -230,6 +230,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             "tiny": "ai21labs/Jamba-tiny-dev",
                                             "random": "ai21labs/Jamba-tiny-random",  # noqa: E501
                                         }),
+    "Lfm2ForCausalLM": _HfExamplesInfo("LiquidAI/LFM2-1.2B",
+                                       min_transformers_version="4.54"),
     "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Llama-3.2-1B-Instruct",
                                         extras={"guard": "meta-llama/Llama-Guard-3-1B",  # noqa: E501
                                                 "hermes": "NousResearch/Hermes-3-Llama-3.1-8B", # noqa: E501
