@@ -107,8 +107,9 @@ class Mxfp4Config(QuantizationConfig):
 
 
 class Mxfp4MoEMethod(FusedMoEMethodBase):
-    # cached permutation indices for trtllm-gen moe
-    _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+    if should_use_flashinfer_mxfp4():
+        # cached permutation indices for trtllm-gen moe
+        _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
