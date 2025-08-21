@@ -112,13 +112,17 @@ __global__ void moe_sum_kernel(
     const scalar_t* __restrict__ input,  // [..., topk, d]
     const int d) {
   const uint32_t token_idx = blockIdx.x;
+
+  auto _in_ptr = input + token_idx * TOPK * d;
+  auto out_ptr = out + token_idx * d;
   for (uint32_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
     scalar_t x = 0.0;
+    auto in_ptr = _in_ptr + idx;
 #pragma unroll
     for (int k = 0; k < TOPK; ++k) {
-      x += VLLM_LDG(&input[token_idx * TOPK * d + k * d + idx]);
+      x += VLLM_LDG(&in_ptr[k * d]);
     }
-    out[token_idx * d + idx] = x;
+    out_ptr[idx] = x;
   }
 }
 
@@ -305,6 +309,22 @@ void moe_sum(torch::Tensor& input,   // [num_tokens, topk, hidden_size]
     case 4:
       VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
         vllm::moe::moe_sum_kernel<scalar_t, 4><<<grid, block, 0, stream>>>(
+            output.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+            hidden_size);
+      });
+      break;
+
+    case 6:
+      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
+        vllm::moe::moe_sum_kernel<scalar_t, 6><<<grid, block, 0, stream>>>(
+            output.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+            hidden_size);
+      });
+      break;
+
+    case 8:
+      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
+        vllm::moe::moe_sum_kernel<scalar_t, 8><<<grid, block, 0, stream>>>(
             output.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
             hidden_size);
       });
