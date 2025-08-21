@@ -1181,9 +1181,10 @@ class OpenAIServingChat(OpenAIServing):
             # if auto tools are not enabled, and a named tool choice using
             #   outlines is not being used
             if (not self.enable_auto_tools or not self.tool_parser) and \
-                (not isinstance(request.tool_choice,
-                                ChatCompletionNamedToolChoiceParam
-                                ) and request.tool_choice != "required"):
+                type(request.tool_choice) is not \
+                    ChatCompletionNamedToolChoiceParam and \
+                request.tool_choice != "required":
+
                 message = ChatMessage(role=role,
                                       reasoning_content=reasoning_content,
                                       content=content)
@@ -1192,10 +1193,8 @@ class OpenAIServingChat(OpenAIServing):
             elif request.tool_choice and \
                 type(request.tool_choice) is ChatCompletionNamedToolChoiceParam:
 
-                if isinstance(tokenizer, MistralTokenizer):
-                    tool_call_class = MistralToolCall
-                else:
-                    tool_call_class = ToolCall
+                tool_call_class = MistralToolCall if isinstance(
+                    tokenizer, MistralTokenizer) else ToolCall
 
                 tool_parser_success = False
                 if self.tool_parser:
@@ -1203,19 +1202,23 @@ class OpenAIServingChat(OpenAIServing):
                         tool_parser = self.tool_parser(tokenizer)
 
                         tool_call_info = tool_parser.extract_tool_calls(
-                            content if content is not None else "", request=request)
+                            content if content is not None else "",
+                            request=request)
 
                         if tool_call_info.tools_called and \
                             len(tool_call_info.tool_calls) == 1 and \
-                            tool_call_info.tool_calls[0].function.name == request.tool_choice.function.name:
+                            tool_call_info.tool_calls[0].function.name == \
+                                request.tool_choice.function.name:
 
-                            message = ChatMessage(role=role,
-                                                reasoning_content=reasoning_content,
-                                                content=tool_call_info.content,
-                                                tool_calls=tool_call_info.tool_calls)
+                            message = ChatMessage(
+                                role=role,
+                                reasoning_content=reasoning_content,
+                                content=tool_call_info.content,
+                                tool_calls=tool_call_info.tool_calls)
                             tool_parser_success = True
-                    except RuntimeError as e:
-                        logger.exception("Error in tool parser creation.")
+                    except Exception:
+                        logger.warning("Failed to parse tool calls",
+                                       exc_info=True)
 
                 if not tool_parser_success:
                     message = ChatMessage(
@@ -1269,10 +1272,10 @@ class OpenAIServingChat(OpenAIServing):
                                       content=content)
 
             # handle when there are tools and tool choice is auto
-            elif request.tools and (
-                    request.tool_choice == "auto"
-                    or request.tool_choice is None) and self.enable_auto_tools \
-                    and self.tool_parser:
+            elif request.tools and \
+                (request.tool_choice == "auto" or \
+                 request.tool_choice is None) and \
+                self.enable_auto_tools and self.tool_parser:
 
                 try:
                     tool_parser = self.tool_parser(tokenizer)
