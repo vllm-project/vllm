@@ -16,10 +16,9 @@ from transformers.models.got_ocr2.image_processing_got_ocr2 import (
     get_optimal_tiled_canvas)
 
 from vllm.config import VllmConfig
-from vllm.jsontree import json_map_leaves
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargsItems
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -29,6 +28,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -123,16 +123,10 @@ class AyaVisionProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(AyaVisionConfig)
 
     def get_hf_processor(self, **kwargs: object) -> AyaVisionProcessor:
-        processor = self.ctx.get_hf_processor(AyaVisionProcessor, **kwargs)
+        return self.ctx.get_hf_processor(AyaVisionProcessor, **kwargs)
 
-        # Temporary workaround since this processor has multiple image tokens
-        # See https://github.com/huggingface/transformers/issues/38350
-        processor._check_special_mm_tokens = lambda *args, **kwargs: None
-
-        return processor
-
-    def get_image_processor(self) -> GotOcr2ImageProcessor:
-        return self.get_hf_processor().image_processor
+    def get_image_processor(self, **kwargs: object) -> GotOcr2ImageProcessor:
+        return self.get_hf_processor(**kwargs).image_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
@@ -248,7 +242,7 @@ class AyaVisionMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token = hf_processor.image_token
@@ -256,8 +250,7 @@ class AyaVisionMultiModalProcessor(
         image_processor = hf_processor.image_processor
 
         def get_replacement(item_idx: int):
-            images: ImageProcessorItems = mm_items.get("image",
-                                                       ImageProcessorItems)
+            images = mm_items.get_items("image", ImageProcessorItems)
             image_size: ImageSize = images.get_image_size(item_idx)
             num_patches = self.info.get_num_patches(
                 image_width=image_size.width,

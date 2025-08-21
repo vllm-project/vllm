@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import Optional
 
 import deep_ep
 import torch
@@ -127,12 +127,16 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 expert_topk_weights)
 
     def prepare(
-        self, a1: torch.Tensor, a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor], topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor, num_experts: int,
-        expert_map: Optional[torch.Tensor], apply_router_weight_on_input: bool,
+        self,
+        a1: torch.Tensor,
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-        extra_prepare_args: Optional[dict[str, Any]]
     ) -> tuple[torch.Tensor, Optional[torch.Tensor],
                Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
                Optional[torch.Tensor]]:
@@ -144,12 +148,13 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1")
             a1 = a1 * topk_weights.to(a1.dtype)
 
-        if quant_config.per_act_token_quant:
+        if quant_config.is_block_quantized:
+            # Quant and Dispatch
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
                 a1_scale,
                 quant_dtype=quant_config.quant_dtype,
-                per_act_token_quant=True,
+                per_act_token_quant=quant_config.per_act_token_quant,
                 block_shape=quant_config.block_shape,
             )
             if a1q_scale is not None and a1q_scale.numel() == 1:
@@ -162,8 +167,10 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  rank_topk_weights=topk_weights,
                  num_experts=num_experts)
         else:
-            # DeepEP kernels only support dispatching per-token-quant
-            # quantization. dispatch in bfloat16.
+            # Dispatch and Quant
+            # DeepEP kernels only support dispatching block-quantized
+            # activation scales.
+            # Dispatch in bfloat16
             (expert_x, _, expert_tokens_meta, expert_topk_ids,
              expert_topk_weights) = self._do_dispatch(
                  tokens=a1,
@@ -171,7 +178,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                  rank_topk_ids=topk_ids,
                  rank_topk_weights=topk_weights,
                  num_experts=num_experts)
-            # quantize now
+            # Quantize after dispatch.
             expert_x_scale = None
             if expert_x.numel() != 0:
                 expert_x, expert_x_scale = moe_kernel_quantize_input(
@@ -184,11 +191,15 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
                 expert_topk_weights)
 
-    def finalize(self, output: torch.Tensor, fused_expert_output: torch.Tensor,
-                 topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                 apply_router_weight_on_input: bool,
-                 weight_and_reduce_impl: mk.TopKWeightAndReduce,
-                 extra_finalize_args: Optional[dict[str, Any]]) -> None:
+    def finalize(
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+    ) -> None:
 
         assert self.handle is not None
 
