@@ -217,7 +217,7 @@ class FusedMoEPrepareAndFinalize(ABC):
     ) -> ReceiverType:
         """
         Perform any quantization (and/or) dispatching needed for this kernel
-        but does not wait for results from other workers.
+        but do not wait for results from other workers.
         - a1: The (unquantized) input to the MoE layer.
         - a1_scale: Optional scales for a1
         - a2_scale: Optional scales for the second MoE gemm.  Required to make
@@ -498,10 +498,12 @@ class FusedMoEModularKernel(torch.nn.Module):
     objects.
     """
 
-    def __init__(self,
-                 prepare_finalize: FusedMoEPrepareAndFinalize,
-                 fused_experts: FusedMoEPermuteExpertsUnpermute,
-                 shared_experts: Optional[torch.nn.Module] = None):
+    def __init__(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        fused_experts: FusedMoEPermuteExpertsUnpermute,
+        shared_experts: Optional[torch.nn.Module] = None,
+    ):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
@@ -785,7 +787,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
-        # TODO: shared_experts chunking?
+        # TODO(bnell): implement chunking for shared_experts.
         shared_output: torch.Tensor
 
         if (not self.prepare_finalize.has_prepare_no_receive()
