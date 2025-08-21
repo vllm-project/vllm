@@ -305,7 +305,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 paged_kv_indptr_buffer=paged_kv_indptr,
                 paged_kv_indices_buffer=paged_kv_indices,
                 paged_kv_last_page_len_buffer=paged_kv_last_page_len,
-                use_tensor_cores=True)
+                # Tensor cores are enabled by default because the perf would be
+                # atleast as good as cuda cores for all attention ops in latest 
+                # gpus.
+                use_tensor_cores=True, 
+            )
 
             # save the decode wrapper
             if use_cudagraph:
