@@ -63,6 +63,8 @@ class DummyLogitsProcessor(LogitsProcessor):
         process_dict_updates(
             self.req_info,
             batch_update,
+            # This function returns the LP's state based on the request details,
+            # or None if this LP does not apply to the request.
             lambda params, _, __: params.extra_args
             and (params.extra_args.get("target_tokens")),
         )
