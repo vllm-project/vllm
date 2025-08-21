@@ -12,7 +12,7 @@ class DynamicTable:
     placement_table = None
 
 
-class DynamicEplbV2(EplbPolicy):
+class DynamicEplb(EplbPolicy):
 
     def __init__(self, config: DynamicConfig):
         super().__init__(config)
@@ -684,3 +684,4 @@ class DynamicEplbV2(EplbPolicy):
                                                                                                   layer_num, expert_num)
 
         return physical_to_logical_map, logical_to_physical_map, logical_replica_count
+
