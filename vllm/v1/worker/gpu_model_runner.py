@@ -341,10 +341,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.model_config,
             self.scheduler_config,
             self.mm_registry,
-            max_model_len=self.max_model_len,
-            max_num_reqs=self.max_num_reqs,
-        ) if self.supports_mm_inputs \
-            else None)
+        ) if self.supports_mm_inputs else None)
 
         self.reorder_batch_threshold: Optional[int] = None
 
@@ -669,7 +666,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mm_budget = self.mm_budget
             assert mm_budget is not None
 
-            dummy_modality, _ = mm_budget.get_modality_with_max_tokens()
+            dummy_modality = mm_budget.get_modality_with_max_tokens()
 
             return self._get_mm_dummy_batch(dummy_modality, num_seqs)
 
@@ -2595,14 +2592,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # NOTE: Currently model is profiled with a single non-text
                     # modality with the max possible input tokens even when
                     # it supports multiple.
-                    (
-                        dummy_modality,
-                        max_tokens,
-                    ) = mm_budget.get_modality_with_max_tokens()
-                    (
-                        max_mm_items_per_prompt,
-                        max_mm_items_per_batch,
-                    ) = mm_budget.get_max_items(dummy_modality, max_tokens)
+                    dummy_modality = mm_budget.get_modality_with_max_tokens()
+                    max_mm_items_per_batch = mm_budget \
+                        .max_items_per_batch_by_modality[dummy_modality]
 
                     logger.info(
                         "Encoder cache will be initialized with a budget of "
