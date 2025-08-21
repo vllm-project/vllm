@@ -827,7 +827,6 @@ class OpenAIServingResponses(OpenAIServing):
             status="in_progress",
             usage=None,
         ).model_dump()
-        current_output_index += 1
         yield _send_event(
             ResponseCreatedEvent(
                 type="response.created",
