@@ -888,12 +888,6 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
-        parser.add_argument('--enable-prompt-adapter',
-                            action='store_true',
-                            deprecated=True,
-                            help='[DEPRECATED] Prompt adapter has been '
-                            'removed. Setting this flag to True or False'
-                            ' has no effect on vLLM behavior.')
 
         return parser
 
