@@ -89,7 +89,7 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
 
   explicit FP16Vec16(const FP32Vec16&);
 
-  void save(void* ptr) const { *reinterpret_cast<__m256i*>(ptr) = reg; }
+  void save(void* ptr) const { _mm256_storeu_si256((__m256i*)ptr, reg); }
 
   void save(void* ptr, const int elem_num) const {
     constexpr uint32_t M = 0xFFFFFFFF;
@@ -126,7 +126,7 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
 
   explicit BF16Vec16(const FP32Vec16&);
 
-  void save(void* ptr) const { *reinterpret_cast<__m256i*>(ptr) = reg; }
+  void save(void* ptr) const { _mm256_storeu_si256((__m256i*)ptr, reg); }
 
   void save(void* ptr, const int elem_num) const {
     constexpr uint32_t M = 0xFFFFFFFF;
@@ -180,8 +180,8 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
             (__m128i)vec8_data.reg, 1)) {}
 
   void save(void* ptr) const {
-    *reinterpret_cast<__m256i*>(ptr) = reg_low;
-    *reinterpret_cast<__m256i*>((__m256i*)ptr + 1) = reg_high;
+    _mm256_storeu_si256((__m256i*)ptr, reg_low);
+    _mm256_storeu_si256((__m256i*)ptr + 1, reg_high);
   }
 };
 #endif
