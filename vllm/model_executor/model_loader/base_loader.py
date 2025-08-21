@@ -52,4 +52,4 @@ class BaseModelLoader(ABC):
         return model.eval()
 
 
-model_loader_manager = ExtensionManager[BaseModelLoader]()
+model_loader_manager = ExtensionManager(base_cls=BaseModelLoader)

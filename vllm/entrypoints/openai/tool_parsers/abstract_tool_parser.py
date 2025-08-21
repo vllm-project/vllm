@@ -79,4 +79,4 @@ class ToolParser:
             "implemented!")
 
 
-tool_parser_manager = ExtensionManager[ToolParser]()
+tool_parser_manager = ExtensionManager(base_cls=ToolParser)

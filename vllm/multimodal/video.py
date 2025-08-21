@@ -63,7 +63,7 @@ class VideoLoader:
         raise NotImplementedError
 
 
-video_loader_manager = ExtensionManager[VideoLoader]()
+video_loader_manager = ExtensionManager(base_cls=VideoLoader)
 
 
 @video_loader_manager.register(names=["opencv"])

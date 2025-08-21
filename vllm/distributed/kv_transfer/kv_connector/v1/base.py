@@ -333,4 +333,4 @@ class KVConnectorBase_V1(ABC):
         return None
 
 
-kv_connector_manager = ExtensionManager[KVConnectorBase_V1]()
+kv_connector_manager = ExtensionManager(base_cls=KVConnectorBase_V1)

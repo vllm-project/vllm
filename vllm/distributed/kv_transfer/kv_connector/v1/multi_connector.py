@@ -241,11 +241,10 @@ class MultiConnector(KVConnectorBase_V1):
             if name is None:
                 # With ExtensionManager, we no longer do on-the-fly imports,
                 # as extensions must be registered via
-                # ExtensionManager.register(...) decorator.
+                # register(...) decorator.
                 raise ValueError(
                     "KV connector name must be set in KVTransferConfig")
-            connector_cls = ExtensionManager.get_extension_class(
-                base_cls=KVConnectorBase_V1, name=name)
+            connector_cls = kv_connector_manager.get_extension_class(name=name)
 
             required_kvcache_layout = (
                 connector_cls.get_required_kvcache_layout(temp_vllm_config))
