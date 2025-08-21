@@ -20,7 +20,7 @@ def linear_quantize(name, from_p, profile):
             from_p = torch.round(from_p).clamp(min=-128, max=127).to(torch.int8)
         else:
             from_p = from_p.to(profile[name]['type'])
-    
+    # print("from p dtype:", from_p.dtype)
     return from_p 
 
 input_linear_map = {

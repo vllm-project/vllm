@@ -672,6 +672,7 @@ def patch_load_weights(self: "Worker"):
             # are unfused
             for name, (shape, stride, dtype, nbytes) in model.hacked_original_weights_rebuild_keys.items():
                 # allocates storage in orignal dtype (bfloat16 for fp8 dynamic quantization)
+                # for int8 this should be int8 dtype
                 if name in existing_params and name in requested_names_vllm:
                     existing_params[name].data = torch.empty(shape, dtype=dtype) 
             
@@ -681,13 +682,19 @@ def patch_load_weights(self: "Worker"):
                         setattr(existing_params[n], k, bond_method_to_cls(loader, existing_params[n]))
             end1 = time.time()
 
+
+            ff = time.time()
+            weights_to_load = flash_quantize_fn(weights, self.flash_rl_profile)
+            logger.debug(f"Applying flashrl quantization functions took: {time.time() - ff}")
+
             updated_params = original_load_weights(
-                flash_quantize_fn(weights, self.flash_rl_profile)
+                weights_to_load    
             )
             end2 = time.time()
-            # print("original load weights took: ", end2 - end1, flush=True)
+            logger.debug(f"original load weights took: {end2 - end1}")
             
-            if hasattr(model, 'hacked_model_config') and hasattr(model, 'hacked_target_device'):        
+            # skip process weights afteer loading for int8
+            if (hasattr(model, 'hacked_model_config') and hasattr(model, 'hacked_target_device')) and not config_data.get('fn', 'int8') == "int8":
                 from vllm.model_executor.model_loader import utils
                 process_weights_after_loading_subset(model, None, None, param_names=requested_names_vllm)
                 setattr(model, 'hacked_not_need_process_weights_after_loading', True)
@@ -732,7 +739,6 @@ def patch_load_weights(self: "Worker"):
             gc.collect()
             torch.cuda.empty_cache()
             end5 = time.time()
-            # print("clearing out the cache weights took: ", end5 - end4, flush=True)
         
             if len(self.flash_rl_module_attribute_to_preserve) > 0:
                 for _, module in model.named_modules():
@@ -741,7 +747,7 @@ def patch_load_weights(self: "Worker"):
                             assert hasattr(module, f'hacked_{attr}'), f"module {module} does not have attribute hacked_{attr}"
                             setattr(module, attr, getattr(module, f'hacked_{attr}'))
                             delattr(module, f'hacked_{attr}')
-            # print("E2E time for load weights: ", time.time() - start, flush=True)
+            logger.debug(f"E2E time for patched load weights: {time.time() - start}")
             return updated_params
         
         model.load_weights = hacked_load_weights

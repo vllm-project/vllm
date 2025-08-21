@@ -4,6 +4,7 @@
 import gc
 import os
 from typing import TYPE_CHECKING, Optional
+import time 
 
 import ray
 import torch
@@ -200,11 +201,33 @@ class Worker(WorkerBase):
         # from transformers import AutoModelForCausalLM
         # # load the bf16 model
         # test_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
-        # # print("dump params: ", [name for name, _ in test_model.named_parameters()])
-        # full_weights = [(name, param.to(self.device)) for name, param in test_model.named_parameters()]
+        # weights_to_load = []
+        # from typing import Dict, List 
+
+        # module_to_params: Dict[str, List[str]] = {}
+        # for param_name, param in test_model.named_parameters():
+        #     module_name = ".".join(param_name.split(".")[:-2])
+        #     if module_name not in module_to_params:
+        #         module_to_params[module_name] = [param_name]
+        #     else:
+        #         module_to_params[module_name].append(param_name)
+        
+        # params = dict(test_model.named_parameters())
+        # weights = []
+        # for i, module in enumerate(module_to_params.keys()):
+        #     if i == 4:
+        #         break
+        #     for param_name in module_to_params[module]:
+        #         param = params[param_name]
+        #         weights.append((param_name, param))
+        # # print("dump params: ", [name for name, _ in weights])
+        # full_weights = [(name, param.to(self.device)) for name, param in weights]
+        # s = time.time()
         # self.model_runner.model.load_weights(
-        #     weights=full_weights[:5]
+        #     weights=full_weights
         # )
+        # e = time.time()
+        # print("Total e2e time: ", e - s )
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
