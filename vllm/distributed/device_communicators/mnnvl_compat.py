@@ -83,12 +83,14 @@ import torch
 from flashinfer.comm.mnnvl import CommBackend as CommBackend
 class vLLMCommBackend(CommBackend):
     def __init__(self):
-        self._group = get_tensor_model_parallel_group()
+        # self._group = get_tensor_model_parallel_group()
+        self._group = get_dp_group()
     
     def Get_rank(self) -> int:
         return self._group.rank_in_group
     
     def Get_size(self) -> int:
+        print('compat.py'*100)
         return self._group.world_size
     
     def allgather(self, data: int) -> list[int]:

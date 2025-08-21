@@ -302,15 +302,25 @@ class FlashInferAllToAllManager(All2AllManagerBase):
         logger.debug(
                 "making map: "
                 "rank=%d, world size=%d", rank, world_size)
-
+        print(f"At a2a initialize: {world_size}, {rank}, {gpus_per_node}, {4}")
+        # self.mapping = Mapping(
+        #     world_size=world_size,
+        #     rank=rank,
+        #     gpus_per_node=gpus_per_node,
+        #     tp_size=4,
+        #     # dp_size=world_size,  #VLLM is dp
+        # )
         self.mapping = Mapping(
-            world_size=world_size,
-            rank=rank,
-            gpus_per_node=gpus_per_node,
+            world_size,
+            rank,
+            gpus_per_node,
             tp_size=4,
             # dp_size=world_size,  #VLLM is dp
         )
-
+        # ref
+        # self.mapping = Mapping(
+        #     self.world_size, self.rank, self.local_world_size, tp_size=self.world_size
+        # )
         from vllm.distributed.device_communicators.mnnvl_compat import (
             vLLMCommBackend)
         def get_vllm_mnnvl_config() -> MnnvlConfig:
@@ -359,8 +369,8 @@ class FlashInferAllToAllManager(All2AllManagerBase):
         topk_weights: torch.Tensor,
         top_k: int,
         num_experts: int,
-        ep_rank: int,
-        ep_size: int,
+        # ep_rank: int,
+        # ep_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # TODO(shuw): add later
         # assert (
@@ -369,6 +379,8 @@ class FlashInferAllToAllManager(All2AllManagerBase):
 
         # gather router info
         # Assume same number of tokens across all devices if global_num_tokens_cpu is None
+        ep_rank = self.rank
+        ep_size = self.world_size
         max_num_token = max(global_num_tokens_cpu
                             ) if global_num_tokens_cpu is not None else x.shape[0]
         topk_ids = torch.nn.functional.pad(
@@ -401,23 +413,26 @@ class FlashInferAllToAllManager(All2AllManagerBase):
                 ep_size,
             ))
         self.alltoall_info = alltoall_info
+        print(f"inside: before: {x.shape}, rank:{ep_rank}, max_num_token:{max_num_token}")
         x = MnnvlMoe.mnnvl_moe_alltoallv(
             x, alltoall_info, self.workspace_tensor, ep_rank, ep_size)
-
+        print(f"inside: after: {x.shape}")
         return x, topk_ids, topk_weights
 
     def flashinfer_alltoall_combine(
         self,
         output: torch.Tensor,
         top_k: int,
-        ep_rank: int,
-        ep_size: int,
+        # ep_rank: int,
+        # ep_size: int,
         token_count: int,
     ):
         # TODO(shuw): add later
         # assert (
         #     ensure_alltoall_workspace_initialized()
         # ), "FlashInfer AllToAll workspace not available"
+        ep_rank = self.rank
+        ep_size = self.world_size
         return MnnvlMoe.mnnvl_moe_alltoallv_combine(
             output,
             self.alltoall_info,

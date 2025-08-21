@@ -1482,25 +1482,25 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
               and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS):
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 flashinfer_cutlass_moe_fp4)
-
-            out = flashinfer_cutlass_moe_fp4(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                w1_scale=layer.w13_blockscale_swizzled,
-                w2_scale=layer.w2_blockscale_swizzled,
-                g1_alphas=layer.g1_alphas,
-                g2_alphas=layer.g2_alphas,
-                a1_gscale=layer.w13_input_scale_quant,
-                a2_gscale=layer.w2_input_scale_quant,
-                inplace=False,  # TODO(shuw): fix later, now output is high prec
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
+            out = torch.empty_like(x)
+            # out = flashinfer_cutlass_moe_fp4(
+            #     hidden_states=x,
+            #     w1=layer.w13_weight,
+            #     w2=layer.w2_weight,
+            #     topk_weights=topk_weights,
+            #     topk_ids=topk_ids,
+            #     w1_scale=layer.w13_blockscale_swizzled,
+            #     w2_scale=layer.w2_blockscale_swizzled,
+            #     g1_alphas=layer.g1_alphas,
+            #     g2_alphas=layer.g2_alphas,
+            #     a1_gscale=layer.w13_input_scale_quant,
+            #     a2_gscale=layer.w2_input_scale_quant,
+            #     inplace=False,  # TODO(shuw): fix later, now output is high prec
+            #     activation=activation,
+            #     global_num_experts=global_num_experts,
+            #     expert_map=expert_map,
+            #     apply_router_weight_on_input=apply_router_weight_on_input,
+            # )
         else:
             # If no modular kernel is provided, use cutlass_moe_fp4 for TP case
             # only (no EP).
