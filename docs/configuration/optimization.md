@@ -153,7 +153,8 @@ from vllm import LLM
 
 llm = LLM(
     model="Qwen/Qwen2.5-VL-72B-Instruct",
-    # The vision encoder uses TP=4 (not DP=1) to shard the input data
+    # The vision encoder uses TP=4 (not DP=1) to shard the input data,
+    # so the TP size becomes the effective DP size.
     # The language decoder uses TP=4 to shard the weights as usual
     tensor_parallel_size=4,
     mm_encoder_tp_mode="data",
