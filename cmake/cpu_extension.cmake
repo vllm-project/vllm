@@ -8,6 +8,9 @@ if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
     set(MACOSX_FOUND TRUE)
 endif()
 
+if (${CMAKE_SYSTEM_NAME} MATCHES "AIX")
+    set(AIX_FOUND TRUE)
+endif()
 
 #
 # Define environment variables for special configurations
@@ -30,6 +33,25 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
     )
 endif()
 
+if(AIX_FOUND)
+   set (ENABLE_NUMA FALSE)
+   execute_process(COMMAND sh -c "prtconf | grep 'Implementation' | head -n 1"
+                   OUTPUT_VARIABLE POWER10_M
+                   RESULT_VARIABLE PRTCONF_RESULT
+                   ERROR_QUIET)
+   if(NOT PRTCONF_RESULT EQUAL 0)
+       message(WARNING "Failed to determine PowerPC CPU version via prtconf. Using '-mcpu=native'.")
+   endif()
+   string(TOUPPER "${POWER10_M}" POWER10_M_UPPER)
+   string(REGEX MATCHALL "POWER *([0-9]+)" MATCHED_STRING "${POWER10_M_UPPER}")
+   string(REGEX REPLACE "POWER *([0-9]+)" "\\1" EXTRACTED_NUMBER "${MATCHED_STRING}")
+   if (EXTRACTED_NUMBER GREATER_EQUAL 10)
+       list(APPEND CXX_COMPILE_FLAGS -mcpu=power10 -mpowerpc64 -mvsx -fopenmp -DVLLM_CPU_EXTENSION)
+   else()
+       list(APPEND CXX_COMPILE_FLAGS -mcpu=native -mpowerpc64 -mvsx -fopenmp -DVLLM_CPU_EXTENSION)
+   endif()
+endif()
+
 if(MACOSX_FOUND)
     list(APPEND CXX_COMPILE_FLAGS
         "-DVLLM_CPU_EXTENSION")
@@ -39,7 +61,7 @@ else()
         "-DVLLM_CPU_EXTENSION")
 endif()
 
-if (NOT MACOSX_FOUND)
+if (NOT MACOSX_FOUND AND NOT AIX_FOUND)
     execute_process(COMMAND cat /proc/cpuinfo
                     RESULT_VARIABLE CPUINFO_RET
                     OUTPUT_VARIABLE CPUINFO)
@@ -90,6 +112,8 @@ if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     set(ENABLE_NUMA OFF)
     check_sysctl(hw.optional.neon ASIMD_FOUND)
     check_sysctl(hw.optional.arm.FEAT_BF16 ARM_BF16_FOUND)
+elseif (AIX_FOUND)
+    set(AIX_POWERPC_FOUND TRUE)
 else()
     find_isa(${CPUINFO} "avx2" AVX2_FOUND)
     find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
@@ -175,6 +199,8 @@ elseif (S390_FOUND)
         "-mzvector"
         "-march=native"
         "-mtune=native")
+elseif (AIX_POWERPC_FOUND)
+    message(STATUS "AIX PowerPC detected")
 else()
     message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA, S390X ISA or ARMv8 support.")
 endif()
