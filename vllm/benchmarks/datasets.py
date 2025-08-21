@@ -568,10 +568,14 @@ class RandomMultiModalDataset(RandomDataset):
       images with resolution 256x256 w.p. 0.5,
       images with resolution 720x1280 w.p. 0.4,
       videos with resolution 720x1280 and 16 frames w.p. 0.1.
+      Remove zero probability modalities from the bucket config.
       Always ensure that the bucket config sums to 1.
-      NOTE: The sampling strategy is an heuristic. We can do better.
-      For example, sample without replacement considering the limit per prompt
-      for all modalities.
+      NOTE: The mm item sampling strategy is as follows:
+      Consider that the number of max multimodal items per prompt is
+      at most the sum of mm-limits-per-prompt for all modalities whose
+      probability is non-zero in the bucket config.
+      This allows us to always sample the required number of multimodal items
+      per prompt.
     - Optional `enable_multimodal_chat` formats prompt/content into chat style.
     - Reuses the seeded RNG for reproducible text and image sampling.
     """
@@ -594,7 +598,13 @@ class RandomMultiModalDataset(RandomDataset):
 
 
     def generate_synthetic_image(self, width: int, height: int) -> Image.Image:
-        """Generate synthetic PIL image with random RGB values."""
+        """Generate synthetic PIL image with random RGB values.
+        
+        NOTE: iid pixel sampling results in worst-case compression 
+        (good for stressing I/O), but very unlike real photos. 
+        We could consider a “low-freq” mode (e.g., noise blur)
+        to emulate network realism instead of max stress.
+        """
         random_pixels = self._rng.integers(
             0,
             256,
@@ -623,15 +633,21 @@ class RandomMultiModalDataset(RandomDataset):
 
     def normalize_bucket_config(self, bucket_config: dict[tuple[int, int, int], 
                                 float]) -> dict[tuple[int, int, int], float]:
-        """Normalize the bucket config to sum to 1."""
+        """
+        Remove zero probability entries
+        and normalize the bucket config to sum to 1.
+        """
         # Raise error if value is negative
         if any(v < 0 for v in bucket_config.values()):
             raise ValueError("Bucket config values must be non-negative.")
+        # Remove zero probability entries
+        bucket_config = {k: v for k, v in bucket_config.items() if v > 0}
+        # if bucket config is empty, raise error
+        if not bucket_config:
+            raise ValueError("Got invalid bucket config. "
+                             "Bucket config values must be non-zero.")
+        # Normalize the remaining bucket config to sum to 1
         total = sum(bucket_config.values())
-        # Raise error if total is 0
-        if total == 0:
-            raise ValueError("Got 0 sum of bucket config values. "
-                             "Bucket config values must sum to non-zero.")
         return {k: v / total for k, v in bucket_config.items()}
 
 
@@ -665,7 +681,7 @@ class RandomMultiModalDataset(RandomDataset):
         num_mm_items_range_ratio: float,
         limit_mm_per_prompt: dict[str, int],
         bucket_config: dict[tuple[int, int, int], float],
-    ) -> tuple[int, int, dict[tuple[int, int, int], float]]:
+    ) -> tuple[int, int, dict[str, int], dict[tuple[int, int, int], float]]:
         """
         Get the sampling parameters for the multimodal items.
         """
@@ -675,18 +691,6 @@ class RandomMultiModalDataset(RandomDataset):
             "range"
         )
 
-        # Normalize bucket config to sum to 1
-        bucket_config = self.normalize_bucket_config(bucket_config)
-        logger.info(
-            "Normalized bucket config: %s", bucket_config,
-        )
-
-        # Get max and min num mm items
-        max_num_mm_items = int(num_mm_items * (1 + num_mm_items_range_ratio))
-        # Ensure min num mm items is at least 0
-        min_num_mm_items = max(0, 
-                            int(num_mm_items * (1 - num_mm_items_range_ratio)
-                            ))
         # Ensure modalities to sample are in limit_mm_per_prompt
         for k, v in bucket_config.items():
             # get modality from bucket config
@@ -696,11 +700,40 @@ class RandomMultiModalDataset(RandomDataset):
                                  f"limit_mm_per_prompt: "
                                  f"{limit_mm_per_prompt.keys()}")
 
-        # Ensure max num mm items is smaller than min num mm items
-        if max_num_mm_items < min_num_mm_items:
-            raise ValueError(f"Max num mm items is less than min num mm items: "
-                             f"{max_num_mm_items} < {min_num_mm_items}")
+        # Remove zero probability entries 
+        # and normalize bucket config to sum to 1
+        bucket_config = self.normalize_bucket_config(bucket_config)
+        logger.info(
+            "Normalized bucket config: %s", bucket_config,
+        )
+        # Only consider limit per prompt for modalities in bucket config
+        allowed_modalities = {self.map_config_to_modality(cfg) 
+                              for cfg in bucket_config}
+        limit_mm_per_prompt = {
+            k: v for k, v in limit_mm_per_prompt.items() 
+            if k in allowed_modalities}
+        if not limit_mm_per_prompt:
+            raise ValueError("No valid limits for modalities present in "
+                             "bucket_config.")
 
+        logger.info(
+            "Updated mm-limit-per-prompt: %s", limit_mm_per_prompt,
+        )
+
+        # Get max and min num mm items and ensure
+        # it is at most the sum of limit_mm_per_prompt for all modalities
+        max_num_mm_items = min(sum(limit_mm_per_prompt.values()), 
+                                int(num_mm_items * (1 + num_mm_items_range_ratio
+                                )))
+        # Ensure min num mm items is at least 0
+        min_num_mm_items = max(0, 
+                            int(num_mm_items * (1 - num_mm_items_range_ratio)
+                            ))
+        # Raise error if min num mm items is greater than max num mm items
+        if min_num_mm_items > max_num_mm_items:
+            raise ValueError(f"Min num mm items is greater than max mm items: "
+                             f"{min_num_mm_items} > {max_num_mm_items}")
+        
         logger.info(
             "Sampling number of multimodal items from [%s, %s]",
             min_num_mm_items, max_num_mm_items,
@@ -709,6 +742,7 @@ class RandomMultiModalDataset(RandomDataset):
         return (
             min_num_mm_items,
             max_num_mm_items,
+            limit_mm_per_prompt,
             bucket_config,
         )
 
@@ -732,6 +766,9 @@ class RandomMultiModalDataset(RandomDataset):
         request_num_mm_items = int(
             self._rng.integers(min_num_mm_items, max_num_mm_items + 1)
         ) 
+        # If request_num_mm_items is 0, yield an empty iterator
+        if request_num_mm_items == 0:
+            return
         # Initialize modality counters
         modality_counter = {self.map_config_to_modality(k): 0 
                             for k in bucket_config}
@@ -756,8 +793,12 @@ class RandomMultiModalDataset(RandomDataset):
                     if self.map_config_to_modality(k) == modality:
                         bucket_config_copy[k] = 0
                 # If all configs are 0, break the loop
-                # Can this happen?
+                # This should not happen as request_num_mm_items is at most
+                # the sum of limit_mm_per_prompt for all modalities
                 if all(v == 0 for v in bucket_config_copy.values()):
+                    logger.warning("Exhausted all multimodal items "
+                                   "of modality %s",
+                                   modality)
                     break
                 # Renormalize the bucket config
                 bucket_config_copy = self.normalize_bucket_config(
@@ -788,6 +829,7 @@ class RandomMultiModalDataset(RandomDataset):
         (
             min_num_mm_items,
             max_num_mm_items,
+            limit_mm_per_prompt,
             bucket_config,
         ) = self.get_mm_item_sampling_params(
             num_mm_items,
