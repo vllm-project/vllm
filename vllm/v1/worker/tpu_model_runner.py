@@ -32,7 +32,6 @@ from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
                                     PlaceholderRange)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
@@ -1330,7 +1329,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 batched_dummy_mm_inputs = self._get_mm_dummy_batch(
                     mode,
                     num_items,
-                    cache=mm_budget.cache,
                 )
                 # Run multimodal encoder.
                 xm.mark_step()
@@ -1562,7 +1560,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     batched_dummy_mm_inputs = self._get_mm_dummy_batch(
                         dummy_modality,
                         max_mm_items_per_batch,
-                        cache=mm_budget.cache,
                     )
 
                     # Run multimodal encoder.
@@ -1813,15 +1810,15 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         modality: str,
         max_items_per_batch: int,
-        *,
-        cache: Optional[BaseMultiModalProcessorCache],
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
+        assert self.mm_budget is not None
+
         dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
             seq_len=self.max_num_tokens,
             mm_counts={modality: 1},
-            cache=cache,
+            cache=self.mm_budget.cache,
         )
         dummy_mm_data = dummy_decoder_data.multi_modal_data
 
