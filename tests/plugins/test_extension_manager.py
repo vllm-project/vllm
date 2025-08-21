@@ -97,3 +97,8 @@ def test_extension_manager_valid_names():
         "a1", "a2", "a2_alias"
     ]
     assert extension_manager_b.get_valid_extension_names() == ["b1", "b2"]
+
+
+def test_extension_manager_must_be_unique_per_base_class():
+    with pytest.raises(ValueError):
+        _ = ExtensionManager(base_cls=BaseA)

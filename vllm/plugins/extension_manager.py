@@ -89,6 +89,9 @@ class ExtensionManagerRegistry:
 class ExtensionManager:
 
     def __init__(self, base_cls: type) -> None:
+        if base_cls.__name__ in ExtensionManagerRegistry._registry:
+            raise ValueError(
+                f"Extension group {base_cls.__name__} already exists.")
         self.base_cls = base_cls
 
     def register(self, names: list[str]):
