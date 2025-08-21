@@ -278,7 +278,9 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return _qwen2_5_omni_thinker_field_config(hf_inputs)
+        return create_qwen2_5_omni_thinker_field_config(
+            self.info.get_hf_config().vision_config.spatial_merge_size
+        )(hf_inputs)
 
     def _maybe_apply_prompt_updates(
         self,
