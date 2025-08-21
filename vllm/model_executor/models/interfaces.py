@@ -3,7 +3,7 @@
 
 from collections.abc import Iterable, Mapping, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
-                    Union, overload, runtime_checkable)
+                    TypeVar, Union, overload, runtime_checkable)
 
 import numpy as np
 import torch
@@ -641,6 +641,23 @@ def supports_cross_encoding(
     return is_pooling_model(model) and _supports_cross_encoding(model)
 
 
+_T = TypeVar("_T", bound=type[torch.nn.Module])
+
+
+def default_pooling_type(pooling_type: str):
+    """Set default_pooling_type decorator. """
+
+    def func(model: _T) -> _T:
+        model.default_pooling_type = pooling_type  # type: ignore
+        return model
+
+    return func
+
+
+def get_default_pooling_type(model: Union[type[object], object]) -> str:
+    return getattr(model, "default_pooling_type", "LAST")
+
+
 class SupportsQuant:
     """The interface required for all models that support quantization."""
 
@@ -809,3 +826,56 @@ def supports_v0_only(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsV0Only]], TypeIs[SupportsV0Only]]:
     return getattr(model, "supports_v0_only", False)
+
+
+@runtime_checkable
+class SupportsEagle3(Protocol):
+    """The interface required for models that support 
+    EAGLE3 speculative decoding."""
+
+    supports_eagle3: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports EAGLE3 
+    speculative decoding.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        """
+        Set which layers should output auxiliary
+        hidden states for EAGLE3.
+        
+        Args:
+            layers: Tuple of layer indices that should output auxiliary
+              hidden states.
+        """
+        ...
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        """
+        Get the layer indices that should output auxiliary hidden states
+        for EAGLE3.
+        
+        Returns:
+            Tuple of layer indices for auxiliary hidden state outputs.
+        """
+        ...
+
+
+@overload
+def supports_eagle3(model: type[object]) -> TypeIs[type[SupportsEagle3]]:
+    ...
+
+
+@overload
+def supports_eagle3(model: object) -> TypeIs[SupportsEagle3]:
+    ...
+
+
+def supports_eagle3(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsEagle3]], TypeIs[SupportsEagle3]]:
+    return isinstance(model, SupportsEagle3)

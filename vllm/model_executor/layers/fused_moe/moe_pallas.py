@@ -3,7 +3,6 @@
 
 import torch
 import torch.nn.functional as F
-import torch_xla.experimental.custom_kernel  # noqa: F401
 
 
 def _histogram(input: torch.Tensor, min: int, max: int) -> torch.Tensor:
@@ -41,6 +40,7 @@ def fused_moe(
         gating_output: [*, num_experts]
     """
     assert expert_map is None, "expert_map is not supported for pallas MoE."
+    import torch_xla.experimental.custom_kernel  # noqa: F401
     orig_shape = hidden_states.shape
     hidden_size = hidden_states.shape[-1]
     num_tokens = hidden_states.shape[:-1].numel()

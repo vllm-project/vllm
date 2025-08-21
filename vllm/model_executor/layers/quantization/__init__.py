@@ -7,7 +7,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 
 QuantizationMethods = Literal[
-    "aqlm",
     "awq",
     "deepspeedfp",
     "tpu_int8",
@@ -16,7 +15,6 @@ QuantizationMethods = Literal[
     "fbgemm_fp8",
     "modelopt",
     "modelopt_fp4",
-    "marlin",
     "bitblas",
     "gguf",
     "gptq_marlin_24",
@@ -26,7 +24,6 @@ QuantizationMethods = Literal[
     "gptq",
     "compressed-tensors",
     "bitsandbytes",
-    "qqq",
     "hqq",
     "experts_int8",
     "neuron_quant",
@@ -88,7 +85,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     # lazy import to avoid triggering `torch.compile` too early
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
-    from .aqlm import AQLMConfig
     from .auto_round import AutoRoundConfig
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
@@ -108,19 +104,16 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .hqq_marlin import HQQMarlinConfig
     from .inc import INCConfig
     from .ipex_quant import IPEXConfig
-    from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
     from .neuron_quant import NeuronQuantConfig
     from .ptpc_fp8 import PTPCFp8Config
-    from .qqq import QQQConfig
     from .rtn import RTNConfig
     from .torchao import TorchAOConfig
     from .tpu_int8 import Int8TpuConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
-        "aqlm": AQLMConfig,
         "awq": AWQConfig,
         "deepspeedfp": DeepSpeedFPConfig,
         "tpu_int8": Int8TpuConfig,
@@ -128,7 +121,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "fbgemm_fp8": FBGEMMFp8Config,
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
-        "marlin": MarlinConfig,
         "bitblas": BitBLASConfig,
         "gguf": GGUFConfig,
         "gptq_marlin_24": GPTQMarlin24Config,
@@ -139,7 +131,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
         "ptpc_fp8": PTPCFp8Config,
-        "qqq": QQQConfig,
         "hqq": HQQMarlinConfig,
         "experts_int8": ExpertsInt8Config,
         "neuron_quant": NeuronQuantConfig,

@@ -40,7 +40,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors)
 from vllm.multimodal.parse import (AudioItem, AudioProcessorItems,
@@ -316,7 +316,7 @@ class MiniCPMOMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         base_updates = super()._get_prompt_updates(
             mm_items=mm_items,
@@ -605,7 +605,6 @@ class MiniCPMO(MiniCPMV2_6):
                                   max=size)
         # Create column indices for broadcasting
         col_indices = torch.arange(size, device=device).unsqueeze(0)
-        row_indices = row_indices.unsqueeze(1)
         start_indices = start_indices.unsqueeze(1)
         end_indices = end_indices.unsqueeze(1)
         # Vectorized mask creation
