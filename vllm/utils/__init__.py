@@ -942,10 +942,10 @@ def get_open_port() -> int:
 
 def get_open_ports_list(count: int = 5) -> list[int]:
     """Get a list of open ports."""
-    ports = []
-    for _ in range(count):
-        ports.append(get_open_port())
-    return ports
+    ports = set()
+    while len(ports) < count:
+        ports.add(get_open_port())
+    return list(ports)
 
 
 def _get_open_port() -> int:

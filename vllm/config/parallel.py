@@ -89,8 +89,6 @@ class ParallelConfig:
     """Port for data parallel messaging."""
     data_parallel_master_port: int = 29500
     """Port of the data parallel master."""
-    _data_parallel_master_port_list: list[int] = field(default_factory=list)
-    """List of port for data parallel messaging"""
     data_parallel_backend: str = "mp"
     """Backend to use for data parallel, either "mp" or "ray"."""
     data_parallel_external_lb: bool = False
@@ -173,16 +171,16 @@ class ParallelConfig:
     rank: int = 0
     """Global rank in distributed setup."""
 
+    _data_parallel_master_port_list: Optional[list[int]] = None
+    """List of open port auto-queried for data parallel messaging.
+    Set to be private as it's not intended to be configured by users.
+    """
+
     @property
     def world_size_across_dp(self) -> int:
         """world_size_across_dp is TPxPPxDP, it is the size of the world
         including data parallelism."""
         return self.world_size * self.data_parallel_size
-
-    @property
-    def data_parallel_master_port_list(self) -> list[int]:
-        """provide a getter for this port list that is generated during init"""
-        return self._data_parallel_master_port_list
 
     def get_next_dp_init_port(self) -> int:
         """
@@ -193,12 +191,12 @@ class ParallelConfig:
         pop a new port from the prepared port list each time we need to
         initialize a new process group related to data parallelism.
         """
-        if len(self._data_parallel_master_port_list) > 0:
+        if self._data_parallel_master_port_list:
             answer = self._data_parallel_master_port_list.pop()
         else:
             answer = self.data_parallel_master_port
+            self.data_parallel_master_port += 1
 
-        self.data_parallel_master_port = answer + 1
         return answer
 
     def stateless_init_dp_group(self) -> ProcessGroup:
@@ -324,8 +322,8 @@ class ParallelConfig:
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
             # Data parallel was specified in the engine args.
-            self._data_parallel_master_port_list = get_open_ports_list(5)
-            assert len(self._data_parallel_master_port_list) > 0
+            if not self._data_parallel_master_port_list:
+                self._data_parallel_master_port_list = get_open_ports_list(5)
             self.data_parallel_master_port = \
                 self._data_parallel_master_port_list.pop()
 
