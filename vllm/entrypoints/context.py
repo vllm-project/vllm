@@ -171,6 +171,7 @@ class StreamingHarmonyContext(HarmonyContext):
         self.parser = get_streamable_parser_for_assistant()
         self.encoding = get_encoding()
         self.last_tok = None
+        self.first_tok_of_message = True
 
     @property
     def messages(self) -> list:
@@ -178,7 +179,15 @@ class StreamingHarmonyContext(HarmonyContext):
 
     def append_output(self, output) -> None:
         if isinstance(output, RequestOutput):
-            self._update_num_prompt_tokens(output)
+            # append_output is called for each output token in streaming case,
+            # so we only want to add the prompt tokens once for each message.
+            if self.first_tok_of_message:
+                self._update_num_prompt_tokens(output)
+            # Reset self.first_tok_of_message if needed:
+            # if the current token is the last one of the current message
+            # (finished=True), then the next token processed will mark the
+            # beginning of a new message
+            self.first_tok_of_message = output.finished
             tok = output.outputs[0].token_ids[0]
             self.parser.process(tok)
             self._update_num_output_tokens(output.outputs[0].token_ids)
