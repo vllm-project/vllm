@@ -194,10 +194,9 @@ class PaliGemmaMultiModalProcessor(
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
-                                  tokenization_kwargs, return_mm_hashes)
+                                  tokenization_kwargs)
         prompt_token_ids = mm_inputs["prompt_token_ids"]
 
         tokenizer = self.info.get_tokenizer()

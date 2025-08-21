@@ -99,7 +99,6 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         mm_kwargs = {}
 
@@ -133,12 +132,17 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
             ])
         ]
 
+        # Always provide multimodal hashes
+        mm_items = self._to_mm_items(mm_data)
+        mm_hashes = self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
+                                        tokenization_kwargs or {})
+
         return MultiModalInputs(
             type="multimodal",
             prompt=prompt,
             prompt_token_ids=[1],
             mm_kwargs=MultiModalKwargsItems.from_seq(multimodal_kwargs_items),
-            mm_hashes=None,
+            mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholders,
         )
 
