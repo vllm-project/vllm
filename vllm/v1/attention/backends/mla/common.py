@@ -580,15 +580,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         return self.build(0, m)
 
     def build(self,
-              num_actual_tokens: int,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> M:
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
-
-        assert self._num_decodes + self._num_prefills == num_reqs
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
@@ -691,8 +688,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 assert max(chunked_context_metadata.max_seq_lens) <= \
                     self.chunked_prefill_workspace_size
 
-            prefill_metadata = MLACommonPrefillMetadata(
-                block_table=block_table[reqs_start:, ...],
+            prefill_metadata = self.prefill_metadata_cls(
+                block_table=block_table_tensor[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
@@ -1061,13 +1058,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 q=q,
                 k=k,
                 v=v,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.chunked_context.cu_seq_lens[i],
-                max_seqlen_q=prefill_metadata.max_query_len,
-                max_seqlen_k=prefill_metadata.chunked_context.max_seq_lens[i],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_softmax_lse=True,
             )
 
             if output is None:

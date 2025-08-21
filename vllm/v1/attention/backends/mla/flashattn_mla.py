@@ -83,11 +83,11 @@ class FlashAttnMLAMetadataBuilder(
             )
         return None
 
-    def _build_decode(self, seq_lens_cpu: torch.Tensor,
+    def _build_decode(self, block_table_tensor: torch.Tensor,
+                      seq_lens_cpu: torch.Tensor,
                       seq_lens_device: torch.Tensor,
                       query_start_loc_cpu: torch.Tensor,
-                      query_start_loc_device: torch.Tensor,
-                      block_table: torch.Tensor) -> FlashAttnMLADecodeMetadata:
+                      query_start_loc_device: torch.Tensor) -> FlashAttnMLADecodeMetadata:
 
         query_lens_cpu = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])
         max_query_len = query_lens_cpu.max().item()
@@ -103,7 +103,7 @@ class FlashAttnMLAMetadataBuilder(
         )
 
         return FlashAttnMLADecodeMetadata(
-            block_table=block_table,
+            block_table=block_table_tensor,
             seq_lens=seq_lens_device,
             query_start_loc=query_start_loc_device,
             max_query_len=max_query_len,
