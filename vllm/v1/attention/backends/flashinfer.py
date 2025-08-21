@@ -783,7 +783,6 @@ class FlashInferImpl(AttentionImpl):
         # Decodes are at the front and prefills are at the back,
         # according to reorder_batch()
         if num_prefill_tokens > 0:
-            print(f"num_prefill_tokens: {num_prefill_tokens}")
             prefill_wrapper = attn_metadata.prefill_wrapper
             prefill_query = query[num_decode_tokens:]
             assert prefill_query.shape[0] == num_prefill_tokens
@@ -837,7 +836,6 @@ class FlashInferImpl(AttentionImpl):
                 )
 
         if num_decode_tokens > 0:
-            print(f"num_decode_tokens: {num_decode_tokens}")
             decode_wrapper = attn_metadata.decode_wrapper
             decode_query = query[:num_decode_tokens]
             assert decode_query.shape[0] == num_decode_tokens
