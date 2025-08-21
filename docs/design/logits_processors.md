@@ -271,7 +271,7 @@ The `BatchUpdate` abstraction models the persistent batch as a list of requests,
 * **Add:** add (or replace existing request with) a new request at index `i`
 
     * An Add is represented in `Batchupdate.added` as a tuple of
-    
+
         ``` text
         (index, new request SamplingParams, prompt token ids, output token ids)
         ```
@@ -320,7 +320,7 @@ The `BatchUpdate` abstraction models the persistent batch as a list of requests,
 * **Move:** move request at index `s` to index `d` OR swap requests at indices `s` and `d`
 
     * A Move is represented in `Batchupdate.moved` as a tuple of
-    
+
         ``` text
         (s, d, UNIDIRECTIONAL or SWAP)
         ```
@@ -379,7 +379,7 @@ Logits processor `update_state()` implementations should assume the following mo
     2. *If there are more new requests than finished requests:* apply Add operations to extend the batch with the remaining new requests which did not replace finished requests. Assign consecutive indices to these new requests, starting with `current_max_batch_index + 1`
 
     3. *If there are fewer new requests than finished requests:*
-    
+
         * Apply Remove operations to finished requests which were not replaced with new requests. These removed request indices will necessarily be greater than the greatest index of the finished requests which were replaced in the previous step. The Removes may leave the batch in a non-contiguous state
 
         * **"Condense" the batch to be contiguous:** starting with the lowest-index empty slot (which was caused by a Remove), apply a Unidirectional Move from the current highest non-empty slot in the batch to fill the empty slot. Proceed with additional Unidirectional Move operations in order of increasing empty slot destination index and decreasing non-empty slot source index until the batch is contiguous
