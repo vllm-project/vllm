@@ -6,7 +6,7 @@ This document shows how to write, load and use a custom logits processor.
 
 Review the [logits processor design documentation](../design/logits_processors.md) for baseline guidance on writing correct and efficient logits processors.
 
-## Writing a Custom Logits Procesor
+## Writing a Custom Logits Processor
 
 Custom logits processors must be subclasses of `vllm.v1.sample.logits_processor.LogitsProcessor`. Unlike built-in logits processors, custom logits processors may require configuration arguments that are not hard-coded into `SamplingParams` or the vLLM server REST API. To solve this problem, custom logits processors may leverage vLLM [custom arguments](./custom_arguments.md) support to receive configuration settings from the user (although your are also free to design a custom logits processor which utilizes the pre-existing fields in `SamplingParams`.)
 
@@ -132,7 +132,7 @@ See examples below:
 
 During initialization, vLLM automatically scans the `vllm.logits_processors` entry point group and loads any installed logits processors which it finds.
 
-Suppose that you have developed a Python package that holds your custom logits processors. You can expose each logits processor to vLLM by adding a unique entrypoint for each logits processor to your logits processor Python package. The example below shows how to add an entrypoint to your project's `.toml` file:
+Suppose that you have developed a Python package that holds your custom logits processors. You can expose each logits processor to vLLM by adding a unique entrypoint for each logits processor to your logits processor Python package. The example below shows how to add an entrypoint to your project's `pyproject.toml` file:
 
 ??? code "Exposing a custom logits processor as a Python entrypoint"
 

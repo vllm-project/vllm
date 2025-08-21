@@ -4,19 +4,21 @@ This document describes how the vLLM engine interacts with logits processors, an
 
 ## Logits Processors Background
 
-A logits processor adjusts the next-token probability distribution, usually with the intention of steering the model towards a desired type of behavior. 
+A logits processor adjusts the next-token probability distribution, usually with the intention of steering the model towards a desired type of behavior.
 
-In vLLM, logits processors operate at batch granularity: during a given engine step, the logits processor consumes a $(num\_requests) \times (vocab\_size)$ tensor of raw logits output by the model. For all requests which enable the logits processor, the logits processor applies a transformation to the corresponding row of the logits tensor, while leaving other rows unmodified. The transformed logits tensor is then passed to softmax.  
+In vLLM, logits processors operate at batch granularity. During a given engine step, the logits processor consumes a `(num_requests) x (vocab_size)` tensor of raw logits output by the model. For all requests which enable the logits processor, the logits processor applies a transformation to the corresponding row of the logits tensor, while leaving other rows unmodified. The transformed logits tensor is then passed to softmax.  
 
 ## Logits Processors in the vLLM engine
 
-The vLLM engine's persistent batch data structure maintains a list of loaded logits processors. This list is passed to `SamplingMetadata` when the data structure is built.
+The vLLM engine's persistent batch data structure maintains a list of loaded logits processors.
 
 In order to operate on the entire batch at once, each logits processor may maintain metadata about the requests in the batch (i.e. each request's logits-processor-specific configuration settings). Therefore, logits processors are stateful.
 
-In each engine step, the vLLM engine will:
+In each engine step, the vLLM engine will (1) update each logits processor's internal state and (2) apply logits processors to the model output logits.
 
-1. **Update each logits processor's internal state to match persistent batch internal state, by invoking each logits processor's `update_state()` method.** This is necessary to ensure that logits processors' internal state is reorganized to match the new persistent batch state at the end of the current step. The pseudocode below shows how the vLLM model runner computes updates to the persistent batch state and then notifies each logits processor of the state changes:
+### Updating logits processor internal state
+
+The vLLM model runner invokes each logits processor's `update_state()` method at the end of each engine step. This is necessary to ensure that logits processors' internal states are reorganized to match the new persistent batch state at the end of the current step. The pseudocode below shows that the vLLM model runner computes updates to the persistent batch state and then notifies each logits processor of the state changes:
 
 ??? code "Model Runner Updates Logits Processor States"
 
@@ -74,12 +76,17 @@ In each engine step, the vLLM engine will:
         removed: Sequence[RemovedRequest]
         moved: Sequence[MovedRequest]
         added: Sequence[AddedRequest]
+    
     ```
 
     !!! note
         `InputBatch.refresh_metadata()` generates a `BatchUpdate` data structure - representing the persistent batch state changes resulting from new, finished and reordered requests - and passes that data structure to the logits processors' `update_state()` methods.
 
-2. **Apply the logits processors to the model output logits tensor, by invoking each logits processor's `apply()` method.** The pseudocode below shows how the vLLM model runner invokes the sampler, which in turn causes the logits processors to transform the model output logits.
+### Applying logits processors to the model output logits
+
+The pseudocode below shows how the vLLM model runner invokes the sampler, which in turn invokes the logits processors' `apply()` methods against the model output logit processors.
+
+Note that the sampler will access the logits processors via `SamplingMetadata.logitsprocs`. When the vLLM engine constructs `SamplingMetadata`, the reference to the list of logits processors is passed from the persistent batch data structure to `SamplingMetadata`.
 
 ??? code "Apply logits processors to model output logits"
 
@@ -245,9 +252,9 @@ A vLLM logits processor must subclass `LogitsProcessor` and define (at minimum) 
 * `__init__()`
 
 * `apply(self, logits: torch.Tensor) -> torch.Tensor`:
-    * Consume a $(num\_requests) \times (vocab\_size)$ logits tensor (`logits`)
+    * Consume a `(num_requests) x (vocab_size)` logits tensor (`logits`)
     * Apply logits processor transformation at batch granularity
-    * Return a transformed $(num\_requests) \times (vocab\_size)$ logits tensor
+    * Return a transformed `(num_requests) x (vocab_size)` logits tensor
 
 * `is_argmax_invariant(self) -> bool`:
     * Return `True` if the logits processor is argmax invariant (never changes what is the highest-logit-value token ID for a given request), `False` if the logits processor may modify argmax
@@ -261,11 +268,11 @@ A vLLM logits processor must subclass `LogitsProcessor` and define (at minimum) 
 
 The `BatchUpdate` abstraction models the persistent batch as a list of requests, supporting the following operations to change batch state (summarized below along with a schematic representation of how the batch is modified by the operation):
 
-* **Add:** add (or replace existing request with) a new request at index $i$
+* **Add:** add (or replace existing request with) a new request at index `i`
 
     * An Add is represented in `Batchupdate.added` as a tuple of
     
-        ```
+        ``` text
         (index, new request SamplingParams, prompt token ids, output token ids)
         ```
 
@@ -273,9 +280,9 @@ The `BatchUpdate` abstraction models the persistent batch as a list of requests,
 
     * The implementation of the particular logits processor subclass determines whether or how the fields in the added request tuple are digested into an internal representation. For example, a logits processor that does not utilize prompt or output token ids may only need to utilize `index` and `SamplingParams` and discard the other tuple fields
 
-    * If index $i$ currently holds a request, a replacement occurs:
+    * If index `i` currently holds a request, a replacement occurs:
 
-        ```
+        ``` text
         Batch: [A,B,C]
         New request to be added @ i: D @ 1
 
@@ -284,9 +291,9 @@ The `BatchUpdate` abstraction models the persistent batch as a list of requests,
         New Batch: [A,D,C] # Add D, discard B
         ```
 
-    * If index $i$ does not currently hold a request (because $i$ is out of bounds of the current batch size):
+    * If index `i` does not currently hold a request (because `i` is out of bounds of the current batch size):
 
-        ```
+        ``` text
         Batch: [A,B,C]
         New request to be added @ i: D @ 3
 
@@ -295,13 +302,13 @@ The `BatchUpdate` abstraction models the persistent batch as a list of requests,
         New Batch: [A,B,C,D] # Add D, extending batch
         ```
 
-* **Remove:** remove (without replacement) request at index $i$
+* **Remove:** remove (without replacement) request at index `i`
 
-    * A Remove is represented in `Batchupdate.removed` by an `int` (representing $i$)
+    * A Remove is represented in `Batchupdate.removed` by an `int` (representing `i`)
 
     * Effect of remove-at-index on batch:
 
-        ```
+        ``` text
         Batch: [A,B,C]
         Remove @ i:  1
 
@@ -310,11 +317,11 @@ The `BatchUpdate` abstraction models the persistent batch as a list of requests,
         New Batch: [A,x,C] # Discard B and leave an empty slot
         ```
 
-* **Move:** move request at index $s$ to index $d$ OR swap requests at indices $s$ and $d$
+* **Move:** move request at index `s` to index `d` OR swap requests at indices `s` and `d`
 
     * A Move is represented in `Batchupdate.moved` as a tuple of
     
-        ```
+        ``` text
         (s, d, UNIDIRECTIONAL or SWAP)
         ```
 
@@ -322,7 +329,7 @@ The `BatchUpdate` abstraction models the persistent batch as a list of requests,
 
         * The request at index `s` is moved to index `d`; index `s` becomes an empty slot
 
-            ```
+            ``` text
             Batch: [A,x,C,D]
             Unidirectionally Move s -> d:  3 -> 1
 
@@ -333,7 +340,7 @@ The `BatchUpdate` abstraction models the persistent batch as a list of requests,
 
         * If another request already resided at index `d`, it is replaced and discarded
 
-            ```
+            ``` text
             Batch: [A,B,C,D]
             Unidirectionally Move s -> d:  3 -> 1
 
@@ -344,7 +351,7 @@ The `BatchUpdate` abstraction models the persistent batch as a list of requests,
 
     * If the Move specifies `SWAP`, the requests at `s` and `d` exchange indices
 
-        ```
+        ``` text
         Batch: [A,B,C,D]
         Swap Move s <-> d:  3 <-> 1
 
@@ -395,7 +402,7 @@ Notes:
 
 The following example models an engine step where 1 new request is introduced and 2 finished requests are eliminated, additionally the attention backend performs a swap to optimize the batch ordering.
 
-```
+``` text
 Batch state (beginning of engine step): [A,B,C,D]
 Batch size: 4
 
@@ -429,7 +436,7 @@ Batch size: 3
 
 The resulting `BatchUpdate` data structure will look like
 
-```
+``` text
 BatchUpdate instance
 * added: [(0,E's SamplingParams,E's prompt tokens ref,E's output tokens ref)]
 * removed: [2] # request C was removed without replacement
@@ -440,7 +447,7 @@ BatchUpdate instance
 
 The following example models an engine step where 2 new requests are introduced and 1 finished request is eliminated, additionally the attention backend performs a swap to optimize the batch ordering.
 
-```
+``` text
 Batch state (beginning of engine step): [A,B,C,D]
 Batch size: 4
 
@@ -471,7 +478,7 @@ Note that batch condensation is skipped because there are no empty slots left be
 
 The resulting `BatchUpdate` data structure will look like
 
-```
+``` text
 BatchUpdate instance
 * added: [(2,E's SamplingParams,E's prompt tokens ref,E's output tokens ref),(4,F's SamplingParams,F's prompt tokens ref,F's output tokens ref)]
 * removed: [] # no requests were removed without replacement
@@ -490,7 +497,7 @@ BatchUpdate instance
 
     1. **The per-request attributes which configure the logits processor's behavior against that request.** For example, if you are writing a new built-in logits processor for vLLM, you may or may not need to add additional fields to `SamplingParams` and the vLLM REST API
 
-    2. **The conditions under which the logits processor is or is not enabled on a per-request basis.** Unless your intention is for the custom logits processor to act on all requests all the time, you should write your logits processor in such a way that it is possible to disable the logits processor for a given request, i.e. by defaulting an argument to `None` or by passing in a specific do-nothing argument value i.e. $0.0$. Try to save compute and memory for requests which disable the logits processor
+    2. **The conditions under which the logits processor is or is not enabled on a per-request basis.** Unless your intention is for the custom logits processor to act on all requests all the time, you should write your logits processor in such a way that it is possible to disable the logits processor for a given request, i.e. by defaulting an argument to `None` or by passing in a specific do-nothing argument value i.e. `0.0`. Try to save compute and memory for requests which disable the logits processor
 
     3. **The conditions under which the logits processor is short-circuited at the batch level.** Even if you have defined a way to disable the custom logits processor at the request level, it may be difficult to translate this into compute savings i.e. if your `update_state()` and `apply()` implementations use efficient vectorized implementations that operate on the whole persistent batch in a single command. For example, you cannot skip an entire vectorized operation in `apply()` just because one request disabled the logits processor. To save compute in the edge-case where no running requests utilize the custom logits processor, we recommend designing `apply()` to return the unmodified input tensor if all requests have the logits processor disabled. Similarly, consider whether steps can be skipped in `update_state()` if no requests enable the logits processor
 
