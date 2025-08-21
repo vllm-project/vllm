@@ -253,13 +253,10 @@ class Processor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
-        return_mm_hashes = (self.mm_processor_cache is not None
-                            or bool(self.cache_config.enable_prefix_caching))
         processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            return_mm_hashes=return_mm_hashes,
         )
         from vllm.platforms import current_platform
         current_platform.validate_request(
@@ -302,7 +299,7 @@ class Processor:
         if decoder_inputs["type"] == "multimodal":
             decoder_mm_inputs = decoder_inputs["mm_kwargs"]
             decoder_mm_positions = decoder_inputs["mm_placeholders"]
-            decoder_mm_hashes = decoder_inputs.get("mm_hashes")
+            decoder_mm_hashes = decoder_inputs["mm_hashes"]
 
             # Merge and flatten multimodal placeholders, hashes and inputs
             # from dictionaries to lists, and sort them by each item's position
@@ -317,7 +314,7 @@ class Processor:
                 decoder_mm_positions[modality][idx]
                 for modality, idx in sorted_mm_idxs
             ]
-            sorted_mm_hashes = None if decoder_mm_hashes is None else [
+            sorted_mm_hashes = [
                 decoder_mm_hashes[modality][idx]
                 for modality, idx in sorted_mm_idxs
             ]

@@ -8,7 +8,6 @@ import dataclasses
 import functools
 import json
 import sys
-import threading
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
 from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
@@ -1514,11 +1513,6 @@ class EngineArgs:
             return False
         #############################################################
         # Experimental Features - allow users to opt in.
-
-        # Signal Handlers requires running in main thread.
-        if (threading.current_thread() != threading.main_thread()
-                and _warn_or_fallback("Engine in background thread")):
-            return False
 
         if self.pipeline_parallel_size > 1:
             supports_pp = getattr(self.distributed_executor_backend,

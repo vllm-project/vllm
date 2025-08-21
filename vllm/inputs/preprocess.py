@@ -257,7 +257,6 @@ class InputPreprocessor:
         mm_processor_kwargs: Optional[Mapping[str, object]],
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         """
         Apply the model's multi-modal processor to a multi-modal prompt,
@@ -277,8 +276,7 @@ class InputPreprocessor:
         return mm_processor.apply(prompt,
                                   mm_data,
                                   hf_processor_mm_kwargs=mm_processor_kwargs,
-                                  tokenization_kwargs=tokenization_kwargs,
-                                  return_mm_hashes=return_mm_hashes)
+                                  tokenization_kwargs=tokenization_kwargs)
 
     async def _process_multimodal_async(
         self,
@@ -287,7 +285,6 @@ class InputPreprocessor:
         mm_processor_kwargs: Optional[Mapping[str, object]],
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         """
         Async version of
@@ -307,8 +304,7 @@ class InputPreprocessor:
         return mm_processor.apply(prompt,
                                   mm_data,
                                   hf_processor_mm_kwargs=mm_processor_kwargs,
-                                  tokenization_kwargs=tokenization_kwargs,
-                                  return_mm_hashes=return_mm_hashes)
+                                  tokenization_kwargs=tokenization_kwargs)
 
     def _process_embeds(
         self,
@@ -345,7 +341,6 @@ class InputPreprocessor:
         parsed_content: TokensPrompt,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        return_mm_hashes: bool = False,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_token_ids = parsed_content["prompt_token_ids"]
         token_type_ids = parsed_content.get("token_type_ids")
@@ -358,7 +353,6 @@ class InputPreprocessor:
                 parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                return_mm_hashes=return_mm_hashes,
             )
         else:
             inputs = token_inputs(
@@ -376,7 +370,6 @@ class InputPreprocessor:
         parsed_content: TokensPrompt,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        return_mm_hashes: bool = False,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_token_ids = parsed_content["prompt_token_ids"]
         token_type_ids = parsed_content.get("token_type_ids")
@@ -389,7 +382,6 @@ class InputPreprocessor:
                 parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                return_mm_hashes=return_mm_hashes,
             )
         else:
             inputs = token_inputs(
@@ -407,7 +399,6 @@ class InputPreprocessor:
         parsed_content: TextPrompt,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        return_mm_hashes: bool = False,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_text = parsed_content["prompt"]
 
@@ -419,7 +410,6 @@ class InputPreprocessor:
                 parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                return_mm_hashes=return_mm_hashes,
             )
         else:
             prompt_token_ids = self._tokenize_prompt(
@@ -442,7 +432,6 @@ class InputPreprocessor:
         parsed_content: TextPrompt,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        return_mm_hashes: bool = False,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_text = parsed_content["prompt"]
 
@@ -454,7 +443,6 @@ class InputPreprocessor:
                 parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                return_mm_hashes=return_mm_hashes,
             )
         else:
             prompt_token_ids = await self._tokenize_prompt_async(
@@ -477,7 +465,6 @@ class InputPreprocessor:
         prompt: SingletonPrompt,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        return_mm_hashes: bool = False,
     ) -> SingletonInputs:
         """
         Extract the singleton inputs from a prompt.
@@ -486,7 +473,6 @@ class InputPreprocessor:
 
         * prompt: single encoder or decoder input prompt
         * lora_request: this is only valid for decoder prompts
-        * return_mm_hashes: whether to return multimodal hashes
 
         Returns:
 
@@ -500,21 +486,18 @@ class InputPreprocessor:
             return self._process_tokens(
                 parsed["content"],
                 lora_request=lora_request,
-                return_mm_hashes=return_mm_hashes,
             )
         if parsed["type"] == "text":
             return self._process_text(
                 parsed["content"],
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                return_mm_hashes=return_mm_hashes,
             )
         if parsed["type"] == "str":
             return self._process_text(
                 TextPrompt(prompt=parsed["content"]),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                return_mm_hashes=return_mm_hashes,
             )
 
         assert_never(parsed)
@@ -524,7 +507,6 @@ class InputPreprocessor:
         prompt: SingletonPrompt,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        return_mm_hashes: bool = False,
     ) -> SingletonInputs:
         """
         Async version of
@@ -538,21 +520,18 @@ class InputPreprocessor:
             return await self._process_tokens_async(
                 parsed["content"],
                 lora_request=lora_request,
-                return_mm_hashes=return_mm_hashes,
             )
         if parsed["type"] == "text":
             return await self._process_text_async(
                 parsed["content"],
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                return_mm_hashes=return_mm_hashes,
             )
         if parsed["type"] == "str":
             return await self._process_text_async(
                 TextPrompt(prompt=parsed["content"]),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
-                return_mm_hashes=return_mm_hashes,
             )
 
         assert_never(parsed)
@@ -795,7 +774,6 @@ class InputPreprocessor:
         prompt: SingletonPrompt,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        return_mm_hashes: bool = False,
     ) -> DecoderOnlyInputs:
         """
         For decoder-only models:
@@ -806,7 +784,6 @@ class InputPreprocessor:
 
         * prompt: input prompt
         * lora_request
-        * return_mm_hashes
 
         Returns:
 
@@ -817,7 +794,6 @@ class InputPreprocessor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            return_mm_hashes=return_mm_hashes,
         )
 
         return self._build_decoder_only_llm_inputs(prompt_comps)
@@ -827,7 +803,6 @@ class InputPreprocessor:
         prompt: SingletonPrompt,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        return_mm_hashes: bool = False,
     ) -> DecoderOnlyInputs:
         """
         Async version of
@@ -837,7 +812,6 @@ class InputPreprocessor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            return_mm_hashes=return_mm_hashes,
         )
 
         return self._build_decoder_only_llm_inputs(prompt_comps)
@@ -847,17 +821,15 @@ class InputPreprocessor:
         prompt: PromptType,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        return_mm_hashes: bool = False,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
         if self.model_config.is_encoder_decoder:
-            assert not return_mm_hashes, (
-                "Multimodal hashes for encoder-decoder models should not be ",
-                "returned until they are supported on vLLM V1.")
             # Encoder-decoder model requires special mapping of
-            # input prompts to encoder & decoder
+            # input prompts to encoder & decoder.
             return self._process_encoder_decoder_prompt(
-                prompt, tokenization_kwargs)
+                prompt,
+                tokenization_kwargs,
+            )
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise ValueError("Cannot pass encoder-decoder prompt "
@@ -868,7 +840,6 @@ class InputPreprocessor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            return_mm_hashes=return_mm_hashes,
         )
 
     async def preprocess_async(
@@ -876,19 +847,18 @@ class InputPreprocessor:
         prompt: PromptType,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
-        return_mm_hashes: bool = False,
     ) -> ProcessorInputs:
         """
         Async version of
         [`preprocess`][vllm.inputs.preprocess.InputPreprocessor.preprocess].
         """
         if self.model_config.is_encoder_decoder:
-            assert not return_mm_hashes, (
-                "Multimodal hashes for encoder-decoder models should not be ",
-                "returned until they are supported on vLLM V1.")
             # Encoder-decoder model requires special mapping of
-            # input prompts to encoder & decoder
-            return await self._process_encoder_decoder_prompt_async(prompt)
+            # input prompts to encoder & decoder.
+            return await self._process_encoder_decoder_prompt_async(
+                prompt,
+                tokenization_kwargs,
+            )
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise ValueError("Cannot pass encoder-decoder prompt "
@@ -899,7 +869,6 @@ class InputPreprocessor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            return_mm_hashes=return_mm_hashes,
         )
 
     def clear_cache(self) -> None:
