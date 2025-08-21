@@ -22,7 +22,7 @@ from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
 from vllm.forward_context import BatchDescriptor, set_forward_context
 
 # This import automatically registers torch ops for testing (like silly.attention)
-import tests.compile.test_operations
+import tests.compile.testing_ops
 
 
 @dataclass

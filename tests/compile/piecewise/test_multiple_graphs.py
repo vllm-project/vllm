@@ -17,7 +17,7 @@ from vllm.envs import VLLM_USE_V1
 from vllm.forward_context import set_forward_context
 
 # This import automatically registers torch ops for testing (like silly.attention)
-import tests.compile.test_operations
+import tests.compile.testing_ops
 
 BATCH_SIZE = 32
 MLP_SIZE = 128

@@ -16,7 +16,7 @@ from vllm.envs import VLLM_USE_V1
 from vllm.forward_context import BatchDescriptor, set_forward_context
 
 # This import also automatically registers torch ops for testing (like silly.attention)
-from tests.compile.test_operations import (
+from tests.compile.testing_ops import (
     get_global_counter, reset_global_counter
 )
 
