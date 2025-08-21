@@ -27,7 +27,7 @@ class FlashAttnMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASHATTN_MLA_VLLM_V1"
+        return "FLASH_ATTN_MLA_VLLM_V1"
 
     @staticmethod
     def get_metadata_cls() -> type["FlashAttnMLAMetadata"]:
@@ -65,7 +65,6 @@ class FlashAttnMLAMetadataBuilder(
         super().__init__(kv_cache_spec, layer_names, vllm_config, device,
                          FlashAttnMLAMetadata)
         self.fa_aot_schedule = (get_flash_attn_version() == 3)
-        self.page_size = self.runner.block_size
 
     def _schedule_decode(self, num_reqs, cu_query_lens, max_query_len, seqlens,
                          max_seq_len, causal):
