@@ -153,10 +153,7 @@ from vllm import LLM
 
 llm = LLM(
     model="Qwen/Qwen2.5-VL-72B-Instruct",
-    # Create two EngineCore instances, one per DP rank
-    data_parallel_size=2,
-    # Within each EngineCore instance:
-    # The vision encoder uses TP=4 (not DP=2) to shard the input data
+    # The vision encoder uses TP=4 (not DP=1) to shard the input data
     # The language decoder uses TP=4 to shard the weights as usual
     tensor_parallel_size=4,
     mm_encoder_tp_mode="data",
