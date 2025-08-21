@@ -30,6 +30,7 @@ from vllm.utils import (has_triton_kernels, is_torch_equal_or_newer,
 if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
         or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
     from flashinfer.fused_moe import cutlass_fused_moe
+    from flashinfer.autotuner import autotune
     from flashinfer import (mxfp8_quantize, shuffle_matrix_a,
                             shuffle_matrix_sf_a, trtllm_fp4_block_scale_moe)
 
@@ -86,6 +87,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.topk_indices_dtype = None
         self.moe = moe
         self.use_marlin = self._should_use_marlin()
+        self.flashinfer_autotune = True
 
     def _should_use_marlin(self):
         if envs.VLLM_MXFP4_USE_MARLIN is not None:
@@ -139,13 +141,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.intermediate_size_per_partition = \
                 intermediate_size_per_partition_after_pad
         elif (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-              or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+              or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16) and current_platform.is_device_capability(100):
             # pad the intermediate size to be a multiple of 2 * mxfp4_block
             # for to hold non-uniform sharded tensor as well as swizzling
             # other padding to increase performance
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 256)
             hidden_size = round_up(hidden_size, 256)
+        elif (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16) and current_platform.is_device_capability(90):
+            intermediate_size_per_partition_after_pad = round_up(
+                intermediate_size_per_partition, 128)
         elif current_platform.is_rocm():
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 128)
@@ -395,6 +400,53 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             assert (layer.w2_bias.dim() == 2
                     and layer.w2_bias.shape[0] == self.num_experts
                     and layer.w2_bias.shape[1] == self.hidden_size)
+
+
+
+            # De-interleave weights, scales, and biases for gate and up projections
+            w13_weight_data = layer.w13_weight.data
+            gate_w, up_w = w13_weight_data[:, ::2, :], w13_weight_data[:, 1::2, :]
+            deinterleaved_w13_weight = torch.cat([gate_w, up_w], dim=1)
+            w1_weight, w3_weight = torch.chunk(deinterleaved_w13_weight, 2, dim=1)
+            layer.w13_weight = torch.nn.Parameter(torch.cat([w3_weight, w1_weight], dim=1).cuda(), requires_grad=False)
+
+            w13_bias_data = layer.w13_bias.data.to(torch.float32)
+            gate_b, up_b = w13_bias_data[:, ::2], w13_bias_data[:, 1::2]
+            deinterleaved_w13_bias = torch.cat([gate_b, up_b], dim=1)
+            b1, b3 = torch.chunk(deinterleaved_w13_bias, 2, dim=-1)
+            b = torch.cat([b3, b1], dim=-1)
+            layer.w13_bias = torch.nn.Parameter(b.to(torch.bfloat16).cuda(), requires_grad=False)
+
+            # Scale
+            w13_scale_data = layer.w13_weight_scale.data
+            gate_s, up_s = w13_scale_data[:, ::2, :], w13_scale_data[:, 1::2, :]
+            deinterleaved_w13_scale = torch.cat([gate_s, up_s], dim=1)
+            w1_weight_scale, w3_weight_scale = torch.chunk(deinterleaved_w13_scale, 2, dim=1)
+            all_w31_scales = torch.cat([w3_weight_scale, w1_weight_scale], dim=1)
+
+            w31_scales = all_w31_scales.to(torch.uint8).view(torch.uint8)
+            w31_s_shape = w31_scales.shape
+            w31_scales_interleaved = w31_scales.reshape(
+                w31_s_shape[0], w31_s_shape[1],
+                (w31_s_shape[2] // 4), 4)
+            w31_scales_interleaved = w31_scales_interleaved.permute(0, 2, 1, 3)
+            w31_scales_interleaved = w31_scales_interleaved.reshape(
+                w31_s_shape[0], w31_s_shape[2] // 4, w31_s_shape[1] * 4)
+
+            layer.w13_weight_scale = torch.nn.Parameter(w31_scales_interleaved.cuda(), requires_grad=False)
+
+            w2_weight_scale = layer.w2_weight_scale.data
+            w2_scales = w2_weight_scale.to(torch.uint8).view(torch.uint8)
+            w2_s_shape = w2_scales.shape
+            w2_scales_interleaved = w2_scales.reshape(
+                w2_s_shape[0], w2_s_shape[1],
+                (w2_s_shape[2] // 4), 4)
+            w2_scales_interleaved = w2_scales_interleaved.permute(0, 2, 1, 3)
+            w2_scales_interleaved = w2_scales_interleaved.reshape(
+                w2_s_shape[0], w2_s_shape[2] // 4, w2_s_shape[1] * 4)
+
+            layer.w2_weight_scale = torch.nn.Parameter(w2_scales_interleaved.cuda(), requires_grad=False)
+
         else:
             from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
@@ -567,8 +619,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             assert x.dtype == torch.bfloat16
 
             quant_scales = [
-                layer.w13_weight_scale.view(torch.int32),
-                layer.w2_weight_scale.view(torch.int32),
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
             ]
 
             topk_weights, topk_ids = FusedMoE.select_experts(
@@ -586,22 +638,24 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
             output = torch.zeros_like(x)
 
-            _ = cutlass_fused_moe(
-                input=x,
-                token_selected_experts=topk_ids,
-                token_final_scales=topk_weights,
-                fc1_expert_weights=layer.w13_weight,
-                fc2_expert_weights=layer.w2_weight,
-                output_dtype=torch.bfloat16,
-                quant_scales=quant_scales,
-                fc1_expert_biases=layer.w13_bias,
-                fc2_expert_biases=layer.w2_bias,
-                swiglu_alpha=layer.gemm1_alpha,
-                swiglu_beta=layer.gemm1_beta,
-                swiglu_limit=layer.gemm1_clamp_limit,
-                use_w4_group_scaling=True,
-                output=output,
-            )
+            with torch.inference_mode(), autotune(self.flashinfer_autotune):
+                _ = cutlass_fused_moe(
+                    input=x,
+                    token_selected_experts=topk_ids,
+                    token_final_scales=topk_weights,
+                    fc1_expert_weights=layer.w13_weight,
+                    fc2_expert_weights=layer.w2_weight,
+                    output_dtype=torch.bfloat16,
+                    quant_scales=quant_scales,
+                    fc1_expert_biases=layer.w13_bias,
+                    fc2_expert_biases=layer.w2_bias,
+                    swiglu_alpha=layer.gemm1_alpha,
+                    swiglu_beta=layer.gemm1_beta,
+                    swiglu_limit=layer.gemm1_clamp_limit,
+                    use_w4_group_scaling=True,
+                    output=output,
+                )
+                self.flashinfer_autotune = False
             return output
         else:
             return triton_kernel_moe_forward(
