@@ -11,29 +11,32 @@ DEEPGEMM_GIT_REF="7b6b5563b9d4c1ae07ffbce7f78ad3ac9204827c"
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --repo)
-            DEEPGEMM_GIT_REPO="$2"
-            shift 2
-            ;;
         --ref)
+            if [[ -z "$2" || "$2" =~ ^- ]]; then
+                echo "Error: --ref requires an argument." >&2
+                exit 1
+            fi
             DEEPGEMM_GIT_REF="$2"
             shift 2
             ;;
         --cuda-version)
+            if [[ -z "$2" || "$2" =~ ^- ]]; then
+                echo "Error: --cuda-version requires an argument." >&2
+                exit 1
+            fi
             CUDA_VERSION="$2"
             shift 2
             ;;
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
-            echo "  --repo REPO_URL    DeepGEMM git repository URL (default: $DEEPGEMM_GIT_REPO)"
             echo "  --ref REF          Git reference to checkout (default: $DEEPGEMM_GIT_REF)"
             echo "  --cuda-version VER CUDA version (auto-detected if not provided)"
             echo "  -h, --help         Show this help message"
             exit 0
             ;;
         *)
-            echo "Unknown option: $1"
+            echo "Unknown option: $1" >&2
             exit 1
             ;;
     esac
@@ -67,11 +70,15 @@ echo "Installing DeepGEMM from source..."
 echo "Repository: $DEEPGEMM_GIT_REPO"
 echo "Reference: $DEEPGEMM_GIT_REF"
 
+# Create a temporary directory for the build
+INSTALL_DIR=$(mktemp -d)
+trap 'rm -rf "$INSTALL_DIR"' EXIT
+
 # Clone the repository
-git clone --recursive --shallow-submodules "$DEEPGEMM_GIT_REPO" deepgemm
+git clone --recursive --shallow-submodules "$DEEPGEMM_GIT_REPO" "$INSTALL_DIR/deepgemm"
 
 echo "🏗️  Building DeepGEMM"
-pushd deepgemm
+pushd "$INSTALL_DIR/deepgemm"
 
 # Checkout the specific reference
 git checkout "$DEEPGEMM_GIT_REF"
@@ -86,7 +93,7 @@ python3 setup.py bdist_wheel
 if command -v uv >/dev/null 2>&1; then
     echo "Installing DeepGEMM wheel using uv..."
     # Use --system in Docker contexts, respect user's environment otherwise
-    if [ -n "$VLLM_DOCKER_BUILD_CONTEXT" ] || [ -f /.dockerenv ]; then
+    if [ -n "$VLLM_DOCKER_BUILD_CONTEXT" ]; then
         uv pip install --system dist/*.whl
     else
         uv pip install dist/*.whl
@@ -97,8 +104,5 @@ else
 fi
 
 popd
-
-# Clean up
-rm -rf deepgemm
 
 echo "✅ DeepGEMM installation completed successfully"

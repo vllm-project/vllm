@@ -434,7 +434,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install DeepGEMM from source
 COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
-    /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" && \
+    VLLM_DOCKER_BUILD_CONTEXT=1 /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" && \
     rm /tmp/install_deepgemm.sh
 
 #################### vLLM installation IMAGE ####################
