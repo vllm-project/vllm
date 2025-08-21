@@ -235,9 +235,7 @@ class LLM:
                 logger.error(
                     "Failed to convert 'kv_transfer_config' dict to "
                     "KVTransferConfig object. Dict: %s. Error: %s",
-                    raw_config_dict,
-                    e,
-                )
+                    raw_config_dict, e)
                 # Consider re-raising a more specific vLLM error or ValueError
                 # to provide better context to the user.
                 raise ValueError(
@@ -302,8 +300,8 @@ class LLM:
         self.default_sampling_params: Union[dict[str, Any], None] = None
 
         if envs.VLLM_USE_V1:
-            supported_tasks = self.llm_engine.get_supported_tasks(
-            )  # type: ignore
+            supported_tasks = self.llm_engine \
+                .get_supported_tasks()  # type: ignore
         else:
             supported_tasks = self.llm_engine.model_config.supported_tasks
 
@@ -510,10 +508,8 @@ class LLM:
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def _get_modality_specific_lora_reqs(
-        self,
-        parsed_prompts: Union[PromptType, Sequence[PromptType]],
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]],
-    ):
+            self, parsed_prompts: Union[PromptType, Sequence[PromptType]],
+            lora_request: Optional[Union[list[LoRARequest], LoRARequest]]):
         # Grab the lora config off the vllm config on the engine,
         # since this is the same for both v0 & v1.
         lora_config = self.llm_engine.vllm_config.lora_config
@@ -541,12 +537,10 @@ class LLM:
                                                      optional_loras)
         ]
 
-    def _resolve_single_prompt_mm_lora(
-        self,
-        parsed_prompt: PromptType,
-        lora_request: Optional[LoRARequest],
-        default_mm_loras: Optional[dict[str, str]],
-    ):
+    def _resolve_single_prompt_mm_lora(self, parsed_prompt: PromptType,
+                                       lora_request: Optional[LoRARequest],
+                                       default_mm_loras: Optional[dict[str,
+                                                                       str]]):
         if (not default_mm_loras or not isinstance(parsed_prompt, dict)
                 or "multi_modal_data" not in parsed_prompt):
             return lora_request
@@ -565,9 +559,7 @@ class LLM:
                 " used by a single prompt consuming several modalities; "
                 " currently we only support one lora per request; as such,"
                 " lora(s) registered with modalities: %s"
-                " will be skipped",
-                intersection,
-            )
+                " will be skipped", intersection)
             return lora_request
 
         # Build the LoRA request; the ID of the default mm lora is the
@@ -592,13 +584,11 @@ class LLM:
             modality_lora_path,
         )
 
-    def collective_rpc(
-        self,
-        method: Union[str, Callable[..., _R]],
-        timeout: Optional[float] = None,
-        args: tuple = (),
-        kwargs: Optional[dict[str, Any]] = None,
-    ) -> list[_R]:
+    def collective_rpc(self,
+                       method: Union[str, Callable[..., _R]],
+                       timeout: Optional[float] = None,
+                       args: tuple = (),
+                       kwargs: Optional[dict[str, Any]] = None) -> list[_R]:
         """
         Execute an RPC call on all workers.
 
@@ -756,12 +746,10 @@ class LLM:
 
             # only runs for one step
             # we don't need to use tqdm here
-            output = self.generate(
-                prompts_batch,
-                sampling_params=beam_search_params,
-                use_tqdm=False,
-                lora_request=lora_req_batch,
-            )
+            output = self.generate(prompts_batch,
+                                   sampling_params=beam_search_params,
+                                   use_tqdm=False,
+                                   lora_request=lora_req_batch)
 
             for (start, end), instance in zip(instance_start_and_end,
                                               instances):
@@ -784,11 +772,10 @@ class LLM:
                                 logprob_obj.logprob,
                                 multi_modal_data=current_beam.multi_modal_data,
                                 mm_processor_kwargs=current_beam.
-                                mm_processor_kwargs,
-                            )
+                                mm_processor_kwargs)
 
-                            if (token_id == tokenizer.eos_token_id
-                                    and not ignore_eos):
+                            if token_id == tokenizer.eos_token_id and \
+                                not ignore_eos:
                                 instance.completed.append(new_beam)
                             else:
                                 instance_new_beams.append(new_beam)
@@ -1111,14 +1098,13 @@ class LLM:
                 "Please use one of the more specific methods or set the "
                 "task directly when using `LLM.encode`:\n"
                 "  - For embeddings, use `LLM.embed(...)` "
-                'or `pooling_task="embed"`.\n'
+                "or `pooling_task=\"embed\"`.\n"
                 "  - For classification logits, use `LLM.classify(...)` "
-                'or `pooling_task="classify"`.\n'
+                "or `pooling_task=\"classify\"`.\n"
                 "  - For rewards, use `LLM.reward(...)` "
-                'or `pooling_task="reward"`\n'
+                "or `pooling_task=\"reward\"`\n"
                 "  - For similarity scores, use `LLM.score(...)`.",
-                pooling_task,
-            )
+                pooling_task)
 
         model_config = self.llm_engine.model_config
         runner_type = model_config.runner_type
@@ -1539,8 +1525,7 @@ class LLM:
                 truncate_prompt_tokens,
                 use_tqdm,
                 pooling_params,
-                lora_request,
-            )
+                lora_request)
         else:
             return self._embedding_score(
                 tokenizer,
@@ -1549,8 +1534,7 @@ class LLM:
                 truncate_prompt_tokens,
                 use_tqdm,
                 pooling_params,
-                lora_request,
-            )
+                lora_request)
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()
@@ -1623,8 +1607,8 @@ class LLM:
         if prompts is None and prompt_token_ids is None:
             raise ValueError(
                 "Either prompts or prompt_token_ids must be provided.")
-        if (prompts is not None and prompt_token_ids is not None
-                and len(prompts) != len(prompt_token_ids)):
+        if prompts is not None and prompt_token_ids is not None \
+                and len(prompts) != len(prompt_token_ids):
             raise ValueError(
                 "The lengths of prompts and prompt_token_ids must be the same."
             )
@@ -1657,12 +1641,8 @@ class LLM:
     def _validate_and_add_requests(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
-        params: Union[
-            SamplingParams,
-            Sequence[SamplingParams],
-            PoolingParams,
-            Sequence[PoolingParams],
-        ],
+        params: Union[SamplingParams, Sequence[SamplingParams], PoolingParams,
+                      Sequence[PoolingParams]],
         *,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
@@ -1698,8 +1678,8 @@ class LLM:
                 prompt,
                 params[i] if isinstance(params, Sequence) else params,
                 tokenization_kwargs=tokenization_kwargs,
-                lora_request=(lora_request[i] if isinstance(
-                    lora_request, Sequence) else lora_request),
+                lora_request=lora_request[i] if isinstance(
+                    lora_request, Sequence) else lora_request,
                 priority=priority[i] if priority else 0,
             )
 
@@ -1756,8 +1736,8 @@ class LLM:
                             in_spd = total_in_toks / pbar.format_dict["elapsed"]
                             total_out_toks += sum(
                                 len(stp.token_ids) for stp in output.outputs)
-                            out_spd = total_out_toks / pbar.format_dict[
-                                "elapsed"]
+                            out_spd = (total_out_toks /
+                                       pbar.format_dict["elapsed"])
                             pbar.postfix = (
                                 f"est. speed input: {in_spd:.2f} toks/s, "
                                 f"output: {out_spd:.2f} toks/s")
