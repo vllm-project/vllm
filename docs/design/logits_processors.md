@@ -66,7 +66,7 @@ The pseudocode below shows the process by which the vLLM model runner notifies e
             ...
 
 
-    # logits_processor/interface.py
+    # vllm/v1/sample/logits_processor/interface.py
 
     @dataclass(frozen=True)
     class BatchUpdate:
@@ -515,7 +515,7 @@ BatchUpdate instance
 
 ### Built-In Logits Processors
 
-Built-in logits processors are always loaded when the vLLM engine starts. See the existing vLLM built-in logits processors in `logits_processor/builtin.py` for examples of how to write a new built-in vLLM logits processor. It makes sense to write a PR to introduce a new logits processor as a built-in if it is likely to be useful to a wide audience. vLLM currently supports the following built-in logits processors based on the programming model described above:
+Built-in logits processors are always loaded when the vLLM engine starts. See the existing vLLM built-in logits processors in `vllm/v1/sample/logits_processor/builtin.py` for examples of how to write a new built-in vLLM logits processor. It makes sense to write a PR to introduce a new logits processor as a built-in if it is likely to be useful to a wide audience. vLLM currently supports the following built-in logits processors based on the programming model described above:
 
 * Min-P
 
