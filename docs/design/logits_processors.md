@@ -16,7 +16,7 @@ In order to operate on the entire batch at once, each logits processor may maint
 
 In each engine step, the vLLM engine will (1) update each logits processor's internal state and (2) apply logits processors to the model output logits.
 
-### Updating logits processor internal state
+### Updating Logits Processor Internal State
 
 At the beginning of each engine step, the persistent batch adds, discards and reorders requests in response to the scheduler output. After the persistent batch has reorganized, the vLLM engine invokes each logits processor's `update_state()` method. This is necessary to ensure that logits processors' internal states are reorganized to match the new persistent batch state at the beginning of the engine step.
 
@@ -81,7 +81,7 @@ The pseudocode below shows the process by which the vLLM model runner notifies e
     
     ```
 
-### Applying logits processors to the model output logits
+### Applying Logits Processors to the Model Output Logits
 
 After updating persistent batch state, the vLLM model runner performs model inference to obtain logits. Then, the model runner invokes the sampler against the logits. In turn, part of the sampler's operation is to invoke the logits processors' `apply()` methods against the model output logit processors. This process is shown in the pseudocode below.
 
