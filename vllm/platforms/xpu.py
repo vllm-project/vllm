@@ -90,13 +90,6 @@ class XPUPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
 
-        # FIXME: Temporarily forcing eager mode
-        # remove after t.compile support stabilizes.
-        if (envs.VLLM_USE_V1 and model_config is not None
-                and not vllm_config.model_config.enforce_eager):
-            from vllm.config import CompilationLevel
-            vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION  # noqa: E501
-
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
         compilation_config = vllm_config.compilation_config
@@ -187,4 +180,6 @@ class XPUPlatform(Platform):
         """
         Currently xpu does NOT support Graph model.
         """
+        logger.warning("XPU does not support graph pool. This may be unsafe "
+                       "if you enable graphmode on XPU currently.")
         return None
