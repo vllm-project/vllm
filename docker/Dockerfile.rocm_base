@@ -101,8 +101,8 @@ RUN cd flash-attention \
     && git submodule update --init \
     && GPU_ARCHS=$(echo ${PYTORCH_ROCM_ARCH} | sed -e 's/;gfx1[0-9]\{3\}//g') python3 setup.py bdist_wheel --dist-dir=dist
 RUN mkdir -p /app/install \
-    && cp /app/pytorch/dist/*.whl /app/install \
-    && cp /app/vision/dist/*.whl /app/install \
+   # && cp /app/pytorch/dist/*.whl /app/install \
+   # && cp /app/vision/dist/*.whl /app/install \
     && cp /app/flash-attention/dist/*.whl /app/install
 RUN mkdir -p /app/install && cp /app/flash-attention/dist/*.whl /app/install
 
