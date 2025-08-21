@@ -94,13 +94,14 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription, OpenAIServingTranslation)
 from vllm.entrypoints.openai.tool_parsers import ToolParser
+from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
+    tool_parser_manager)
 from vllm.entrypoints.tool_server import (DemoToolServer, MCPToolServer,
                                           ToolServer)
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     log_non_default_args, with_cancellation)
 from vllm.logger import init_logger
-from vllm.plugins.extension_manager import (ExtensionManager,
-                                            tool_parser_manager)
+from vllm.plugins.extension_manager import ExtensionManagerRegistry
 from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -1837,7 +1838,7 @@ def setup_server(args):
     log_non_default_args(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
-        ExtensionManager.import_extension(args.tool_parser_plugin)
+        ExtensionManagerRegistry.import_extension(args.tool_parser_plugin)
 
     validate_api_server_args(args)
 
@@ -1889,7 +1890,7 @@ async def run_server_worker(listen_address,
     """Run a single API server worker."""
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
-        ExtensionManager.import_extension(args.tool_parser_plugin)
+        ExtensionManagerRegistry.import_extension(args.tool_parser_plugin)
 
     server_index = client_config.get("client_index", 0) if client_config else 0
 

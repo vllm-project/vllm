@@ -94,7 +94,7 @@ class ExtensionManager:
     def register(self, names: list[str]):
         return ExtensionManagerRegistry._register(self.base_cls, names)
 
-    def create(self, name: str, *args, **kwargs) -> type:
+    def create(self, name: str, *args, **kwargs) -> Any:
         return ExtensionManagerRegistry._create(self.base_cls, name, *args,
                                                 **kwargs)
 
