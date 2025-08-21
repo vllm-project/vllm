@@ -200,7 +200,6 @@ def test_eagle_correctness(
 
         if "Qwen2.5-VL" in model_name and attn_backend == "TREE_ATTN":
             pytest.skip("TREE ATTN not support Qwen2.5-VL Model yet")
-        print(f"model_setup={model_setup}")
         ref_llm = LLM(model=model_name,
                       max_model_len=2048,
                       tensor_parallel_size=tp_size)

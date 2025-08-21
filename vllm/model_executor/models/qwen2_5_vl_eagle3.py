@@ -217,7 +217,7 @@ class Eagle3Qwen2_5_VLForCausalLM(Qwen2ForCausalLM):
                                   quant_config=quant_config)
 
         logit_scale = getattr(self.config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(self.config.vocab_size,
+        self.logits_processor = LogitsProcessor(self.config.draft_vocab_size,
                                                 scale=logit_scale)
         # Establish a mapping relationship between
         # the draft model vocabulary and the target model vocabulary.
