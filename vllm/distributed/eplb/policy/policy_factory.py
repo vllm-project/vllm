@@ -9,11 +9,6 @@ class PolicyFactory:
     @staticmethod
     def generate_policy(policy_type: int, config: DynamicConfig) -> EplbPolicy:
         policy = {
-            # Constraint applying Dynamic EPLB policy V2:
-            # If there exists redundant expert:
-            # only one redundant expert can be placed in one NPU and its physical expert index must be 0
-
-            # Applying greedy d2d expert weight update composing
             0:
             DefaultEplb,  # RandomLoadBalance: shuffle last physical expert on NPU 1 and 3
             1:
@@ -21,3 +16,4 @@ class PolicyFactory:
         }
 
         return policy.get(policy_type, DefaultEplb)(config)
+
