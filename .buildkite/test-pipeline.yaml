@@ -328,6 +328,7 @@ steps:
     - pytest -v -s compile/test_sequence_parallelism.py
     - pytest -v -s compile/test_async_tp.py
     - pytest -v -s compile/test_fusion_all_reduce.py
+    - pytest -v -s compile/test_decorator.py
 
 - label: PyTorch Fullgraph Smoke Test # 9min
   mirror_hardwares: [amdexperimental]
@@ -341,6 +342,7 @@ steps:
   - pytest -v -s compile/piecewise/test_simple.py
   - pytest -v -s compile/piecewise/test_toy_llama.py
   - pytest -v -s compile/piecewise/test_full_cudagraph.py
+  - pytest -v -s compile/piecewise/test_multiple_graphs.py
 
 - label: PyTorch Fullgraph Test # 18min
   mirror_hardwares: [amdexperimental]
@@ -451,13 +453,11 @@ steps:
 
 - label: LM Eval Small Models # 53min
   mirror_hardwares: [amdexperimental]
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
 
 - label: OpenAI API correctness
   mirror_hardwares: [amdexperimental]
@@ -545,6 +545,15 @@ steps:
   commands:
     - pytest -v -s models/language/pooling -m 'not core_model'
 
+- label: Multi-Modal Processor Test
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
+    - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+
 - label: Multi-Modal Models Test (Standard)
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -554,9 +563,7 @@ steps:
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/multimodal/processing
-    - pytest -v -s --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/test_tensor_schema.py models/multimodal -m core_model
-    - pytest -v -s models/multimodal/test_tensor_schema.py -m core_model  # Needs mp_method="spawn"
+    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
     - cd .. && pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
 
 - label: Multi-Modal Models Test (Extended) 1
@@ -567,7 +574,7 @@ steps:
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing models/multimodal -m 'not core_model'
+    - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
 
 - label: Multi-Modal Models Test (Extended) 2
   mirror_hardwares: [amdexperimental]
@@ -630,6 +637,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_prepare_finalize.py
+  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
   - vllm/v1/attention/backends/flashinfer.py
   - vllm/compilation/fusion.py
   - vllm/compilation/fusion_attn.py
@@ -647,9 +655,11 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
+    - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
     # Fusion
     - pytest -v -s tests/compile/test_fusion_all_reduce.py
     - pytest -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
+    - pytest -v -s tests/kernels/moe/test_flashinfer.py
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
