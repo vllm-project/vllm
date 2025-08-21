@@ -723,7 +723,7 @@ def patch_load_weights(self: "Worker"):
             # print("remappiung weights to original storage took: ", end4 - end3, flush=True)
             # print("copy time: ", copy_time, flush=True)
             
-            logger.debug(f"flash_rl load_weights skipped params (not accurate for `fp8-vllm`): {skipped_params}")
+            # logger.debug(f"flash_rl load_weights skipped params (not accurate for `fp8-vllm`): {skipped_params}")
             alloc, total = torch.cuda.memory.mem_get_info()
             # print(f"torch memory allocated, {alloc / 1024 **2: .2f} MB, {total / 1024**2 : .2f} MB")
             del skipped_params
