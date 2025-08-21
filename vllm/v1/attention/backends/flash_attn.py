@@ -485,8 +485,8 @@ class FlashAttentionImpl(AttentionImpl):
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
         # in KV cache.
-        if (self.kv_sharing_target_layer_name is None and (key is not None)
-                and (value is not None)):
+        if (self.kv_sharing_target_layer_name is None and key is not None
+                and value is not None):
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
             # NOTE(woosuk): Here, key and value are padded while slot_mapping is
