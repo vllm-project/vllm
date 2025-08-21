@@ -3,15 +3,12 @@
 
 import pytest
 
-from vllm.core.block.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
-                                   STR_NOT_IMPL_ENC_DEC_SWA)
 from vllm.core.block_manager import SelfAttnBlockSpaceManager
 from vllm.core.interfaces import AllocStatus
 from vllm.sequence import Logprob, SequenceStatus
 from vllm.utils import chunk_list
 
-from ..utils import (create_dummy_prompt, create_seq_group,
-                     create_seq_group_encoder_decoder)
+from ..utils import create_dummy_prompt, create_seq_group
 
 
 @pytest.mark.parametrize("block_size", [16])
@@ -56,156 +53,6 @@ def test_can_allocate_seq_group(block_size: int, num_seqs_per_group: int,
             assert can_allocate_result == AllocStatus.OK
         else:
             assert can_allocate_result == AllocStatus.LATER
-
-
-@pytest.mark.parametrize("block_size", [16])
-@pytest.mark.parametrize("num_gpu_blocks", [16, 80, 160])
-@pytest.mark.parametrize("num_seqs_per_group", [1, 4])
-@pytest.mark.parametrize("watermark", [0.0, 0.5])
-def test_can_allocate_seq_group_encoder_decoder(block_size: int,
-                                                num_seqs_per_group: int,
-                                                num_gpu_blocks: int,
-                                                watermark: float):
-    block_manager = SelfAttnBlockSpaceManager(
-        block_size=block_size,
-        num_gpu_blocks=num_gpu_blocks,
-        num_cpu_blocks=1024,
-        watermark=watermark,
-    )
-    num_watermark_blocks = int(watermark * num_gpu_blocks)
-
-    num_output_blocks_per_seq = 1
-
-    # NOTE: This should be num_output_blocks_per_seq * num_seqs_per_group, but
-    # the current implementation assumes all seqs are new prompts / don't have
-    # different output lens.
-    num_output_blocks = num_output_blocks_per_seq
-
-    for bdx, num_prompt_blocks in enumerate(
-            range(1, num_gpu_blocks - num_output_blocks)):
-        num_cross_blocks_per_seq = num_prompt_blocks
-
-        seq_group = create_seq_group_encoder_decoder(
-            seq_prompt_len=block_size * num_prompt_blocks,
-            seq_output_lens=[
-                block_size * num_output_blocks_per_seq
-                for _ in range(num_seqs_per_group)
-            ],
-            request_id=str(bdx))
-
-        assert num_prompt_blocks + num_output_blocks <= num_gpu_blocks
-
-        can_allocate_result = block_manager.can_allocate(seq_group)
-
-        num_required_blocks = num_prompt_blocks + \
-                              num_output_blocks + \
-                              num_cross_blocks_per_seq
-
-        if num_gpu_blocks - num_required_blocks < num_watermark_blocks:
-            assert can_allocate_result == AllocStatus.NEVER
-        elif num_gpu_blocks >= num_required_blocks:
-            assert can_allocate_result == AllocStatus.OK
-        else:
-            assert can_allocate_result == AllocStatus.LATER
-
-
-@pytest.mark.parametrize("block_size", [16])
-@pytest.mark.parametrize("num_gpu_blocks", [16])
-@pytest.mark.parametrize("num_seqs_per_group", [1])
-@pytest.mark.parametrize("watermark", [0.0, 0.5])
-def test_can_allocate_encoder_decoder_fails_with_swa(block_size: int,
-                                                     num_seqs_per_group: int,
-                                                     num_gpu_blocks: int,
-                                                     watermark: float):
-    '''
-    SWA short for Sliding Window Attention.
-
-    At time of writing block manager does not support SWA.
-
-    However even when SWA is implemented for block manager,
-    there will still most likely be a separate workstream required
-    to enable SWA for encoder/decoder models.
-
-    Therefore this test enforces that one of the following cases
-    hold true:
-    1. Block manager does not support SWA at all (true at time of writing)
-    2. Block manager fails with NotImplementError when SWA is enabled
-       AND a SequenceGroup with an encoder sequence (i.e. in support of an
-       encoder/decoder model) is passed into can_allocate() as an argument
-
-    The setup for this test is stripped down version of
-    test_can_allocate_seq_group_encoder_decoder()
-    '''
-
-    with pytest.raises((NotImplementedError, AssertionError)) as exc_info:
-        block_manager = SelfAttnBlockSpaceManager(
-            block_size=block_size,
-            num_gpu_blocks=num_gpu_blocks,
-            num_cpu_blocks=1024,
-            watermark=watermark,
-            sliding_window=5  # SWA
-        )
-
-        num_output_blocks_per_seq = 1
-        num_prompt_blocks = 1
-        num_output_blocks = num_output_blocks_per_seq
-        seq_group = create_seq_group_encoder_decoder(
-            seq_prompt_len=block_size * num_prompt_blocks,
-            seq_output_lens=[
-                block_size * num_output_blocks_per_seq
-                for _ in range(num_seqs_per_group)
-            ],
-            request_id="0")
-
-        assert num_prompt_blocks + num_output_blocks <= num_gpu_blocks
-        block_manager.can_allocate(seq_group)
-
-    # Assert that either
-    # 1. Block manager constructor fails with assertion that sliding window
-    #    is not yet supported (most likely near-term outcome at time of
-    #    writing), or
-    # 2. can_allocate() fails with NotImplementedError due to combination of
-    #    encoder/decoder and sliding window attention
-    if isinstance(exc_info.value, NotImplementedError):
-        assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_SWA
-    elif isinstance(exc_info.value, AssertionError):
-        assert str(exc_info.value) == "Sliding window not yet supported"
-
-
-@pytest.mark.parametrize("block_size", [16])
-@pytest.mark.parametrize("num_gpu_blocks", [16])
-@pytest.mark.parametrize("num_seqs_per_group", [1])
-@pytest.mark.parametrize("watermark", [0.0, 0.5])
-def test_can_allocate_encoder_decoder_fails_with_prefix_cache(
-        block_size: int, num_seqs_per_group: int, num_gpu_blocks: int,
-        watermark: float):
-
-    block_manager = SelfAttnBlockSpaceManager(
-        block_size=block_size,
-        num_gpu_blocks=num_gpu_blocks,
-        num_cpu_blocks=1024,
-        watermark=watermark,
-        enable_caching=True  # Prefix cache
-    )
-
-    num_output_blocks_per_seq = 1
-    num_prompt_blocks = 1
-    num_output_blocks = num_output_blocks_per_seq
-    seq_group = create_seq_group_encoder_decoder(
-        seq_prompt_len=block_size * num_prompt_blocks,
-        seq_output_lens=[
-            block_size * num_output_blocks_per_seq
-            for _ in range(num_seqs_per_group)
-        ],
-        request_id="0")
-
-    assert num_prompt_blocks + num_output_blocks <= num_gpu_blocks
-
-    # Assert that either can_allocate() fails with NotImplementedError
-    # due to combination of encoder/decoder and prefix cache
-    with pytest.raises(NotImplementedError) as exc_info:
-        block_manager.can_allocate(seq_group)
-    assert str(exc_info.value) == STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE
 
 
 @pytest.mark.parametrize("block_size", [1, 8])
