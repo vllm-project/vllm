@@ -39,7 +39,6 @@ if TYPE_CHECKING:
 import functools
 
 import vllm.envs as envs
-from vllm.lora.fused_moe_lora import fused_moe_w2_lora, fused_moe_w13_lora
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     get_config_dtype_str, modular_triton_fused_moe, try_get_optimal_moe_config)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
@@ -1298,12 +1297,20 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 sorted_token_ids_lora = sorted_token_ids_lora.view(
                     curr_topk_ids.shape[-1], -1)
 
-                fused_moe_w13_lora(hidden_states, w13_lora_a_stacked,
-                                   w13_lora_b_stacked, topk_weights,
-                                   sorted_token_ids_lora, expert_ids_lora,
-                                   num_tokens_post_padded_lora, max_lora_rank,
-                                   top_k, config,
-                                   args[2].view(-1, top_k, args[2].shape[-1]))
+                layer.punica_wrapper.add_lora_fused_moe(
+                    args[2].view(-1, top_k, args[2].shape[-1]),
+                    hidden_states,
+                    w13_lora_a_stacked,
+                    w13_lora_b_stacked,
+                    topk_weights,
+                    sorted_token_ids_lora,
+                    expert_ids_lora,
+                    num_tokens_post_padded_lora,
+                    max_lora_rank,
+                    top_k,
+                    config,
+                )
+
                 result = func(*args, **kwargs)
 
                 layer._lora["intermediate_cache2"] = args[1]
@@ -1356,10 +1363,12 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 intermediate_cache2 = layer._lora["intermediate_cache2"]
                 intermediate_cache3 = args[0]
 
-                intermediate_cache3 += fused_moe_w2_lora(
-                    intermediate_cache2, w2_lora_a_stacked, w2_lora_b_stacked,
-                    topk_weights, sorted_token_ids_lora, expert_ids_lora,
-                    num_tokens_post_padded_lora, max_lora_rank, top_k, config)
+                layer.punica_wrapper.add_lora_fused_moe(
+                    intermediate_cache3, intermediate_cache2,
+                    [w2_lora_a_stacked], [w2_lora_b_stacked], topk_weights,
+                    sorted_token_ids_lora, expert_ids_lora,
+                    num_tokens_post_padded_lora, max_lora_rank, top_k, config,
+                    True)
 
                 result = func(*args, **kwargs)
                 return result

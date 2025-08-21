@@ -145,13 +145,20 @@ def fused_moe_lora(
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
 
-def fused_moe_w13_lora(
-        qcurr_hidden_states: torch.Tensor,
-        w13_lora_a_stacked: list[torch.Tensor],
-        w13_lora_b_stacked: list[torch.Tensor], topk_weights: torch.Tensor,
-        sorted_token_ids: torch.Tensor, expert_ids: torch.Tensor,
-        num_tokens_post_padded: torch.Tensor, max_lora_rank: int,
-        top_k_num: int, config, intermediate_cache1: torch.Tensor):
+def invoke_fused_moe_lora_kernel(
+    intermediate_cache1: torch.Tensor,
+    qcurr_hidden_states: torch.Tensor,
+    lora_a_stacked: list[torch.Tensor],
+    lora_b_stacked: list[torch.Tensor],
+    topk_weights: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    max_lora_rank: int,
+    top_k_num: int,
+    config,
+    mul_routed_weight=False,
+):
     """_summary_
     
     Args:
@@ -167,55 +174,49 @@ def fused_moe_w13_lora(
         config (_type_): _description_
         intermediate_cache1 (torch.Tensor): _description_
     """
+    assert len(lora_a_stacked) == len(lora_b_stacked)
+    device = qcurr_hidden_states.device
+    num_slices = len(lora_a_stacked)
 
-    w1_lora_a_stacked = w13_lora_a_stacked[0]
-    w1_lora_b_stacked = w13_lora_b_stacked[0]
-    num_experts = w13_lora_a_stacked[0].shape[1]
+    w1_lora_a_stacked = lora_a_stacked[0]
+    w1_lora_b_stacked = lora_b_stacked[0]
+    num_experts = lora_a_stacked[0].shape[1]
 
     N = max_lora_rank
-    M = qcurr_hidden_states.shape[0]
+    M = topk_weights.shape[0]
     EM = sorted_token_ids.shape[1]
     K = qcurr_hidden_states.shape[1]
     num_tokens = M * top_k_num
     w1_output_dim_size = w1_lora_b_stacked.shape[2]
 
-    w13_intermediate_cache1 = torch.zeros(
-        (2 * M * top_k_num * (max_lora_rank + w1_output_dim_size)),
+    lora_intermediate_cache1 = torch.zeros(
+        (num_slices * M * top_k_num * (max_lora_rank + w1_output_dim_size)),
         dtype=torch.bfloat16,
-        device=qcurr_hidden_states.device)
+        device=device)
 
-    w1_a_inter_size = M * top_k_num * max_lora_rank
-    w1_b_inter_size = M * top_k_num * w1_output_dim_size
+    # slices
+    a_intermediate_size = num_slices * M * top_k_num * max_lora_rank
+    a_intermediate_cache1 = lora_intermediate_cache1[:
+                                                     a_intermediate_size].view(
+                                                         num_slices, M,
+                                                         top_k_num,
+                                                         max_lora_rank)
+    b_intermediate_cache1 = lora_intermediate_cache1[
+        a_intermediate_size:].view(num_slices, M, top_k_num,
+                                   w1_output_dim_size)
 
-    w1_a_intermediate_cache1 = w13_intermediate_cache1[:w1_a_inter_size].view(
-        M, top_k_num, max_lora_rank)
-    # w3_a_intermediate_cache1 = w13_intermediate_cache1[w1_a_inter_size:2 *
-    #                                                    w1_a_inter_size].view(
-    #                                                        M, top_k_num,
-    #                                                        max_lora_rank)
-
-    w1_b_intermediate_cache1 = w13_intermediate_cache1[2 * w1_a_inter_size:2 *
-                                                       w1_a_inter_size +
-                                                       w1_b_inter_size].view(
-                                                           M, top_k_num,
-                                                           w1_output_dim_size)
-    w3_b_intermediate_cache1 = w13_intermediate_cache1[2 * w1_a_inter_size +
-                                                       w1_b_inter_size:].view(
-                                                           M, top_k_num,
-                                                           w1_output_dim_size)
-
-    b_ptr = _get_ptr(w13_lora_a_stacked, qcurr_hidden_states.device)
+    b_ptr = _get_ptr(lora_a_stacked, device)
 
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(
             N, META["BLOCK_SIZE_N"]),
-        len(w13_lora_a_stacked),
-        w13_lora_a_stacked[0].shape[0],
+        len(lora_a_stacked),
+        lora_a_stacked[0].shape[0],
     )
 
     fused_moe_lora[grid](qcurr_hidden_states,
                          b_ptr,
-                         w1_a_intermediate_cache1,
+                         a_intermediate_cache1,
                          topk_weights,
                          sorted_token_ids,
                          expert_ids,
@@ -231,186 +232,62 @@ def fused_moe_w13_lora(
                          w1_lora_a_stacked.stride(1),
                          w1_lora_a_stacked.stride(3),
                          w1_lora_a_stacked.stride(2),
-                         w1_a_intermediate_cache1.stride(1),
-                         w1_a_intermediate_cache1.stride(2),
+                         a_intermediate_cache1.stride(2),
+                         a_intermediate_cache1.stride(3),
                          sorted_token_ids.stride(0),
                          expert_ids.stride(0),
                          num_slice_a=1,
-                         num_slice_c=2,
+                         num_slice_c=num_slices,
                          slice_a_size=qcurr_hidden_states.numel(),
-                         slice_c_size=w1_a_intermediate_cache1.numel(),
-                         top_k=top_k_num,
+                         slice_c_size=a_intermediate_cache1.numel() //
+                         num_slices,
+                         top_k=1 if mul_routed_weight else top_k_num,
                          MUL_ROUTED_WEIGHT=False,
                          **config)
 
-    b_ptr = _get_ptr(w13_lora_b_stacked, qcurr_hidden_states.device)
+    b_ptr = _get_ptr(lora_b_stacked, device)
     K = max_lora_rank
     N = w1_output_dim_size
 
-    w1_a_intermediate_cache1 = w1_a_intermediate_cache1.view(
-        -1, w1_a_intermediate_cache1.shape[2])
+    a_intermediate_cache1 = a_intermediate_cache1.view(
+        M, -1, a_intermediate_cache1.shape[3])
 
     grid = lambda META: (
         triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(
             N, META["BLOCK_SIZE_N"]),
-        len(w13_lora_b_stacked),
-        w13_lora_b_stacked[0].shape[0],
+        len(lora_b_stacked),
+        lora_b_stacked[0].shape[0],
     )
-    fused_moe_lora[grid](w1_a_intermediate_cache1,
-                         b_ptr,
-                         w1_b_intermediate_cache1,
-                         topk_weights,
-                         sorted_token_ids,
-                         expert_ids,
-                         num_tokens_post_padded,
-                         N,
-                         K,
-                         EM,
-                         num_tokens,
-                         num_experts,
-                         w1_a_intermediate_cache1.stride(0),
-                         w1_a_intermediate_cache1.stride(1),
-                         w1_lora_b_stacked.stride(0),
-                         w1_lora_b_stacked.stride(1),
-                         w1_lora_b_stacked.stride(3),
-                         w1_lora_b_stacked.stride(2),
-                         w1_b_intermediate_cache1.stride(1),
-                         w1_b_intermediate_cache1.stride(2),
-                         sorted_token_ids.stride(0),
-                         expert_ids.stride(0),
-                         num_slice_a=2,
-                         num_slice_c=2,
-                         slice_a_size=w1_a_intermediate_cache1.numel(),
-                         slice_c_size=w1_b_intermediate_cache1.numel(),
-                         top_k=1,
-                         MUL_ROUTED_WEIGHT=False,
-                         **config)
-    intermediate_cache1[:, :, :N] += w1_b_intermediate_cache1
-    intermediate_cache1[:, :, N:] += w3_b_intermediate_cache1
-
-
-def fused_moe_w2_lora(intermediate_cache2, w2_lora_a_stacked: torch.Tensor,
-                      w2_lora_b_stacked: torch.Tensor,
-                      topk_weights: torch.Tensor,
-                      sorted_token_ids: torch.Tensor, expert_ids: torch.Tensor,
-                      num_tokens_post_padded: torch.Tensor, max_lora_rank: int,
-                      top_k_num: int, config):
-    """_summary_
-
-    Args:
-        intermediate_cache2 (_type_): _description_
-        w2_lora_a_stacked (torch.Tensor): _description_
-        w2_lora_b_stacked (torch.Tensor): _description_
-        topk_weights (torch.Tensor): _description_
-        sorted_token_ids (torch.Tensor): _description_
-        expert_ids (torch.Tensor): _description_
-        num_tokens_post_padded (torch.Tensor): _description_
-        max_lora_rank (int): _description_
-        top_k_num (int): _description_
-        config (_type_): _description_
-
-    Returns:
-        _type_: _description_
-    """
-    EM = sorted_token_ids.shape[1]
-    M = topk_weights.shape[0]
-    num_tokens = topk_weights.numel()
-    num_experts = w2_lora_a_stacked[0].shape[1]
-
-    device = intermediate_cache2.device
-
-    w2_a_intermediate_cache1 = torch.zeros((M * top_k_num, max_lora_rank),
-                                           dtype=torch.bfloat16,
-                                           device=device)
-    w2_b_intermediate_cache1 = torch.zeros(
-        (M, top_k_num, w2_lora_b_stacked.shape[2]),
-        dtype=torch.bfloat16,
-        device=device)
-
-    b_ptr = _get_ptr([w2_lora_a_stacked], device)
-
-    w2_lora_a_in = intermediate_cache2.view(-1, intermediate_cache2.shape[-1])
-    w2_lora_a_out = w2_a_intermediate_cache1.view(-1, top_k_num, max_lora_rank)
-
-    K = w2_lora_a_stacked.shape[3]
-    N = max_lora_rank
-
-    grid = lambda META: (
-        triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(
-            N, META["BLOCK_SIZE_N"]),
-        1,  #slices
-        w2_lora_a_stacked.shape[0],  # max_loras
-    )
-
-    fused_moe_lora[grid](intermediate_cache2,
-                         b_ptr,
-                         w2_a_intermediate_cache1,
-                         topk_weights,
-                         sorted_token_ids,
-                         expert_ids,
-                         num_tokens_post_padded,
-                         N,
-                         K,
-                         EM,
-                         num_tokens,
-                         num_experts,
-                         w2_lora_a_in.stride(0),
-                         w2_lora_a_in.stride(1),
-                         w2_lora_a_stacked.stride(0),
-                         w2_lora_a_stacked.stride(1),
-                         w2_lora_a_stacked.stride(3),
-                         w2_lora_a_stacked.stride(2),
-                         w2_lora_a_out.stride(1),
-                         w2_lora_a_out.stride(2),
-                         sorted_token_ids.stride(0),
-                         expert_ids.stride(0),
-                         num_slice_a=1,
-                         num_slice_c=1,
-                         slice_a_size=intermediate_cache2.numel(),
-                         slice_c_size=w2_a_intermediate_cache1.numel(),
-                         top_k=1,
-                         MUL_ROUTED_WEIGHT=False,
-                         **config)
-
-    K = max_lora_rank
-    N = w2_lora_b_stacked.shape[2]
-
-    b_ptr = _get_ptr([w2_lora_b_stacked], device)
-
-    grid = lambda META: (
-        triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(
-            N, META["BLOCK_SIZE_N"]),
-        1,  #slices
-        w2_lora_a_stacked.shape[0],  # max_loras
-    )
-
-    fused_moe_lora[grid](w2_a_intermediate_cache1,
-                         b_ptr,
-                         w2_b_intermediate_cache1,
-                         topk_weights,
-                         sorted_token_ids,
-                         expert_ids,
-                         num_tokens_post_padded,
-                         N,
-                         K,
-                         EM,
-                         num_tokens,
-                         num_experts,
-                         w2_a_intermediate_cache1.stride(0),
-                         w2_a_intermediate_cache1.stride(1),
-                         w2_lora_b_stacked.stride(0),
-                         w2_lora_b_stacked.stride(1),
-                         w2_lora_b_stacked.stride(3),
-                         w2_lora_b_stacked.stride(2),
-                         w2_b_intermediate_cache1.stride(1),
-                         w2_b_intermediate_cache1.stride(2),
-                         sorted_token_ids.stride(0),
-                         expert_ids.stride(0),
-                         num_slice_a=1,
-                         num_slice_c=1,
-                         slice_a_size=w2_a_intermediate_cache1.numel(),
-                         slice_c_size=w2_b_intermediate_cache1.numel(),
-                         top_k=1,
-                         MUL_ROUTED_WEIGHT=True,
-                         **config)
-    return w2_b_intermediate_cache1
+    fused_moe_lora[grid](
+        a_intermediate_cache1,
+        b_ptr,
+        b_intermediate_cache1,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        N,
+        K,
+        EM,
+        num_tokens,
+        num_experts,
+        a_intermediate_cache1.stride(1),
+        a_intermediate_cache1.stride(2),
+        w1_lora_b_stacked.stride(0),
+        w1_lora_b_stacked.stride(1),
+        w1_lora_b_stacked.stride(3),
+        w1_lora_b_stacked.stride(2),
+        b_intermediate_cache1.stride(2),
+        b_intermediate_cache1.stride(3),
+        sorted_token_ids.stride(0),
+        expert_ids.stride(0),
+        num_slice_a=num_slices,
+        num_slice_c=num_slices,
+        slice_a_size=a_intermediate_cache1.numel() // num_slices,
+        slice_c_size=b_intermediate_cache1.numel() // num_slices,
+        top_k=1,
+        MUL_ROUTED_WEIGHT=mul_routed_weight,
+        **config)
+    for i in range(num_slices):
+        intermediate_cache1[:, :,
+                            i * N:(i + 1) * N] += b_intermediate_cache1[i]

@@ -728,6 +728,13 @@ class DeepseekV2Model(nn.Module):
 class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
                             SupportsLoRA):
 
+    packed_modules_mapping = {
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ]
+    }
+
     def get_packed_modules_mapping(self) -> dict[str, list[str]]:
         # This method generates and returns a dictionary mapping packed module
         # names to lists of their corresponding submodule names. It includes
@@ -735,14 +742,10 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts,
         # the expert indices are expanded based on the configured number
         # of routed experts.
 
-        packed_modules_mapping = {
-            "gate_up_proj": [
-                "gate_proj",
-                "up_proj",
-            ]
-        }
-
         expert_params_mapping = self.get_expert_mapping()
+
+        packed_modules_mapping = self.packed_modules_mapping.copy()
+
         packed_modules_mapping["experts"] = [
             weight_name.rstrip(".")
             for _, weight_name, _, _ in expert_params_mapping

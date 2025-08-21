@@ -19,6 +19,8 @@ if HAS_TRITON:
     from vllm.lora.ops.triton_ops import (LoRAKernelMeta, lora_expand,
                                           lora_shrink)
 
+from vllm.lora.fused_moe_lora import invoke_fused_moe_lora_kernel
+
 from .punica_base import PunicaWrapperBase
 
 
@@ -277,3 +279,34 @@ class PunicaWrapperGPU(PunicaWrapperBase):
                     *self.prompt_mapping_meta.meta_args(buffer.size(0)),
                     add_inputs=True)
         y = y.view_as(y_org)
+
+    def add_lora_fused_moe(
+        self,
+        y: torch.Tensor,
+        x: torch.Tensor,
+        lora_a_stacked: list[torch.Tensor],
+        lora_b_stacked: list[torch.Tensor],
+        topk_weights: torch.Tensor,
+        sorted_token_ids: torch.Tensor,
+        expert_ids: torch.Tensor,
+        num_tokens_post_padded: torch.Tensor,
+        max_lora_rank: int,
+        top_k_num: int,
+        config,
+        mul_routed_weight=False,
+    ):
+
+        invoke_fused_moe_lora_kernel(
+            y,
+            x,
+            lora_a_stacked,
+            lora_b_stacked,
+            topk_weights,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            max_lora_rank,
+            top_k_num,
+            config,
+            mul_routed_weight,
+        )
