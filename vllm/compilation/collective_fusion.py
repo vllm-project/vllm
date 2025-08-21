@@ -465,7 +465,7 @@ if flashinfer_comm is not None:
                 quant_out=quant_out,
                 scale_out=scale_out,
                 # in vllm we only support swizzled layout
-                layout_code=flashinfer_comm.FP4QuantizationSFLayout.SWIZZLED,
+                layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED,
                 scale_factor=scale_factor,
             )
         else:
