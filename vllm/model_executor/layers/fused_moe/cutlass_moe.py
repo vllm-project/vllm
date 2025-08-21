@@ -15,8 +15,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate, TopKWeightAndReduceNoOP)
-from vllm.model_executor.layers.fused_moe.utils import (_fp8_perm,
-                                                        _fp8_quantize,
+from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
                                                         _resize_cache)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
@@ -1088,28 +1087,17 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
         return (workspace1, workspace2, output,
                 self.out_dtype if self.out_dtype is not None else a.dtype)
 
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str,
-        global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-        apply_router_weight_on_input: bool,
-    ) -> torch.Tensor:
+    def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
+              w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor, activation: str, global_num_experts: int,
+              expert_map: Optional[torch.Tensor],
+              w1_scale: Optional[torch.Tensor],
+              w2_scale: Optional[torch.Tensor], w1_zp: Optional[torch.Tensor],
+              w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
+              a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
+              workspace2: torch.Tensor,
+              expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+              apply_router_weight_on_input: bool) -> torch.Tensor:
         assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"
         activation_callable = lambda i, o: self.activation(activation, i, o)
@@ -1191,7 +1179,7 @@ def block_scaled_cutlass_moe_fp8(
     out_dtype = a.dtype
 
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
+        MoEPrepareAndFinalizeNoEP(skip_quant=True),
         CutlassExpertsBlockedFp8(
             max_experts_per_worker=global_num_experts,
             out_dtype=out_dtype,
@@ -1217,5 +1205,4 @@ def block_scaled_cutlass_moe_fp8(
               w2_scale,
               a1_scale=a1_scale,
               a2_scale=a2_scale,
-              apply_router_weight_on_input=apply_router_weight_on_input,
-              extra_prepare_args={"skip_quant": True})
+              apply_router_weight_on_input=apply_router_weight_on_input)
