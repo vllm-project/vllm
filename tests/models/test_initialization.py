@@ -95,6 +95,8 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
 
 @pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
 def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
+    if model_arch == "Lfm2ForCausalLM":
+        pytest.skip("Skipping until test supports V1-only models")
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
