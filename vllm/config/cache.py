@@ -3,16 +3,16 @@
 
 import hashlib
 from dataclasses import field
-from typing import Any, get_args, Literal, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal, Optional, get_args
 
-import vllm.envs as envs
-
-from pydantic import model_validator, SkipValidation
+from pydantic import SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
+
+import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.utils import get_cpu_memory, GiB_bytes
+from vllm.utils import GiB_bytes, get_cpu_memory
 
 if TYPE_CHECKING:
     from vllm.config.parallel import ParallelConfig
@@ -145,7 +145,8 @@ class CacheConfig:
         factors.append(self.mamba_cache_dtype)
         factors.append(self.mamba_ssm_cache_dtype)
         # `cpu_offload_gb` does not use `torch.compile` yet.
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(),
+                               usedforsecurity=False).hexdigest()
         return hash_str
 
     def __post_init__(self) -> None:
@@ -162,22 +163,18 @@ class CacheConfig:
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
         if self.cpu_offload_gb < 0:
-            raise ValueError(
-                "CPU offload space must be non-negative"
-                f", but got {self.cpu_offload_gb}"
-            )
+            raise ValueError("CPU offload space must be non-negative"
+                             f", but got {self.cpu_offload_gb}")
 
         if self.gpu_memory_utilization > 1.0:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
-                f"{self.gpu_memory_utilization}."
-            )
+                f"{self.gpu_memory_utilization}.")
 
         if self.kv_sharing_fast_prefill:
             logger.warning_once(
                 "--kv-sharing-fast-prefill is currently work in progress "
-                "and not functional yet (i.e. no prefill savings)"
-            )
+                "and not functional yet (i.e. no prefill savings)")
 
         return self
 
@@ -189,8 +186,7 @@ class CacheConfig:
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
                 "Meanwhile, it may cause accuracy drop without a proper "
-                "scaling factor."
-            )
+                "scaling factor.")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
 
@@ -201,18 +197,14 @@ class CacheConfig:
         if self.sliding_window is not None and not envs.VLLM_USE_V1:
             raise NotImplementedError(
                 "Prefix caching is not supported with sliding window. "
-                "Run with --disable-sliding-window to use prefix caching."
-            )
+                "Run with --disable-sliding-window to use prefix caching.")
 
-        if (
-            self.enable_prefix_caching
-            and self.prefix_caching_hash_algo not in get_args(PrefixCachingHashAlgo)
-        ):
+        if (self.enable_prefix_caching and self.prefix_caching_hash_algo
+                not in get_args(PrefixCachingHashAlgo)):
             raise ValueError(
                 "Unknown prefix caching hash algorithm: "
                 f"{self.prefix_caching_hash_algo}. Must be one of "
-                f"{get_args(PrefixCachingHashAlgo)}."
-            )
+                f"{get_args(PrefixCachingHashAlgo)}.")
 
     def verify_with_parallel_config(
         self,
@@ -224,11 +216,9 @@ class CacheConfig:
         num_gpus_per_node = parallel_config.tensor_parallel_size
         cpu_memory_usage = self.swap_space_bytes * num_gpus_per_node
 
-        msg = (
-            f"{cpu_memory_usage / GiB_bytes:.2f} GiB out of the "
-            f"{total_cpu_memory / GiB_bytes:.2f} GiB total CPU memory "
-            "is allocated for the swap space."
-        )
+        msg = (f"{cpu_memory_usage / GiB_bytes:.2f} GiB out of the "
+               f"{total_cpu_memory / GiB_bytes:.2f} GiB total CPU memory "
+               "is allocated for the swap space.")
         if cpu_memory_usage > 0.7 * total_cpu_memory:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
