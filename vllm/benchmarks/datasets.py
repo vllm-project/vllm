@@ -466,9 +466,8 @@ class RandomDataset(BenchmarkDataset):
         Get the sampling parameters for the dataset.
         """
         # Enforce range_ratio < 1
-        assert range_ratio < 1.0, (
-            "random_range_ratio must be < 1.0 to ensure a valid sampling range"
-        )
+        if not (0.0 <= range_ratio < 1.0):
+            raise ValueError("range_ratio must be in [0, 1).")
         num_special_tokens = int(tokenizer.num_special_tokens_to_add())
         real_input_len = max(0, int(input_len) - num_special_tokens)
         # Bounds use floor for low and ceil for high
@@ -688,10 +687,8 @@ class RandomMultiModalDataset(RandomDataset):
         Get the sampling parameters for the multimodal items.
         """
         # Enforce num_mm_items_range_ratio < 1
-        assert num_mm_items_range_ratio < 1.0, (
-            "num_mm_items_range_ratio must be < 1.0 to ensure a valid sampling "
-            "range"
-        )
+        if not (0.0 <= num_mm_items_range_ratio < 1.0):
+            raise ValueError("num_mm_items_range_ratio must be in [0, 1).")
 
         # Ensure modalities to sample are in limit_mm_per_prompt
         for k, v in bucket_config.items():
@@ -824,6 +821,15 @@ class RandomMultiModalDataset(RandomDataset):
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
         **kwargs,
     ) -> list[SampleRequest]:
+
+        # NOTE: Video sampling is WIP. Raise error if video is in bucket config
+        # and probability is non-zero.
+        if any(self.map_config_to_modality(cfg) == "video" and p > 0 
+                for cfg, p in bucket_config.items()):
+            raise NotImplementedError("Video sampling not implemented; "
+                                      "set its probability to 0.")
+
+        # Get the sampling parameters for the dataset
         input_lens, output_lens, offsets = self.get_sampling_params(
             num_requests, range_ratio, input_len, output_len, tokenizer
         )

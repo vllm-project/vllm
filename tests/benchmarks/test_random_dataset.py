@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
-from typing import NamedTuple
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from vllm.benchmarks.datasets import RandomDataset, SampleRequest
+from vllm.benchmarks.datasets import (RandomDataset, RandomMultiModalDataset,
+                                      SampleRequest)
 
 
 @pytest.fixture(scope="session")
@@ -123,3 +124,195 @@ def test_random_dataset_different_seeds(
     assert a != b
 
 
+# -----------------------------
+# RandomMultiModalDataset tests
+# -----------------------------
+
+def _mm_fingerprint_sample(
+    req: SampleRequest,
+) -> tuple[str, int, int, int, list[str]]:
+    """Create a compact fingerprint for multimodal samples.
+
+    Includes:
+    - prompt string
+    - prompt_len
+    - expected_output_len
+    - count of multimodal items
+    - per-item type and URL prefix (e.g., 'data:image/jpeg;base64,')
+    """
+    items = req.multi_modal_data or []
+    item_prefixes: list[str] = []
+    for it in items:
+        if isinstance(it, dict) and it.get("type") == "image_url":
+            url = it.get("image_url", {}).get("url", "")
+            # Only keep a short identifying prefix to avoid huge strings
+            item_prefixes.append(f"image:{url[:22]}")
+        elif isinstance(it, dict) and it.get("type") == "video_url":
+            url = it.get("video_url", {}).get("url", "")
+            item_prefixes.append(f"video:{url[:22]}")
+        else:
+            item_prefixes.append("unknown:")
+    return (req.prompt, req.prompt_len, req.expected_output_len, len(items),
+            item_prefixes)
+
+
+def _collect_mm_samples(
+    dataset: RandomMultiModalDataset,
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    num_requests: int = 8,
+    prefix_len: int = 3,
+    range_ratio: float = 0.0,
+    input_len: int = 20,
+    output_len: int = 5,
+    num_mm_items: int = 2,
+    num_mm_items_range_ratio: float = 0.0,
+    limit_mm_per_prompt: dict[str, int] | None = None,
+    bucket_config: dict[tuple[int, int, int], float] | None = None,
+    enable_multimodal_chat: bool = False,
+) -> list[SampleRequest]:
+    if limit_mm_per_prompt is None:
+        limit_mm_per_prompt = {"image": 5, "video": 0}
+    if bucket_config is None:
+        bucket_config = {(32, 32, 1): 0.5, (52, 64, 1): 0.5}
+    return dataset.sample(
+        tokenizer=tokenizer,
+        num_requests=num_requests,
+        prefix_len=prefix_len,
+        range_ratio=range_ratio,
+        input_len=input_len,
+        output_len=output_len,
+        num_mm_items=num_mm_items,
+        num_mm_items_range_ratio=num_mm_items_range_ratio,
+        limit_mm_per_prompt=limit_mm_per_prompt,
+        bucket_config=bucket_config,
+        enable_multimodal_chat=enable_multimodal_chat,
+    )
+
+
+@pytest.mark.benchmark
+def test_random_mm_same_seed(hf_tokenizer: PreTrainedTokenizerBase) -> None:
+    seed = 42
+    ds_a = RandomMultiModalDataset(random_seed=seed)
+    ds_b = RandomMultiModalDataset(random_seed=seed)
+    a = _collect_mm_samples(ds_a, hf_tokenizer)
+    b = _collect_mm_samples(ds_b, hf_tokenizer)
+    fa = [_mm_fingerprint_sample(s) for s in a]
+    fb = [_mm_fingerprint_sample(s) for s in b]
+    assert fa == fb
+
+
+@pytest.mark.benchmark
+def test_random_mm_different_seeds(
+    hf_tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    ds_a = RandomMultiModalDataset(random_seed=0)
+    ds_b = RandomMultiModalDataset(random_seed=999)
+    a = _collect_mm_samples(ds_a, hf_tokenizer)
+    b = _collect_mm_samples(ds_b, hf_tokenizer)
+    fa = [_mm_fingerprint_sample(s) for s in a]
+    fb = [_mm_fingerprint_sample(s) for s in b]
+    assert fa != fb
+
+@pytest.mark.benchmark
+def test_random_mm_respects_limits(
+    hf_tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    ds = RandomMultiModalDataset(random_seed=0)
+    # Requesting 3 items with a per-prompt limit of 1 should error per current
+    # design (dataset refuses to silently clamp below the requested baseline).
+    with pytest.raises(ValueError):
+        _collect_mm_samples(
+            ds,
+            hf_tokenizer,
+            num_requests=12,
+            num_mm_items=3,
+            num_mm_items_range_ratio=0.0,
+            limit_mm_per_prompt={"image": 1, "video": 0},
+            bucket_config={(32, 32, 1): 1.0},
+        )
+
+
+@pytest.mark.benchmark
+def test_random_mm_zero_prob_entries_are_removed(
+    hf_tokenizer: PreTrainedTokenizerBase,
+) -> None:
+    ds = RandomMultiModalDataset(random_seed=0)
+    # Second bucket has zero probability and should be ignored after
+    # normalization
+    samples = _collect_mm_samples(
+        ds,
+        hf_tokenizer,
+        num_requests=6,
+        num_mm_items=2,
+        num_mm_items_range_ratio=0.0,
+        limit_mm_per_prompt={"image": 10, "video": 0},
+        bucket_config={(32, 32, 1): 1.0, (52, 64, 1): 0.0},
+    )
+    for s in samples:
+        assert isinstance(s.multi_modal_data, list)
+        typed_mm = cast(list[dict[str, Any]], s.multi_modal_data)
+        for it in typed_mm:
+            assert it.get("type") == "image_url"
+
+
+@pytest.mark.benchmark
+def test_random_mm_zero_items(hf_tokenizer: PreTrainedTokenizerBase) -> None:
+    ds = RandomMultiModalDataset(random_seed=0)
+    samples = _collect_mm_samples(
+        ds,
+        hf_tokenizer,
+        num_requests=5,
+        num_mm_items=0,
+        num_mm_items_range_ratio=0.0,
+        limit_mm_per_prompt={"image": 5, "video": 0},
+        bucket_config={(32, 32, 1): 1.0},
+    )
+    for s in samples:
+        assert s.multi_modal_data == []
+
+@pytest.mark.benchmark
+def test_random_mm_num_items_per_prompt(
+    hf_tokenizer: PreTrainedTokenizerBase) -> None:
+    ds = RandomMultiModalDataset(random_seed=0)
+    # Fixed number of images per prompt
+    # set num_mm_items_range_ratio to 0.0
+    # TODO: modify video values when video sampling is implemented
+    samples_fixed_items = _collect_mm_samples(
+        ds,
+        hf_tokenizer,
+        num_requests=5,
+        num_mm_items=3,
+        num_mm_items_range_ratio=0.0,
+        limit_mm_per_prompt={"image": 3, "video": 0},
+        bucket_config={(32, 32, 1): 1.0},
+    )
+    # Must have 5 requests each with 3 mm items per prompt
+    assert len(samples_fixed_items) == 5
+    for s in samples_fixed_items:
+        mm_data = cast(list[dict[str, Any]], s.multi_modal_data)
+        assert len(mm_data) == 3
+        for it in mm_data:
+            assert it.get("type") == "image_url"
+
+
+    # Vary number of mm items per prompt
+    # set num_mm_items_range_ratio to 0.5
+    samples_varying_items = _collect_mm_samples(
+        ds,
+        hf_tokenizer,
+        num_requests=5,
+        num_mm_items=2,
+        num_mm_items_range_ratio=0.5,
+        limit_mm_per_prompt={"image": 4, "video": 0},
+        bucket_config={(32, 32, 1): 1.0},
+    )
+    # Must have 5 requests each with less than 4 mm items per prompt
+    # but at least 1 mm item per prompt
+    assert len(samples_varying_items) == 5
+    for s in samples_varying_items:
+        mm_data = cast(list[dict[str, Any]], s.multi_modal_data)
+        assert len(mm_data) <= 4
+        assert len(mm_data) >= 1
+        for it in mm_data:
+            assert it.get("type") == "image_url"
