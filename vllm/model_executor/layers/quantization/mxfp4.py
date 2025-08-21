@@ -39,10 +39,10 @@ def _should_use_flashinfer_mxfp4_bf16():
         return envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
 
     # Enable by default on SM100 if MXFP8 is not explicitly enabled
-    if (current_platform.is_device_capability(100) and has_flashinfer()
+    if (current_platform.is_device_capability(100) or current_platform.is_device_capability(90) and has_flashinfer()
             and not envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8")):
         logger.info_once(
-            "Enabling FlashInfer MXFP4 BF16 backend by default for Blackwell. "
+            "Enabling FlashInfer MXFP4 BF16 backend by default for Blackwell and Hopper. "
             "For faster performance, consider setting "
             "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1, "
             "though this may impact accuracy.")
@@ -172,14 +172,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.hidden_size = hidden_size
             layer.intermediate_size_per_partition = \
                 intermediate_size_per_partition_after_pad
-        elif should_use_flashinfer_mxfp4():
+        elif should_use_flashinfer_mxfp4() and current_platform.is_device_capability(100):
             # pad the intermediate size to be a multiple of 2 * mxfp4_block
             # for to hold non-uniform sharded tensor as well as swizzling
             # other padding to increase performance
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 256)
             hidden_size = round_up(hidden_size, 256)
-        elif (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16) and current_platform.is_device_capability(90):
+        elif _should_use_flashinfer_mxfp4_bf16() and current_platform.is_device_capability(90):
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 128)
         elif current_platform.is_rocm():
@@ -388,7 +388,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w2_bias = Parameter(torch.stack(gemm2_bias_shuffled).reshape(
                 self.num_experts, -1),
                                       requires_grad=False)
-        elif envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16 and current_platform.is_device_capability(90):
+        elif _should_use_flashinfer_mxfp4_bf16() and current_platform.is_device_capability(90):
             assert layer.w13_weight.dtype == torch.uint8, f"layer.w13_weight.dtype: {layer.w13_weight.dtype}, expected: {torch.uint8}"
             assert layer.w2_weight.dtype == torch.uint8, f"layer.w2_weight.dtype: {layer.w2_weight.dtype}, expected: {torch.uint8}"
             assert layer.w13_weight_scale.dtype == torch.uint8, f"layer.w13_weight_scale.dtype: {layer.w13_weight_scale.dtype}, expected: {torch.uint8}"
@@ -604,7 +604,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             logical_replica_count), (
                 "MXFP4 are not supported with this configuration.")
 
-        if should_use_flashinfer_mxfp4():
+        if should_use_flashinfer_mxfp4() and current_platform.is_device_capability(100):
             from flashinfer import mxfp8_quantize, trtllm_fp4_block_scale_moe
             assert not self.moe.use_ep, (
                 "EP is not supported for flashinfer mxfp4 moe backend yet.")
@@ -645,7 +645,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 True,  # do finalize
             )[0]
             return trtllm_gen_output
-        elif (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16) and current_platform.is_device_capability(90):
+        elif _should_use_flashinfer_mxfp4_bf16() and current_platform.is_device_capability(90):
 
             assert x.dtype == torch.bfloat16
 
