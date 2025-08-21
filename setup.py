@@ -653,14 +653,15 @@ if envs.VLLM_USE_PRECOMPILED:
             raise ValueError(f"Unsupported architecture: {arch}")
         base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
         wheel_url = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
+        nightly_wheel_url = f"https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
         from urllib.request import urlopen
         try:
             with urlopen(wheel_url) as resp:
                 if resp.status != 200:
-                    wheel_url = f"https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
+                    wheel_url = nightly_wheel_url
         except Exception as e:
             print(f"[warn] Falling back to nightly wheel: {e}")
-            wheel_url = f"https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
+            wheel_url = nightly_wheel_url
 
     patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
         wheel_url)
