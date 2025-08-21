@@ -85,6 +85,7 @@ class ReqMeta:
     remote_port: int
     remote_engine_id: str
     tp_size: int
+    pp_size: int
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -112,6 +113,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             remote_port=kv_transfer_params["remote_port"],
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
+            pp_size=kv_transfer_params.get("pp_size", 1)
         )
         if save_to_host:
             self.reqs_to_save[request_id] = _req
@@ -415,7 +417,8 @@ class NixlConnectorScheduler:
             remote_engine_id=self.engine_id,
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
-            tp_size=self.vllm_config.parallel_config.tensor_parallel_size)
+            tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            pp_size=self.vllm_config.parallel_config.pipeline_parallel_size)
 
 
 class NixlConnectorWorker:
@@ -434,8 +437,9 @@ class NixlConnectorWorker:
 
         # Agent.
         self.nixl_wrapper = NixlWrapper(str(uuid.uuid4()), None)
-        # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
-        self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
+        # Map of engine_id -> {pprank0: {{rank0: agent_name0, rank1: agent_name1}},
+        #                      pprank1: {{rank0: agent_name2, rank1: agent_name3..}..}.
+        self._remote_agents: dict[EngineId, dict[int, dict[int, str]]] = defaultdict(dict)
 
         # NIXL handshake port.
         # NOTE(rob): Within a DP group, each DP rank gets its own
@@ -520,7 +524,7 @@ class NixlConnectorWorker:
             max_workers=1,
             thread_name_prefix="vllm-nixl-handshake-initiator")
         self._ready_requests = queue.Queue[tuple[ReqId, ReqMeta]]()
-        self._handshake_futures: dict[EngineId, Future[dict[int, str]]] = {}
+        self._handshake_futures: dict[EngineId, dict[int, Future[dict[int, str]]]] = {}
         # Protects _handshake_futures and _remote_agents.
         self._handshake_lock = threading.RLock()
 
@@ -593,6 +597,7 @@ class NixlConnectorWorker:
         host: str,
         port: int,
         remote_tp_size: int,
+        remote_pp_size: int,
         expected_engine_id: str,
     ) -> dict[int, str]:
         """Do a NIXL handshake with a remote instance."""
@@ -606,10 +611,11 @@ class NixlConnectorWorker:
         # Handshake only with the remote TP rank that current local rank will
         # pull from. With homogeneous TP it happens to be the same rank_i.
         tp_ratio = self._tp_size[self.engine_id] // remote_tp_size
-        p_remote_rank = self.tp_rank // tp_ratio
-        path = make_zmq_path("tcp", host, port + p_remote_rank)
-        logger.debug("Querying metadata on path: %s at remote rank %s", path,
-                     p_remote_rank)
+        p_remote_tp_rank = self.tp_rank // tp_ratio
+        p_remote_pp_rank = self.pp_rank # don't support homogeneous PP
+        path = make_zmq_path("tcp", host, port + remote_tp_size * p_remote_pp_rank + p_remote_tp_rank)
+        logger.debug("Querying metadata on path: %s at remote tp rank %s, remote pp rank %s", path,
+                     p_remote_tp_rank, p_remote_pp_rank)
 
         # Send query for the request.
         with zmq_ctx(zmq.REQ, path) as sock:
@@ -628,14 +634,15 @@ class NixlConnectorWorker:
                                    f"received {metadata.engine_id}.")
 
             # Register Remote agent.
-            remote_agent_name = self.add_remote_agent(metadata, p_remote_rank,
-                                                      remote_tp_size)
+            remote_agent_name = self.add_remote_agent(metadata, p_remote_tp_rank,
+                                                      remote_tp_size, p_remote_pp_rank,
+                                                      remote_pp_size)
             setup_agent_time = time.perf_counter()
             logger.debug("NIXL handshake: add agent took: %s",
                          setup_agent_time - got_metadata_time)
 
         # Remote rank -> agent name.
-        return {p_remote_rank: remote_agent_name}
+        return {p_remote_tp_rank: remote_agent_name}
 
     def initialize_host_xfer_buffer(
             self, kv_caches: dict[str, torch.Tensor]) -> None:
@@ -669,14 +676,14 @@ class NixlConnectorWorker:
         if fut is None:
             fut = self._handshake_initiation_executor.submit(
                 self._nixl_handshake, meta.remote_host, meta.remote_port,
-                meta.tp_size, remote_engine_id)
-            self._handshake_futures[remote_engine_id] = fut
+                meta.tp_size, meta.pp_size, remote_engine_id)
+            self._handshake_futures[remote_engine_id] = {self.pp_rank : fut}
 
             def done_callback(f: Future[dict[int, str]], eid=remote_engine_id):
                 with self._handshake_lock:
-                    del self._handshake_futures[eid]
+                    del self._handshake_futures[eid][self.pp_rank]
                     try:
-                        self._remote_agents[eid] = f.result()
+                        self._remote_agents[eid][self.pp_rank] = f.result()
                     except Exception:
                         logger.exception("Handshake with %s failed", eid)
 
@@ -833,10 +840,13 @@ class NixlConnectorWorker:
         self._nixl_handshake_listener_t.start()
         ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 
+
     def add_remote_agent(self,
                          nixl_agent_meta: NixlAgentMetadata,
                          remote_tp_rank: int = 0,
-                         remote_tp_size: int = 1) -> str:
+                         remote_tp_size: int = 1,
+                         remote_pp_rank: int = 0,
+                         remote_pp_size: int = 1) -> str:
         """
         Add the remote NIXL agent and prepare the descriptors for reading cache
         blocks from remote.
@@ -848,21 +858,29 @@ class NixlConnectorWorker:
 
         Here's an example:
 
-        rank_offset     p_remote_tp_rank
+        rank_offset   p_remote_tp_rank    p_remote_pp_rank 
         (kv split no)    
-        --------------------------------
-            0                 0      Worker0  ---- 1st half of KV ----> Worker0  [ KV Cache ]
-                                                                        /
-            1                 0      Worker1  ---- 2nd half of KV -----/
+        ---------------------------------------------------------------
+            0                 0                  0             Worker0  ---- 1st half of KV ----> Worker0  [ KV Cache ]
+                                                                                                  /
+            1                 0                  0             Worker1  ---- 2nd half of KV -----/
 
-            0                 1      Worker2  ---- 1st half of KV ----> Worker1  [ KV Cache ]
-                                                                        /
-            1                 1      Worker3  ---- 2nd half of KV -----/
+            0                 1                  0             Worker2  ---- 1st half of KV ----> Worker1  [ KV Cache ]
+                                                                                                  /
+            1                 1                  0             Worker3  ---- 2nd half of KV -----/
 
 
                                 Decoder TP workers                     Prefix TP workers
                                   (world_size=4)                         (world_size=2)
                                                  tp_ratio = 4 // 2 = 2                  
+
+            0                 0                  1             Worker4  ---- 1st half of KV ----> Worker2  [ KV Cache ]
+                                                                                                  /
+            1                 0                  1             Worker5  ---- 2nd half of KV -----/
+
+            0                 1                  1             Worker6  ---- 1st half of KV ----> Worker3  [ KV Cache ]
+                                                                                                  /
+            1                 1                  1             Worker7  ---- 2nd half of KV -----/
                                 
         Considering the KV Caches, if P-Worker_i has cache size [2, num_blocksP, kv_heads, block_size, head_dim]  
         then D-Worker_j has [2, num_blocksD, kv_heads//tp_ratio, block_size, head_dim]. Mind the "HND" layout format.
@@ -877,8 +895,8 @@ class NixlConnectorWorker:
         """ # noqa: E501
         engine_id = nixl_agent_meta.engine_id
         # TODO re-evaluate refreshing for scaling/recovery
-        if remote_tp_rank in self._remote_agents.get(engine_id, {}):
-            return self._remote_agents[engine_id][remote_tp_rank]
+        if remote_tp_rank in self._remote_agents.get(engine_id, {}).get(remote_pp_rank, {}):
+            return self._remote_agents[engine_id][remote_pp_rank][remote_tp_rank]
 
         if engine_id not in self._tp_size:
             self._tp_size[engine_id] = remote_tp_size
@@ -951,11 +969,12 @@ class NixlConnectorWorker:
                 # self.block_len == remote_block_len//tp_ratio bytes.
                 addr = base_addr + block_offset + rank_offset
                 # (addr, len, device id)
-                blocks_data.append((addr, self.block_len, remote_tp_rank))
+                # blocks_data.append((addr, self.block_len, remote_tp_rank))
+                blocks_data.append((addr, self.block_len, remote_tp_rank + remote_pp_rank * remote_tp_size))
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and "
-            "local rank %s", len(blocks_data), engine_id, remote_tp_rank,
-            self.tp_rank)
+            "tp local rank %s, device id %s", len(blocks_data), engine_id, remote_tp_rank,
+            self.tp_rank, remote_tp_rank + remote_pp_rank * remote_tp_size)
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data,
@@ -1005,8 +1024,8 @@ class NixlConnectorWorker:
         done_recving = self._pop_done_transfers(self._recving_transfers)
         if len(done_sending) > 0 or len(done_recving) > 0:
             logger.debug(
-                "Rank %s, get_finished: %s requests done sending "
-                "and %s requests done recving", self.tp_rank,
+                "TP Rank %s, PP Rank %s, get_finished: %s requests done sending "
+                "and %s requests done recving", self.tp_rank, self.pp_rank,
                 len(done_sending), len(done_recving))
 
         if self.use_host_buffer:
@@ -1074,8 +1093,10 @@ class NixlConnectorWorker:
                 xfer_state = self.nixl_wrapper.check_xfer_state(handle)
                 if xfer_state == "DONE":
                     self.nixl_wrapper.release_xfer_handle(handle)
+                    logger.info(f"============transfer req_id {req_id} done")
                 elif xfer_state == "PROC":
                     in_progress = True
+                    logger.info(f"============transfer req_id {req_id} processing")
                     continue
                 else:
                     raise RuntimeError("Transfer failed with state %s",
@@ -1152,7 +1173,8 @@ class NixlConnectorWorker:
         num_local_blocks = len(local_block_ids)
         if num_local_blocks == 0:
             remote_rank = self.tp_rank // tp_ratio
-            agent_name = self._remote_agents[dst_engine_id][remote_rank]
+            remote_pp_rank = self.pp_rank # don't consider heterogeneous PP now
+            agent_name = self._remote_agents[dst_engine_id][remote_pp_rank][remote_rank]
             self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
             return
 
