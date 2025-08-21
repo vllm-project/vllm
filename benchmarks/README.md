@@ -60,10 +60,10 @@ become available.
       <td><code>synthetic</code></td>
     </tr>
     <tr>
-      <td><strong>Random (multi-modal)</strong></td>
-      <td style="text-align: center;">✅</td>
-      <td style="text-align: center;">✅</td>
-      <td><code>synthetic</code> (text + images)</td>
+      <td><strong>RandomMultiModal (Image/Video)</strong></td>
+      <td style="text-align: center;">🟡</td>
+      <td style="text-align: center;">🚧</td>
+      <td><code>synthetic</code> </td>
     </tr>
     <tr>
       <td><strong>Prefix Repetition</strong></td>
@@ -737,12 +737,13 @@ python benchmarks/benchmark_serving.py \
 
 <br/>
 
-Generate synthetic image inputs and random text prompts, useful to stress-test vision models without external datasets.
+Generate synthetic image inputs alongside random text prompts to stress-test vision models without external datasets.
 
 Notes:
 
-- Currently works only with the OpenAI Chat-compatible backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
-- To avoid bad request errors, set `--limit-mm-per-prompt` according to your model config.
+- Works only with the OpenAI Chat-compatible backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
+- Set `--limit-mm-per-prompt` on the server to match your model config.
+- Video sampling is not yet implemented. If specifying videos in the bucket config, set their probability to 0.
 
 Start the server (example):
 
@@ -754,7 +755,7 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
   --mm-processor-kwargs max_pixels=1003520
 ```
 
-Fixed number of images and dimensions:
+Fixed number of items and a single image resolution:
 
 ```bash
 vllm bench serve \
@@ -768,28 +769,32 @@ vllm bench serve \
   --random-input-len 300 \
   --random-output-len 40 \
   --random-range-ratio 0.2 \
-  --random-mm-height 224 \
-  --random-mm-width 224 \
-  --random-mm-images-per-request 2 \
-  --random-mm-limit-images-per-request 3 \
+  --random-mm-base-items-per-request 2 \
+  --random-mm-limit-mm-per-prompt '{"image": 3, "video": 0}' \
+  --random-mm-bucket-config '{(224, 224, 1): 1.0}' \
   --request-rate inf \
   --ignore-eos \
   --seed 42
 ```
 
-For variable number of images and dimensions per request set the flag
+Vary the number of items per request and use multiple image buckets:
 
 ```bash
-  --random-mm-images-per-request-range-ratio 0.5 \
-  --random-mm-dimension-range-ratio 0.5 \
+  --random-mm-base-items-per-request 2 \
+  --random-mm-num-mm-items-range-ratio 0.5 \
+  --random-mm-limit-mm-per-prompt '{"image": 4, "video": 0}' \
+  --random-mm-bucket-config '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}' \
 ```
 
 Flags specific to `random-mm`:
 
-- `--random-mm-images-per-request`: base number of images per request.
-- `--random-mm-limit-images-per-request`: hard cap per request.
-- `--random-mm-width`, `--random-mm-height`: base image dimensions.
-- `--random-mm-images-per-request-range-ratio`: vary image count in \[n(1−r), n(1+r)\).
-- `--random-mm-dimension-range-ratio`: vary width/height in \[d(1−r), d(1+r)\).
+- `--random-mm-base-items-per-request`: base number of multimodal items per request.
+- `--random-mm-num-mm-items-range-ratio`: vary item count in [n(1−r), n(1+r)].
+- `--random-mm-limit-mm-per-prompt`: per-modality hard caps, e.g. '{"image": 3, "video": 0}'.
+- `--random-mm-bucket-config`: dict mapping (H, W, T) → probability; zeros are removed and remaining probabilities are normalized. Use T=1 for images. Set T>1 entries to 0 (videos not yet supported).
+
+Behavioral notes:
+
+- If the requested base item count cannot be satisfied under the provided per-prompt limits, the tool raises an error rather than silently clamping.
 
 </details>
