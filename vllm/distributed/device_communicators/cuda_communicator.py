@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import cache
 from typing import Optional, Union
 
 import torch
@@ -16,7 +15,6 @@ from .base_device_communicator import DeviceCommunicatorBase
 logger = init_logger(__name__)
 
 
-@cache
 def is_rocm_aiter_custom_allreduce_enabled() -> bool:
     """Check if aiter custom allreduce is enabled for ROCm platform."""
     from vllm.platforms.rocm import on_gfx9
