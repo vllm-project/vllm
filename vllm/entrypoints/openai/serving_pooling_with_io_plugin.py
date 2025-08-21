@@ -10,8 +10,8 @@ from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (ErrorResponse,
-                                              IOProcessorPluginRequest,
-                                              IOProcessorPluginResponse)
+                                              IOProcessorRequest,
+                                              IOProcessorResponse)
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
@@ -38,9 +38,9 @@ class ServingPoolingWithIOPlugin(OpenAIServing):
 
     async def create_pooling_with_io_plugin(
         self,
-        request: IOProcessorPluginRequest,
+        request: IOProcessorRequest,
         raw_request: Optional[Request] = None,
-    ) -> Union[IOProcessorPluginResponse, ErrorResponse]:
+    ) -> Union[IOProcessorResponse, ErrorResponse]:
 
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -53,19 +53,19 @@ class ServingPoolingWithIOPlugin(OpenAIServing):
             trace_headers = (None if raw_request is None else await
                              self._get_trace_headers(raw_request.headers))
 
-            output = await self.engine_client.encode_with_io_processor_plugin(
+            output = (await self.engine_client.encode_with_io_processor(
                 request,
                 pooling_params,
                 request_id,
                 trace_headers=trace_headers,
                 priority=request.priority,
-            )
+            ))
         except ValueError as e:
             return self.create_error_response(str(e))
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
 
         io_processor = await self.engine_client.get_io_processor()
-        response = io_processor.plugin_out_to_response(output)
+        response = io_processor.output_to_response(output)
 
         return response

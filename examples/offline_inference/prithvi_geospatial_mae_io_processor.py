@@ -41,7 +41,7 @@ def main():
 
     pooling_params = PoolingParams(task="encode", softmax=False)
 
-    output = llm.encode_with_io_processor_plugin(
+    output = llm.encode_with_io_processor(
         img_prompt,
         pooling_params=pooling_params,
     )

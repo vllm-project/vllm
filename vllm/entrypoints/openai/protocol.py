@@ -2489,7 +2489,7 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 T = TypeVar("T")
 
 
-class IOProcessorPluginRequest(OpenAIBaseModel, Generic[T]):
+class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     model: Optional[str] = None
 
     priority: int = Field(default=0)
@@ -2508,7 +2508,7 @@ class IOProcessorPluginRequest(OpenAIBaseModel, Generic[T]):
         return PoolingParams(task="encode")
 
 
-class IOProcessorPluginResponse(OpenAIBaseModel, Generic[T]):
+class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
 
     request_id: Optional[str] = None
     """

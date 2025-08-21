@@ -64,8 +64,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorInfo,
                                               ErrorResponse,
-                                              IOProcessorPluginRequest,
-                                              IOProcessorPluginResponse,
+                                              IOProcessorRequest,
+                                              IOProcessorResponse,
                                               LoadLoRAAdapterRequest,
                                               PoolingRequest, PoolingResponse,
                                               RerankRequest, RerankResponse,
@@ -821,7 +821,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
              })
 @with_cancellation
 @load_aware_call
-async def create_pooling_with_io_plugin(request: IOProcessorPluginRequest,
+async def create_pooling_with_io_plugin(request: IOProcessorRequest,
                                         raw_request: Request):
     handler = pooling_with_io_plugin(raw_request)
     if handler is None:
@@ -834,7 +834,7 @@ async def create_pooling_with_io_plugin(request: IOProcessorPluginRequest,
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
-    elif isinstance(generator, IOProcessorPluginResponse):
+    elif isinstance(generator, IOProcessorResponse):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)

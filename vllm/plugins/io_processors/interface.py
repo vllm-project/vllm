@@ -3,15 +3,18 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any, Generic, Optional, TypeVar, Union
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.openai.protocol import IOProcessorPluginResponse
+from vllm.entrypoints.openai.protocol import IOProcessorResponse
 from vllm.inputs.data import PromptType
 from vllm.outputs import PoolingRequestOutput
 
+IOProcessorInput = TypeVar('IOProcessorInput')
+IOProcessorOutput = TypeVar('IOProcessorOutput')
 
-class IOProcessor(ABC):
+
+class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
 
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
@@ -19,7 +22,7 @@ class IOProcessor(ABC):
     @abstractmethod
     def pre_process(
         self,
-        prompt: Any,
+        prompt: IOProcessorInput,
         request_id: Optional[str] = None,
         **kwargs,
     ) -> Union[PromptType, Sequence[PromptType]]:
@@ -27,7 +30,7 @@ class IOProcessor(ABC):
 
     async def pre_process_async(
         self,
-        prompt: Any,
+        prompt: IOProcessorInput,
         request_id: Optional[str] = None,
         **kwargs,
     ) -> Union[PromptType, Sequence[PromptType]]:
@@ -35,24 +38,24 @@ class IOProcessor(ABC):
 
     @abstractmethod
     def post_process(self,
-                     model_out: Sequence[Optional[PoolingRequestOutput]],
+                     model_output: Sequence[Optional[PoolingRequestOutput]],
                      request_id: Optional[str] = None,
-                     **kwargs) -> Any:
+                     **kwargs) -> IOProcessorOutput:
         raise NotImplementedError
 
     async def post_process_async(
         self,
-        model_out: Sequence[Optional[PoolingRequestOutput]],
+        model_output: Sequence[Optional[PoolingRequestOutput]],
         request_id: Optional[str] = None,
         **kwargs,
-    ) -> Any:
-        return self.post_process(model_out, request_id, **kwargs)
+    ) -> IOProcessorOutput:
+        return self.post_process(model_output, request_id, **kwargs)
 
     @abstractmethod
-    def parse_request(self, request: Any) -> Optional[Any]:
+    def parse_request(self, request: Any) -> IOProcessorInput:
         raise NotImplementedError
 
     @abstractmethod
-    def plugin_out_to_response(self,
-                               plugin_out: Any) -> IOProcessorPluginResponse:
+    def output_to_response(
+            self, plugin_output: IOProcessorOutput) -> IOProcessorResponse:
         raise NotImplementedError

@@ -1151,7 +1151,7 @@ class LLM:
         return self.engine_class.validate_outputs(outputs,
                                                   PoolingRequestOutput)
 
-    def encode_with_io_processor_plugin(
+    def encode_with_io_processor(
         self,
         prompt: Any,
         /,
@@ -1216,7 +1216,7 @@ class LLM:
 
         # get the post-processed model outputs
         processed_outputs = self.io_processor.post_process(
-            model_out=model_outputs)
+            model_output=model_outputs)
 
         return processed_outputs
 

@@ -229,7 +229,7 @@ class EngineClient(ABC):
         """Generate outputs for a request from a pooling model."""
         ...
 
-    async def encode_with_io_processor_plugin(
+    async def encode_with_io_processor(
         self,
         prompt: Any,
         pooling_params: PoolingParams,

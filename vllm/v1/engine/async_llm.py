@@ -551,7 +551,7 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
 
-    async def encode_with_io_processor_plugin(
+    async def encode_with_io_processor(
         self,
         prompt: PromptType,
         pooling_params: PoolingParams,
@@ -601,7 +601,7 @@ class AsyncLLM(EngineClient):
             final_results[i] = res
 
         post_processed_outputs = (await self.io_processor.post_process_async(
-            model_out=final_results,
+            model_output=final_results,
             request_id=request_id,
         ))
 

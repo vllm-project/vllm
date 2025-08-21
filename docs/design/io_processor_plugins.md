@@ -2,7 +2,7 @@
 
 IO Processor plugins are a feature that allows pre and post processing of the model input and output for pooling models. The idea is that users are allowed to pass a custom input to vLLM that is converted into one or more model prompts and fed to the model `encode` method. One potential use-case of such plugins is that of using vLLM for generating multi-modal data. Say users feed an image to vLLM and get an image in output.
 
-When performing inference with plugins, the prompt type is defined by the plugin and the same is valid for the model output. vLLM does not perform any validation of input/output data and it is up to the plugin to ensure the correct data is being fed to the model and returned to the user. As of now these plugins can be used only for pooling models and they are automatically applied to the `encode` methods in the `LLM` and `AsyncLLM` classes when invoking the `encode_with_io_processor_plugin` method, or in online serving mode via the `/plugin_pooling` endpoint.
+When performing inference with plugins, the prompt type is defined by the plugin and the same is valid for the model output. vLLM does not perform any validation of input/output data and it is up to the plugin to ensure the correct data is being fed to the model and returned to the user. As of now these plugins can be used only for pooling models and they are automatically applied to the `encode` methods in the `LLM` and `AsyncLLM` classes when invoking the `encode_with_io_processor` method, or in online serving mode via the `/plugin_pooling` endpoint.
 
 ## Writing an IO Processor Plugin
 
@@ -52,16 +52,16 @@ class IOProcessor(ABC):
 
     @abstractmethod
     def plugin_out_to_response(self,
-                               plugin_out: Any) -> IOProcessorPluginResponse:
+                               plugin_out: Any) -> IOProcessorResponse:
         raise NotImplementedError
 ```
 
 The `parse` method is used for validating the user prompt and converting it into the input expected by the `pre_process`/`pre_process_async` methods.
 The `pre_process*` methods take the validated plugin input to generate vLLM's model prompts for regular inference.
 The `post_process*` methods take `PoolingRequestOutput` objects as input and generate a custom plugin output.
-An implementation of the `encode_with_io_processor_plugin` method is available [here](../../vllm/entrypoints/llm.py) and [here](../../vllm/v1/engine/async_llm.py).
+An implementation of the `encode_with_io_processor` method is available [here](../../vllm/entrypoints/llm.py) and [here](../../vllm/v1/engine/async_llm.py).
 
-The `plugin_out_to_response` method is used only for online serving and converts the plugin output to the `IOProcessorPluginResponse` type that is then returned by the API Server. The implementation of the `/plugin_pooling` serving endpoint is [here](../../vllm/entrypoints/openai/serving_pooling_with_io_plugin.py).
+The `plugin_out_to_response` method is used only for online serving and converts the plugin output to the `IOProcessorResponse` type that is then returned by the API Server. The implementation of the `/plugin_pooling` serving endpoint is [here](../../vllm/entrypoints/openai/serving_pooling_with_io_plugin.py).
 
 An example implementation of a plugin that enables generating geotiff images with the PrithviGeospatialMAE model is available [here](https://github.com/christian-pinto/prithvi_io_processor_plugin). Please, also refer to our [online](../../examples/online_serving/prithvi_geospatial_mae.py) and [offline](../../examples/offline_inference/prithvi_geospatial_mae_io_processor.py) inference examples.
 
