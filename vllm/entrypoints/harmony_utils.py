@@ -329,23 +329,19 @@ def parse_chat_output(
         token_ids: Sequence[int]) -> tuple[Optional[str], Optional[str], bool]:
     parser = parse_output_into_messages(token_ids)
     output_msgs = parser.messages
+    is_tool_call = False  # TODO: update this when tool call is supported
     if len(output_msgs) == 0:
         # The generation has stopped during reasoning.
-        is_tool_call = False
         reasoning_content = parser.current_content
         final_content = None
     elif len(output_msgs) == 1:
         # The generation has stopped during final message.
-        is_tool_call = False
         reasoning_content = output_msgs[0].content[0].text
         final_content = parser.current_content
     else:
-        if len(output_msgs) != 2:
-            raise ValueError(
-                "Expected 2 output messages (reasoning and final), "
-                f"but got {len(output_msgs)}.")
-        reasoning_msg, final_msg = output_msgs
-        reasoning_content = reasoning_msg.content[0].text
+        reasoning_msg = output_msgs[:-1]
+        final_msg = output_msgs[-1]
+        reasoning_content = "\n".join(
+            [msg.content[0].text for msg in reasoning_msg])
         final_content = final_msg.content[0].text
-        is_tool_call = final_msg.recipient is not None
     return reasoning_content, final_content, is_tool_call
