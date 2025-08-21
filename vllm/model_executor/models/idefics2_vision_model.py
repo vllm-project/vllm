@@ -27,7 +27,7 @@ from transformers.models.idefics2.configuration_idefics2 import (
     Idefics2Config, Idefics2VisionConfig)
 
 from vllm.attention.layer import MultiHeadAttention
-from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -133,12 +133,12 @@ class Idefics2VisionAttention(nn.Module):
                 f" {self.num_heads}).")
         self.scale = self.head_dim**-0.5
         self.dropout = config.attention_dropout
-        
+
         tp_size = (1 if use_data_parallel else
                    get_tensor_model_parallel_world_size())
         assert self.num_heads % tp_size == 0
         self.num_heads_per_partition = self.num_heads // tp_size
-        
+
         if use_data_parallel:
             self.q_size = self.num_heads * self.head_dim
             self.qkv_proj = ReplicatedLinear(
@@ -239,8 +239,7 @@ class Idefics2EncoderLayer(nn.Module):
             config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
-            use_data_parallel=use_data_parallel
-        )
+            use_data_parallel=use_data_parallel)
         self.layer_norm1 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
         self.mlp = Idefics2VisionMLP(config,
@@ -350,8 +349,7 @@ class Idefics2VisionTransformer(nn.Module):
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.encoder",
-            use_data_parallel=use_data_parallel
-        )
+            use_data_parallel=use_data_parallel)
 
         num_hidden_layers = config.num_hidden_layers
         if len(self.encoder.layers) > config.num_hidden_layers:
