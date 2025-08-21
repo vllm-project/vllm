@@ -80,9 +80,6 @@ class Scheduler(SchedulerInterface):
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
         if self.vllm_config.kv_transfer_config is not None:
-            assert len(self.kv_cache_config.kv_cache_groups) == 1, (
-                "Multiple KV cache groups are not currently supported "
-                "with KV connectors")
             self.connector = KVConnectorFactory.create_connector(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
 
@@ -383,7 +380,7 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens))
-
+                    
                     # Total computed tokens (local + external).
                     num_computed_tokens = (num_new_local_computed_tokens +
                                            num_external_computed_tokens)
@@ -444,16 +441,41 @@ class Scheduler(SchedulerInterface):
                                               == 0 else
                                               self.num_lookahead_tokens)
 
-                new_blocks = self.kv_cache_manager.allocate_slots(
+                # NOTE(Kuntai): the original code of this part is:
+                # ```
+                # new_blocks = self.kv_cache_manager.allocate_slots(
+                #     request,
+                #     num_new_tokens + num_external_computed_tokens,
+                #     num_new_local_computed_tokens,
+                #     new_computed_blocks,
+                #     num_lookahead_tokens=effective_lookahead_tokens,
+                #     delay_cache_blocks=load_kv_async,
+                # )
+                # ```
+                # However, in current implementation of hybrid memory allocator,
+                # `allocate_slots(req, extra_tokens)` has the following properties:
+                # 1. It first truncates tokens in `req` that are outside sliding window
+                # 2. But then it ALWAYS allocate `extra_tokens` for all layers without
+                # any truncating.
+                # As a result, when `num_external_computed_tokens` is too large, 
+                # it will cause allocation failure, even when it is possible to 
+                # allocate these tokens if we evict the tokens outside sliding window.
+                #
+                # To fix this, we create a new function in scheduler called 
+                # `allocate_slots_chunked` instead, which will incrementally allocate 
+                # new blocks instead.
+                new_blocks = self.kv_cache_manager.allocate_slots_chunked(
                     request,
                     num_new_tokens + num_external_computed_tokens,
                     num_new_local_computed_tokens,
                     new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
                     delay_cache_blocks=load_kv_async,
+                    chunk_size=self.max_num_scheduled_tokens,
                 )
-
+                
                 if new_blocks is None:
+                    breakpoint()
                     # The request cannot be scheduled.
                     break
 
@@ -462,11 +484,14 @@ class Scheduler(SchedulerInterface):
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
-                    self.connector.update_state_after_alloc(
-                        request,
-                        new_computed_blocks + new_blocks,
-                        num_external_computed_tokens,
-                    )
+                    try:
+                        self.connector.update_state_after_alloc(
+                            request,
+                            new_computed_blocks + new_blocks,
+                            num_external_computed_tokens,
+                        )
+                    except Exception as e:
+                        breakpoint()
 
                 # Request was already popped from self.waiting
                 # unless it was re-added above due to new_blocks being None.
@@ -1113,8 +1138,8 @@ class Scheduler(SchedulerInterface):
         if self.connector is None:
             return False, None
 
-        (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
-        return self.connector.request_finished(request, block_ids)
+        blocks = self.kv_cache_manager.coordinator.get_blocks(request.request_id)
+        return self.connector.request_finished(request, blocks)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """

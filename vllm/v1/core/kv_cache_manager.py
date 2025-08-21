@@ -100,6 +100,10 @@ class KVCacheManager:
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
 
+
+        # for debug
+        self.break_flag = False
+
     @property
     def usage(self) -> float:
         """Get the KV cache usage.
@@ -204,6 +208,9 @@ class KVCacheManager:
         Returns:
             A list of new allocated blocks.
         """
+        if self.break_flag:
+            breakpoint()
+
         if num_new_tokens == 0:
             raise ValueError("num_new_tokens must be greater than 0")
 
@@ -270,6 +277,91 @@ class KVCacheManager:
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return KVCacheBlocks(new_blocks)
+
+
+    def allocate_slots_chunked(
+        self,
+        request: "Request",
+        num_new_tokens: int,
+        num_new_computed_tokens: int = 0,
+        new_computed_blocks: Optional["KVCacheBlocks"] = None,
+        num_lookahead_tokens: int = 0,
+        delay_cache_blocks: bool = False,
+        chunk_size: int = 1024,
+    ) -> Optional["KVCacheBlocks"]:
+        """
+        Chunked wrapper around `allocate_slots` that:
+        1) splits `num_new_tokens` into chunks of size `chunk_size`,
+        2) preserves semantics of other args,
+        3) concatenates chunk results via `KVCacheBlocks.__add__`.
+
+        Behavior:
+        - `num_lookahead_tokens` is only applied to the last chunk.
+        - `num_new_computed_tokens` and `new_computed_blocks` are applied only to
+            the first chunk.
+        - Returns None if any chunked allocation fails.
+
+        Args:
+            request: The request to allocate slots for.
+            num_new_tokens: Total number of new tokens to allocate (will be chunked).
+            chunk_size: Size of each chunk (must be > 0).
+            num_new_computed_tokens: Forwarded once on the first chunk only.
+            new_computed_blocks: Forwarded once on the first chunk only.
+            num_lookahead_tokens: Applied only on the last chunk.
+            delay_cache_blocks: Forwarded to each chunk call.
+
+        Returns:
+            KVCacheBlocks containing concatenation of all chunk allocations, or None.
+        """
+        if num_new_tokens <= 0:
+            raise ValueError("num_new_tokens must be greater than 0")
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than 0")
+
+        tokens_remaining = num_new_tokens
+        is_first_chunk = True
+        accumulated: Optional["KVCacheBlocks"] = None
+
+        if num_new_tokens == 60007:
+            self.break_flag = True
+
+        while tokens_remaining > 0:
+            this_chunk = min(chunk_size, tokens_remaining)
+            tokens_remaining -= this_chunk
+
+            # Apply lookahead only to the final chunk
+            this_lookahead = num_lookahead_tokens if tokens_remaining == 0 else 0
+
+            # Apply computed-only once, on the first chunk
+            if is_first_chunk:
+                this_new_computed_tokens = num_new_computed_tokens
+                this_new_computed_blocks = new_computed_blocks
+                is_first_chunk = False
+            else:
+                this_new_computed_tokens = 0
+                this_new_computed_blocks = None
+
+            chunk_blocks = self.allocate_slots(
+                request=request,
+                num_new_tokens=this_chunk,
+                num_new_computed_tokens=this_new_computed_tokens,
+                new_computed_blocks=this_new_computed_blocks,
+                num_lookahead_tokens=this_lookahead,
+                delay_cache_blocks=delay_cache_blocks,
+            )
+
+            if chunk_blocks is None:
+                # Allocation failed mid-way; caller can decide how to handle rollback.
+                return None
+
+
+
+            accumulated = chunk_blocks if accumulated is None else (accumulated + chunk_blocks)
+
+            print("Chunked len: ", len(accumulated.blocks[0]))
+            print("Accumulated len: ", len(chunk_blocks.blocks[0]))
+
+        return accumulated
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
@@ -348,10 +440,13 @@ class KVCacheManager:
         """
         return self.block_pool.take_events()
 
+    def get_blocks(self, request_id: str) -> KVCacheBlocks:
+        """Get the blocks of a request."""
+        return KVCacheBlocks(self.coordinator.get_blocks(request_id))
+
     def get_block_ids(self, request_id: str) -> tuple[list[int], ...]:
         """Get the block ids of a request."""
-        return KVCacheBlocks(
-            self.coordinator.get_blocks(request_id)).get_block_ids()
+        return self.get_blocks(request_id).get_block_ids()
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request, if enabled."""
