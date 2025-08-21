@@ -1673,16 +1673,8 @@ class FusedMoE(CustomOp):
                 logical_replica_count=self.logical_replica_count,
             )
 
-            # If there are shared experts and the first output of the tuple is
-            # None, it means the experts have not been called by `apply`, i.e.
-            # from a modular kernel, so we need to invoke them now.
-            if self.shared_experts is not None and not isinstance(
-                    final_hidden_states, tuple):
-                logger.info("INVOKE CHUNKED")
-                final_hidden_states = (
-                    self.shared_experts(staged_hidden_states),
-                    final_hidden_states,
-                )
+            assert self.shared_experts is None or isinstance(
+                final_hidden_states, tuple)
 
             if not skip_result_store:
                 if self.shared_experts is None:
@@ -1746,6 +1738,15 @@ class FusedMoE(CustomOp):
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
 
+        # If there are shared experts but we are not using a modular kernel, the
+        # shared experts must be called here
+        if (not isinstance(self.quant_method.fused_experts,
+                           FusedMoEModularKernel)
+                and self.shared_experts is not None):
+            shared_output = self.shared_experts(hidden_states)
+        else:
+            shared_output = None
+
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
             layer=self,
@@ -1770,14 +1771,11 @@ class FusedMoE(CustomOp):
             logical_replica_count=self.logical_replica_count,
         )
 
-        # If there are shared experts and the first output of the tuple is
-        # None, it means the experts have not been called by `apply`, i.e.
-        # from a modular kernel, so we need to invoke them now.
-        if self.shared_experts is not None and not isinstance(
-                final_hidden_states, tuple):
-            logger.info("INVOKE IMPL")
+        if shared_output is not None:
+            assert not isinstance(final_hidden_states, tuple)
+            assert self.shared_experts is not None
             final_hidden_states = (
-                self.shared_experts(hidden_states),
+                shared_output,
                 final_hidden_states,
             )
 
