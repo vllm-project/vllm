@@ -198,6 +198,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         else:
             return None
 
+    # Note: init_prepare_finalize should only be called by
+    # prepare_communication_buffer_for_model.
     def init_prepare_finalize(self):
         assert self.moe is not None
         prepare_finalize = self.maybe_make_prepare_finalize(self.moe)
@@ -693,6 +695,26 @@ def determine_expert_map(
     return (local_num_experts, expert_map)
 
 
+def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
+    """
+        Compresses the expert map by removing any -1 entries.
+
+        Args:
+            expert_map (torch.Tensor): A tensor of shape (global_num_experts,)
+                mapping from global to local index. Contains -1 for experts not
+                assigned to the current rank.
+
+        Returns:
+            str: A string mapping from local to global index.
+                Using str to support hashing for logging once only.
+        """
+    global_indices = torch.where(expert_map != -1)[0]
+    local_indices = expert_map[global_indices]
+    return ", ".join(
+        f"{local_index.item()}->{global_index.item()}"
+        for local_index, global_index in zip(local_indices, global_indices))
+
+
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
@@ -793,6 +815,12 @@ class FusedMoE(CustomOp):
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts)
+            logger.info_once(
+                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                " number of experts: %s/%s. Experts local to global index map:"
+                " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
+                self.global_num_experts,
+                get_compressed_expert_map(self.expert_map))
         else:
             self.local_num_experts, self.expert_map = (self.global_num_experts,
                                                        None)

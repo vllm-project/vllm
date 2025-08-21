@@ -42,7 +42,6 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "GPTQMarlinLinearMethod",
     "Fp8LinearMethod",
     "MarlinLinearMethod",
-    "QQQLinearMethod",
     "GPTQMarlin24LinearMethod",
     "TPUInt8LinearMethod",
     "GPTQLinearMethod",
@@ -437,7 +436,7 @@ class MergedReplicatedLinear(ReplicatedLinear):
             shard_offset = sum(self.output_sizes[:loaded_shard_id])
             shard_size = self.output_sizes[loaded_shard_id]
 
-        param[shard_offset:shard_offset + shard_size] = loaded_weight
+        param.data[shard_offset:shard_offset + shard_size] = loaded_weight
 
 
 @CustomOp.register("column_parallel_linear")
