@@ -41,7 +41,6 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
-from .rebalance_algo import rebalance_experts
 from .rebalance_execute import rearrange_expert_weights_inplace
 from .policy.policy_factory import (DynamicConfig, PolicyFactory)
 from .policy.policy_abstract import EplbPolicy
