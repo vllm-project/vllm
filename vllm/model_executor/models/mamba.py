@@ -9,6 +9,7 @@ from torch import nn
 from transformers import MambaConfig
 
 from vllm import envs
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -81,10 +82,12 @@ class MambaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.norm(hidden_states, residual)
 
-        hidden_states = self.mixer(hidden_states, mamba_cache_params)
-        return hidden_states, residual
+        output = torch.empty_like(hidden_states)
+        self.mixer(hidden_states, output, mamba_cache_params)
+        return output, residual
 
 
+@support_torch_compile
 class MambaModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

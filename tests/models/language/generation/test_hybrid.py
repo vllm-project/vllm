@@ -54,15 +54,13 @@ V1_SUPPORTED_MODELS = [
     "tiiuae/Falcon-H1-0.5B-Base",
 ]
 
+FULL_CUDA_GRAPH_MODELS = [
+    "ai21labs/Jamba-tiny-dev",
+    "Zyphra/Zamba2-1.2B-instruct",
+]
+
 # Avoid OOM
 MAX_NUM_SEQS = 4
-
-# Once we add support for FCG in Mamba1, this list will be removed and tests
-# all test cases will use enforce_eager=False
-ENFORCE_EAGER_MODELS_V1 = [
-    "state-spaces/mamba-130m-hf",
-    "ai21labs/Jamba-tiny-dev",
-]
 
 
 @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
@@ -101,19 +99,13 @@ def test_models(
             example_prompts, max_tokens, num_logprobs)
 
     if model in V1_SUPPORTED_MODELS:
-        enforce_eager = False
         with monkeypatch.context() as m:
             m.setenv("VLLM_USE_V1", "1")
             if model in HYBRID_MODELS:
                 # required due to reorder_batch behaviour
                 m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
-
-            if model in ENFORCE_EAGER_MODELS_V1:
-                enforce_eager = True
-
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
-                             enforce_eager=enforce_eager,
                              enable_prefix_caching=False) as vllm_model:
                 vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                     example_prompts, max_tokens, num_logprobs)
@@ -373,7 +365,7 @@ def test_distributed_correctness(
     )
 
 
-@pytest.mark.parametrize("model", ["Zyphra/Zamba2-1.2B-instruct"])
+@pytest.mark.parametrize("model", FULL_CUDA_GRAPH_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_full_cuda_graph(
