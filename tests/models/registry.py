@@ -413,8 +413,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
                                                         {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"},    # noqa: E501
-                                                        min_transformers_version="4.55.1",
-                                                        transformers_version_reason="HF model broken in 4.55.0"),  # noqa: E501
+                                                        min_transformers_version="4.56",
+                                                        transformers_version_reason="HF model broken in 4.55"),  # noqa: E501
     "InternS1ForConditionalGeneration": _HfExamplesInfo("internlm/Intern-S1",
                                                         trust_remote_code=True),  # noqa: E501
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
@@ -496,8 +496,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B",
                                            trust_remote_code=True),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct",  # noqa: E501
-                                                       min_transformers_version="4.55.1",
-                                                       transformers_version_reason="HF model broken in 4.55.0"),  # noqa: E501
+                                                       max_transformers_version="4.56",
+                                                       transformers_version_reason="HF model broken in 4.55"),  # noqa: E501
     "Step3VLForConditionalGeneration": _HfExamplesInfo("stepfun-ai/step3",
                                                         trust_remote_code=True),
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
