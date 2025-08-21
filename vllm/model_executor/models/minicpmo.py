@@ -75,7 +75,7 @@ class MiniCPMOAudioFeatureInputs(TensorSchema):
 
     audio_features: Annotated[
         Union[torch.Tensor, list[torch.Tensor]],
-        TensorShape("bns", "c", "l"),
+        TensorShape("bns", "c", "l", dynamic_dims={"l"}),
     ]
     """
     Slice here means chunk. Audio that is too long will be split into slices,
