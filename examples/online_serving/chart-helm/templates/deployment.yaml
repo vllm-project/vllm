@@ -65,10 +65,8 @@ spec:
           {{- include "chart.probes" . | indent 10 }}
           resources: {{- include "chart.resources" . | nindent 12 }}
           volumeMounts:
-          {{- if .Values.extraInit  }}
           - name: {{ .Release.Name }}-storage
             mountPath: /data
-          {{- end }} 
           {{- if .Values.pvWithModels }}
           - name: {{ .Values.pvWithModels }}
             mountPath: {{ .Values.modelsPath }}
@@ -107,11 +105,9 @@ spec:
       {{- end }}
 
       volumes:
-        {{- if .Values.extraInit }}
         - name: {{ .Release.Name }}-storage
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-storage-claim
-        {{- end }} 
         {{- if .Values.pvWithModels }} 
         - name: {{ .Values.pvWithModels }}
           persistentVolumeClaim:
