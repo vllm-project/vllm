@@ -33,6 +33,8 @@ def kernel_warmup(worker: "Worker"):
     # FlashInfer autotune for Blackwell (SM 10.0) GPUs
     if has_flashinfer() and current_platform.is_device_capability(100):
         flashinfer_autotune(worker.model_runner)
+        # TODO(mgoin) detect attention backend class
+        flashinfer_autotune_attention(worker.model_runner)
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
@@ -55,3 +57,36 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
         runner._dummy_run(runner.scheduler_config.max_num_batched_tokens,
                           skip_eplb=True,
                           is_profile=True)
+
+
+def flashinfer_autotune_attention(runner: "GPUModelRunner"):
+    """
+    Autotune FI attention kernels to avoid autotuning during model runtime.
+    """
+    from vllm.utils.flashinfer import autotune
+
+    with torch.inference_mode(), autotune():
+        # We skip EPLB here since we don't want to record dummy metrics
+        # We run max_num_reqs requests, each with
+        # max_num_batched_tokens//max_num_reqs tokens,
+        # triggering the prefill kernels.
+        runner._dummy_run(
+            runner.scheduler_config.max_num_batched_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,  # Warmup attention
+            seq_len=1,  # full seq_len not required
+        )
+
+        # Here, we trigger autotuning of the decode kernels
+        # (max_num_seqs requests, decode tokens each).
+        num_tokens = runner.scheduler_config.max_num_seqs * \
+                     runner.uniform_decode_query_len
+        runner._dummy_run(
+            num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            force_attention=True,  # Warmup attention
+            uniform_decode=True,  # Decode path
+            seq_len=1,  # full seq_len not required
+        )

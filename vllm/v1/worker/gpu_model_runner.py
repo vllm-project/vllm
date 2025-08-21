@@ -2250,6 +2250,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         uniform_decode: bool = False,
         skip_eplb: bool = False,
         is_profile: bool = False,
+        seq_len: Optional[int] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -2267,6 +2268,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             uniform_decode: If True, the batch is a uniform decode batch.
             skip_eplb: If True, skip EPLB state update.
             is_profile: If True, this is a profile run.
+            seq_len: control the sequence length, set to max_model_len if None.
         """
         assert cudagraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
@@ -2322,8 +2324,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
             attn_metadata = {}
 
-            # Make sure max_model_len is used at the graph capture time.
-            self.seq_lens_np[:num_reqs] = self.max_model_len
+            # max_model_len is used at the graph capture time
+            # seq_len is overridden for warmup/other uses.
+            if seq_len is None:
+                seq_len = self.max_model_len
+
+            self.seq_lens_np[:num_reqs] = seq_len
             self.seq_lens_np[num_reqs:] = 0
             self.seq_lens.copy_(self.seq_lens_cpu, non_blocking=True)
 
