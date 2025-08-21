@@ -813,9 +813,9 @@ class OpenAIServingResponses(OpenAIServing):
             return (f"event: {event_type}\n"
                     f"data: {event.model_dump_json(indent=None)}\n\n")
 
-        current_content_index = 0 
+        current_content_index = 0
         current_output_index = 0
-        current_item_id = "" 
+        current_item_id = ""
         sent_output_item_added = False
 
         initial_response = ResponsesResponse.from_request(
@@ -963,7 +963,7 @@ class OpenAIServingResponses(OpenAIServing):
                                     logprobs=[],
                                 ),
                             ))
-                    current_content_index += 1    
+                    current_content_index += 1
                     yield _send_event(
                         openai_responses_types.ResponseTextDeltaEvent(
                             type="response.output_text.delta",
