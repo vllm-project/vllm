@@ -26,13 +26,11 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
-import time
+import multiprocessing as mp
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Callable, Optional, Union, Tuple, Any, Dict
-
-import multiprocessing as mp
 from multiprocessing import Queue
+from typing import Any, Callable, Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -51,16 +49,18 @@ logger = init_logger(__name__)
 
 
 class EPLBProcess:
-    """Encapsulates lifecycle management for asynchronous expert rearrangement processes"""
+    """
+    Encapsulates lifecycle management for asynchronous expert
+    rearrangement processes
+    """
 
-    def __init__(self,
-                 target_func: Callable,
-                 max_steps: int = 30):
+    def __init__(self, target_func: Callable, max_steps: int = 30):
         """
         Initialize asynchronous process manager
 
         Args:
-            target_func: Target function to execute in asynchronous process (e.g., rebalance_experts)
+            target_func: Target function to execute in asynchronous process
+                (e.g., rebalance_experts)
             max_steps: Maximum number of steps to wait
         """
         self.target_func = target_func
@@ -72,22 +72,21 @@ class EPLBProcess:
         self._result_queue: Optional[Queue] = None
         self._exception_queue: Optional[Queue] = None
         self._step_counter = 0
-        self._result: Optional[Tuple] = None
-        self._args: Optional[Tuple] = None
+        self._result: Optional[tuple] = None
+        self._args: Optional[tuple] = None
         self._is_running = False
 
         # Save parameters needed for post-processing
-        self._post_process_args: Optional[Dict[str, Any]] = None
+        self._post_process_args: Optional[dict[str, Any]] = None
 
-    def start(self,
-              args: Tuple,
-              post_process_args: Dict[str, Any]) -> bool:
+    def start(self, args: tuple, post_process_args: dict[str, Any]) -> bool:
         """
         Start asynchronous process
 
         Args:
             args: Tuple of arguments to pass to the target function
-            post_process_args: Parameters needed for subsequent processing (e.g., model, ep_group)
+            post_process_args: Parameters needed for subsequent
+                processing (e.g., model, ep_group)
 
         Returns:
             True if process started successfully, False otherwise
@@ -108,21 +107,22 @@ class EPLBProcess:
 
             # Put arguments and start process
             self._input_queue.put(args)
-            self._process = mp.Process(
-                target=self._worker,
-                args=(self._input_queue, self._result_queue, self._exception_queue),
-                daemon=True
-            )
+            self._process = mp.Process(target=self._worker,
+                                       args=(self._input_queue,
+                                             self._result_queue,
+                                             self._exception_queue),
+                                       daemon=True)
             self._process.start()
             self._is_running = True
             return True
 
         except Exception as e:
-            logger.error(f"Failed to start asynchronous process: {str(e)}")
+            logger.error("Failed to start asynchronous process: {}", str(e))
             self.cleanup()
             return False
 
-    def _worker(self, input_queue: Queue, output_queue: Queue, exception_queue: Queue) -> None:
+    def _worker(self, input_queue: Queue, output_queue: Queue,
+                exception_queue: Queue) -> None:
         """Subprocess worker function"""
         try:
             # Get arguments
@@ -133,8 +133,11 @@ class EPLBProcess:
             output_queue.put(result)
         except Exception as e:
             output_queue.put(None)
-            exception_queue.put(str(e))
-            logger.error(f"Asynchronous process execution failed: {str(e)}")
+            if hasattr(e, "add_note"):
+                import traceback
+                e.add_note(traceback.format_exc())
+            exception_queue.put(e)
+            logger.exception("Asynchronous process execution failed")
 
     def step(self) -> bool:
         """
@@ -152,7 +155,7 @@ class EPLBProcess:
         if self._exception_queue and not self._exception_queue.empty():
             error_msg = self._exception_queue.get()
             self.cleanup()
-            raise RuntimeError(f"Asynchronous process failed: {error_msg}")
+            raise RuntimeError("Asynchronous process failed: {}", error_msg)
 
         # Check if processing conditions are met
         if self._should_process():
@@ -167,9 +170,9 @@ class EPLBProcess:
         if not self._process or not self._result_queue:
             return True
 
-        return (self._step_counter >= self.max_steps or
-                not self._process.is_alive() or
-                not self._result_queue.empty())
+        return (self._step_counter >= self.max_steps
+                or not self._process.is_alive()
+                or not self._result_queue.empty())
 
     def _fetch_result(self) -> None:
         """Retrieve subprocess results"""
@@ -177,7 +180,8 @@ class EPLBProcess:
             self._result = self._result_queue.get()
         else:
             self._result = None
-            logger.warning("Asynchronous process completed but no result was returned")
+            logger.warning(
+                "Asynchronous process completed but no result was returned")
 
     def cleanup(self) -> None:
         """Clean up process resources"""
@@ -187,6 +191,11 @@ class EPLBProcess:
             self._process.join(timeout=5.0)
             self._process = None
 
+        for q in (self._input_queue, self._result_queue,
+                  self._exception_queue):
+            if q:
+                q.close()
+                q.join_thread()
         self._input_queue = None
         self._result_queue = None
         self._exception_queue = None
@@ -198,18 +207,19 @@ class EPLBProcess:
         return self._is_running
 
     @property
-    def result(self) -> Optional[Tuple]:
+    def result(self) -> Optional[tuple]:
         """Return processing results"""
         return self._result
 
     @property
-    def post_process_args(self) -> Optional[Dict[str, Any]]:
+    def post_process_args(self) -> Optional[dict[str, Any]]:
         """Return post-processing arguments"""
         return self._post_process_args
 
     def __del__(self):
         """Ensure resource cleanup when object is destroyed"""
         self.cleanup()
+
 
 @dataclass
 class EplbState:
@@ -497,10 +507,8 @@ class EplbState:
 
     def __post_init__(self):
         # Initialize asynchronous process manager
-        self._async_processor = EPLBProcess(
-            target_func=rebalance_experts,
-            max_steps=30
-        )
+        self._async_processor = EPLBProcess(target_func=rebalance_experts,
+                                            max_steps=30)
 
     def step(self,
              model: MixtureOfExperts,
@@ -591,7 +599,8 @@ class EplbState:
                     # Process results
                     self._process_async_result()
             except Exception as e:
-                logger.error(f"Error processing async rebalance results: {str(e)}")
+                logger.error("Error processing async rebalance results: {}",
+                             str(e))
                 self._async_processor.cleanup()
 
     def rearrange(
@@ -607,15 +616,6 @@ class EplbState:
         """
 
         ep_group = get_ep_group().device_group
-        ep_rank = ep_group.rank()
-
-        time_start = None
-        is_main_rank = ep_rank == 0
-        if is_main_rank:
-            torch.cuda.synchronize()
-            time_start = time.perf_counter()
-            logger.info("Rearranging experts %s...",
-                        "(profile)" if is_profile else "")
 
         if global_expert_load is None:
             # Map the physical expert load to global logical experts
@@ -704,13 +704,21 @@ class EplbState:
         }
 
         # Start asynchronous process
-        success = self._async_processor.start(
-            args=input_args,
-            post_process_args=post_process_args
-        )
+        if self._async_processor is None:
+            logger.error(
+                "Async processor is not initialized, cannot start process")
+            return
+
+        try:
+            success = self._async_processor.start(
+                args=input_args, post_process_args=post_process_args)
+        except Exception as e:
+            logger.error("Error starting async process: %s", str(e))
+            success = False
 
         if success:
-            logger.info("rebalance_experts has started in async process, will check results after maximum 30 steps")
+            logger.info("rebalance_experts has started in async process, "
+                        "will check results after maximum 30 steps")
         else:
             logger.error("Failed to start async rebalance process")
 
@@ -723,7 +731,8 @@ class EplbState:
         post_args = self._async_processor.post_process_args
 
         if not result or not post_args:
-            logger.error("Async process did not return valid results, skipping post-processing")
+            logger.error("Async process did not return valid results, "
+                         "skipping post-processing")
             return
 
         # Parse parameters and results
@@ -733,7 +742,8 @@ class EplbState:
         rank_mapping = post_args["rank_mapping"]
         device = post_args["device"]
 
-        new_physical_to_logical_map, new_logical_to_physical_map, new_logical_replica_count = result
+        (new_physical_to_logical_map, new_logical_to_physical_map,
+         new_logical_replica_count) = result
 
         # Restore tensors to original device
         new_physical_to_logical_map = new_physical_to_logical_map.to(device)
@@ -750,21 +760,24 @@ class EplbState:
             rank_mapping,
         )
 
-        # Update state mappings
-        if self.physical_to_logical_map.shape[1] != new_physical_to_logical_map.shape[1]:
-            self.physical_to_logical_map = new_physical_to_logical_map
-        else:
-            self.physical_to_logical_map.copy_(new_physical_to_logical_map)
+        if not is_profile:
+            # Update state mappings
+            if self.physical_to_logical_map.shape[
+                    1] != new_physical_to_logical_map.shape[1]:
+                self.physical_to_logical_map = new_physical_to_logical_map
+            else:
+                self.physical_to_logical_map.copy_(new_physical_to_logical_map)
 
-        max_physical_slots = new_logical_to_physical_map.shape[-1]
-        assert max_physical_slots <= self.logical_to_physical_map.shape[-1]
-        new_logical_to_physical_map = torch.nn.functional.pad(
-            new_logical_to_physical_map,
-            (0, self.logical_to_physical_map.shape[-1] - max_physical_slots),
-            value=-1,
-        )
-        self.logical_to_physical_map.copy_(new_logical_to_physical_map)
-        self.logical_replica_count.copy_(new_logical_replica_count)
+            max_physical_slots = new_logical_to_physical_map.shape[-1]
+            assert max_physical_slots <= self.logical_to_physical_map.shape[-1]
+            new_logical_to_physical_map = torch.nn.functional.pad(
+                new_logical_to_physical_map,
+                (0,
+                 self.logical_to_physical_map.shape[-1] - max_physical_slots),
+                value=-1,
+            )
+            self.logical_to_physical_map.copy_(new_logical_to_physical_map)
+            self.logical_replica_count.copy_(new_logical_replica_count)
 
         logger.info("rebalance_experts result processing completed")
 
