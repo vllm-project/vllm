@@ -42,12 +42,14 @@ def test_custom_executor_type_checking():
         engine_args = EngineArgs(
             model=MODEL,
             gpu_memory_utilization=0.2,
+            max_model_len=8192,
             distributed_executor_backend=Mock,
         )
         LLMEngine.from_engine_args(engine_args)
     with pytest.raises(ValueError):
         engine_args = AsyncEngineArgs(model=MODEL,
                                       gpu_memory_utilization=0.2,
+                                      max_model_len=8192,
                                       distributed_executor_backend=Mock)
         AsyncLLM.from_engine_args(engine_args)
 
@@ -65,6 +67,7 @@ def test_custom_executor(distributed_executor_backend, tmp_path):
         engine_args = EngineArgs(
             model=MODEL,
             gpu_memory_utilization=0.2,
+            max_model_len=8192,
             distributed_executor_backend=distributed_executor_backend,
             enforce_eager=True,  # reduce test time
         )
@@ -92,6 +95,7 @@ def test_custom_executor_async(distributed_executor_backend, tmp_path):
         engine_args = AsyncEngineArgs(
             model=MODEL,
             gpu_memory_utilization=0.2,
+            max_model_len=8192,
             distributed_executor_backend=distributed_executor_backend,
             enforce_eager=True,  # reduce test time
         )
