@@ -600,6 +600,7 @@ class MLADims:
 
 def get_mla_dims(model_config: ModelConfig) -> MLADims:
     hf_text_config = model_config.hf_text_config
+
     return MLADims(
         q_lora_rank=getattr(hf_text_config, "q_lora_rank", None),
         kv_lora_rank=hf_text_config.kv_lora_rank,
