@@ -11,6 +11,7 @@ generation. Supported dataset types include:
   - HuggingFace
   - VisionArena
 """
+import ast
 import base64
 import io
 import json
@@ -19,6 +20,7 @@ import math
 import random
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from functools import cache
@@ -663,12 +665,12 @@ class RandomMultiModalDataset(RandomDataset):
         
         if self.map_config_to_modality(mm_item_config) == "image":
             return process_image(self.generate_synthetic_image(
-                                                            mm_item_config[0],
-                                                            mm_item_config[1]))
+                                                            mm_item_config[1],
+                                                            mm_item_config[0]))
         elif self.map_config_to_modality(mm_item_config) == "video":
             return process_video(self.generate_synthetic_video(
-                                                            mm_item_config[0], 
                                                             mm_item_config[1], 
+                                                            mm_item_config[0], 
                                                             mm_item_config[2]))
         else:
             raise ValueError(f"Invalid multimodal item configuration: "
@@ -1101,23 +1103,6 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "random-mm dataset.",
     )
     random_mm_group.add_argument(
-        "--random-mm-limit-mm-per-prompt",
-        type=str,
-        default=RandomMultiModalDataset.DEFAULT_LIMIT_MM_PER_PROMPT,
-        help="Maximum number of multimodal items per request for "
-        "random-mm dataset. "
-        "Format: '{\"image\": 3, \"video\": 0}'",
-    )
-    random_mm_group.add_argument(
-        "--random-mm-bucket-config",
-        type=str,
-        default=RandomMultiModalDataset.DEFAULT_MM_ITEM_BUCKET_CONFIG,
-        help="Bucket config for sampling multimodal items for "
-        "random-mm dataset. "
-        "Format: '{(256, 256, 1): 0.25, (720, 1280, 1): 0.25, "
-        "(720, 1280, 16): 0.5}'",
-    )
-    random_mm_group.add_argument(
         "--random-mm-num-mm-items-range-ratio",
         type=float,
         default=RandomMultiModalDataset.DEFAULT_NUM_MM_ITEMS_RANGE_RATIO,
@@ -1129,6 +1114,57 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "[num_mm_items * (1 - range_ratio), num_mm_items * (1 + range_ratio)]."
         ),
     )
+    random_mm_group.add_argument(
+        "--random-mm-limit-mm-per-prompt",
+        type=json.loads,
+        default=RandomMultiModalDataset.DEFAULT_LIMIT_MM_PER_PROMPT,
+        help=(
+            "Maximum number of multimodal items per request for random-mm."
+            "Accepts JSON or dotted keys. Examples: "
+            "--random-mm-limit-mm-per-prompt "
+            "'{\"image\": 3, \"video\": 0}'"
+        ),
+    )
+
+    def _parse_mm_bucket_config(v: object) -> dict[tuple[int, int, int], float]:
+        # If already a dict (e.g., programmatic call), normalize keys
+        def normalize(d: dict) -> dict[tuple[int, int, int], float]:
+            out: dict[tuple[int, int, int], float] = {}
+            for k, val in d.items():
+                key = k
+                if isinstance(key, str):
+                    with suppress(Exception):
+                        key = ast.literal_eval(key)
+                if not (isinstance(key, tuple) and len(key) == 3
+                        and all(isinstance(x, int) for x in key)):
+                    raise ValueError(
+                        f"Invalid bucket key {k!r}. Expected tuple (H, W, T)."
+                    )
+                out[(int(key[0]), int(key[1]), int(key[2]))] = float(val)
+            return out
+
+        if isinstance(v, dict):
+            return normalize(v)
+        if isinstance(v, str):
+            # Python literal (supports tuple keys)
+            parsed = ast.literal_eval(v)
+            if not isinstance(parsed, dict):
+                raise ValueError("Bucket config must parse to a dict.")
+            return normalize(parsed)
+        raise ValueError("Unsupported value for --random-mm-bucket-config.")
+
+    random_mm_group.add_argument(
+        "--random-mm-bucket-config",
+        type=_parse_mm_bucket_config,
+        default=RandomMultiModalDataset.DEFAULT_MM_ITEM_BUCKET_CONFIG,
+        help=(
+            "Bucket config for sampling multimodal items for random-mm dataset."
+            "Pass a Python literal dict with tuple keys. Example: "
+            "--random-mm-bucket-config "
+            "'{(256, 256, 1): 0.25, (720, 1280, 1): 0.75}'"
+        ),
+    )
+
 
 
     hf_group = parser.add_argument_group("hf dataset options")
