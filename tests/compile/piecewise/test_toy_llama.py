@@ -21,8 +21,7 @@ from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
                          VllmConfig, set_current_vllm_config)
 from vllm.forward_context import BatchDescriptor, set_forward_context
 
-# Import shared test operations
-# The standard attention operation is automatically registered when imported
+# This import automatically registers torch ops for testing (like silly.attention)
 import tests.compile.test_operations
 
 
