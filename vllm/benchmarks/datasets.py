@@ -34,6 +34,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
+from vllm.multimodal.video import Video
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 from vllm.utils import PlaceholderModule
 
@@ -550,30 +551,39 @@ class RandomDataset(BenchmarkDataset):
 # MultiModalDataset Implementation
 # -----------------------------------------------------------------------------
 
-
 class RandomMultiModalDataset(RandomDataset):
     """
     Synthetic multimodal dataset (text + images) extending RandomDataset.
 
+    TODO: Add video support.
+    TODO: Add audio support.
     Strategy:
-    - Per request, sample image count uniformly within
-      [num_images*(1 - num_images_range_ratio), num_images*(1 + ...)],
-      capped by limit_images_per_prompt.
-    - For each image, sample width/height uniformly around base values using
-      dimension_range_ratio (min size 1).
-    - Create RGB images with iid random pixels; encode to base64 data URLs via
-      process_image and attach as OpenAI Chat-compatible `multi_modal_data`.
+    - Per request, first sample multimodal item count uniformly within
+      [num_mm_items*(1 - num_mm_items_range_ratio), num_mm_items*(1 + ...)],
+      capped by limit_mm_per_prompt.
+    - For each item in the multimodal item count, 
+      sample a modality from the supported modalities following
+      convention: 
+      {(256, 256, 1): 0.25, (720, 1280, 1): 0.25, (720, 1280, 16): 0.5}
+      To sample  
+      images with resolution 256x256 pixels w.p. 0.25,
+      images with resolution 720x1280 pixels w.p. 0.25,
+      videos with resolution 720x1280 pixels and 16 frames w.p. 0.5.
+      NOTE: Only sampling images for now.
     - Optional `enable_multimodal_chat` formats prompt/content into chat style.
     - Reuses the seeded RNG for reproducible text and image sampling.
     """
 
     IS_MULTIMODAL = True
-    DEFAULT_HEIGHT = 224
-    DEFAULT_WIDTH = 224
-    DEFAULT_NUM_IMAGES = 1
-    DEFAULT_LIMIT_IMAGES_PER_PROMPT = 255
-    DEFAULT_NUM_IMAGES_RANGE_RATIO = 0.0
-    DEFAULT_DIMENSION_RANGE_RATIO = 0.0
+    DEFAULT_LIMIT_MM_PER_PROMPT = {"image": 255, "video": 255}
+
+    DEFAULT_NUM_MM_ITEMS = 1
+    DEFAULT_NUM_MM_ITEMS_RANGE_RATIO = 0.0
+    DEFAULT_MM_ITEM_BUCKET_CONFIG = {
+        (256, 256, 1): 0.25,
+        (720, 1280, 1): 0.25,
+        (720, 1280, 16): 0.5,
+    }
     DEFAULT_ENABLE_MULTIMODAL_CHAT = False
 
     def __init__(self, **kwargs) -> None:
@@ -590,80 +600,149 @@ class RandomMultiModalDataset(RandomDataset):
         )
         return Image.fromarray(random_pixels)
 
-    def get_image_sampling_params(
-        self,
-        num_images_range_ratio: float,
-        limit_images_per_prompt: int,
-        dimension_range_ratio: float,
-        width: int,
-        height: int,
-        num_images: int,
-    ) -> tuple[int, int, int, int, int, int]:
+    def generate_synthetic_video(self, width: int, 
+                                    height: int, 
+                                    num_frames: int) -> Video:
+        """Generate synthetic video with random values."""
+        random_pixels = self._rng.integers(
+            0,
+            256,
+            (num_frames, height, width, 3),
+            dtype=np.uint8,
+        )
+        return Video.fromarray(random_pixels)
+
+    def map_config_to_modality(self, config: tuple[int, int, int]) -> str:
+        """Map the configuration to the modality."""
+        if config[-1] == 1:
+            return "image"
+        elif config[-1] > 1:
+            return "video"
+        else:
+            raise ValueError(f"Invalid multimodal item configuration: {config}")
+
+    def normalize_bucket_config(self, bucket_config: dict[tuple[int, int, int], 
+                                float]) -> dict[tuple[int, int, int], float]:
+        """Normalize the bucket config to sum to 1."""
+        total = sum(bucket_config.values())
+        return {k: v / total for k, v in bucket_config.items()}
+
+
+    def generate_mm_item(self, 
+                         mm_item_config: tuple[int, int, int],
+                         ) -> Mapping[str, Any]:
         """
-        Get the sampling parameters for the image dimensions.
+        Create synthetic images and videos and 
+        apply process_image/process_video respectively.
+        This follows the OpenAI API chat completions
+        https://github.com/openai/openai-python
+        """
+        
+        if self.map_config_to_modality(mm_item_config) == "image":
+            return process_image(self.generate_synthetic_image(
+                                                            mm_item_config[0],
+                                                            mm_item_config[1]))
+        elif self.map_config_to_modality(mm_item_config) == "video":
+            return process_video(self.generate_synthetic_video(
+                                                            mm_item_config[0], 
+                                                            mm_item_config[1], 
+                                                            mm_item_config[2]))
+        else:
+            raise ValueError(f"Invalid multimodal item configuration: "
+                             f"{mm_item_config}")
+
+
+    def get_mm_item_sampling_params(
+        self,
+        num_mm_items: int,
+        num_mm_items_range_ratio: float,
+        limit_mm_per_prompt: dict[str, int],
+        bucket_config: dict[tuple[int, int, int], float],
+    ) -> tuple[int, int, dict[tuple[int, int, int], float]]:
+        """
+        Get the sampling parameters for the multimodal items.
         """
         # Enforce num_images_range_ratio < 1
-        assert num_images_range_ratio < 1.0, (
-            "num_images_range_ratio must be < 1.0 to ensure a valid sampling "
+        assert num_mm_items_range_ratio < 1.0, (
+            "num_mm_items_range_ratio must be < 1.0 to ensure a valid sampling "
             "range"
         )
-        max_num_images = min(int(num_images * (1 + num_images_range_ratio)),
-                             limit_images_per_prompt)
-        # ensure min num images is zero
-        min_num_images = max(int(num_images * (1 - num_images_range_ratio)), 0)
-        # raise error if min_num_images > max_num_images
-        if min_num_images > max_num_images:
-            raise ValueError(
-                "min_num_images must be <= max_num_images"
-            )
-        # Enforce dimension_range_ratio < 1
-        assert dimension_range_ratio < 1.0, (
-            "dimension_range_ratio must be < 1.0 to ensure a valid sampling "
-            "range"
-        )
-        # Ensure min_width and min_height are at least 1 to prevent
-        # sampling 0-sized images.
-        min_width = max(1, int(width * (1 - dimension_range_ratio)))
-        max_width = int(width * (1 + dimension_range_ratio))
-        min_height = max(1, int(height * (1 - dimension_range_ratio)))
-        max_height = int(height * (1 + dimension_range_ratio))
+
+        max_num_mm_items = int(num_mm_items * (1 + num_mm_items_range_ratio))
+        # Ensure min num mm items is zero
+        min_num_mm_items = max(0, 
+                            int(num_mm_items * (1 - num_mm_items_range_ratio)
+                            ))
+        # Ensure modalities to sample are in limit_mm_per_prompt
+        for k, v in bucket_config.items():
+            # get modality from bucket config
+            modality = self.map_config_to_modality(k)
+            if modality not in limit_mm_per_prompt:
+                raise ValueError(f"Modality {modality} is not in "
+                                 f"limit_mm_per_prompt: "
+                                 f"{limit_mm_per_prompt.keys()}")
+
+        # Ensure min num mm is smaller than max num mm for all modalities
+        # Ensure max num is smaller than limit per prompt, setting it to limit
+        for k, v in limit_mm_per_prompt.items():
+            if min_num_mm_items > v:
+                raise ValueError(f"Min num mm items for modality {k} is "
+                                 f"greater than the limit per prompt: "
+                                 f"{min_num_mm_items} > {v}")
+            max_num_mm_items = min(max_num_mm_items, v)
+
 
         logger.info(
-            "Sampling number of images from [%s, %s] and image dimensions from "
-            "[%s, %s]x[%s, %s]",
-            min_num_images, max_num_images, min_width, max_width, min_height,
-            max_height,
+            "Sampling number of multimodal items from [%s, %s]",
+            min_num_mm_items, max_num_mm_items,
+        )
+
+        bucket_config = self.normalize_bucket_config(bucket_config)
+        logger.info(
+            "Normalized bucket config: %s", bucket_config,
         )
 
         return (
-            min_num_images,
-            max_num_images,
-            min_width,
-            max_width,
-            min_height,
-            max_height,
+            min_num_mm_items,
+            max_num_mm_items,
+            bucket_config,
         )
 
-    def get_image_dimensions_iterator(
+    def get_mm_item_iterator(
         self,
-        min_num_images: int,
-        max_num_images: int,
-        min_width: int,
-        max_width: int,
-        min_height: int,
-        max_height: int,
-    ) -> Iterator[tuple[int, int]]:
+        min_num_mm_items: int,
+        max_num_mm_items: int,
+        bucket_config: dict[tuple[int, int, int], float],
+        limit_mm_per_prompt: dict[str, int],
+    ) -> Iterator[tuple[int,int, int]]:
         """
-        Iterator over the image dimensions for each request
-        whose size is between min_num_images and max_num_images.
+        Iterator over the multimodal items for each request
+        whose size is between min_num_mm_items and max_num_mm_items.
         """
-        request_num_images = int(
-            self._rng.integers(min_num_images, max_num_images + 1)
+        request_num_mm_items = int(
+            self._rng.integers(min_num_mm_items, max_num_mm_items + 1)
         )
-        for _ in range(request_num_images):
+        modality_counter = {
+            "image": 0,
+            "video": 0,
+        }
+        for _ in range(request_num_mm_items):
+            while True:
+                mm_item_config = self._rng.choice(list(bucket_config.keys()), 
+                                                  p=list(bucket_config.values()))
+                if self.map_config_to_modality(mm_item_config) == "image":
+                    if modality_counter["image"] < limit_mm_per_prompt["image"]:
+                        modality_counter["image"] += 1
+                        break
+                elif self.map_config_to_modality(mm_item_config) == "video":
+                    if modality_counter["video"] < limit_mm_per_prompt["video"]:
+                        modality_counter["video"] += 1
+                        break
+                else:
+                    raise ValueError(f"Invalid multimodal item configuration: "
+                                     f"{mm_item_config}")
             yield (
-                int(self._rng.integers(min_width, max_width + 1)),
-                int(self._rng.integers(min_height, max_height + 1)),
+                mm_item_config
             )
 
     def sample(
@@ -675,12 +754,11 @@ class RandomMultiModalDataset(RandomDataset):
         range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
         input_len: int = RandomDataset.DEFAULT_INPUT_LEN,
         output_len: int = RandomDataset.DEFAULT_OUTPUT_LEN,
-        num_images: int = DEFAULT_NUM_IMAGES,
-        limit_images_per_prompt: int = DEFAULT_LIMIT_IMAGES_PER_PROMPT,
-        num_images_range_ratio: float = DEFAULT_NUM_IMAGES_RANGE_RATIO,
-        width: int = DEFAULT_WIDTH,
-        height: int = DEFAULT_HEIGHT,
-        dimension_range_ratio: float = DEFAULT_DIMENSION_RANGE_RATIO,
+        limit_mm_per_prompt: dict[str, int] = DEFAULT_LIMIT_MM_PER_PROMPT,
+        num_mm_items: int = DEFAULT_NUM_MM_ITEMS,
+        num_mm_items_range_ratio: float = DEFAULT_NUM_MM_ITEMS_RANGE_RATIO,
+        bucket_config: dict[tuple[int, int, int], float] = 
+                                        DEFAULT_MM_ITEM_BUCKET_CONFIG,
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
         **kwargs,
     ) -> list[SampleRequest]:
@@ -689,19 +767,14 @@ class RandomMultiModalDataset(RandomDataset):
         )
 
         (
-            min_num_images,
-            max_num_images,
-            min_width,
-            max_width,
-            min_height,
-            max_height,
-        ) = self.get_image_sampling_params(
-            num_images_range_ratio,
-            limit_images_per_prompt,
-            dimension_range_ratio,
-            width,
-            height,
-            num_images,
+            min_num_mm_items,
+            max_num_mm_items,
+            bucket_config,
+        ) = self.get_mm_item_sampling_params(
+            num_mm_items,
+            num_mm_items_range_ratio,
+            limit_mm_per_prompt,
+            bucket_config,
         )
 
         # Generate prefix once
@@ -719,28 +792,22 @@ class RandomMultiModalDataset(RandomDataset):
                 offset=int(offsets[i]),
                 index=i,
             )
-            # Get image dimension iterator for a given request
-            image_dimensions_iterator = self.get_image_dimensions_iterator(
-                min_num_images,
-                max_num_images,
-                min_width,
-                max_width,
-                min_height,
-                max_height,
+            # Get multimodal item iterator for a given request
+            mm_item_iterator = self.get_mm_item_iterator(
+                min_num_mm_items,
+                max_num_mm_items,
+                bucket_config,
+                limit_mm_per_prompt,
             )
-            # Create synthetic images and apply process_image.
-            # This follows the OpenAI API chat completions
-            # https://github.com/openai/openai-python
+
             mm_content = cast(list[dict[str, Any]], [
-                process_image(
-                    self.generate_synthetic_image(width, height)
-                )
-                for width, height in image_dimensions_iterator
+                self.generate_mm_item(mm_item_config)
+                for mm_item_config in mm_item_iterator
             ])
 
             if enable_multimodal_chat:
-                # NOTE: This option is only provided for completeness given 
-                # that the serve.py benchmark currently does not use it.
+                # NOTE: For now this option is only provided for completeness 
+                # given that the serve.py benchmark currently does not use it.
                 mm_chat_prompt: Any = prompt
                 mm_chat_prompt = self.apply_multimodal_chat_transformation(
                     prompt, mm_content)
@@ -966,49 +1033,39 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
     random_mm_group = parser.add_argument_group(
         "random multimodal dataset options extended from random dataset")
     random_mm_group.add_argument(
-        "--random-mm-images-per-request",
+        "--random-mm-base-items-per-request",
         type=int,
-        default=RandomMultiModalDataset.DEFAULT_NUM_IMAGES,
-        help="Number of images per request for random-mm dataset.",
+        default=RandomMultiModalDataset.DEFAULT_NUM_MM_ITEMS,
+        help="Base number of multimodal items per request for "
+        "random-mm dataset.",
     )
     random_mm_group.add_argument(
-        "--random-mm-limit-images-per-request",
-        type=int,
-        default=RandomMultiModalDataset.DEFAULT_LIMIT_IMAGES_PER_PROMPT,
-        help="Maximum number of images per request for random-mm dataset.",
+        "--random-mm-limit-mm-per-prompt",
+        type=str,
+        default=RandomMultiModalDataset.DEFAULT_LIMIT_MM_PER_PROMPT,
+        help="Maximum number of multimodal items per request for "
+        "random-mm dataset. "
+        "Format: '{\"image\": 3, \"video\": 0}'",
     )
     random_mm_group.add_argument(
-        "--random-mm-width",
-        type=int,
-        default=RandomMultiModalDataset.DEFAULT_WIDTH,
-        help="Image width in pixels per image for random-mm dataset.",
+        "--random-mm-bucket-config",
+        type=str,
+        default=RandomMultiModalDataset.DEFAULT_MM_ITEM_BUCKET_CONFIG,
+        help="Bucket config for sampling multimodal items for "
+        "random-mm dataset. "
+        "Format: '{(256, 256, 1): 0.25, (720, 1280, 1): 0.25, "
+        "(720, 1280, 16): 0.5}'",
     )
     random_mm_group.add_argument(
-        "--random-mm-height",
-        type=int,
-        default=RandomMultiModalDataset.DEFAULT_HEIGHT,
-        help="Image height in pixels per image for random-mm dataset.",
-    )
-    random_mm_group.add_argument(
-        "--random-mm-images-per-request-range-ratio",
+        "--random-mm-num-mm-items-range-ratio",
         type=float,
-        default=RandomMultiModalDataset.DEFAULT_NUM_IMAGES_RANGE_RATIO,
+        default=RandomMultiModalDataset.DEFAULT_NUM_MM_ITEMS_RANGE_RATIO,
         help=(
-            "Range ratio for sampling number of images per request, "
+            "Range ratio for sampling number of multimodal items per request, "
         "used only for random-mm sampling. Must be in the range [0, 1) to "
-        "define a symmetric sampling range"
-        "[num_images * (1 - range_ratio), num_images * (1 + range_ratio)]."
-        ),
-    )
-    random_mm_group.add_argument(
-        "--random-mm-dimension-range-ratio",
-        type=float,
-        default=RandomMultiModalDataset.DEFAULT_DIMENSION_RANGE_RATIO,
-        help=(
-            "Range ratio for sampling image dimensions, "
-        "used only for random-mm sampling. Must be in the range [0, 1) to "
-        "define a symmetric sampling range"
-        "[dim * (1 - range_ratio), dim * (1 + range_ratio)]."
+        "define a symmetric sampling range. "
+        "Keeps the base number of multimodal items constant. "
+        "[num_mm_items * (1 - range_ratio), num_mm_items * (1 + range_ratio)]."
         ),
     )
 
@@ -1197,11 +1254,10 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 range_ratio=args.random_range_ratio,
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
-                num_images=args.random_mm_images_per_request,
-                width=args.random_mm_width,
-                height=args.random_mm_height,
-                num_images_range_ratio=args.random_mm_images_per_request_range_ratio,
-                dimension_range_ratio=args.random_mm_dimension_range_ratio,
+                num_mm_items=args.random_mm_base_items_per_request,
+                limit_mm_per_prompt=args.random_mm_limit_mm_per_prompt,
+                num_mm_items_range_ratio=args.random_mm_num_mm_items_range_ratio,
+                bucket_config=args.random_mm_bucket_config,
                 request_id_prefix=args.request_id_prefix,
             ),
             "prefix_repetition":
