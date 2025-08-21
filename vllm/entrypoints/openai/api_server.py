@@ -810,7 +810,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
 
 
 #This entrypoint is not available in the OpenAI API, we define it.
-@router.post("/plugin_pooling",
+@router.post("/io_processor_pooling",
              responses={
                  HTTPStatus.BAD_REQUEST.value: {
                      "model": ErrorResponse
