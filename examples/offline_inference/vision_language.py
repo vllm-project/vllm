@@ -283,8 +283,10 @@ def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
     )
 
     prompts = [
-        f"<|user|>\n<|begin_of_image|><|endoftext|><|end_of_image|>\
-        {question}<|assistant|>"
+        (
+            "<|user|>\n<|begin_of_image|><|endoftext|><|end_of_image|>"
+            f"{question}<|assistant|>"
+        )
         for question in questions
     ]
 
@@ -767,15 +769,13 @@ def run_llava_next_video(questions: list[str], modality: str) -> ModelRequestDat
 def run_llava_onevision(questions: list[str], modality: str) -> ModelRequestData:
     if modality == "video":
         prompts = [
-            f"<|im_start|>user <video>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
+            f"<|im_start|>user <video>\n{question}<|im_end|><|im_start|>assistant\n"
             for question in questions
         ]
 
     elif modality == "image":
         prompts = [
-            f"<|im_start|>user <image>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
+            f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
             for question in questions
         ]
 
@@ -998,8 +998,7 @@ def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
     )
 
     prompts = [
-        f"<|im_start|>user <image>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
+        f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
         for question in questions
     ]
 
@@ -1436,6 +1435,28 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
     )
 
 
+# R-4B
+def run_r_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "YannQi/R-4B"
+
+    prompts = [
+        f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
+        for question in questions
+    ]
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=16384,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # SkyworkR1V
 def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1622,6 +1643,7 @@ model_example_map = {
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
     "qwen2_5_omni": run_qwen2_5_omni,
+    "rvl": run_r_vl,
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
     "step3": run_step3,
