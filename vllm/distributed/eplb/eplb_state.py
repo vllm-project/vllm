@@ -70,6 +70,7 @@ class EPLBProcess:
         self._process: Optional[mp.Process] = None
         self._input_queue: Optional[Queue] = None
         self._result_queue: Optional[Queue] = None
+        self._exception_queue: Optional[Queue] = None
         self._step_counter = 0
         self._result: Optional[Tuple] = None
         self._args: Optional[Tuple] = None
@@ -80,44 +81,59 @@ class EPLBProcess:
 
     def start(self,
               args: Tuple,
-              post_process_args: Dict[str, Any]) -> None:
+              post_process_args: Dict[str, Any]) -> bool:
         """
         Start asynchronous process
 
         Args:
             args: Tuple of arguments to pass to the target function
             post_process_args: Parameters needed for subsequent processing (e.g., model, ep_group)
+
+        Returns:
+            True if process started successfully, False otherwise
         """
         # Ensure previous process is cleaned up
         self.cleanup()
 
-        # Initialize queues and counters
-        self._input_queue = Queue()
-        self._result_queue = Queue()
-        self._step_counter = 0
-        self._result = None
-        self._args = args
-        self._post_process_args = post_process_args
+        try:
 
-        # Put arguments and start process
-        self._input_queue.put(args)
-        self._process = mp.Process(
-            target=self._worker,
-            args=(self._input_queue, self._result_queue),
-            daemon=True
-        )
-        self._process.start()
-        self._is_running = True
+            # Initialize queues
+            self._input_queue = Queue()
+            self._result_queue = Queue()
+            self._exception_queue = Queue()
+            self._step_counter = 0
+            self._result = None
+            self._args = args
+            self._post_process_args = post_process_args
 
-    def _worker(self, input_queue: Queue, output_queue: Queue) -> None:
+            # Put arguments and start process
+            self._input_queue.put(args)
+            self._process = mp.Process(
+                target=self._worker,
+                args=(self._input_queue, self._result_queue, self._exception_queue),
+                daemon=True
+            )
+            self._process.start()
+            self._is_running = True
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to start asynchronous process: {str(e)}")
+            self.cleanup()
+            return False
+
+    def _worker(self, input_queue: Queue, output_queue: Queue, exception_queue: Queue) -> None:
         """Subprocess worker function"""
         try:
+            # Get arguments
             args = input_queue.get()
+
+            # Execute target function
             result = self.target_func(*args)
             output_queue.put(result)
         except Exception as e:
             output_queue.put(None)
-            import logging
+            exception_queue.put(str(e))
             logger.error(f"Asynchronous process execution failed: {str(e)}")
 
     def step(self) -> bool:
@@ -132,11 +148,18 @@ class EPLBProcess:
 
         self._step_counter += 1
 
+        # Check for exceptions first
+        if self._exception_queue and not self._exception_queue.empty():
+            error_msg = self._exception_queue.get()
+            self.cleanup()
+            raise RuntimeError(f"Asynchronous process failed: {error_msg}")
+
         # Check if processing conditions are met
         if self._should_process():
             self._fetch_result()
             self.cleanup()
             return True
+
         return False
 
     def _should_process(self) -> bool:
@@ -154,6 +177,7 @@ class EPLBProcess:
             self._result = self._result_queue.get()
         else:
             self._result = None
+            logger.warning("Asynchronous process completed but no result was returned")
 
     def cleanup(self) -> None:
         """Clean up process resources"""
@@ -165,6 +189,7 @@ class EPLBProcess:
 
         self._input_queue = None
         self._result_queue = None
+        self._exception_queue = None
         self._is_running = False
 
     @property
@@ -561,9 +586,13 @@ class EplbState:
             self.rearrange(model)
 
         if self._async_processor and self._async_processor.is_running:
-            if self._async_processor.step():
-                # Process results
-                self._process_async_result()
+            try:
+                if self._async_processor.step():
+                    # Process results
+                    self._process_async_result()
+            except Exception as e:
+                logger.error(f"Error processing async rebalance results: {str(e)}")
+                self._async_processor.cleanup()
 
     def rearrange(
         self,
@@ -675,12 +704,15 @@ class EplbState:
         }
 
         # Start asynchronous process
-        self._async_processor.start(
+        success = self._async_processor.start(
             args=input_args,
             post_process_args=post_process_args
         )
-        logger.info("rebalance_experts has started in async process, will check results after maximum 30 steps")
-        return None
+
+        if success:
+            logger.info("rebalance_experts has started in async process, will check results after maximum 30 steps")
+        else:
+            logger.error("Failed to start async rebalance process")
 
     def _process_async_result(self):
         """Process asynchronously returned results"""
