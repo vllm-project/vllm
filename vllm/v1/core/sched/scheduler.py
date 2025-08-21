@@ -535,7 +535,7 @@ class Scheduler(SchedulerInterface):
             req_to_new_blocks,
         )
         structured_output_request_ids, grammar_bitmask = (
-            self.get_grammar_bitmask(num_scheduled_tokens,
+            self.get_grammar_bitmask(self.running,
                                      scheduled_spec_decode_tokens))
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
@@ -736,7 +736,7 @@ class Scheduler(SchedulerInterface):
 
     def get_grammar_bitmask(
         self,
-        num_scheduled_tokens: dict[str, int],
+        requests: list[Request],
         scheduled_spec_decode_tokens: dict[str, list[int]],
     ):
         # NOTE: structured_output_request_ids maps
@@ -746,15 +746,13 @@ class Scheduler(SchedulerInterface):
         # and only applies valid mask for requests that
         # uses structured decoding.
         structured_output_request_ids: dict[str, int] = {}
-        req_ids = num_scheduled_tokens.keys()
-        for i, req_id in enumerate(req_ids):
-            req = self.requests.get(req_id)
-            if req is not None and req.use_structured_output:
+        for i, req in enumerate(requests):
+            if req.use_structured_output:
                 # PERF: in case of chunked prefill,
                 # request might not include any new tokens.
                 # Therefore, we might introduce some additional
                 # cycle to fill in the bitmask, which could be a big no-op.
-                structured_output_request_ids[req_id] = i
+                structured_output_request_ids[req.request_id] = i
 
         if not structured_output_request_ids:
             bitmask = None
