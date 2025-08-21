@@ -552,10 +552,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 self._get_tile_tokens_dim(x, top_k),
                 1 if renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
-                self.device_support_pdl,
-                None,  # output
                 # TODO: use the maximum number in the cudagraph_batch_sizes
-                8192,  # tune_max_num_tokens.
+                tune_max_num_tokens=8192,
             )[0]
             return trtllm_gen_output
         else:
