@@ -676,7 +676,7 @@ class InputPreprocessor:
             if (decoder_input := prompt["decoder_prompt"]) is None:
                 decoder_inputs = None
             else:
-                decoder_inputs = self._prompt_to_llm_inputs(decoder_input, )
+                decoder_inputs = self._prompt_to_llm_inputs(decoder_input)
             # For multimodal model, override decoder prompt from processor
             # with explicit decoder prompt.
             if self.model_config.is_multimodal_model:

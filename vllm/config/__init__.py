@@ -1680,15 +1680,6 @@ class ModelConfig:
         return self.multimodal_config is not None
 
     @property
-    def processor_return_mm_hashes(self) -> bool:
-        """Whether the multi-modal processor should output hashes."""
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return False
-
-        return mm_config.mm_processor_cache_gb > 0
-
-    @property
     def enable_mm_processor_cache(self) -> bool:
         """Whether the multi-modal processor cache should be enabled."""
         mm_config = self.multimodal_config
