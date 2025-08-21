@@ -387,14 +387,6 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
     torch.ops._C.gptq_shuffle(q_weight, q_perm, bit)
 
 
-# marlin
-def marlin_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                b_scales: torch.Tensor, workspace: torch.Tensor, size_m: int,
-                size_n: int, size_k: int) -> torch.Tensor:
-    return torch.ops._C.marlin_gemm(a, b_q_weight, b_scales, workspace, size_m,
-                                    size_n, size_k)
-
-
 # marlin_24
 def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                         b_meta: torch.Tensor, b_scales: torch.Tensor,
@@ -436,25 +428,6 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
                                use_fp32_reduce: bool = False,
                                is_zp_float: bool = False) -> torch.Tensor:
         return torch.empty((size_m, size_n), device=a.device, dtype=a.dtype)
-
-    @register_fake("_C::marlin_qqq_gemm")
-    def _marlin_qqq_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
-                              s_tok: torch.Tensor, s_ch: torch.Tensor,
-                              s_group: torch.Tensor, workspace: torch.Tensor,
-                              size_m: torch.SymInt, size_n: torch.SymInt,
-                              size_k: torch.SymInt) -> torch.Tensor:
-        return torch.empty((size_m, size_n),
-                           dtype=torch.float16,
-                           device=a.device)
-
-    @register_fake("_C::marlin_gemm")
-    def _marlin_gemm_fake(a: torch.Tensor, b_q_weight: torch.Tensor,
-                          b_scales: torch.Tensor, workspace: torch.Tensor,
-                          size_m: torch.SymInt, size_n: torch.SymInt,
-                          size_k: torch.SymInt) -> torch.Tensor:
-        return torch.empty((size_m, size_n),
-                           dtype=torch.float16,
-                           device=a.device)
 
     @register_fake("_C::awq_dequantize")
     def _awq_dequantize_fake(qweight: torch.Tensor, scales: torch.Tensor,
@@ -842,6 +815,28 @@ def get_cutlass_moe_mm_data(topk_ids: torch.Tensor,
                                                 output_permutation,
                                                 num_experts, n, k,
                                                 blockscale_offsets)
+
+
+def get_cutlass_moe_mm_problem_sizes(
+        topk_ids: torch.Tensor,
+        problem_sizes1: torch.Tensor,
+        problem_sizes2: torch.Tensor,
+        num_experts: int,
+        n: int,
+        k: int,
+        blockscale_offsets: Optional[torch.Tensor] = None):
+    """
+    Compute only the per-expert problem sizes needed by the two grouped matrix
+    multiplications used in CUTLASS-based fused MoE.
+
+    The function takes in topk_ids (token→expert mapping) and computes:
+    - problem_sizes1, problem_sizes2: M×N×K sizes of each expert's
+                                    multiplication for the two grouped MMs
+                                    used in the fused MoE operation.
+    """
+    return torch.ops._C.get_cutlass_moe_mm_problem_sizes(
+        topk_ids, problem_sizes1, problem_sizes2, num_experts, n, k,
+        blockscale_offsets)
 
 
 def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
@@ -1324,15 +1319,6 @@ def scaled_int8_quant(
     torch.ops._C.dynamic_scaled_int8_quant(output, input.contiguous(),
                                            input_scales, input_azp)
     return output, input_scales, input_azp
-
-
-# qqq ops
-def marlin_qqq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-                    s_tok: torch.Tensor, s_ch: torch.Tensor,
-                    s_group: torch.Tensor, workspace: torch.Tensor,
-                    size_m: int, size_n: int, size_k: int) -> torch.Tensor:
-    return torch.ops._C.marlin_qqq_gemm(a, b_q_weight, s_tok, s_ch, s_group,
-                                        workspace, size_m, size_n, size_k)
 
 
 # gguf
@@ -1841,3 +1827,86 @@ if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
         M = mat1.size(0)
         N = mat2.size(0)
         return torch.empty((M, N), dtype=out_dtype)
+
+
+class CPUDNNLGEMMHandler:
+
+    def __init__(self) -> None:
+        self.handler: Optional[int] = None
+        self.n = -1
+        self.k = -1
+
+    def __del__(self):
+        if self.handler is not None:
+            torch.ops._C.release_dnnl_matmul_handler(self.handler)
+
+
+def create_onednn_scaled_mm(
+    weight: torch.Tensor,  # [K, N]
+    weight_scales: torch.Tensor,
+    output_type: torch.dtype,
+    dynamic_quant: bool,
+    use_azp: bool,
+    primitive_cache_size: int = 128,
+) -> CPUDNNLGEMMHandler:
+    handler = CPUDNNLGEMMHandler()
+    handler.k, handler.n = weight.size()
+    handler.handler = torch.ops._C.create_onednn_scaled_mm_handler(
+        weight, weight_scales, output_type, dynamic_quant, use_azp,
+        primitive_cache_size)
+    return handler
+
+
+def onednn_scaled_int8_quant(input: torch.Tensor,
+                             scale: Optional[torch.Tensor] = None,
+                             azp: Optional[torch.Tensor] = None,
+                             symmetric: bool = True):
+    """
+    Quantize the input tensor to int8 and return the quantized tensor and scale, and maybe azp.
+
+    Args:
+        input: The input tensor to be quantized to int8.
+        scale: Optional scaling factor for the int8 quantization.
+            When not provided, we invoke dynamic-per-token quantization.
+        azp: Optional zero-point for the int8 quantization.
+            Must be provided for asymmetric quantization if `scale` is provided.
+        symmetric: Whether to use symmetric quantization (scale only, azp ignored).
+
+    Returns:
+      tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] : Output int8 tensor, scales, and optionally azp.
+    """
+    output = torch.empty_like(input, dtype=torch.int8)
+    token_num = input.numel() // input.shape[-1]
+    input = input.view((token_num, input.shape[-1]))
+    if scale is not None:
+        # static-per-tensor quantization.
+        assert symmetric == (
+            azp
+            is None), "azp must only be provided for asymmetric quantization."
+        torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
+        return output, scale, azp
+
+    # dynamic-per-token quantization.
+    input_scales = torch.empty((token_num, 1),
+                               device=input.device,
+                               dtype=torch.float32)
+    input_azp = None if symmetric else torch.empty_like(input_scales,
+                                                        dtype=torch.int32)
+    torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales,
+                                           input_azp)
+    return output, input_scales, input_azp
+
+
+def onednn_scaled_mm(
+    dnnl_handler: CPUDNNLGEMMHandler,
+    x: torch.Tensor,
+    output: torch.Tensor,
+    input_scale: Optional[torch.Tensor],
+    input_zp: Optional[torch.Tensor],
+    input_zp_adj: Optional[torch.Tensor],
+    bias: Optional[torch.Tensor],
+) -> torch.Tensor:
+    torch.ops._C.onednn_scaled_mm(output, x, input_scale, input_zp,
+                                  input_zp_adj, bias, dnnl_handler.handler)
+
+    return output

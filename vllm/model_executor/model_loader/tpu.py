@@ -98,14 +98,15 @@ class TPUModelLoader(DefaultModelLoader):
 
         # Check parameters
         for name, param in model.named_parameters():
-            assert param.device.type == device_type, f"Parameter {name} is on \
-                {param.device.type} instead of {device_type}"
+            assert param.device.type == device_type, (
+                f"Parameter {name} is on {param.device.type} "
+                f"instead of {device_type}")
 
         # Check buffers
         for name, buffer in model.named_buffers():
-            assert buffer.device.type == device_type, \
-                f"Buffer {name} is on {buffer.device.type} instead of \
-                    {device_type}"
+            assert buffer.device.type == device_type, (
+                f"Buffer {name} is on {buffer.device.type} "
+                f"instead of {device_type}")
 
         for module in model.modules():
             if (mesh is not None) and (get_fqn(module) == 'QKVParallelLinear'):

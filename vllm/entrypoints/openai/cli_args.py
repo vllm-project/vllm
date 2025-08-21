@@ -20,6 +20,8 @@ from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
+from vllm.entrypoints.constants import (H11_MAX_HEADER_COUNT_DEFAULT,
+                                        H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT)
 from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
@@ -172,6 +174,12 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     enable_log_outputs: bool = False
     """If set to True, enable logging of model outputs (generations) 
     in addition to the input logging that is enabled by default."""
+    h11_max_incomplete_event_size: int = H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT
+    """Maximum size (bytes) of an incomplete HTTP event (header or body) for
+    h11 parser. Helps mitigate header abuse. Default: 4194304 (4 MB)."""
+    h11_max_header_count: int = H11_MAX_HEADER_COUNT_DEFAULT
+    """Maximum number of HTTP headers allowed in a request for h11 parser.
+    Helps mitigate header abuse. Default: 256."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:

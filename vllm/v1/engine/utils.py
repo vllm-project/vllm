@@ -71,7 +71,7 @@ class EngineHandshakeMetadata:
     connect to.
     """
     addresses: EngineZmqAddresses
-    parallel_config: dict[str, Union[int, str]]
+    parallel_config: dict[str, Union[int, str, list[int]]]
 
 
 class CoreEngineProcManager:
@@ -798,6 +798,8 @@ def wait_for_engine_startup(
                         parallel_config.data_parallel_master_ip,
                         "data_parallel_master_port":
                         parallel_config.data_parallel_master_port,
+                        "_data_parallel_master_port_list":
+                        parallel_config._data_parallel_master_port_list,
                         "data_parallel_size":
                         parallel_config.data_parallel_size,
                     }))
