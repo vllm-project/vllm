@@ -250,17 +250,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     ) -> bool:
         return False
 
-    def patch_common_attn_metadata(
-        self,
-        common_attn_metadata: CommonAttentionMetadata,
-        scheduler_output: "SchedulerOutput",
-    ) -> CommonAttentionMetadata:
-        """
-        Update the common attention metadata based on attention type. Do nothing
-        by default.
-        """
-        return common_attn_metadata
-
 
 @functools.lru_cache
 def get_kv_cache_layout():
@@ -559,7 +548,7 @@ def subclass_attention_metadata_builder(
     name_prefix: str,
     builder_cls: type[AttentionMetadataBuilder[M]],
     build: Callable[
-        [AttentionMetadataBuilder[M], CommonAttentionMetadata],
+        [AttentionMetadataBuilder[M], int, CommonAttentionMetadata, bool],
         AttentionMetadata,
     ],
 ) -> type[AttentionMetadataBuilder[M]]:
