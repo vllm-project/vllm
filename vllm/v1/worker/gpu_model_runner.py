@@ -1875,9 +1875,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # M-RoPE
                 if self.uses_mrope:
                     target_positions = \
-                        self.mrope_positions[:, :token_indices]
+                        self.mrope_positions[:, token_indices]
                 else:
-                    target_positions = self.positions[:token_indices]
+                    target_positions = self.positions[token_indices]
                 if self.use_aux_hidden_state_outputs:
                     target_hidden_states = torch.cat(
                         [h[token_indices] for h in aux_hidden_states], dim=-1)

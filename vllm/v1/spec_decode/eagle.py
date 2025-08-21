@@ -136,7 +136,7 @@ class EagleProposer:
         self,
         # [num_tokens]
         target_token_ids: torch.Tensor,
-        # [num_tokens]
+        # [num_tokens] or [3, num_tokens] when M-RoPE is enabled
         target_positions: torch.Tensor,
         # [num_tokens, hidden_size]
         target_hidden_states: torch.Tensor,
@@ -293,7 +293,8 @@ class EagleProposer:
                 # Mask out the position ids that exceed the max model length.
                 # Otherwise, we may get out-of-range error in RoPE.
                 clamped_positions = torch.where\
-                    (exceeds_max_model_len.unsqueeze(0), 0,positions)
+                    (exceeds_max_model_len.unsqueeze(0), \
+                     torch.zeros_like(positions), positions)
             else:
                 positions += 1
                 exceeds_max_model_len = positions >= self.max_model_len
@@ -336,7 +337,7 @@ class EagleProposer:
             self.input_ids[:batch_size] = input_ids
             # M-RoPE
             if self.uses_mrope:
-                self.positions[:,:batch_size] = clamped_positions[0]
+                self.positions[:,:batch_size] = clamped_positions
             else:
                 self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
@@ -411,16 +412,16 @@ class EagleProposer:
             tree_positions = torch.empty((3, 0),
                                          device=self.positions.device,
                                          dtype=self.positions.dtype)
-            assert positions.dim() == 3
-            # Precompute the draft token positions.
+            assert positions.dim() == 3 or 2
+            # Precompute the draft token positions. -> (3, B, L)
             flattened_draft_positions = (
-                positions.view(3, batch_size, -1) +
-                self.tree_draft_pos_offsets[:batch_size, :]).unsqueeze(0)
+                positions.view(3, batch_size, 1) +
+                self.tree_draft_pos_offsets[:batch_size, :].unsqueeze(0))
             
         else:
-            tree_positions = torch.empty(0,
-                                        device=self.positions.device,
-                                        dtype=self.positions.dtype)
+            tree_positions = torch.empty((batch_size, 0),
+                                          device=self.positions.device,
+                                          dtype=self.positions.dtype)
             # Precompute the draft token positions.
             flattened_draft_positions = (
                 positions.view(batch_size, -1) +
@@ -474,7 +475,7 @@ class EagleProposer:
                 tree_positions = torch.cat([tree_positions, draft_positions.view(3, -1)],
                                         dim=1)
             else:
-                tree_positions = torch.cat([tree_positions, draft_positions.view(-1)],
+                tree_positions = torch.cat([tree_positions, draft_positions],
                                         dim=1)
             tree_hidden_states = torch.cat(
                 [tree_hidden_states, draft_hidden_states], dim=1)
@@ -509,8 +510,8 @@ class EagleProposer:
             # Compute the slot mapping.
             # M-RoPE
             if self.uses_mrope:
-                query_positions = \
-                    flattened_draft_positions[:, :, level:level + query_len]
+                query_positions = flattened_draft_positions[:, :, \
+                                    level:level + query_len]
                 block_numbers = query_positions[0] // self.block_size
                 block_ids = attn_metadata.block_table.gather(dim=1,
                                                          index=block_numbers)
