@@ -28,7 +28,7 @@ class RequestFuncInput:
     model_name: Optional[str] = None
     logprobs: Optional[int] = None
     extra_body: Optional[dict] = None
-    multi_modal_content: Optional[Union[dict,list[dict]]] = None
+    multi_modal_content: Optional[Union[dict, list[dict]]] = None
     ignore_eos: bool = False
     language: Optional[str] = None
     request_id: Optional[str] = None
