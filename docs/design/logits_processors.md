@@ -76,7 +76,8 @@ In each engine step, the vLLM engine will:
         added: Sequence[AddedRequest]
     ```
 
-    Note that `InputBatch.refresh_metadata()` generates a `BatchUpdate` data structure - representing the persistent batch state changes resulting from new, finished and reordered requests - and passes that data structure to the logits processors' `update_state()` methods.
+    !!! note
+        `InputBatch.refresh_metadata()` generates a `BatchUpdate` data structure - representing the persistent batch state changes resulting from new, finished and reordered requests - and passes that data structure to the logits processors' `update_state()` methods.
 
 2. **Apply the logits processors to the model output logits tensor, by invoking each logits processor's `apply()` method.** The pseudocode below shows how the vLLM model runner invokes the sampler, which in turn causes the logits processors to transform the model output logits.
 
@@ -250,6 +251,7 @@ A vLLM logits processor must subclass `LogitsProcessor` and define (at minimum) 
 
 * `is_argmax_invariant(self) -> bool`:
     * Return `True` if the logits processor is argmax invariant (never changes what is the highest-logit-value token ID for a given request), `False` if the logits processor may modify argmax
+    * `is_argmax_invariant()` is evaluated once at startup; if `True`, vLLM will skip applying this logits processor in a given step when all requests use greedy sampling
 
 * `update_state(self, batch_update: Optional["BatchUpdate"]) -> None`:
     * Consume a `BatchUpdate` data structure representing persistent batch state changes at the end of the current engine step
@@ -355,7 +357,7 @@ Additionally, the `BatchUpdate` data structure includes a representation (`batch
 
 ### How the vLLM engine builds the `BatchUpdate` data structure
 
-Logits processor `update_state()` implementations should assume the following model for how model runner updates persistent batch state (expressed here in terms of the `BatchUpdate` abstraction):
+Logits processor `update_state()` implementations should assume the following model for how the model runner updates persistent batch state (expressed here in terms of the `BatchUpdate` abstraction):
 
 1. Identify indices of requests which finished in the current engine step
 
@@ -389,7 +391,96 @@ Notes:
 
 * If there are no new/finished requests and there is no batch reordering, then the batch update for the logits processors will be `None`
 
-## Best practices for writing logits processors
+#### Example: Batch Update with Fewer New Requests Than Finished Requests
+
+The following example models an engine step where 1 new request is introduced and 2 finished requests are eliminated, additionally the attention backend performs a swap to optimize the batch ordering.
+
+```
+Batch state (beginning of engine step): [A,B,C,D]
+Batch size: 4
+
+New requests: E
+
+Finished requests: A, C
+
+Processing steps (using BatchUpdate abstraction):
+
+1. Add E at index 0
+
+[E,B,C,D] # Discard A
+Batch size: 4
+
+2. Remove at index 2
+
+[E,B,x,D] # Discard C, empty slot at index 2
+Batch size: 4
+
+3. Condense batch with a Unidirectional Move 3 -> 2 operation and shrink batch
+
+[E,B,D] x # Empty slot is now outside batch
+Batch size: 3
+
+4. Attention backend optimization: reorder batch with Swap 0 <-> 1
+
+[B,E,D]
+Batch size: 3
+
+```
+
+The resulting `BatchUpdate` data structure will look like
+
+```
+BatchUpdate instance
+* added: [(0,E's SamplingParams,E's prompt tokens ref,E's output tokens ref)]
+* removed: [2] # request C was removed without replacement
+* moved: [(3,2,UNIDIRECTIONAL),(0,1,SWAP)]
+```
+
+#### Example: Batch Update with More New Requests Than Finished Requests
+
+The following example models an engine step where 2 new requests are introduced and 1 finished request is eliminated, additionally the attention backend performs a swap to optimize the batch ordering.
+
+```
+Batch state (beginning of engine step): [A,B,C,D]
+Batch size: 4
+
+New requests: E,F
+
+Finished requests: C
+
+Processing steps (using BatchUpdate abstraction):
+
+1. Add E at index 2
+
+[A,B,E,D] # Discard C
+Batch size: 4
+
+2. Add E at index 4 (current max batch index + 1)
+
+[A,B,E,D,F] # Extend batch by 1
+Batch size: 5
+
+4. Attention backend optimization: reorder batch with Swap 0 <-> 1
+
+[B,A,E,D,F]
+Batch size: 5
+
+```
+
+Note that batch condensation is skipped because there are no empty slots left behind by Remove operations.
+
+The resulting `BatchUpdate` data structure will look like
+
+```
+BatchUpdate instance
+* added: [(2,E's SamplingParams,E's prompt tokens ref,E's output tokens ref),(4,F's SamplingParams,F's prompt tokens ref,F's output tokens ref)]
+* removed: [] # no requests were removed without replacement
+* moved: [(0,1,SWAP)]
+```
+
+## How to Introduce a New Logits Processor to vLLM
+
+### Best Practices for Writing Built-In Logits Processors
 
 * Write efficient `apply()` and `update_state()` implementations in light of the fact that logits processors operate at batch granularity
     * For example, you may be able to use efficient vectorized operations to implement `apply()` or update internal state vectors in `update_state()`
@@ -397,7 +488,7 @@ Notes:
 
 * It is up to the logits processor author to determine:
 
-    1. **The per-request attributes which configure the logits processor's behavior against that request.** For example, if you are writing a new built-in logits processor for vLLM, you may or may not need to add additional fields to `SamplingParams`
+    1. **The per-request attributes which configure the logits processor's behavior against that request.** For example, if you are writing a new built-in logits processor for vLLM, you may or may not need to add additional fields to `SamplingParams` and the vLLM REST API
 
     2. **The conditions under which the logits processor is or is not enabled on a per-request basis.** Unless your intention is for the custom logits processor to act on all requests all the time, you should write your logits processor in such a way that it is possible to disable the logits processor for a given request, i.e. by defaulting an argument to `None` or by passing in a specific do-nothing argument value i.e. $0.0$. Try to save compute and memory for requests which disable the logits processor
 
@@ -407,4 +498,38 @@ Notes:
 
 * Ensure that the logits processor `update_state` method discards information about finished requests (i.e. requests which are replaced by an Add or which are subject to a Remove)
 
-* `is_argmax_invariant()` can be hard-coded to `True` or `False` if the logits processor has consistent behavior. However the argmax invariance may also be determined programmatically (i.e. if your logits processor is user-customizable in some way that impacts whether the logits processor is argmax invariant)
+* `is_argmax_invariant()` can be hard-coded to `True` or `False` if the logits processor has consistent behavior. However the argmax invariance may also be determined programmatically (i.e. if your logits processor is user-customizable in some way that impacts whether the logits processor is argmax invariant). For this reason, `is_argmax_invariant()` is not a class method
+
+### Built-In Logits Processors
+
+Built-in logits processors are always loaded when the vLLM engine starts. See the existing vLLM built-in logits processors in `logits_processor/builtin.py` for examples of how to write a new built-in vLLM logits processor. It makes sense to write a PR to introduce a new logits processor as a built-in if it is likely to be useful to a wide audience. vLLM currently supports the following built-in logits processors based on the programming model described above:
+
+* Min-P
+
+* Logit bias
+
+* Min-tokens
+
+Review these logits processor implementations for guidance on writing built-in logits processors.
+
+Additionally, the following logits processors or logits-processor-like functionalities are hard-coded into the sampler for efficiency and do not utilize the programming model described above, but may be updated to use the aforemented logits processor programming model in the future:
+
+* Allowed token IDs
+
+* Bad words
+
+* Repetition penalty
+
+* Frequency penalty
+
+* Presence penalty
+
+* Temperature
+
+* Top-K
+
+* Top-P
+
+### Custom Logits Processors
+
+vLLM can be augmented with [user-provided custom logits processors](../features/custom_logitsprocs.md).

@@ -1,90 +1,20 @@
 # Custom Logits Processors
 
-This document shows you how to augment vLLM with custom logits processors.
+A "custom" logits processor is written by a user of vLLM and is loaded into vLLM at initialization without needing to modify or recompile the vLLM source code. It is the opposite of a built-in logits processor.
 
-## Ways to Pass Your Custom Logits Processor to vLLM
+This document shows how to write, load and use a custom logits processor.
 
-### 1. Offline-only: pass a Python class object to the vLLM constructor
+Review the [logits processor design documentation](../design/logits_processors.md) for baseline guidance on writing correct and efficient logits processors.
 
-You can pass one or more custom logits processor class objects to the `LLM` constructor. This option is very flexible, as the logits processor classes may either be (1) defined locally within the same Python source file where `LLM` is instantiated, or (2) imported from a Python package.
+## Writing a Custom Logits Procesor
 
-??? code "Passing custom logits processor class object to `LLM` in Python"
+Custom logits processors must be subclasses of `vllm.v1.sample.logits_processor.LogitsProcessor`. Unlike built-in logits processors, custom logits processors may require configuration arguments that are not hard-coded into `SamplingParams` or the vLLM server REST API. To solve this problem, custom logits processors may leverage vLLM [custom arguments](./custom_arguments.md) support to receive configuration settings from the user (although your are also free to design a custom logits processor which utilizes the pre-existing fields in `SamplingParams`.)
 
-    ``` python
-    # Import custom logits processor
-    from some.module import DummyLogitsProcessor
-
-    # ...or...
-
-    # Define custom logits processor locally
-    from vllm.v1.sample.logits_processor import LogitsProcessor
-
-    class DummyLogitsProcessor(LogitsProcessor):
-        # See DummyLogitsProcessor implementation above
-        ...
-
-    # Pass class object to LLM constructor
-    llm = LLM(
-        model="facebook/opt-125m",
-        logits_processors=[DummyLogitsProcessor],
-    )
-    ```
-
-### 2. Pass the custom logits processor fully-qualified class name (FQCN) to vLLM at initialization time
-
-This method is supported in both offline and online vLLM usage scenarios. The custom logits processor's FQCN (in the form of `dotted.path.to.module:ClassName`) can be passed as an argument to the `LLM` Python constructor, or as a CLI argument to `vllm serve` with the following syntax
-
-``` bash
-vllm serve ... --logits_processors <logits processor 1> <logits processor 2> ...
-```
-
-The only requirements on the FQCN are
-1. Python's `importlib.import_module()` must be able to resolve the dotted path portion of the FQCN and load it as a module
-2. The class-name portion of the FQCN must be possible to import from the loaded module
-3. The object pointed to by the FQCN must be a subclass of `LogitsProcessor`
-
-See examples below:
-
-??? code "Passing custom logits processor FQCN to `LLM` in Python"
-
-    ``` python
-    # Pass in FQCN
-    llm = LLM(
-        model="facebook/opt-125m",
-        logits_processors=["your.module.path:DummyLogitsProcessor"],
-    )
-    ```
-
-??? code "Passing custom logits processor FQCN to vLLM server via CLI"
-
-    ```bash
-    vllm serve facebook/opt-125m --logits_processors your.module.path:DummyLogitsProcessor
-    ```
-
-### 3. Automatically detect installed custom logits processors in your Python environment via Python entry points
-
-During initialization, vLLM automatically scans the `vllm.logits_processors` [entry point](https://setuptools.pypa.io/latest/userguide/entry_point.html) group and loads any installed logits processors which it finds.
-
-Suppose that you have developed a Python package that holds your custom logits processors. You can expose each logits processor to vLLM by adding a unique entrypoint for each logits processor to your Python package; see example below:
-
-??? code "Exposing a custom logits processor as a Python entrypoint"
-
-    ``` toml
-    [project.entry-points."vllm.logits_processors"]
-    dummy_logits_processor = "your.module.path:DummyLogitsProcessor"
-    ```
-
-Once your package is installed, your custom logits processor will be loaded automatically whenever vLLM is initialized. You do *not* need to pass the custom logits processor to `logits_processors` at initialization time.
-
-**Note:** vLLM will *always* load *all* logits processors which are exposed via entrypoints under `vllm.logits_processors`.
-
-## Writing a vLLM Custom Logits Procesor
-
-Custom logits processors must be subclasses of `vllm.v1.sample.logits_processor.LogitsProcessor`. The contrived example below implements a custom logits processor which masks out all tokens except for one (`target_token`) with `float(-inf)`. The logits processor is disabled for any request that does not specify `target_token`.
+In vLLM logits processors operate at batch granularity. The contrived example below implements a custom logits processor which consumes a `(num\_requests) \times (vocab\_size)` logits tensor and masks out all tokens except for one (`target_token`) with `float(-inf)`. The logits processor is disabled for any request that does not specify `target_token`. To determine whether the logits processor is enabled and which token to leave unmasked, the logits processor checks `SamplingParams.extra_args` for a `target_token` custom argument associated with each request:
 
 ??? code "Example custom logits processor definition"
 
-    ```python
+    ``` python
     from typing import Optional
     import torch
     from vllm.config import VllmConfig
@@ -143,25 +73,103 @@ Custom logits processors must be subclasses of `vllm.v1.sample.logits_processor.
             values_to_keep = logits[rows, cols].clone()
     ```
 
-## Defining How the Custom Logits Processor Can Be Used
+Throughout this document, we will use `DummyLogitsProcessor` as an example of a custom logits processor.
 
-Once vLLM loads a logits processor during initialization, then vLLM will invoke `update_state()` and `apply()` against that logits processor in every engine step. Both methods operate on all requests which currently reside in the vLLM persistent batch. It is up to the logits processor author to determine:
+Once vLLM loads a logits processor during initialization, then vLLM will invoke `update_state()` and `apply()` against that logits processor in every engine step. Both methods operate on all requests which currently reside in the vLLM persistent batch. Thus it is important to implement these methods efficiently.
 
-1. **The per-request attributes which configure the logits processor's behavior against that request.** vLLM supports [custom arguments](./custom_arguments.md): the user may pass in a `dict` of custom request arguments, which will be accessible to all logits processors via `SamplingParams.extra_args`. If your logits processor requires arguments not already supported by `SamplingParams` and the vLLM REST API, we recommended designing your custom logits processor to look for these arguments as keys in the `SamplingParams.extra_args` dict. In the `DummyLogitsProcessor` example above, the logits processor looks for `target_tokens` as a custom argument.
+The `DummyLogitsProcessor.update_state()` implementation maintains a "sparse" representation of the batched requests in the `self.req_info` dictionary: only those requests which specify a `target_token` value have a key in the dictionary. `update_state()` adjusts the stored request indices and `target_token` values (keys and values respectively in `self.req_info`) in response to Add, Remove and Move operations against the persistent batch.
 
-2. **The conditions under which the logits processor is or is not enabled on a per-request basis.** Unless your intention is for the custom logits processor to act on all requests all the time, we recommended writing your logits processor in such a way that it is possible to disable the logits processor for a given request, i.e. through the absence of a particular custom argument or by passing in a specific argument value. In the `DummyLogitsProcessor` example above, the absence of `target_token` disables the logits processor for a given request.
+## Ways to Load Your Custom Logits Processor in vLLM
 
-3. **The conditions under which the logits processor is short-circuited at the batch level.** Even if you have defined a way to disable the custom logits processor at the request level, it may be difficult to translate this into compute savings i.e. if your `update_state()` and `apply()` implementations use efficient vectorized implementations that operate on the whole persistent batch in a single command. To save compute in the edge-case where no running requests utilize the custom logits processor, we recommend designing `update_state()` and `apply()` to exit early if all requests have the logits processor disabled. 
+Logits processors are loaded at initialization. Critically, the set of loaded logits processors cannot be modified after the vLLM engine finishes loading, and new logits logits processors cannot be loaded on-demand for individual requests.
 
-The examples below show how a user would pass a custom argument (`target_token`) to `DummyLogitsProcessor` in order to (1) enable the logits processor for that particular request and (2) control the logits processor's behavior.
+This section details different ways of making your logits processor visible to vLLM and triggering vLLM to load your logits processor.
 
-??? code "Python: configure custom logits processor for a request"
+### Method 1: Pass the Custom Logits Processor Fully-Qualified Class Name (FQCN) to vLLM at Initialization Time
+
+This method is supported in both offline and online vLLM usage scenarios. The custom logits processor's FQCN (in the form of `dotted.path.to.module:ClassName`) can be passed as an argument to the `LLM` Python constructor, or as a CLI argument to `vllm serve` with the following syntax
+
+``` bash
+vllm serve ... --logits_processors <logits processor 1> <logits processor 2> ...
+```
+
+The only requirements on the FQCN are
+
+1. Python's `importlib.import_module()` must be able to resolve the dotted path portion of the FQCN and load it as a module
+
+2. The class-name portion of the FQCN must be possible to import from the loaded module
+
+3. The object pointed to by the FQCN must be a subclass of `LogitsProcessor`
+
+See examples below:
+
+??? code "Passing custom logits processor FQCN to `LLM` in Python"
 
     ``` python
-    outputs_logitproc = llm.generate("your prompt", 
-                                     SamplingParams(...,
-                                        extra_args={"target_token": 67}))
+    # Pass in FQCN
+    llm = LLM(
+        model="facebook/opt-125m",
+        logits_processors=["your.module.path:DummyLogitsProcessor"],
+    )
     ```
+
+??? code "Passing custom logits processor FQCN to vLLM server via CLI"
+
+    ```bash
+    vllm serve facebook/opt-125m --logits_processors your.module.path:DummyLogitsProcessor
+    ```
+
+### Method 2: Automatically Detect Custom Logits Processors Installed in Your Python Environment As Entry Points
+
+[`setuptools`](https://setuptools.pypa.io/en/latest/userguide/entry_point.html) can enable installed packages to make themselves available as plugins to other Python programs, via pieces of metadata known as "entry points".
+
+During initialization, vLLM automatically scans the `vllm.logits_processors` entry point group and loads any installed logits processors which it finds.
+
+Suppose that you have developed a Python package that holds your custom logits processors. You can expose each logits processor to vLLM by adding a unique entrypoint for each logits processor to your logits processor Python package. The example below shows how to add an entrypoint to your project's `.toml` file:
+
+??? code "Exposing a custom logits processor as a Python entrypoint"
+
+    ``` toml
+    [project.entry-points."vllm.logits_processors"]
+    dummy_logits_processor = "your.module.path:DummyLogitsProcessor"
+    ```
+
+Once your package is installed, your custom logits processor will be loaded automatically whenever vLLM is initialized. You do *not* need to pass the custom logits processor to the `LLM` constructor or to the vLLM server explicitly at initialization time if your logits processor is exposed as an entry point.
+
+!!! note
+    vLLM will *always* load *all* logits processors which are exposed via entrypoints under the `vllm.logits_processors` grouping.
+
+### Method 3 (Offline-only): Pass a Python Class Object to the vLLM Constructor
+
+You can pass one or more custom logits processor class objects to the `LLM` constructor. This option is very flexible, as the logits processor classes may either be (1) defined locally within the same Python source file where `LLM` is instantiated, or (2) imported from a Python package.
+
+??? code "Passing custom logits processor class object to `LLM` in Python"
+
+    ``` python
+    # Import custom logits processor
+    from some.module import DummyLogitsProcessor
+
+    # ...or...
+
+    # Define custom logits processor locally
+    from vllm.v1.sample.logits_processor import LogitsProcessor
+
+    class DummyLogitsProcessor(LogitsProcessor):
+        # See DummyLogitsProcessor implementation above
+        ...
+
+    # Pass class object to LLM constructor
+    llm = LLM(
+        model="facebook/opt-125m",
+        logits_processors=[DummyLogitsProcessor],
+    )
+    ```
+
+## Invoking a Custom Logits Processor Against a Request
+
+The design of the custom logits processor determines whether the logits processor must be enabled/disabled for a given request, and what arguments must be provided to configure the logits processor. For more information, review [the logits processors design documentation](../design/logits_processors.md).
+
+The examples below show how a user would pass a custom argument (`target_token`) to `DummyLogitsProcessor` in order to (1) enable the logits processor for that particular request and (2) control the logits processor's behavior.
 
 ??? code "vLLM REST API: configure custom logits processor for a request"
 
@@ -189,12 +197,10 @@ The examples below show how a user would pass a custom argument (`target_token`)
     )
     ```
 
-## Logits Processor Programming Model
+??? code "Offline: configure custom logits processor for a request"
 
-* `__init__(self, vllm_config: vllm.config.VllmConfig, device: torch.device, is_pin_memory: bool)`
-    * `vllm_config`: vLLM engine configuration
-* `is_argmax_invariant(self)`
-* `update_state(self, batch_update: Optional[vllm.v1.sample.logits_processor.BatchUpdate])`
-    * `batch_update`: representation of added/removed/moved requests in the vLLM persistent batch during the most recent engine step
-* `apply(self, logits: torch.Tensor)`
-    * `logits`: a $num\_reqs \times vocab\_size$ tensor representing the unprocessed token probability distribution for each request.
+    ``` python
+    outputs_logitproc = llm.generate("your prompt", 
+                                     SamplingParams(...,
+                                        extra_args={"target_token": 67}))
+    ```
