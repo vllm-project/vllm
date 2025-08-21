@@ -125,9 +125,6 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         return False
 
     def update_state(self, batch_update: Optional[BatchUpdate]):
-        if not batch_update:
-            return
-
         needs_update = process_dict_updates(
             self.biases, batch_update,
             lambda params, _, __: params.logit_bias or None)
