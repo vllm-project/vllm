@@ -266,7 +266,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer):
         if self.use_marlin:
             prepare_moe_fp4_layer_for_marlin(layer)
-        elif should_use_flashinfer_mxfp4():
+        elif should_use_flashinfer_mxfp4() and current_platform.is_device_capability(100):
             from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
             layer.gemm1_alpha = Parameter(torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32).cuda(),
@@ -646,6 +646,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )[0]
             return trtllm_gen_output
         elif _should_use_flashinfer_mxfp4_bf16() and current_platform.is_device_capability(90):
+            from flashinfer import cutlass_fused_moe
+            from flashinfer.autotuner import autotune
 
             assert x.dtype == torch.bfloat16
 
@@ -683,6 +685,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     swiglu_alpha=layer.gemm1_alpha,
                     swiglu_beta=layer.gemm1_beta,
                     swiglu_limit=layer.gemm1_clamp_limit,
+                    tp_size=self.moe.tp_size,
+                    tp_rank=self.moe.tp_rank,
+                    ep_size=self.moe.ep_size,
+                    ep_rank=self.moe.ep_rank,
                     use_w4_group_scaling=True,
                     output=output,
                 )
