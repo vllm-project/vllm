@@ -107,6 +107,8 @@ class Mxfp4Config(QuantizationConfig):
 
 
 class Mxfp4MoEMethod(FusedMoEMethodBase):
+    # cached permutation indices for trtllm-gen moe
+    _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
@@ -263,7 +265,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         if self.use_marlin:
             prepare_moe_fp4_layer_for_marlin(layer)
         elif should_use_flashinfer_mxfp4():
-            from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
+            from flashinfer import block_scale_interleave
+            from flashinfer.fused_moe.core import (
+                _maybe_get_cached_w2_permute_indices)
+
             layer.gemm1_alpha = Parameter(torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32).cuda(),
                                           requires_grad=False)
@@ -300,10 +305,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     and layer.w2_bias.shape[0] == self.num_experts
                     and layer.w2_bias.shape[1] == self.hidden_size)
 
-            w13_weight_scale = layer.w13_weight_scale.data
-            w2_weight_scale = layer.w2_weight_scale.data
-            w13_weight = layer.w13_weight.data
-            w2_weight = layer.w2_weight.data
+            w13_weight = layer.w13_weight.data.view(torch.uint8)
+            w2_weight = layer.w2_weight.data.view(torch.uint8)
+            w13_weight_scale = layer.w13_weight_scale.data.view(
+                torch.float8_e4m3fn)
+            w2_weight_scale = layer.w2_weight_scale.data.view(
+                torch.float8_e4m3fn)
             w13_bias = layer.w13_bias.data.to(torch.float32)
             w2_bias = layer.w2_bias.data.to(torch.float32)
 
@@ -329,60 +336,50 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w13_weight = swap_every_two_rows(w13_weight, -2)
             w13_bias = swap_every_two_rows(w13_bias, -1)
 
-            # Do not interleave as the checkpoint is already interleaved
-
             # Shuffle weights and scaling factors for transposed mma output
-            gemm1_weights_mxfp4_shuffled = []
-            gemm1_scales_mxfp4_shuffled = []
-            gemm2_weights_mxfp4_shuffled = []
-            gemm2_scales_mxfp4_shuffled = []
-            gemm1_bias_shuffled = []
-            gemm2_bias_shuffled = []
             epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
-            for i in range(self.num_experts):
-                gemm1_weights_mxfp4_shuffled.append(
-                    shuffle_matrix_a(w13_weight[i].view(torch.uint8),
-                                     epilogue_tile_m))
-                gemm1_scales_mxfp4_shuffled.append(
-                    shuffle_matrix_sf_a(w13_weight_scale[i].view(torch.uint8),
-                                        epilogue_tile_m))
-                gemm1_bias_shuffled.append(
-                    shuffle_matrix_a(w13_bias[i].clone().reshape(-1, 1),
-                                     epilogue_tile_m))
 
-                gemm2_weights_mxfp4_shuffled.append(
-                    shuffle_matrix_a(w2_weight[i].view(torch.uint8),
-                                     epilogue_tile_m))
-                gemm2_scales_mxfp4_shuffled.append(
-                    shuffle_matrix_sf_a(w2_weight_scale[i].view(torch.uint8),
-                                        epilogue_tile_m))
-                gemm2_bias_shuffled.append(
-                    shuffle_matrix_a(w2_bias[i].clone().reshape(-1, 1),
-                                     epilogue_tile_m))
+            def shuffle_tensor(x: torch.Tensor,
+                               num_elts_per_sf: Optional[int]):
+                shuffled = []
+                for i in range(self.num_experts):
+                    # FIXME: determine if interleaving is needed from
+                    #        checkpoint metadata or model config
+                    indices = _maybe_get_cached_w2_permute_indices(
+                        self._cache_permute_indices,
+                        x[i],
+                        epilogue_tile_m,
+                        num_elts_per_sf=num_elts_per_sf,
+                    ).to(x.device)
+                    shuffled.append(x[i][indices])
+                return torch.stack(shuffled)
 
-            w13_weight = torch.stack(gemm1_weights_mxfp4_shuffled)
-            w13_weight_scale = torch.stack(
-                gemm1_scales_mxfp4_shuffled).reshape(
-                    self.num_experts, 2 * self.intermediate_size,
-                    self.hidden_size // sf_block_size).view(
-                        torch.float8_e4m3fn)
-
-            w2_weight = torch.stack(gemm2_weights_mxfp4_shuffled)
-            w2_weight_scale = torch.stack(gemm2_scales_mxfp4_shuffled).reshape(
-                self.num_experts, self.hidden_size, self.intermediate_size //
-                sf_block_size).view(torch.float8_e4m3fn)
+            w13_weight = shuffle_tensor(w13_weight, None)
+            w13_weight_scale = shuffle_tensor(
+                w13_weight_scale.view(torch.uint8), 16)
+            w13_weight_scale = block_scale_interleave(w13_weight_scale)
+            w2_weight = shuffle_tensor(w2_weight, None)
+            w2_weight_scale = shuffle_tensor(w2_weight_scale.view(torch.uint8),
+                                             16)
+            w2_weight_scale = block_scale_interleave(w2_weight_scale)
+            w13_bias = shuffle_tensor(
+                w13_bias.reshape(self.num_experts, -1, 1), None)
+            w2_bias = shuffle_tensor(w2_bias.reshape(self.num_experts, -1, 1),
+                                     None)
 
             layer.w13_weight = Parameter(w13_weight, requires_grad=False)
-            layer.w13_weight_scale = Parameter(w13_weight_scale,
+            layer.w13_weight_scale = Parameter(w13_weight_scale.reshape(
+                self.num_experts, 2 * self.intermediate_size,
+                self.hidden_size // sf_block_size).view(torch.float8_e4m3fn),
                                                requires_grad=False)
             layer.w2_weight = Parameter(w2_weight, requires_grad=False)
-            layer.w2_weight_scale = Parameter(w2_weight_scale,
+            layer.w2_weight_scale = Parameter(w2_weight_scale.reshape(
+                self.num_experts, self.hidden_size, self.intermediate_size //
+                sf_block_size).view(torch.float8_e4m3fn),
                                               requires_grad=False)
-            layer.w13_bias = Parameter(
-                torch.stack(gemm1_bias_shuffled).reshape(self.num_experts, -1),
-                requires_grad=False)
-            layer.w2_bias = Parameter(torch.stack(gemm2_bias_shuffled).reshape(
-                self.num_experts, -1),
+            layer.w13_bias = Parameter(w13_bias.reshape(self.num_experts, -1),
+                                       requires_grad=False)
+            layer.w2_bias = Parameter(w2_bias.reshape(self.num_experts, -1),
                                       requires_grad=False)
         else:
             from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
