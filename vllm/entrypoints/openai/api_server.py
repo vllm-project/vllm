@@ -93,7 +93,6 @@ from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription, OpenAIServingTranslation)
-from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     tool_parser_manager)
 from vllm.entrypoints.tool_server import (DemoToolServer, MCPToolServer,
@@ -1855,8 +1854,7 @@ def create_server_unix_socket(path: str) -> socket.socket:
 
 
 def validate_api_server_args(args):
-    valid_tool_parses = tool_parser_manager.get_extension_names(
-        base_cls=ToolParser)
+    valid_tool_parses = tool_parser_manager.get_valid_extension_names()
     if args.enable_auto_tool_choice \
             and args.tool_call_parser not in valid_tool_parses:
         raise KeyError(f"invalid tool call parser: {args.tool_call_parser} "

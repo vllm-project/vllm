@@ -69,7 +69,7 @@ class ExtensionManagerRegistry:
             return []
 
     @staticmethod
-    def import_extension(extension_path: type) -> None:
+    def import_extension(extension_path: str) -> None:
         """
         Import a user-defined extension by the path of the extension file.
 
