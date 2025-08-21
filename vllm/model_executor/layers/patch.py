@@ -420,6 +420,13 @@ def load_flashrl_config(config):
         import yaml
         with open(config_path, 'r') as f:
             config_data = yaml.safe_load(f)
+        
+        # don't use `distributed_executor_backend` overrides
+        for i in range(len(config_data["configs"])):
+            config_data["configs"][i].pop("distributed_executor_backend", "")
+            # don't use `model` overrides if specified
+            if int(os.environ.get("FLASHRL_IGNORE_MODEL_ATTR", "0")):
+                config_data["configs"][i].pop("model", "")
 
     return config_data
 
@@ -576,6 +583,24 @@ def patch_load_weights(self: "Worker"):
     model = self.model_runner.model
     self.flash_rl_profile = None
 
+    if config_data.get("fn", "int8") not in ["fp8_vllm", "fp8"]:
+        quant_profile = config_data.get('profile', "")
+
+        if not len(quant_profile):
+            raise ValueError(f"Invalid quant profile in config: {config}")
+        
+        logger.debug(f"Loading flash_rl profile from: {quant_profile}")
+
+        
+        quant_profile_path = quant_profile.strip()
+        if not os.path.exists(quant_profile_path):
+            from huggingface_hub import hf_hub_download
+            quant_profile_path = quant_profile_path.split('/')
+            assert len(quant_profile_path) >= 3, f'Invalid flash_rl profile path: {quant_profile_path}'
+            quant_profile_path = hf_hub_download(repo_id='/'.join(quant_profile_path[:2]), filename='/'.join(quant_profile_path[2:]))
+        
+        self.flash_rl_profile = torch.load(quant_profile_path)
+
     from vllm.model_executor.utils import get_packed_modules_mapping
 
     if (not hasattr(model, 'beforeflashrl_load_weights')) and \
@@ -698,7 +723,7 @@ def patch_load_weights(self: "Worker"):
             # print("remappiung weights to original storage took: ", end4 - end3, flush=True)
             # print("copy time: ", copy_time, flush=True)
             
-            # logger.debug(f"flash_rl load_weights skipped params (not accurate for `fp8-vllm`): {skipped_params}")
+            logger.debug(f"flash_rl load_weights skipped params (not accurate for `fp8-vllm`): {skipped_params}")
             alloc, total = torch.cuda.memory.mem_get_info()
             # print(f"torch memory allocated, {alloc / 1024 **2: .2f} MB, {total / 1024**2 : .2f} MB")
             del skipped_params
