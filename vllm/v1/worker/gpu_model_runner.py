@@ -532,7 +532,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 req_state.mrope_positions, req_state.mrope_position_delta = \
                     MRotaryEmbedding.get_input_positions_tensor(
-                        req_state,
+                        req_state.prompt_token_ids,
                         hf_config=hf_config,
                         image_grid_thw=image_grid_thw,
                         video_grid_thw=video_grid_thw,
