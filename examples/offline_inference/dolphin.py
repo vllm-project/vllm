@@ -4,7 +4,6 @@
 import argparse
 import copy
 import os
-import sys
 from dataclasses import dataclass
 
 import cv2
@@ -147,6 +146,7 @@ def process_coordinates(coords, padded_image, dims: ImageDimensions, previous_bo
         return 0, 0, 100, 100, orig_x1, orig_y1, orig_x2, orig_y2, [0, 0, 100, 100]
 
 
+# Copied from https://github.com/bytedance/Dolphin/utils/utils.py
 def prepare_image(image) -> tuple[np.ndarray, ImageDimensions]:
     try:
         image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
@@ -174,6 +174,7 @@ def prepare_image(image) -> tuple[np.ndarray, ImageDimensions]:
         return np.zeros((h, w, 3), dtype=np.uint8), dimensions
 
 
+# Copied from https://github.com/bytedance/Dolphin/utils/utils.py
 def parse_layout_string(bbox_str):
     """Parse layout string using regular expressions"""
     pattern = r"\[(\d*\.?\d+),\s*(\d*\.?\d+),\s*(\d*\.?\d+),\s*(\d*\.?\d+)\]\s*(\w+)"
@@ -211,33 +212,19 @@ encoder_prompt = "".join(["0"] * 783)
 sampling_params = SamplingParams(
     temperature=0.0,
     max_tokens=2048,
-    logprobs=0,
-    prompt_logprobs=None,
-    skip_special_tokens=False,
 )
 
 processor = DonutProcessor.from_pretrained(model_id)
 llm = LLM(
     model=model_id,
-    dtype="float32",
-    enforce_eager=True,
-    max_num_seqs=16,
+    dtype="float16",
+    max_num_seqs=8,
     hf_overrides={"architectures": ["DonutForConditionalGeneration"]},
 )
 
 parser = argparse.ArgumentParser()
 parser.add_argument(
     "--image_path", type=str, default=None, help="Path to a local image file."
-)
-parser.add_argument(
-    "--task",
-    type=str,
-    default="full",
-    choices=["full", "segment", "text", "table"],
-    help="The task to perform. "
-    "'full': layout analysis then OCR (default). "
-    "'segment': layout analysis only. "
-    "'text'/'table': direct end-to-end parsing.",
 )
 args = parser.parse_args()
 
@@ -246,116 +233,78 @@ if args.image_path:
         raise FileNotFoundError(f"Error: File not found at {args.image_path}")
     image = Image.open(args.image_path).convert("RGB")
 else:
-    print("Loading default image from Hugging Face datasets.")
     dataset = load_dataset("hf-internal-testing/example-documents", split="test")
     image = dataset[0]["image"]
 
 
-if args.task in ["full", "segment"]:
-    prompt = "Parse the reading order of this document."
-    decoder_prompt = f"<s>{prompt}<Answer/>"
-    decoder_prompt_tokens = TokensPrompt(
-        prompt_token_ids=processor.tokenizer(decoder_prompt, add_special_tokens=False)[
-            "input_ids"
-        ]
-    )
-    enc_dec_prompt = ExplicitEncoderDecoderPrompt(
-        encoder_prompt=TextPrompt(
-            prompt=encoder_prompt, multi_modal_data={"image": image}
-        ),
-        decoder_prompt=decoder_prompt_tokens,
-    )
-    layout_outputs = llm.generate(
-        prompts=enc_dec_prompt, sampling_params=sampling_params
-    )
-    layout_result_str = layout_outputs[0].outputs[0].text
-    print(f"Raw layout analysis output:\n{layout_result_str}")
+prompt = "Parse the reading order of this document. "
+decoder_prompt = f"<s>{prompt}<Answer/>"
+decoder_prompt_tokens = TokensPrompt(
+    prompt_token_ids=processor.tokenizer(decoder_prompt, add_special_tokens=False)[
+        "input_ids"
+    ]
+)
+enc_dec_prompt = ExplicitEncoderDecoderPrompt(
+    encoder_prompt=TextPrompt(prompt=encoder_prompt, multi_modal_data={"image": image}),
+    decoder_prompt=decoder_prompt_tokens,
+)
+layout_outputs = llm.generate(prompts=enc_dec_prompt, sampling_params=sampling_params)
+layout_result_str = layout_outputs[0].outputs[0].text
+print(f"Layout analysis output:\n{layout_result_str}")
 
-    if args.task == "segment":
-        print("\nTask 'segment' completed.")
-        sys.exit(0)
-
-    padded_image, dims = prepare_image(image)
-    layout_results = parse_layout_string(layout_result_str)
-    text_table_elements = []
-    previous_box = None
-    reading_order = 0
-    for bbox_coords, label in layout_results:
-        if label == "fig":
-            continue
-        try:
-            x1, y1, x2, y2, orig_x1, orig_y1, orig_x2, orig_y2, previous_box = (
-                process_coordinates(bbox_coords, padded_image, dims, previous_box)
-            )
-            cropped = padded_image[y1:y2, x1:x2]
-            if cropped.size > 0 and cropped.shape[0] > 3 and cropped.shape[1] > 3:
-                pil_crop = Image.fromarray(cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB))
-                prompt_ocr = (
-                    "Parse the table in the image."
-                    if label == "tab"
-                    else "Read text in the image."
-                )
-                text_table_elements.append(
-                    {
-                        "crop": pil_crop,
-                        "prompt": prompt_ocr,
-                        "reading_order": reading_order,
-                    }
-                )
-            reading_order += 1
-        except Exception as e:
-            print(f"Error processing bbox (label: {label}): {str(e)}")
-            continue
-
-    if text_table_elements:
-        batch_prompts = []
-        for elem in text_table_elements:
-            decoder_prompt_str = f"<s>{elem['prompt']}<Answer/>"
-            decoder_prompt_tokens = TokensPrompt(
-                prompt_token_ids=processor.tokenizer(
-                    decoder_prompt_str, add_special_tokens=False
-                )["input_ids"]
-            )
-            enc_dec_prompt = ExplicitEncoderDecoderPrompt(
-                encoder_prompt=TextPrompt(
-                    prompt=encoder_prompt, multi_modal_data={"image": elem["crop"]}
-                ),
-                decoder_prompt=decoder_prompt_tokens,
-            )
-            batch_prompts.append(enc_dec_prompt)
-        batch_outputs = llm.generate(
-            prompts=batch_prompts, sampling_params=sampling_params
+padded_image, dims = prepare_image(image)
+layout_results = parse_layout_string(layout_result_str)
+text_table_elements = []
+previous_box = None
+reading_order = 0
+for bbox_coords, label in layout_results:
+    if label == "fig":
+        continue
+    try:
+        x1, y1, x2, y2, orig_x1, orig_y1, orig_x2, orig_y2, previous_box = (
+            process_coordinates(bbox_coords, padded_image, dims, previous_box)
         )
-        for i, output in enumerate(batch_outputs):
-            text_table_elements[i]["text"] = output.outputs[0].text.strip()
+        cropped = padded_image[y1:y2, x1:x2]
+        if cropped.size > 0 and cropped.shape[0] > 3 and cropped.shape[1] > 3:
+            pil_crop = Image.fromarray(cv2.cvtColor(cropped, cv2.COLOR_BGR2RGB))
+            prompt_ocr = (
+                "Parse the table in the image. "
+                if label == "tab"
+                else "Read text in the image. "
+            )
+            text_table_elements.append(
+                {
+                    "crop": pil_crop,
+                    "prompt": prompt_ocr,
+                    "reading_order": reading_order,
+                }
+            )
+        reading_order += 1
+    except Exception as e:
+        print(f"Error processing bbox (label: {label}): {str(e)}")
+        continue
 
-    print("------" * 8)
-    text_table_elements.sort(key=lambda x: x["reading_order"])
+if text_table_elements:
+    batch_prompts = []
     for elem in text_table_elements:
-        print(elem.get("text", ""))
+        decoder_prompt_str = f"<s>{elem['prompt']}<Answer/>"
+        decoder_prompt_tokens = TokensPrompt(
+            prompt_token_ids=processor.tokenizer(
+                decoder_prompt_str, add_special_tokens=False
+            )["input_ids"]
+        )
+        enc_dec_prompt = ExplicitEncoderDecoderPrompt(
+            encoder_prompt=TextPrompt(
+                prompt=encoder_prompt, multi_modal_data={"image": elem["crop"]}
+            ),
+            decoder_prompt=decoder_prompt_tokens,
+        )
+        batch_prompts.append(enc_dec_prompt)
+    batch_outputs = llm.generate(prompts=batch_prompts, sampling_params=sampling_params)
+    for i, output in enumerate(batch_outputs):
+        text_table_elements[i]["text"] = output.outputs[0].text.strip()
 
-elif args.task in ["text", "table"]:
-    prompt_map = {
-        "text": "Read text in the image.",
-        "table": "Parse the tables in the image.",
-    }
-    prompt = prompt_map[args.task]
-    print(f'Using direct prompt: "{prompt}"')
-
-    decoder_prompt = f"<s>{prompt} <Answer/>"
-    decoder_prompt_tokens = TokensPrompt(
-        prompt_token_ids=processor.tokenizer(decoder_prompt, add_special_tokens=False)[
-            "input_ids"
-        ]
-    )
-    enc_dec_prompt = ExplicitEncoderDecoderPrompt(
-        encoder_prompt=TextPrompt(
-            prompt=encoder_prompt, multi_modal_data={"image": image}
-        ),
-        decoder_prompt=decoder_prompt_tokens,
-    )
-    outputs = llm.generate(prompts=enc_dec_prompt, sampling_params=sampling_params)
-    result_text = outputs[0].outputs[0].text.strip()
-
-    print("------" * 8)
-    print("TEXT: ", result_text)
+print("------" * 8)
+text_table_elements.sort(key=lambda x: x["reading_order"])
+for elem in text_table_elements:
+    print(elem.get("text", ""))

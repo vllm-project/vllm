@@ -43,7 +43,6 @@ class SwinSelfAttention(nn.Module):
         self.window_size = (window_size if isinstance(window_size, Iterable)
                             else (window_size, window_size))
         self.scale = self.attention_head_size**-0.5
-        self.fused_attn = True
 
         self.relative_position_bias_table = nn.Parameter(
             torch.zeros(
@@ -107,50 +106,28 @@ class SwinSelfAttention(nn.Module):
         value_layer = self.transpose_for_scores(value_layer)
         query_layer = self.transpose_for_scores(query_layer)
 
-        if self.fused_attn:
-            attention_scores = self._get_rel_pos_bias()
-            if attention_mask is not None:
-                mask_shape = attention_mask.shape[0]
-                attention_mask_expanded = attention_mask.view(
-                    1, mask_shape, 1, dim,
-                    dim).expand(batch_size // mask_shape, mask_shape,
-                                self.num_attention_heads, dim, dim)
-                attention_scores = attention_scores + \
-                attention_mask_expanded.unsqueeze(
-                    1).unsqueeze(0)
-                attention_scores = attention_scores.view(
-                    -1, self.num_attention_heads, dim, dim)
+        attention_scores = self._get_rel_pos_bias()
+        if attention_mask is not None:
+            mask_shape = attention_mask.shape[0]
+            attention_mask_expanded = attention_mask.view(
+                1, mask_shape, 1, dim,
+                dim).expand(batch_size // mask_shape, mask_shape,
+                            self.num_attention_heads, dim, dim)
+            attention_scores = attention_scores + \
+            attention_mask_expanded.unsqueeze(
+                1).unsqueeze(0)
+            attention_scores = attention_scores.view(-1,
+                                                     self.num_attention_heads,
+                                                     dim, dim)
 
-            context_layer = torch.nn.functional.scaled_dot_product_attention(
-                query_layer,
-                key_layer,
-                value_layer,
-                attn_mask=attention_scores,
-                dropout_p=0.,
-            )
-            attention_probs = None
-        else:
-            attention_scores = torch.matmul(query_layer,
-                                            key_layer.transpose(-1, -2))
-            attention_scores = attention_scores * self.scale
-            attention_scores = attention_scores + self._get_rel_pos_bias()
-
-            if attention_mask is not None:
-                mask_shape = attention_mask.shape[0]
-                attention_scores = attention_scores.view(
-                    batch_size // mask_shape, mask_shape,
-                    self.num_attention_heads, dim, dim)
-                attention_scores = attention_scores + attention_mask.unsqueeze(
-                    1).unsqueeze(0)
-                attention_scores = attention_scores.view(
-                    -1, self.num_attention_heads, dim, dim)
-
-            attention_probs = nn.functional.softmax(attention_scores, dim=-1)
-
-            if head_mask is not None:
-                attention_probs = attention_probs * head_mask
-
-            context_layer = torch.matmul(attention_probs, value_layer)
+        context_layer = torch.nn.functional.scaled_dot_product_attention(
+            query_layer,
+            key_layer,
+            value_layer,
+            attn_mask=attention_scores,
+            dropout_p=0.,
+        )
+        attention_probs = None
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
         new_context_layer_shape = context_layer.size()[:-2] + (
