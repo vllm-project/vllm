@@ -558,7 +558,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                       seq_lens_cpu: torch.Tensor,
                       seq_lens_device: torch.Tensor,
                       query_start_loc_cpu: torch.Tensor,
-                      query_start_loc_device: torch.Tensor):
+                      query_start_loc_device: torch.Tensor) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
@@ -705,12 +705,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         if num_decodes > 0:
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
-                seq_lens=seq_lens[:num_decodes],
-                query_start_loc_device=query_start_loc[:self._num_decodes + 1],
-                query_start_loc_cpu=query_start_loc_cpu[:self._num_decodes +
-                                                        1],
-                seq_lens_device=seq_lens[:self._num_decodes],
-                seq_lens_cpu=seq_lens_cpu[:self._num_decodes],
+                seq_lens_cpu=seq_lens_cpu[:num_decodes],
+                seq_lens_device=seq_lens[:num_decodes],
+                query_start_loc_cpu=query_start_loc_cpu[:num_decodes + 1],
+                query_start_loc_device=query_start_loc[:num_decodes + 1],
             )
 
         attn_metadata = self.metadata_cls(
