@@ -12,7 +12,7 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
-from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
+from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
 if TYPE_CHECKING:
@@ -27,9 +27,6 @@ class MultiModalBudget:
         model_config: ModelConfig,
         scheduler_config: SchedulerConfig,
         mm_registry: MultiModalRegistry,
-        *,
-        max_model_len: int,
-        max_num_reqs: int,
     ) -> None:
         super().__init__()
 
@@ -37,24 +34,24 @@ class MultiModalBudget:
         self.scheduler_config = scheduler_config
         self.mm_registry = mm_registry
 
-        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
-            model_config=model_config,
-            scheduler_config=scheduler_config,
-            mm_registry=mm_registry,
-        )
-
-        self.max_num_encoder_input_tokens = encoder_compute_budget
-        self.encoder_cache_size = encoder_cache_size
-        self.max_model_len = max_model_len
-        self.max_num_reqs = max_num_reqs
+        self.max_model_len = model_config.max_model_len
+        self.max_num_reqs = scheduler_config.max_num_seqs
 
         self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config)
 
-        max_items_per_prompt_by_modality = dict[str, int]()
-        max_items_per_batch_by_modality = dict[str, int]()
-
         max_tokens_by_modality = mm_registry \
             .get_max_tokens_per_item_by_nonzero_modality(model_config)
+
+        encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
+            scheduler_config,
+            max_tokens_by_modality,
+        )
+
+        self.encoder_compute_budget = encoder_compute_budget
+        self.encoder_cache_size = encoder_cache_size
+
+        max_items_per_prompt_by_modality = dict[str, int]()
+        max_items_per_batch_by_modality = dict[str, int]()
 
         for modality, max_tokens in max_tokens_by_modality.items():
             (
@@ -69,15 +66,14 @@ class MultiModalBudget:
         self.max_items_per_prompt_by_modality = max_items_per_prompt_by_modality
         self.max_items_per_batch_by_modality = max_items_per_batch_by_modality
 
-    def get_modality_with_max_tokens(self) -> tuple[str, int]:
+    def get_modality_with_max_tokens(self) -> str:
         max_tokens_by_modality = self.max_tokens_by_modality
-        modality, max_tokens = max(max_tokens_by_modality.items(),
-                                   key=lambda item: item[1])
+        modality, _ = max(max_tokens_by_modality.items(), key=lambda x: x[1])
 
-        return modality, max_tokens
+        return modality
 
     def get_encoder_budget(self) -> int:
-        return min(self.max_num_encoder_input_tokens, self.encoder_cache_size)
+        return min(self.encoder_compute_budget, self.encoder_cache_size)
 
     def get_max_items(
         self,
