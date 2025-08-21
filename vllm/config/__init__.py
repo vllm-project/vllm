@@ -257,9 +257,14 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
-LogprobsMode = Literal["raw_logprobs", "raw_logits", "processed_logprobs",
-                       "processed_logits"]
 MMEncoderTPMode = Literal["weights", "data"]
+
+
+class LogprobsMode(enum.Enum):
+    RAW_LOGITS = "raw_logits"
+    RAW_LOGPROBS = "raw_logprobs"
+    PROCESSED_LOGITS = "processed_logits"
+    PROCESSED_LOGPROBS = "processed_logprobs"
 
 
 @config
@@ -363,12 +368,13 @@ class ModelConfig:
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
     vocab_size) logprobs are allowed to be returned and it may cause OOM."""
-    logprobs_mode: LogprobsMode = "raw_logprobs"
+    logprobs_mode: LogprobsMode = LogprobsMode.RAW_LOGPROBS
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
     1) raw_logprobs, 2) processed_logprobs, 3) raw_logits, 4) processed_logits.
-    Raw means the values before applying logit processors, like bad words.
-    Processed means the values after applying such processors.
+    Raw means the values before applying any logit processors, like bad words.
+    Processed means the values after applying all processors, including
+    temperature and top_k/top_p.
     """
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
@@ -1680,15 +1686,6 @@ class ModelConfig:
         return self.multimodal_config is not None
 
     @property
-    def processor_return_mm_hashes(self) -> bool:
-        """Whether the multi-modal processor should output hashes."""
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return False
-
-        return mm_config.mm_processor_cache_gb > 0
-
-    @property
     def enable_mm_processor_cache(self) -> bool:
         """Whether the multi-modal processor cache should be enabled."""
         mm_config = self.multimodal_config
@@ -2586,7 +2583,7 @@ class MultiModalConfig:
 
     skip_mm_profiling: bool = False
     """
-    When enabled, skips multimodal memory profiling and only profiles with 
+    When enabled, skips multimodal memory profiling and only profiles with
     language backbone model during engine initialization.
 
     This reduces engine startup time but shifts the responsibility to users for
@@ -2649,24 +2646,24 @@ class PoolerConfig:
     ## for embeddings models
     normalize: Optional[bool] = None
     """
-    Whether to normalize the embeddings outputs. 
+    Whether to normalize the embeddings outputs.
     """
     dimensions: Optional[int] = None
     """
-    Reduce the dimensions of embeddings if model 
+    Reduce the dimensions of embeddings if model
     support matryoshka representation.
     """
 
     ## for classification models
     activation: Optional[bool] = None
     """
-    Whether to apply activation function to the classification outputs. 
+    Whether to apply activation function to the classification outputs.
     """
 
     ## for reward models
     softmax: Optional[bool] = None
     """
-    Whether to apply softmax to the reward outputs. 
+    Whether to apply softmax to the reward outputs.
     """
     step_tag_id: Optional[int] = None
     """
@@ -2692,9 +2689,9 @@ class PoolerConfig:
 
     max_embed_len: Optional[int] = None
     """
-    Maximum input length allowed for embedding generation. When set, allows 
+    Maximum input length allowed for embedding generation. When set, allows
     inputs longer than max_embed_len to be accepted for embedding models.
-    This parameter enables accepting long inputs without requiring 
+    This parameter enables accepting long inputs without requiring
     VLLM_ALLOW_LONG_MAX_MODEL_LEN environment variable. When an input exceeds
     max_embed_len, it will be handled according to the original max_model_len
     validation logic. Defaults to None (i.e. set to max_model_len).
