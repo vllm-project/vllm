@@ -51,8 +51,9 @@ class PoolingMetadata:
 
     def build_pooling_cursor(self, num_scheduled_tokens: list[int],
                              device: torch.device):
+        prompt_lens = torch.tensor(self.prompt_lens, device="cpu")
         self.pooling_cursor = build_pooling_cursor(num_scheduled_tokens,
-                                                   self.prompt_lens,
+                                                   prompt_lens,
                                                    device=device)
 
 

@@ -6,6 +6,9 @@ from typing import Optional
 import torch
 
 from vllm.pooling_params import PoolingParams
+from vllm.utils import is_pin_memory_available
+
+pin_memory = is_pin_memory_available()
 
 
 @dataclass
@@ -26,9 +29,7 @@ class PoolingCursor:
         )
 
     def is_partial_prefill(self):
-        return len(
-            self.prompt_lens == len(self.num_scheduled_tokens)
-        ) and not torch.all(self.prompt_lens == self.num_scheduled_tokens)
+        return not torch.all(self.prompt_lens == self.num_scheduled_tokens)
 
 
 @dataclass
@@ -52,20 +53,25 @@ class PoolingMetadata:
     def build_pooling_cursor(self, num_scheduled_tokens: list[int],
                              device: torch.device):
         self.pooling_cursor = build_pooling_cursor(num_scheduled_tokens,
-                                                   self.prompt_lens.tolist(),
-                                                   device)
+                                                   self.prompt_lens, device)
 
 
 def build_pooling_cursor(num_scheduled_tokens: list[int],
-                         prompt_lens: list[int], device: torch.device):
+                         prompt_lens: torch.Tensor, device: torch.device):
+    assert len(prompt_lens) == len(num_scheduled_tokens)
+
     n_seq = len(num_scheduled_tokens)
     index = list(range(n_seq))
-    prompt_lens = torch.tensor(prompt_lens, device="cpu")
     num_scheduled_tokens = torch.tensor(num_scheduled_tokens, device="cpu")
-    cumsum = torch.zeros(n_seq + 1, dtype=torch.int64, device="cpu")
+    cumsum = torch.zeros(n_seq + 1,
+                         dtype=torch.int64,
+                         pin_memory=pin_memory,
+                         device="cpu")
     torch.cumsum(num_scheduled_tokens, dim=0, out=cumsum[1:])
-    first = cumsum[:n_seq].to(device, non_blocking=True)
-    last = (cumsum[1:] - 1).to(device, non_blocking=True)
+    cumsum = cumsum.to(device, non_blocking=True)
+
+    first = cumsum[:n_seq]
+    last = (cumsum[1:] - 1)
     return PoolingCursor(index=index,
                          first=first,
                          last=last,
