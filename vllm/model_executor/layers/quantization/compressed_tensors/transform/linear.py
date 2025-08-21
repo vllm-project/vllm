@@ -2,14 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Generator
 from itertools import accumulate
-from typing import Optional
+from typing import Callable, Optional
 
 import torch
 from compressed_tensors.transform import (TransformArgs, TransformConfig,
                                           TransformLocation, TransformScheme)
 from compressed_tensors.utils import is_match
 
-from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
+                                               LinearMethodBase,
+                                               QKVCrossParallelLinear)
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.module import (  # noqa: E501
     HadamardTransform)
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils import (  # noqa: E501
@@ -47,7 +49,22 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
 
-        weight_loader = extra_weight_attrs.get("weight_loader")
+        # get weight loader for transforms
+        weight_loader: Callable = extra_weight_attrs.get(
+            "weight_loader")  # type: ignore[assignment]
+
+        # HACK: UnquantizedLinearMethod does not support weight loader v2, but
+        # transforms (specifically PartitionedLinearWeightParameter) requires
+        # weight loader v2. Until UnquantizedLinearMethod supports v2, we must
+        # hack around this by getting weight loader v1 so ULM can load correctly
+        quant_method_name = self.quant_method.__class__.__name__
+        if quant_method_name not in WEIGHT_LOADER_V2_SUPPORTED:
+            if isinstance(layer, QKVCrossParallelLinear):
+                weight_loader_v1 = layer.weight_loader_v1
+            else:
+                weight_loader_v1 = layer.weight_loader
+            extra_weight_attrs["weight_loader"] = weight_loader_v1
+
         self.quant_method.create_weights(
             layer=layer,
             input_size_per_partition=input_size_per_partition,
