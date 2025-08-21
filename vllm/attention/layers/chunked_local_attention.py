@@ -27,7 +27,7 @@ def create_chunked_local_attention_backend(
 
     underlying_builder = underlying_attn_backend.get_builder_cls()
 
-    class ChunkedLocalAttentionBuilder(underlying_builder):
+    class ChunkedLocalAttentionBuilder(underlying_builder):  # type: ignore
 
         def build(self,
                   common_prefix_len: int,
