@@ -815,7 +815,7 @@ class InputPreprocessor:
         """Preprocess the input prompt."""
         if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
-            # input prompts to encoder & decoder. Allow mm_hashes.
+            # input prompts to encoder & decoder.
             return self._process_encoder_decoder_prompt(
                 prompt,
                 tokenization_kwargs,
@@ -844,7 +844,7 @@ class InputPreprocessor:
         """
         if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
-            # input prompts to encoder & decoder. Allow mm_hashes.
+            # input prompts to encoder & decoder.
             return await self._process_encoder_decoder_prompt_async(
                 prompt,
                 tokenization_kwargs,
