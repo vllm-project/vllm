@@ -434,11 +434,6 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         if self.cache is None:
             num_images = mm_items.get_count("image", strict=False)
         else:
-            logger.warning_once(
-                "Additional overhead is required in multi-modal processor "
-                "to support caching. "
-                "Consider turning it off by `--mm-processor-cache-gb 0`.")
-
             mm_limits = self.info.get_supported_mm_limits()
             num_images = mm_limits.get("image", 0)
 

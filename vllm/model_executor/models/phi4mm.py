@@ -848,11 +848,6 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             num_images = mm_items.get_count("image", strict=False)
             num_audios = mm_items.get_count("audio", strict=False)
         else:
-            logger.warning_once(
-                "Additional overhead is required in multi-modal processor "
-                "to support caching. "
-                "Consider turning it off by `--mm-processor-cache-gb 0`.")
-
             mm_limits = self.info.get_supported_mm_limits()
             num_images = mm_limits.get("image", 0)
             num_audios = mm_limits.get("audio", 0)
