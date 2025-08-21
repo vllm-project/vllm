@@ -199,8 +199,10 @@ class Worker(WorkerBase):
         from vllm.model_executor.layers.patch import patch_load_weights
         patch_load_weights(self)
         # from transformers import AutoModelForCausalLM
-        # # load the bf16 model
-        # test_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B-Instruct")
+        # # # load the bf16 model
+        # # test_model = AutoModelForCausalLM.from_pretrained("Meta-Llama/Meta-Llama-3.1-8B-Instruct")
+        
+        # test_model = AutoModelForCausalLM.from_pretrained("RedHatAI/DeepSeek-R1-Distill-Qwen-14B-quantized.w8a8")
         # weights_to_load = []
         # from typing import Dict, List 
 
@@ -223,6 +225,7 @@ class Worker(WorkerBase):
         # # print("dump params: ", [name for name, _ in weights])
         # full_weights = [(name, param.to(self.device)) for name, param in weights]
         # s = time.time()
+        # # breakpoint()
         # self.model_runner.model.load_weights(
         #     weights=full_weights
         # )

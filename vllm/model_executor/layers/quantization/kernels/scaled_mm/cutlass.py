@@ -45,6 +45,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         is_fused_module = len(layer.logical_widths) > 1
         weight_scale = getattr(layer, self.w_s_name)
         if is_fused_module and not self.config.is_channelwise:
+            # print("going into the channelwise convert")
             weight_scale = convert_to_channelwise(weight_scale,
                                                   layer.logical_widths)
         replace_parameter(
@@ -53,6 +54,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
 
         # INPUT SCALE
         if self.config.is_static_input_scheme:
+            # print("going into the input scheme convert")
             input_scale = getattr(layer, self.i_s_name)
 
             if self.config.input_symmetric:
@@ -82,6 +84,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
                                   torch.nn.Parameter(azp, requires_grad=False))
 
         else:
+            # print('skipping input scheme convert')
             setattr(layer, self.i_s_name, None)
             setattr(layer, self.i_zp_name, None)
 
@@ -91,6 +94,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         # For more details, see csrc/quantization/cutlass_w8a8/Epilogues.md
         # https://github.com/vllm-project/vllm/blob/8d59dbb00044a588cab96bcdc028006ed922eb06/csrc/quantization/cutlass_w8a8/Epilogues.md
         if not self.config.input_symmetric:
+            # print("going into the input symmetric convert")
             weight = getattr(layer, self.w_q_name)
             azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.int32)
             if self.config.is_static_input_scheme:
@@ -100,6 +104,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
             setattr(layer, self.azp_adj_name,
                     torch.nn.Parameter(azp_adj, requires_grad=False))
         else:
+            # print('skipping input symmetric convert')
             setattr(layer, self.azp_adj_name, None)
 
     def apply_weights(self,

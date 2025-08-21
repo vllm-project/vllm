@@ -439,6 +439,8 @@ def process_weights_after_loading_subset(model: nn.Module, model_config,
     from vllm.model_executor.layers.linear import QKVCrossParallelLinear
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizationConfig, QuantizeMethodBase)
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import CompressedTensorsLinearMethod, CompressedTensorsW8A8Int8
+    from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import CutlassScaledMMLinearKernel
 
     # HACK: begin
     if model_config is None and target_device is None:
@@ -484,12 +486,25 @@ def process_weights_after_loading_subset(model: nn.Module, model_config,
         module = name_to_modules[module_name]
 
         if isinstance(module, QKVCrossParallelLinear):
+            # print("runing cross parallel linear postprocess")
             # NOTE(Isotr0py): special case for cross QKV layer because
             # q and kv proj aren't registered as submodules intentionally
             module.process_weights_after_loading()
             continue
         quant_method = getattr(module, "quant_method", None)
         # print("quant method: ", quant_method)
+        # hack for skpping postprocess for default cutlass kernel
+        scheme = getattr(module, "scheme", None)
+        is_cutlass = isinstance(quant_method, CompressedTensorsLinearMethod) and isinstance(scheme, CompressedTensorsW8A8Int8) and isinstance(scheme.kernel, CutlassScaledMMLinearKernel)
+        can_skip_postprocess = False
+        if is_cutlass:
+            assert isinstance(scheme, CompressedTensorsW8A8Int8) 
+            kernel = scheme.kernel
+            can_skip_postprocess = kernel.config.is_channelwise and not kernel.config.is_static_input_scheme and kernel.config.input_symmetric
+        
+        if can_skip_postprocess:
+            continue
+
         if isinstance(quant_method, QuantizeMethodBase):
             # When quant methods need to process weights after loading
             # (for repacking, quantizing, etc), they expect parameters
@@ -497,6 +512,7 @@ def process_weights_after_loading_subset(model: nn.Module, model_config,
             # case where cpu offloading is used, where we will move the
             # parameters onto device for processing and back off after.
             with device_loading_context(module, target_device):
+                # print(f"running postprocess for {module}")
                 quant_method.process_weights_after_loading(module)
 
     # Currently only used by MLA.
@@ -505,10 +521,11 @@ def process_weights_after_loading_subset(model: nn.Module, model_config,
     for _, module in model.named_modules():
         if isinstance(module, Attention) and \
             hasattr(module, "process_weights_after_loading"):
+            # print(f"Running attention postporcessing with dtype: {model_config.dtype}")
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             module.process_weights_after_loading(model_config.dtype)
-        
+    
     # HACK: begin
     model.hacked_recorded_loader = recorded_loader
     # HACK: end
@@ -619,6 +636,7 @@ def patch_load_weights(self: "Worker"):
             start = time.time()
             # print("flash_rl quant load_weights is called")
             setattr(model, 'hacked_not_need_process_weights_after_loading', False)
+
             
             if len(self.flash_rl_module_attribute_to_preserve) > 0:
                 for _, module in model.named_modules():
@@ -694,7 +712,7 @@ def patch_load_weights(self: "Worker"):
             logger.debug(f"original load weights took: {end2 - end1}")
             
             # skip process weights afteer loading for int8
-            if (hasattr(model, 'hacked_model_config') and hasattr(model, 'hacked_target_device')) and not config_data.get('fn', 'int8') == "int8":
+            if (hasattr(model, 'hacked_model_config') and hasattr(model, 'hacked_target_device')):
                 from vllm.model_executor.model_loader import utils
                 process_weights_after_loading_subset(model, None, None, param_names=requested_names_vllm)
                 setattr(model, 'hacked_not_need_process_weights_after_loading', True)
@@ -702,7 +720,7 @@ def patch_load_weights(self: "Worker"):
                 setattr(model, 'hacked_not_need_process_weights_after_loading', False)
             
             end3 = time.time()
-            # print("process weights subset took: ", end3 - end2)
+            logger.debug(f"process weights after loading took: {end3 - end2}")
             
             skipped_params = list()
             # this codeblock is to use the old storage so that cudagraphs don't break
@@ -727,10 +745,8 @@ def patch_load_weights(self: "Worker"):
                 p.data = hacked_data_dict[name]
                 del tmp_data
             end4 = time.time()
-            # print("remappiung weights to original storage took: ", end4 - end3, flush=True)
-            # print("copy time: ", copy_time, flush=True)
+            logger.debug(f"remapping weights to original storage took: {end4 - end3}")
             
-            # logger.debug(f"flash_rl load_weights skipped params (not accurate for `fp8-vllm`): {skipped_params}")
             alloc, total = torch.cuda.memory.mem_get_info()
             # print(f"torch memory allocated, {alloc / 1024 **2: .2f} MB, {total / 1024**2 : .2f} MB")
             del skipped_params
