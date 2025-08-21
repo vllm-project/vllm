@@ -70,53 +70,51 @@ def _silu_mul_fp8_quant_deep_gemm(
     # number of valid tokens for this expert
     n_tokens = tl.load(counts_ptr + e * stride_counts_e).to(tl.int64)
 
-    cols = tl.arange(0, BLOCK)
-    cols = cols.to(tl.int64)
-    mask_h = cols < BLOCK
+    cols = tl.arange(0, BLOCK).to(tl.int64)
+    mask = cols < BLOCK
+
+    base_input_offset = e * stride_i_e + g * GROUP_SIZE * stride_i_h
+    base_gate_offset = base_input_offset + cols * stride_i_h
+    base_up_offset = base_input_offset + H * stride_i_h + cols * stride_i_h
+    base_yq_offset = (e * stride_yq_e + g * GROUP_SIZE * stride_yq_h +
+                      cols * stride_yq_h)
+    base_ys_offset = e * stride_ys_e + g * stride_ys_g
 
     for t in tl.range(0, n_tokens, num_stages=NUM_STAGES):
-        base_i_offset = (e * stride_i_e + t * stride_i_t +
-                         g * GROUP_SIZE * stride_i_h)
-        base_yq_offset = (e * stride_yq_e + t * stride_yq_t +
-                          g * GROUP_SIZE * stride_yq_h)
-        base_ys_offset = e * stride_ys_e + t * stride_ys_t + g * stride_ys_g
-
-        mask = mask_h
-        x = tl.load(input_ptr + base_i_offset + cols * stride_i_h,
-                    mask=mask,
-                    other=0.0).to(tl.float32)
-        y2 = tl.load(input_ptr + base_i_offset + H * stride_i_h +
-                     cols * stride_i_h,
+        gate = tl.load(input_ptr + base_gate_offset + t * stride_i_t,
+                       mask=mask,
+                       other=0.0).to(tl.float32)
+        up = tl.load(input_ptr + base_up_offset + t * stride_i_t,
                      mask=mask,
-                     other=0.0).to(tl.float32)
+                     other=0.0)
 
-        x = x * (1.0 / (1.0 + tl.exp(-x)))
-        y = x * y2
+        gate = gate * (1.0 / (1.0 + tl.exp(-gate)))
+        y = gate * up
 
-        _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
-        scale_raw = _absmax / fp8_max
-        y_s = tl.math.exp2(tl.ceil(
-            tl.log2(scale_raw))) if use_ue8m0 else scale_raw
+        y_s = tl.maximum(tl.max(tl.abs(y)), eps) / fp8_max
+        if use_ue8m0:
+            y_s = tl.exp2(tl.ceil(tl.log2(y_s)))
+
         y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
-        tl.store(y_q_ptr + base_yq_offset + cols * stride_yq_h, y_q, mask=mask)
-        tl.store(y_s_ptr + base_ys_offset, y_s)
+        tl.store(y_q_ptr + base_yq_offset + t * stride_yq_t, y_q, mask=mask)
+        tl.store(y_s_ptr + base_ys_offset + t * stride_ys_t, y_s)
 
 
 def silu_mul_fp8_quant_deep_gemm(
-    y: torch.Tensor,  # (E, T, 2*H) float32
+    y: torch.Tensor,  # (E, T, 2*H)
     tokens_per_expert: torch.Tensor,  # (E,) number of valid tokens per expert
     group_size: int = 128,
     eps: float = 1e-10,
-):
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
 
     y has shape (E, T, 2*H). The first half of the last dimension is 
     silu-activated, multiplied by the second half, then quantized into FP8.
 
     Returns `(y_q, y_s)` where
-    * `y_q` is the FP8 tensor of shape `(E, T, H)`, same layout as `y[..., :H]`.
-    * `y_s` has shape `(E, T, H // group_size)` and strides `(T*G, 1, T)`
+    * `y_q`: FP8 tensor, shape (E, T, H), same layout as y[..., :H]
+    * `y_s`: FP32 tensor, shape (E, T, H // group_size), strides (T*G, 1, T)
     """
     assert y.ndim == 3, "y must be (E, T, 2*H)"
     E, T, H2 = y.shape
@@ -148,7 +146,7 @@ def silu_mul_fp8_quant_deep_gemm(
 
     stride_cnt_e = tokens_per_expert.stride()[0]
 
-    # static grid over experts and H-groups.
+    # Static grid over experts and H-groups.
     # A loop inside the kernel handles the token dim
     grid = (E * G, )
 
@@ -178,7 +176,7 @@ def silu_mul_fp8_quant_deep_gemm(
         fp8_max,
         is_blackwell_deep_gemm_e8m0_used(),
         BLOCK=group_size,
-        NUM_STAGES=8,
+        NUM_STAGES=4,
         num_warps=1,
     )
 
