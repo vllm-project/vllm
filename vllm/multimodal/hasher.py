@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pickle
+import uuid
 from collections.abc import Iterable, Mapping
 from typing import Union
 
@@ -34,10 +35,15 @@ class MultiModalHasher:
             return np.array(obj).tobytes()
 
         if isinstance(obj, Image.Image):
+            exif = obj.getexif()
+            if Image.ExifTags.Base.ImageID in exif and isinstance(
+                    exif[Image.ExifTags.Base.ImageID], uuid.UUID):
+                # If the image has exif ImageID tag, use that
+                return exif[Image.ExifTags.Base.ImageID].bytes
             return cls.item_to_bytes(
                 "image", np.asarray(convert_image_mode(obj, "RGBA")))
         if isinstance(obj, torch.Tensor):
-            return cls.item_to_bytes("tensor", obj.numpy())
+            return cls.item_to_bytes("tensor", obj.cpu().numpy())
         if isinstance(obj, np.ndarray):
             # If the array is non-contiguous, we need to copy it first
             arr_data = obj.data if obj.flags.c_contiguous else obj.tobytes()

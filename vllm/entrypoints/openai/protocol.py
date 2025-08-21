@@ -20,7 +20,15 @@ from openai.types.chat.chat_completion_message import (
 from openai.types.responses import (ResponseFunctionToolCall,
                                     ResponseInputItemParam, ResponseOutputItem,
                                     ResponsePrompt, ResponseReasoningItem,
-                                    ResponseStatus, ResponseTextConfig)
+                                    ResponseStatus)
+
+# Backward compatibility for OpenAI client versions
+try:  # For older openai versions (< 1.100.0)
+    from openai.types.responses import ResponseTextConfig
+except ImportError:  # For newer openai versions (>= 1.100.0)
+    from openai.types.responses import (ResponseFormatTextConfig as
+                                        ResponseTextConfig)
+
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
@@ -30,7 +38,7 @@ from typing_extensions import TypeAlias
 
 from vllm import envs
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
-                                         random_tool_call_id)
+                                         make_tool_call_id)
 from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam)
 from vllm.logger import init_logger
@@ -568,6 +576,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
+    return_token_ids: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If specified, the result will include token IDs alongside the "
+            "generated text. In streaming mode, prompt_token_ids is included "
+            "only in the first chunk, and token_ids contains the delta tokens "
+            "for each chunk. This is useful for debugging or when you "
+            "need to map generated text back to input tokens."))
     cache_salt: Optional[str] = Field(
         default=None,
         description=(
@@ -1054,6 +1070,14 @@ class CompletionRequest(OpenAIBaseModel):
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
+    return_token_ids: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If specified, the result will include token IDs alongside the "
+            "generated text. In streaming mode, prompt_token_ids is included "
+            "only in the first chunk, and token_ids contains the delta tokens "
+            "for each chunk. This is useful for debugging or when you "
+            "need to map generated text back to input tokens."))
 
     cache_salt: Optional[str] = Field(
         default=None,
@@ -1472,7 +1496,9 @@ class CompletionResponseChoice(OpenAIBaseModel):
             "to stop, None if the completion finished for some other reason "
             "including encountering the EOS token"),
     )
+    token_ids: Optional[list[int]] = None  # For response
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    prompt_token_ids: Optional[list[int]] = None  # For prompt
 
 
 class CompletionResponse(OpenAIBaseModel):
@@ -1503,6 +1529,10 @@ class CompletionResponseStreamChoice(OpenAIBaseModel):
             "to stop, None if the completion finished for some other reason "
             "including encountering the EOS token"),
     )
+    # not part of the OpenAI spec but for tracing the tokens
+    # prompt tokens is put into choice to align with CompletionResponseChoice
+    prompt_token_ids: Optional[list[int]] = None
+    token_ids: Optional[list[int]] = None
 
 
 class CompletionStreamResponse(OpenAIBaseModel):
@@ -1604,7 +1634,7 @@ class FunctionCall(OpenAIBaseModel):
 
 
 class ToolCall(OpenAIBaseModel):
-    id: str = Field(default_factory=random_tool_call_id)
+    id: str = Field(default_factory=make_tool_call_id)
     type: Literal["function"] = "function"
     function: FunctionCall
 
@@ -1672,6 +1702,9 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     finish_reason: Optional[str] = "stop"
     # not part of the OpenAI spec but included in vLLM for legacy reasons
     stop_reason: Optional[Union[int, str]] = None
+    # not part of the OpenAI spec but is useful for tracing the tokens
+    # in agent scenarios
+    token_ids: Optional[list[int]] = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -1687,6 +1720,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
 
     # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    prompt_token_ids: Optional[list[int]] = None
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None, description="KVTransfer parameters.")
 
@@ -1704,6 +1738,8 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     logprobs: Optional[ChatCompletionLogProbs] = None
     finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = None
+    # not part of the OpenAI spec but for tracing the tokens
+    token_ids: Optional[list[int]] = None
 
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):
@@ -1713,6 +1749,8 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
+    # not part of the OpenAI spec but for tracing the tokens
+    prompt_token_ids: Optional[list[int]] = None
 
 
 class TranscriptionResponseStreamChoice(OpenAIBaseModel):

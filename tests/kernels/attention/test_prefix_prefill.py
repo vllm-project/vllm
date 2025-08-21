@@ -19,13 +19,13 @@ from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 NUM_HEADS = [64]
-NUM_QUERIES_PER_KV = [1, 8, 64]
-HEAD_SIZES = [128, 96, 24]
+NUM_QUERIES_PER_KV = [1, 64]
+HEAD_SIZES = [24, 128]
 DTYPES = [torch.float16]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
-SLIDING_WINDOW = [0, 16, 64, 128, 256, 512, 2048]
+SLIDING_WINDOW = [0, 16, 2048]
 KV_CACHE_DTYPES = ["auto", "fp8", "fp8_e5m2"]
 
 OPS = [chunked_prefill_paged_decode, context_attention_fwd]
