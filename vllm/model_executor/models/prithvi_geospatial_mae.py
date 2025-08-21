@@ -34,10 +34,8 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalFieldElem, MultiModalInputs,
-                                    MultiModalKwargsItem,
-                                    MultiModalKwargsItems,
-                                    MultiModalSharedField, PlaceholderRange)
+                                    MultiModalInputs, MultiModalKwargsItems,
+                                    PlaceholderRange)
 from vllm.multimodal.parse import (DictEmbeddingItems, ModalityDataItems,
                                    MultiModalDataItems, MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -46,8 +44,19 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 
-def mm_fields_config(
-        hf_inputs: BatchFeature) -> Mapping[str, MultiModalFieldConfig]:
+def _prithvi_field_config(hf_inputs: Mapping[str, torch.Tensor]):
+    # This model receives in input a multi-dimensional tensor representing
+    # a single image patch and therefore it is not to be split
+    # into multiple elements, but rather to be considered a single one.
+    # Hence, the decision of using a MultiModalSharedField.
+    # The expected shape is (num_channels, width, height).
+
+    # This model however allows the user to also submit multiple image
+    # patches as a batch, adding a further dimension to the above shape.
+    # At this stage we only support submitting one patch per request and
+    # batching is achieved via vLLM batching.
+    # TODO (christian-pinto): enable support for multi patch requests
+    # in tandem with vLLM batching.
     return dict(
         pixel_values=MultiModalFieldConfig.shared(batch_size=1,
                                                   modality="image"),
@@ -67,7 +76,7 @@ class PrithviGeoSpatialMAEMultiModalDataParser(MultiModalDataParser):
                 data,
                 modality="image",
                 required_fields={"pixel_values", "location_coords"},
-                fields_factory=mm_fields_config,
+                fields_factory=_prithvi_field_config,
             )
 
         return super()._parse_image_data(data)
@@ -93,11 +102,13 @@ class PrithviGeoSpatialMAEInputBuilder(
         # This model input is fixed and is in the form of a torch Tensor.
         # The size of pixel_values might change in the cases where we resize
         # the input but never exceeds the dimensions below.
-        return {
+        image_data = {
             "pixel_values": torch.full((6, 512, 512), 1.0,
                                        dtype=torch.float16),
             "location_coords": torch.full((1, 2), 1.0, dtype=torch.float16),
         }
+
+        return {"image": image_data}
 
 
 class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
@@ -108,8 +119,9 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return mm_fields_config(hf_inputs)
+        return _prithvi_field_config(hf_inputs)
 
     def _get_prompt_updates(
         self,
@@ -126,48 +138,30 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
     ) -> MultiModalInputs:
-        mm_kwargs = {}
+        if "image" in mm_data:
+            image_data = mm_data["image"]
+        else:
+            image_data = mm_data
+            mm_data = {"image": mm_data}
 
-        for k, v in mm_data.items():
-            if isinstance(v, dict) and k == "image":
-                mm_kwargs.update(v)
-            else:
-                mm_kwargs[k] = v
-        mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
-
-        # This model receives in input a multi-dimensional tensor representing
-        # a single image patch and therefore it is not to be split
-        # into multiple elements, but rather to be considered a single one.
-        # Hence, the decision of using a MultiModalSharedField.
-        # The expected shape is (num_channels, width, height).
-
-        # This model however allows the user to also submit multiple image
-        # patches as a batch, adding a further dimension to the above shape.
-        # At this stage we only support submitting one patch per request and
-        # batching is achieved via vLLM batching.
-        # TODO (christian-pinto): enable support for multi patch requests
-        # in tandem with vLLM batching.
-        multimodal_kwargs_items = [
-            MultiModalKwargsItem.from_elems([
-                MultiModalFieldElem(
-                    modality="image",
-                    key=key,
-                    data=data,
-                    field=MultiModalSharedField(1),
-                ) for key, data in mm_kwargs.items()
-            ])
-        ]
-
-        # Always provide multimodal hashes
-        mm_items = self._to_mm_items({"image": mm_data})
+        mm_items = self._to_mm_items(mm_data)
         mm_hashes = self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
                                         tokenization_kwargs or {})
+        mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
+
+        mm_processed_data = BatchFeature(image_data)
+
+        mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
+            mm_processed_data,
+            self._get_mm_fields_config(mm_processed_data,
+                                       hf_processor_mm_kwargs),
+        )
 
         return MultiModalInputs(
             type="multimodal",
             prompt=prompt,
             prompt_token_ids=[1],
-            mm_kwargs=MultiModalKwargsItems.from_seq(multimodal_kwargs_items),
+            mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
             mm_placeholders=mm_placeholders,
         )
