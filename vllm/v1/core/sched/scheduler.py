@@ -970,7 +970,7 @@ class Scheduler(SchedulerInterface):
         draft_token_ids: DraftTokenIds,
     ) -> None:
         spec_structured_dict = {}
-        
+
         for req_id, spec_token_ids in zip(
                 draft_token_ids.req_ids,
                 draft_token_ids.draft_token_ids,
@@ -988,12 +988,12 @@ class Scheduler(SchedulerInterface):
                 spec_structured_dict[req_id] = spec_token_ids
             else:
                 request.spec_token_ids = spec_token_ids
-        
+
         # Batch validate tokens for structured output requests
         spec_structured_dict = (
             self.structured_output_manager.submit_batch_validate_tokens(
                 spec_structured_dict))
-        
+
         # Update requests with validated tokens
         for req_id in spec_structured_dict:
             request = self.requests.get(req_id)
