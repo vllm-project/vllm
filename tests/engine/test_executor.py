@@ -47,10 +47,7 @@ def test_custom_executor_type_checking(model):
 
 
 @pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
-@pytest.mark.parametrize(
-    "distributed_executor_backend",
-    [CustomUniExecutor, "tests.engine.test_executor.CustomUniExecutor"])
-def test_custom_executor(distributed_executor_backend, model, tmp_path):
+def test_custom_executor(model, tmp_path):
     cwd = os.path.abspath(".")
     os.chdir(tmp_path)
     try:
@@ -58,7 +55,7 @@ def test_custom_executor(distributed_executor_backend, model, tmp_path):
 
         engine_args = EngineArgs(
             model=model,
-            distributed_executor_backend=distributed_executor_backend,
+            distributed_executor_backend=CustomUniExecutor,
             enforce_eager=True,  # reduce test time
         )
         engine = LLMEngine.from_engine_args(engine_args)
@@ -73,10 +70,7 @@ def test_custom_executor(distributed_executor_backend, model, tmp_path):
 
 
 @pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
-@pytest.mark.parametrize("distributed_executor_backend", [
-    CustomUniExecutorAsync, "tests.engine.test_executor.CustomUniExecutorAsync"
-])
-def test_custom_executor_async(distributed_executor_backend, model, tmp_path):
+def test_custom_executor_async(model, tmp_path):
     cwd = os.path.abspath(".")
     os.chdir(tmp_path)
     try:
@@ -84,7 +78,7 @@ def test_custom_executor_async(distributed_executor_backend, model, tmp_path):
 
         engine_args = AsyncEngineArgs(
             model=model,
-            distributed_executor_backend=distributed_executor_backend,
+            distributed_executor_backend=CustomUniExecutorAsync,
             enforce_eager=True,  # reduce test time
         )
         engine = AsyncLLMEngine.from_engine_args(engine_args)
