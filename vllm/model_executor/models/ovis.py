@@ -208,15 +208,15 @@ class OvisImagePatchInputs(TensorSchema):
         - batch_patches: Batch size * number of patches
         - patch_size: patch_size_x * patch_size_y * num_channels
         - patch_indicators: Batch size * (number of patches + 1)
-        - num_patches_per_image: List of number of total patches for each image
+        - patches_per_image: List of number of total patches for each image
           in the batch.
     """
     type: Literal["image_patches"]
     flat_data: Annotated[torch.Tensor,
                          TensorShape("batch_patches", "patch_size")]
     indicator_tokens: Annotated[torch.Tensor, TensorShape("patch_indicators")]
-    num_patches_per_image: Annotated[list[int],
-                                     TensorShape("num_patches_per_image")]
+    patches_per_image: Annotated[list[int],
+                                 TensorShape("num_patches_per_image")]
     # This is used to restore the first two dimensions of `flat_data`.
 
 
