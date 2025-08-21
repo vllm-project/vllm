@@ -706,11 +706,13 @@ def _create_qwen2vl_field_factory(spatial_merge_size: int) -> Callable[
     def _qwen2vl_field_config(hf_inputs: Mapping[str, torch.Tensor]):
         image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
         image_pixel_grid_sizes = image_grid_thw.prod(-1)
-        image_embed_grid_sizes = image_pixel_grid_sizes // spatial_merge_size // spatial_merge_size
+        image_embed_grid_sizes = (
+            image_pixel_grid_sizes // spatial_merge_size // spatial_merge_size)
         
         video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
         video_grid_sizes = video_grid_thw.prod(-1)
-        video_embed_grid_sizes = video_grid_sizes // spatial_merge_size // spatial_merge_size
+        video_embed_grid_sizes = (
+            video_grid_sizes // spatial_merge_size // spatial_merge_size)
         
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes(

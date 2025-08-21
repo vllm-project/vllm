@@ -89,11 +89,13 @@ def create_qwen2_5_omni_thinker_field_config(spatial_merge_size: int) -> Callabl
     
         image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
         image_pixel_grid_sizes = image_grid_thw.prod(-1)
-        image_embed_grid_sizes = image_pixel_grid_sizes // spatial_merge_size // spatial_merge_size
+        image_embed_grid_sizes = (
+            image_pixel_grid_sizes // spatial_merge_size // spatial_merge_size)
     
         video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
         video_grid_sizes = video_grid_thw.prod(-1)
-        video_embed_grid_sizes = video_grid_sizes // spatial_merge_size // spatial_merge_size
+        video_embed_grid_sizes = (
+            video_grid_sizes // spatial_merge_size // spatial_merge_size)
     
         num_videos = len(video_grid_sizes)
     
