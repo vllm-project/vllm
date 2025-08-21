@@ -34,7 +34,6 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
-from vllm.multimodal.video import Video
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_lora_tokenizer
 from vllm.utils import PlaceholderModule
 
@@ -555,8 +554,8 @@ class RandomMultiModalDataset(RandomDataset):
     """
     Synthetic multimodal dataset (text + images) extending RandomDataset.
 
-    TODO: Add video support.
     TODO: Add audio support.
+    TODO: Add video support (WIP) - Finish generate_synthetic_video method.
     Strategy:
     - Per request, first sample multimodal item count uniformly within
       [num_mm_items*(1 - num_mm_items_range_ratio), num_mm_items*(1 + ...)],
@@ -564,25 +563,29 @@ class RandomMultiModalDataset(RandomDataset):
     - For each item in the multimodal item count, 
       sample a modality from the supported modalities following
       convention: 
-      {(256, 256, 1): 0.25, (720, 1280, 1): 0.25, (720, 1280, 16): 0.5}
+      {(256, 256, 1): 0.5, (720, 1280, 1): 0.4, (720, 1280, 16): 0.10}
       To sample  
-      images with resolution 256x256 pixels w.p. 0.25,
-      images with resolution 720x1280 pixels w.p. 0.25,
-      videos with resolution 720x1280 pixels and 16 frames w.p. 0.5.
-      NOTE: Only sampling images for now.
+      images with resolution 256x256 w.p. 0.5,
+      images with resolution 720x1280 w.p. 0.4,
+      videos with resolution 720x1280 and 16 frames w.p. 0.1.
+      Always ensure that the bucket config sums to 1.
+      NOTE: The sampling strategy is an heuristic. We can do better.
+      For example, sample without replacement considering the limit per prompt
+      for all modalities.
     - Optional `enable_multimodal_chat` formats prompt/content into chat style.
     - Reuses the seeded RNG for reproducible text and image sampling.
     """
 
     IS_MULTIMODAL = True
-    DEFAULT_LIMIT_MM_PER_PROMPT = {"image": 255, "video": 255}
+    # NOTE: video sampling is WIP. Setting it to 0.
+    DEFAULT_LIMIT_MM_PER_PROMPT = {"image": 255, "video": 0}
 
     DEFAULT_NUM_MM_ITEMS = 1
     DEFAULT_NUM_MM_ITEMS_RANGE_RATIO = 0.0
     DEFAULT_MM_ITEM_BUCKET_CONFIG = {
-        (256, 256, 1): 0.25,
-        (720, 1280, 1): 0.25,
-        (720, 1280, 16): 0.5,
+        (256, 256, 1): 0.5,
+        (720, 1280, 1): 0.5,
+        (720, 1280, 16): 0.0,
     }
     DEFAULT_ENABLE_MULTIMODAL_CHAT = False
 
@@ -602,15 +605,12 @@ class RandomMultiModalDataset(RandomDataset):
 
     def generate_synthetic_video(self, width: int, 
                                     height: int, 
-                                    num_frames: int) -> Video:
-        """Generate synthetic video with random values."""
-        random_pixels = self._rng.integers(
-            0,
-            256,
-            (num_frames, height, width, 3),
-            dtype=np.uint8,
-        )
-        return Video.fromarray(random_pixels)
+                                    num_frames: int) -> Any:
+        """Generate synthetic video with random values.
+        
+        TODO: Finish this method.
+        """
+        raise NotImplementedError("Video sampling is WIP.")
 
     def map_config_to_modality(self, config: tuple[int, int, int]) -> str:
         """Map the configuration to the modality."""
@@ -624,7 +624,14 @@ class RandomMultiModalDataset(RandomDataset):
     def normalize_bucket_config(self, bucket_config: dict[tuple[int, int, int], 
                                 float]) -> dict[tuple[int, int, int], float]:
         """Normalize the bucket config to sum to 1."""
+        # Raise error if value is negative
+        if any(v < 0 for v in bucket_config.values()):
+            raise ValueError("Bucket config values must be non-negative.")
         total = sum(bucket_config.values())
+        # Raise error if total is 0
+        if total == 0:
+            raise ValueError("Got 0 sum of bucket config values. "
+                             "Bucket config values must sum to non-zero.")
         return {k: v / total for k, v in bucket_config.items()}
 
 
@@ -662,14 +669,21 @@ class RandomMultiModalDataset(RandomDataset):
         """
         Get the sampling parameters for the multimodal items.
         """
-        # Enforce num_images_range_ratio < 1
+        # Enforce num_mm_items_range_ratio < 1
         assert num_mm_items_range_ratio < 1.0, (
             "num_mm_items_range_ratio must be < 1.0 to ensure a valid sampling "
             "range"
         )
 
+        # Normalize bucket config to sum to 1
+        bucket_config = self.normalize_bucket_config(bucket_config)
+        logger.info(
+            "Normalized bucket config: %s", bucket_config,
+        )
+
+        # Get max and min num mm items
         max_num_mm_items = int(num_mm_items * (1 + num_mm_items_range_ratio))
-        # Ensure min num mm items is zero
+        # Ensure min num mm items is at least 0
         min_num_mm_items = max(0, 
                             int(num_mm_items * (1 - num_mm_items_range_ratio)
                             ))
@@ -682,24 +696,14 @@ class RandomMultiModalDataset(RandomDataset):
                                  f"limit_mm_per_prompt: "
                                  f"{limit_mm_per_prompt.keys()}")
 
-        # Ensure min num mm is smaller than max num mm for all modalities
-        # Ensure max num is smaller than limit per prompt, setting it to limit
-        for k, v in limit_mm_per_prompt.items():
-            if min_num_mm_items > v:
-                raise ValueError(f"Min num mm items for modality {k} is "
-                                 f"greater than the limit per prompt: "
-                                 f"{min_num_mm_items} > {v}")
-            max_num_mm_items = min(max_num_mm_items, v)
-
+        # Ensure max num mm items is smaller than min num mm items
+        if max_num_mm_items < min_num_mm_items:
+            raise ValueError(f"Max num mm items is less than min num mm items: "
+                             f"{max_num_mm_items} < {min_num_mm_items}")
 
         logger.info(
             "Sampling number of multimodal items from [%s, %s]",
             min_num_mm_items, max_num_mm_items,
-        )
-
-        bucket_config = self.normalize_bucket_config(bucket_config)
-        logger.info(
-            "Normalized bucket config: %s", bucket_config,
         )
 
         return (
@@ -718,32 +722,47 @@ class RandomMultiModalDataset(RandomDataset):
         """
         Iterator over the multimodal items for each request
         whose size is between min_num_mm_items and max_num_mm_items.
+
+        Loop over the bucket config and sample a multimodal item.
+        Loop until the number of multimodal items sampled is equal to 
+        request_num_mm_items or limit of multimodal items per prompt 
+        for all modalities is reached.
         """
+        # Get the number of multimodal items to sample
         request_num_mm_items = int(
             self._rng.integers(min_num_mm_items, max_num_mm_items + 1)
-        )
-        modality_counter = {
-            "image": 0,
-            "video": 0,
-        }
-        for _ in range(request_num_mm_items):
-            while True:
-                mm_item_config = self._rng.choice(list(bucket_config.keys()), 
-                                                  p=list(bucket_config.values()))
-                if self.map_config_to_modality(mm_item_config) == "image":
-                    if modality_counter["image"] < limit_mm_per_prompt["image"]:
-                        modality_counter["image"] += 1
-                        break
-                elif self.map_config_to_modality(mm_item_config) == "video":
-                    if modality_counter["video"] < limit_mm_per_prompt["video"]:
-                        modality_counter["video"] += 1
-                        break
-                else:
-                    raise ValueError(f"Invalid multimodal item configuration: "
-                                     f"{mm_item_config}")
-            yield (
-                mm_item_config
-            )
+        ) 
+        # Initialize modality counters
+        modality_counter = {self.map_config_to_modality(k): 0 
+                            for k in bucket_config}
+        # Copy the bucket config to avoid modifying the original
+        bucket_config_copy = bucket_config.copy()
+        # Loop over the number of multimodal items to sample
+        while sum(modality_counter.values()) < request_num_mm_items:
+            # Sample a multimodal item config
+            mm_item_config = self._rng.choice(list(bucket_config_copy.keys()), 
+                                                p=list(bucket_config_copy.values()))
+            modality = self.map_config_to_modality(mm_item_config)
+            # Check that modality count is less than limit per prompt
+            if modality_counter[modality] < limit_mm_per_prompt[modality]:
+                modality_counter[modality] += 1
+                yield (
+                    mm_item_config
+                )
+            else:
+                # If the counter is greater than the limit per prompt
+                # set all multimodal items of this modality to 0
+                for k, v in bucket_config_copy.items():
+                    if self.map_config_to_modality(k) == modality:
+                        bucket_config_copy[k] = 0
+                # If all configs are 0, break the loop
+                # Can this happen?
+                if all(v == 0 for v in bucket_config_copy.values()):
+                    break
+                # Renormalize the bucket config
+                bucket_config_copy = self.normalize_bucket_config(
+                                        bucket_config_copy)
+
 
     def sample(
         self,
@@ -780,7 +799,7 @@ class RandomMultiModalDataset(RandomDataset):
         # Generate prefix once
         prefix_token_ids = self.get_prefix(tokenizer, prefix_len)
         vocab_size = tokenizer.vocab_size
-        # Add synthetic images to each request
+        # Add synthetic multimodal items to each request
         mm_requests = []
         for i in range(num_requests):
             prompt, total_input_len = self.generate_token_sequence(
