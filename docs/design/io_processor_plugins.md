@@ -64,7 +64,6 @@ The `pre_process*` methods take validated plugin input to generate vLLM's model 
 The `post_process*` methods take `PoolingRequestOutput` objects and generate a custom plugin output.
 An implementation of the `encode_with_io_processor_plugin` method is available [here](../../vllm/entrypoints/llm.py) and [here](../../vllm/v1/engine/async_llm.py).
 
-The `plugin_out_to_response` method is used only for online serving and converts the plugin output to the `IOProcessorPluginResponse` type that is then returned by the APIServer. The implementation of the 
-`/plugin_pooling` serving endpoint is [here](../../vllm/entrypoints/openai/serving_pooling_with_io_plugin.py).
+The `plugin_out_to_response` method is used only for online serving and converts the plugin output to the `IOProcessorPluginResponse` type that is then returned by the APIServer. The implementation of the `/plugin_pooling` serving endpoint is [here](../../vllm/entrypoints/openai/serving_pooling_with_io_plugin.py).
 
 An example implementation of a plugin that enables generating geotiff images with the PrithviGeospatialMAE model is available [here](https://github.com/christian-pinto/prithvi_io_processor_plugin). Please, also refer to out [online](../../examples/online_serving/prithvi_geospatial_mae.py) and [offline](../../examples/offline_inference/prithvi_geospatial_mae_io_processor.py) inferences examples.
