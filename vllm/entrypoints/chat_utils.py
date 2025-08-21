@@ -29,6 +29,7 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
 from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
 from openai.types.responses import ResponseInputImageParam
+from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 # yapf: enable
@@ -207,7 +208,8 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
 
 
 ChatCompletionMessageParam = Union[OpenAIChatCompletionMessageParam,
-                                   CustomChatCompletionMessageParam]
+                                   CustomChatCompletionMessageParam,
+                                   OpenAIHarmonyMessage]
 
 
 # TODO: Make fields ReadOnly once mypy supports it
@@ -1343,5 +1345,18 @@ def apply_mistral_chat_template(
             "template")
         raise ValueError(str(e)) from e
 
-def random_tool_call_id() -> str:
-    return f"chatcmpl-tool-{random_uuid()}"
+def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):
+    idx = 0
+    for msg in conversation:
+        if msg['role'] == 'assistant':
+            tool_calls = msg.get('tool_calls')
+            idx += len(list(tool_calls)) if tool_calls is not None else 0 # noqa
+    return idx
+
+def make_tool_call_id(id_type:str='random', func_name=None, idx=None):
+
+    if id_type=='kimi_k2':
+        return f'functions.{func_name}:{idx}'
+    else:
+        # by default return random
+        return f"chatcmpl-tool-{random_uuid()}"
