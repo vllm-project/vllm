@@ -929,8 +929,8 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 target_group_size = 0
 
             elif video_group_size < target_group_size:
-                raise RuntimeError(f"video_group_size < target_group_size!! \
-                        [{video_group_size} < {target_group_size}]")
+                raise RuntimeError(
+                    f"{video_group_size=} < {target_group_size=}")
 
         assert len(target_features
                    ) == 0, f"target_features is not empty!! {target_features}"
@@ -1114,9 +1114,8 @@ def reshape_and_unpad_image_features(
     base_image_feature = image_feature[0]
     image_feature = image_feature[1:]
 
-    assert (height * width == base_image_feature.shape[0]
-            ), f"height: {height}, width: {width}, \
-        base_image_feature.shape[0]: {base_image_feature.shape[0]}"
+    assert height * width == base_image_feature.shape[0], (
+        f"{height=} * {width=} != {base_image_feature.shape[0]=}")
 
     num_patch_width, num_patch_height = get_anyres_image_grid_shape(
         image_size, possible_resolutions, grid_size)
