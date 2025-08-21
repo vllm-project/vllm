@@ -24,9 +24,9 @@ from vllm.utils import GiB_bytes, is_list_of, set_default_torch_num_threads
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
-from ...conftest import VllmRunner
-from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
-from ..utils import dummy_hf_overrides
+from ....conftest import VllmRunner
+from ...registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
+from ...utils import dummy_hf_overrides
 
 ARCH_TO_SKIP = {
     "MolmoForCausalLM": "incompatible requirements",
@@ -147,7 +147,6 @@ def get_model_id_to_test(
     return filtered_results
 
 
-@pytest.mark.core_model
 @pytest.mark.parametrize(
     "model_arch, model_id",
     get_model_id_to_test(_MULTIMODAL_EXAMPLE_MODELS.keys()))
