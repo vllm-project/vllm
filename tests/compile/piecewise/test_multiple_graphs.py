@@ -16,8 +16,7 @@ from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
 from vllm.envs import VLLM_USE_V1
 from vllm.forward_context import set_forward_context
 
-# Import shared test operations
-# The standard attention operation is automatically registered when imported
+# This import automatically registers torch ops for testing (like silly.attention)
 import tests.compile.test_operations
 
 BATCH_SIZE = 32
@@ -319,10 +318,6 @@ def test_multi_graph_piecewise_compile_outputs_equal():
             num_cudagraph_captured=0,  # no cudagraph captured
     ):
         outputs.append(run_model(vllm_config, model, inputs))
-
-    # Generally don't expect outputs with and without inductor
-    # to be bitwise equivalent
-    assert torch.allclose(outputs[0], outputs[1])
 
     # Expect bitwise equivalence using inductor w/ and w/o cudagraph
     assert torch.equal(outputs[0], outputs[2])

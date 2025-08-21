@@ -3,14 +3,7 @@
 """
 Shared PyTorch custom operations for compilation tests.
 
-This module provides a centralized place to define and register custom
-PyTorch operations used across multiple compilation tests. This avoids
-duplicate operation registrations that would cause RuntimeErrors when
-running tests together.
-
-The main "attention" operation is automatically registered when this module
-is imported. Individual test files can access the global counter functionality
-through helper functions.
+Centralizes custom operation definitions to avoid duplicate registrations.
 """
 
 import torch
@@ -23,7 +16,7 @@ from vllm.utils import direct_register_custom_op
 silly_lib = Library("silly", "FRAGMENT")
 
 
-# Global counter that all tests can use or ignore
+# Global counter that counts the number of times attention is invoked
 _global_counter = 0
 
 
