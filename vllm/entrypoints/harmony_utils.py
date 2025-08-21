@@ -341,7 +341,7 @@ def parse_chat_output(
     else:
         reasoning_msg = output_msgs[:-1]
         final_msg = output_msgs[-1]
-        reasoning_content = "".join(
+        reasoning_content = "\n".join(
             [msg.content[0].text for msg in reasoning_msg])
         final_content = final_msg.content[0].text
     return reasoning_content, final_content, is_tool_call
