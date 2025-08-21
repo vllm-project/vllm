@@ -69,20 +69,6 @@ BATCH_SPECS = {
 }
 
 
-def create_dummy_kv_cache(kv_cache_spec: FullAttentionSpec,
-                          device: torch.device,
-                          num_blocks: int = 100) -> torch.Tensor:
-    """Create a dummy KV cache tensor for testing."""
-    kv_cache = torch.randn(
-        num_blocks,
-        kv_cache_spec.block_size,
-        kv_cache_spec.head_size,  # latent dimension
-        dtype=_convert_dtype_to_torch(kv_cache_spec.dtype),
-        device=device,
-    )
-    return kv_cache
-
-
 def create_and_prepopulate_kv_cache(
         kv_c_contexts: list[torch.Tensor],
         k_pe_contexts: list[torch.Tensor],
