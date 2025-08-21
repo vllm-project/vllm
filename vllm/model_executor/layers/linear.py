@@ -23,7 +23,6 @@ from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 # yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            BlockQuantScaleParameter,
-                                           ModelWeightParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            PerTensorScaleParameter,
@@ -35,7 +34,6 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
-    "UnquantizedLinearMethod",
     "CompressedTensorsLinearMethod",
     "CompressedTensorsLinearTransformMethod",
     "BitBLASLinearMethod",
@@ -192,21 +190,15 @@ class UnquantizedLinearMethod(LinearMethodBase):
                        output_partition_sizes: list[int], input_size: int,
                        output_size: int, params_dtype: torch.dtype,
                        **extra_weight_attrs):
-        weight_loader = extra_weight_attrs.pop("weight_loader")
-        weight = ModelWeightParameter(data=torch.empty(
-            sum(output_partition_sizes),
-            input_size_per_partition,
-            dtype=params_dtype),
-                                      input_dim=1,
-                                      output_dim=0,
-                                      weight_loader=weight_loader)
+        weight = Parameter(torch.empty(sum(output_partition_sizes),
+                                       input_size_per_partition,
+                                       dtype=params_dtype),
+                           requires_grad=False)
+        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # required by torch.compile
-        layer.weight = Parameter(layer.weight.data, requires_grad=False)
-
         # special postprocessing for CPU SGL
         if current_platform.is_cpu() and envs.VLLM_CPU_SGL_KERNEL:
             from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
@@ -1481,7 +1473,7 @@ class QKVCrossParallelLinear(LinearBase):
             self.bias = torch.nn.Parameter()
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
-                "weight_loader": self.bias_weight_loader,
+                "weight_loader": self.weight_loader_v1,
             })
         else:
             self.bias = None
@@ -1591,10 +1583,10 @@ class QKVCrossParallelLinear(LinearBase):
             k, v = kv_enc.split(self.kv_size, dim=-1)
         return q, k, v
 
-    def bias_weight_loader(self,
-                           param: torch.nn.Parameter,
-                           loaded_weight: torch.Tensor,
-                           loaded_shard_id: Optional[str] = None):
+    def weight_loader_v1(self,
+                         param: torch.nn.Parameter,
+                         loaded_weight: torch.Tensor,
+                         loaded_shard_id: Optional[str] = None):
         # just like all other parameters, does not yet
         # support loading bias with weight_loader_v2
         layer = (self.q_proj_decoder

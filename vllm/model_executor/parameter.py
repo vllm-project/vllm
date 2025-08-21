@@ -98,6 +98,17 @@ class BasevLLMParameter(Parameter):
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         self._assert_and_load(loaded_weight)
 
+    def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
+        if isinstance(shard_id, int):
+            return shard_id
+
+        # if not int, assume shard_id for qkv
+        # map to int and return
+        qkv_idxs = {"q": 0, "k": 1, "v": 2}
+        assert isinstance(shard_id, str)
+        assert shard_id in qkv_idxs
+        return qkv_idxs[shard_id]
+
 
 class _ColumnvLLMParameter(BasevLLMParameter):
     """
@@ -241,20 +252,6 @@ class PerTensorScaleParameter(BasevLLMParameter):
     for each quantization config specifically, within 
     process_weights_after_loading 
     """
-
-    def __init__(self, **kwargs):
-        self.qkv_idxs = {"q": 0, "k": 1, "v": 2}
-        super().__init__(**kwargs)
-
-    def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
-        if isinstance(shard_id, int):
-            return shard_id
-
-        # if not int, assume shard_id for qkv
-        # map to int and return
-        assert isinstance(shard_id, str)
-        assert shard_id in self.qkv_idxs
-        return self.qkv_idxs[shard_id]
 
     # For row parallel layers, no sharding needed
     # load weight into parameter as is
@@ -406,7 +403,7 @@ class PartitionedLinearWeightParameter(BasevLLMParameter):
         return instance
 
     def __init__(self, input_dim: int = 1, output_dim: int = 0, **kwargs):
-        weight_loader: Callable = kwargs.get("weight_loader")
+        weight_loader = kwargs.get("weight_loader")  # type: ignore[assignment]
         super().__init__(data=None, weight_loader=weight_loader)
 
         self.partitions = {}
@@ -424,7 +421,8 @@ class PartitionedLinearWeightParameter(BasevLLMParameter):
                                       "currently support tensor parallelism")
 
     def add_partition(self, index: int, data: torch.Tensor):
-        self.partitions[index] = ModelWeightParameter(data=data, **self.kwargs)
+        self.partitions[index] = ModelWeightParameter(
+            data=data, **self.kwargs)  # type: ignore[arg-type]
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         assert len(self.partitions) == 1 and 0 in self.partitions
