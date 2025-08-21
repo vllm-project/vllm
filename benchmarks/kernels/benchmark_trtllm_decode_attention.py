@@ -110,7 +110,7 @@ def benchmark_decode(
     wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
         workspace_buffer,
         kv_layout,
-        use_tensor_cores=((num_qo_heads // num_kv_heads) > 4),
+        use_tensor_cores=True,
     )
     wrapper.plan(
         kv_indptr,
