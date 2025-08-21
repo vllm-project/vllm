@@ -166,11 +166,8 @@ class CudaPlatformBase(Platform):
                     envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA")
 
             from vllm.attention.ops.flashmla import is_flashmla_supported
-            use_flashmla = is_flashmla_supported()[0] and \
-                (envs.VLLM_ATTENTION_BACKEND == "FLASHMLA" or
-                    envs.VLLM_ATTENTION_BACKEND is None)
-
-            if use_flashmla and cache_config.block_size != 64:
+            if use_flashmla and is_flashmla_supported()[0] \
+                and cache_config.block_size != 64:
                 cache_config.block_size = 64
                 logger.info(
                     "Forcing kv cache block size to 64 for FlashMLA backend.")

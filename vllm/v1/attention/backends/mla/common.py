@@ -234,8 +234,6 @@ try:
 except ImportError:
     flashinfer_available = False
 
-is_hip = current_platform.is_rocm()
-
 logger = init_logger(__name__)
 
 CUDNN_WORKSPACE_SIZE = 12800
@@ -602,7 +600,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         device = self.device
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
-        device = self.runner.device
 
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -676,15 +673,19 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                              out=cu_seq_lens_cpu[:, 1:],
                              dtype=torch.int32)
 
-                chunks_max_seq_lens = chunk_seq_lens.max(dim=1).values
+                chunked_context_metadata_cls = \
+                    CudnnPrefillMetadata.ChunkedContextMetadata \
+                    if self._use_cudnn_prefill else \
+                        MLACommonPrefillMetadata.ChunkedContextMetadata
 
                 chunked_context_metadata = \
                     chunked_context_metadata_cls(
                     cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
                     starts=chunk_starts.to(device, non_blocking=True),
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
-                    max_seq_lens=chunks_max_seq_lens,
-                    workspace=self.chunked_prefill_workspace
+                    max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
+                    seq_lens=chunk_seq_lens,
+                    workspace=self.chunked_prefill_workspace,
                 )
 
                 if self._use_cudnn_prefill:
@@ -835,7 +836,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         if is_vllm_fa:
             kwargs["return_softmax_lse"] = return_softmax_lse
-            kwargs["scheduler_metadata"] = scheduler_metadata
         else:
             # ROCm leverages the upstream flash_attn, which takes a parameter
             # called "return_attn_probs" instead of return_softmax_lse
