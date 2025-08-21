@@ -958,8 +958,10 @@ class InstructCoderDataset(HuggingFaceDataset):
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
-            prompt = f"{item['input']}\n\n{item['instruction']} Just output \
-            the code, do not include any explanation."
+            prompt = (
+                f"{item['input']}\n\n{item['instruction']} Just output "
+                "the code, do not include any explanation."
+            )
 
             # apply template
             prompt = tokenizer.apply_chat_template(
