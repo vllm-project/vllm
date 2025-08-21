@@ -123,9 +123,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                 self.packed_modules_mapping)
 
             # choose quantization method
-            if quant_scheme is None:
-                quant_method = UnquantizedLinearMethod()
-            else:
+            quant_method: LinearMethodBase = UnquantizedLinearMethod()
+            if quant_scheme is not None:
                 layer.scheme = quant_scheme
                 quant_method = CompressedTensorsLinearMethod(self)
 

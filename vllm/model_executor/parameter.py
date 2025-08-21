@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from fractions import Fraction
-from typing import Callable, Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 from torch.nn import Parameter
@@ -32,7 +32,7 @@ class BasevLLMParameter(Parameter):
 
         return super().__new__(cls, data=data, requires_grad=False)
 
-    def __init__(self, data: torch.Tensor, weight_loader: Callable):
+    def __init__(self, data: torch.Tensor, weight_loader: Any):
         """
         Initialize the BasevLLMParameter
 
@@ -54,10 +54,10 @@ class BasevLLMParameter(Parameter):
         if current_platform.is_tpu():
             weight_loader = _make_synced_weight_loader(weight_loader)
 
-        self._weight_loader = weight_loader
+        self._weight_loader: Optional[Any] = weight_loader
 
     @property
-    def weight_loader(self) -> Callable:
+    def weight_loader(self) -> Any:
         # NOTE(@ksayers) some models such as mamba_mixer2 override the
         # weight loader to support custom loading. In the future, model-specific
         # weight loading should be implemented via Model.load_weights. In the
@@ -69,12 +69,12 @@ class BasevLLMParameter(Parameter):
         return self._weight_loader
 
     @weight_loader.setter
-    def weight_loader(self, value: Callable):
+    def weight_loader(self, value: Any):
         self._weight_loader = value
 
     @weight_loader.deleter
     def weight_loader(self):
-        self._weight_loader = None  # type: ignore[assignment]
+        self._weight_loader = None
 
     def _is_1d_and_scalar(self, loaded_weight: torch.Tensor):
         cond1 = self.data.ndim == 1 and self.data.numel() == 1
