@@ -673,7 +673,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Note that it must be an absolute path.
     "VLLM_TORCH_PROFILER_DIR":
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
-             .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
+             .path.abspath(os.path.expanduser(os.getenv(
+        "VLLM_TORCH_PROFILER_DIR", ".")))),
 
     # Enable torch profiler to record shapes if set
     # VLLM_TORCH_PROFILER_RECORD_SHAPES=1. If not set, torch profiler will
