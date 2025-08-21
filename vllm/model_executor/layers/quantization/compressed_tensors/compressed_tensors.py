@@ -118,9 +118,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
-            return CompressedTensorsMoEMethod.get_moe_method(self,
-                                                             layer,
-                                                             layer_name=prefix)
+            return CompressedTensorsMoEMethod.get_moe_method(self, layer)
         return None
 
     @classmethod
@@ -404,6 +402,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             input_quant: BaseModel,
             format: Optional[str] = None) -> "CompressedTensorsScheme":
 
+        # use the per-layer format if defined, otherwise, use global format
         format = format if format is not None else self.quant_format
 
         # Detect If Mixed Precision

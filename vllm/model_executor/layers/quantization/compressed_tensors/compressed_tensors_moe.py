@@ -66,28 +66,31 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
 
     @staticmethod
     def get_moe_method(
-            quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
-            layer: torch.nn.Module,
-            layer_name: str) -> "CompressedTensorsMoEMethod":
+        quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
+        layer: torch.nn.Module
+    ) -> "CompressedTensorsMoEMethod":
         # TODO: @dsikka: refactor this to use schemes as other kernels
         # are supported + check if the layer is being ignored.
-        # TODO: - try linear, try layer_name matching, try expert name matching
-
+        # Check if a using "Linear" to select scheems
         if "Linear" in quant_config.target_scheme_map:
             matched_target = "Linear"
         else:
-            # May have separately defined the linear layers in the fused model
-            # check numbers to make sure we're picking up layers in FusedMoe?
+            # May have instead defined the linear layers in the fused model
+
             fused_layers = [
                 "re:.*down_proj.*", "re:.*gate_proj.*", "re:.*up_proj.*"
             ]
             current_scheme = None
             for fused_layer in fused_layers:
+                # Check if one of the fused layers are defined in quant_config
                 matched_target = find_matched_target(
                     layer_name=fused_layer,
                     module=layer,
                     targets=quant_config.target_scheme_map.keys(),
                     fused_mapping=quant_config.packed_modules_mapping)
+
+                # Only valid if down_proj, gate_proj, and up_proj
+                # are mapped to the same quant scheme in the quant_config
                 if current_scheme is None:
                     current_scheme = quant_config.target_scheme_map.get(
                         matched_target)
