@@ -870,7 +870,6 @@ class OpenAIServingResponses(OpenAIServing):
                             summary=[],
                         )
                         current_content_index += 1
-                        print(f"Yielding event with item_id={current_item_id}, content_index={current_content_index}")
                         yield _send_event(
                             ResponseReasoningTextDoneEvent(
                                 type="response.reasoning_text.done",
@@ -894,7 +893,6 @@ class OpenAIServingResponses(OpenAIServing):
                             annotations=[],
                         )
                         current_content_index += 1
-                        print(f"Yielding event with item_id={current_item_id}, content_index={current_content_index}")
                         yield _send_event(
                             openai_responses_types.ResponseTextDoneEvent(
                                 type="response.output_text.done",
@@ -906,7 +904,6 @@ class OpenAIServingResponses(OpenAIServing):
                                 item_id=current_item_id,
                             ))
                         current_content_index += 1
-                        print(f"Yielding event with item_id={current_item_id}, content_index={current_content_index}")
                         yield _send_event(
                             openai_responses_types.
                             ResponseContentPartDoneEvent(
@@ -951,7 +948,6 @@ class OpenAIServingResponses(OpenAIServing):
                                     status="in_progress",
                                 ),
                             ))
-                        print(f"Yielding event with item_id={current_item_id}, content_index={current_content_index}")
                         current_content_index += 1
                         yield _send_event(
                             openai_responses_types.
@@ -968,7 +964,6 @@ class OpenAIServingResponses(OpenAIServing):
                                     logprobs=[],
                                 ),
                             ))
-                    print(f"Yielding event with item_id={current_item_id}, content_index={current_content_index}")
                     current_content_index += 1    
                     yield _send_event(
                         openai_responses_types.ResponseTextDeltaEvent(
@@ -999,7 +994,6 @@ class OpenAIServingResponses(OpenAIServing):
                                     status="in_progress",
                                 ),
                             ))
-                        print(f"Yielding event with item_id={current_item_id}, content_index={current_content_index}")
                         current_content_index += 1
                         yield _send_event(
                             openai_responses_types.
@@ -1016,7 +1010,6 @@ class OpenAIServingResponses(OpenAIServing):
                                     logprobs=[],
                                 ),
                             ))
-                    print(f"Yielding event with item_id={current_item_id}, content_index={current_content_index}")
                     current_content_index += 1
                     yield _send_event(
                         ResponseReasoningTextDeltaEvent(
