@@ -335,7 +335,8 @@ class Fp8LinearOp:
             self.preferred_backend = "rocm"
         elif current_platform.is_cuda(
         ) and not force_fp8_e4m3fnuz and cutlass_fp8_supported():
-            if has_flashinfer():
+            if has_flashinfer() and current_platform.has_device_capability(
+                    100):
                 self.preferred_backend = "flashinfer"
             else:
                 self.preferred_backend = "cutlass"
