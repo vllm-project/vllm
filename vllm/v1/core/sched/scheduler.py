@@ -758,7 +758,7 @@ class Scheduler(SchedulerInterface):
         if not structured_output_request_ids:
             bitmask = None
         else:
-            # Submit async grammar bitmask computation and return the placeholder
+            # Submit async grammar bitmask computation, return the placeholder
             # The actual result will be retrieved later in gpu_model_runner
             bitmask = self.structured_output_manager.submit_grammar_bitmask(
                 self.requests,
