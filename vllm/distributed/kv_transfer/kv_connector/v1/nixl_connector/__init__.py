@@ -227,6 +227,16 @@ class NixlConnector(KVConnectorBase_V1):
         """Get the handshake metadata for NIXL connector."""
         return self._handshake_metadata
 
+    def shutdown(self):
+        """
+        Shutdown the connector. This is called when the worker process
+        is shutting down to ensure that all the async operations are
+        completed and the connector is cleaned up properly.
+        """
+        if self.connector_worker is not None:
+            self.connector_worker.shutdown()
+        return None
+
 
 class NixlConnectorScheduler:
     """Implementation of Scheduler side methods"""
@@ -566,10 +576,26 @@ class NixlConnectorWorker:
             raise ValueError(f"Unknown handshake method: {handshake_method}. "
                              "Supported methods: 'zmq', 'http'")
 
-    def __del__(self):
-        """Cleanup background threads on destruction."""
-        self._handshake_initiation_executor.shutdown(wait=False)
-        self._handshake_strategy.cleanup()
+    def shutdown(self):
+        """
+        Shutdown the worker connector and clean up handshake-related resources.
+        This ensures proper cleanup of background threads, executors, etc.
+        """
+        try:
+            if hasattr(self, '_handshake_initiation_executor'):
+                self._handshake_initiation_executor.shutdown(wait=True)
+
+            if hasattr(self, '_handshake_strategy'):
+                self._handshake_strategy.cleanup()
+
+            if hasattr(self, '_handshake_futures'):
+                with self._handshake_lock:
+                    for future in self._handshake_futures.values():
+                        future.cancel()
+                    self._handshake_futures.clear()
+
+        except Exception as e:
+            logger.warning("Error during NixlConnectorWorker shutdown: %s", e)
 
     def _nixl_handshake(
         self,

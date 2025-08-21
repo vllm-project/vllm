@@ -171,7 +171,8 @@ def run_multi_api_server(args: argparse.Namespace):
 
     with launch_core_engines(vllm_config, executor_class, log_stats,
                              num_api_servers) as (local_engine_manager,
-                                                  coordinator, addresses):
+                                                  coordinator, addresses,
+                                                  kv_metadata):
 
         # Construct common args for the APIServerProcessManager up-front.
         api_server_manager_kwargs = dict(
@@ -183,7 +184,8 @@ def run_multi_api_server(args: argparse.Namespace):
             input_addresses=addresses.inputs,
             output_addresses=addresses.outputs,
             stats_update_address=coordinator.get_stats_publish_address()
-            if coordinator else None)
+            if coordinator else None,
+            kv_handshake_metadata=kv_metadata)
 
         # For dp ranks > 0 in external/hybrid DP LB modes, we must delay the
         # start of the API servers until the local engine is started

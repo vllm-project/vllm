@@ -16,18 +16,18 @@ logger = init_logger(__name__)
 
 class KVConnHandshakeServer:
 
-    def __init__(self, vllm_config: VllmConfig, host: str, port: int):
-        self.vllm_config = vllm_config
+    def __init__(self, host: str, port: int, kv_metadata: dict,
+                 connector_name: str):
         self.host = host
         self.port = port
+        self.kv_metadata = kv_metadata
+        self.connector_name = connector_name
         self.app = FastAPI(title="vLLM KVConnector Handshake Server")
         self.server: Optional[uvicorn.Server] = None
         self._setup_routes()
 
     def _get_connector_name(self) -> str:
-        if self.vllm_config.kv_transfer_config is None:
-            return "Unknown"
-        return self.vllm_config.kv_transfer_config.kv_connector or "Unknown"
+        return self.connector_name
 
     def _setup_routes(self):
 
@@ -36,7 +36,7 @@ class KVConnHandshakeServer:
         @self.app.get("/get_kv_connector_metadata/{dp_rank}/{tp_rank}")
         async def get_kv_connector_metadata(dp_rank: Optional[int] = None,
                                             tp_rank: Optional[int] = None):
-            kv_meta = self.vllm_config.parallel_config.xfer_handshake_metadata
+            kv_meta = self.kv_metadata
 
             if kv_meta is None:
                 raise HTTPException(
@@ -62,6 +62,7 @@ class KVConnHandshakeServer:
             return {dp_rank: {tp_rank: tp_data}}
 
     async def start_async(self):
+
         if self.server is not None:
             logger.warning("Side channel server is already running")
             return
@@ -79,15 +80,22 @@ class KVConnHandshakeServer:
             "access_log": True,
         }
 
-        config = uvicorn.Config(**config_kwargs)
-        config.load()  # need to load config to get SSL context
-        self.server = uvicorn.Server(config)
+        try:
+            config = uvicorn.Config(**config_kwargs)
+            config.load()  # need to load config to get SSL context
+            self.server = uvicorn.Server(config)
 
-        # start the server in a background task
-        if self.server is not None:
-            asyncio.create_task(self.server.serve())
-        logger.info("%s handshake server started successfully",
-                    self._get_connector_name())
+            # start the server in a background task
+            if self.server is not None:
+                asyncio.create_task(self.server.serve())
+
+            logger.info("%s handshake server started successfully",
+                        self._get_connector_name())
+
+        except Exception as e:
+            logger.error(
+                "Exception in KVConnHandshakeServer.start_async(): %s", e)
+            raise
 
     async def stop_async(self):
         if self.server is not None:
@@ -138,7 +146,8 @@ def _get_handshake_server_config(vllm_config: VllmConfig) -> tuple[str, int]:
 
 
 async def set_up_kv_handshake_server(
-        vllm_config: VllmConfig) -> Optional[KVConnHandshakeServer]:
+        vllm_config: VllmConfig,
+        kv_metadata: dict) -> Optional[KVConnHandshakeServer]:
     if not should_start_kv_handshake_server(vllm_config):
         return None
 
@@ -147,11 +156,18 @@ async def set_up_kv_handshake_server(
 
     assert vllm_config.kv_transfer_config is not None
     connector_name = vllm_config.kv_transfer_config.kv_connector
+    assert connector_name is not None
 
     logger.info("Starting %s handshake server on %s:%d", connector_name,
                 side_channel_host, side_channel_port)
 
-    server = KVConnHandshakeServer(vllm_config, side_channel_host,
-                                   side_channel_port)
-    await server.start_async()
+    server = KVConnHandshakeServer(side_channel_host, side_channel_port,
+                                   kv_metadata, connector_name)
+
+    try:
+        await server.start_async()
+    except Exception as e:
+        logger.error("Failed to start KVConnHandshakeServer: %s", e)
+        raise
+
     return server

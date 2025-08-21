@@ -666,8 +666,8 @@ class VllmConfig:
                 # Hybrid KV cache manager is not compatible with KV transfer.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
                 if self.kv_transfer_config.is_kv_transfer_instance:
-                    self.parallel_config.xfer_handshake_metadata = defaultdict(
-                        dict)
+                    self.parallel_config.kv_conn_endpoint_metadata = (
+                        defaultdict(dict))
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
