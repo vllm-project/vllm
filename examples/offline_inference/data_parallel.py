@@ -71,10 +71,25 @@ def parse_args():
         help=("Maximum number of sequences to be processed in a single iteration."),
     )
     parser.add_argument(
+        "--max-model-len",
+        type=int,
+        help=("Maximum number of tokens to be processed in a single iteration."),
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help=("Number of seconds before unresponsive process is killed."),
+    )
+    parser.add_argument(
         "--gpu-memory-utilization",
         type=float,
         default=0.8,
         help=("Fraction of GPU memory vLLM is allowed to allocate (0.0, 1.0]."),
+    )
+    parser.add_argument(
+        "--quantization",
+        type=str,
     )
     return parser.parse_args()
 
@@ -90,7 +105,9 @@ def main(
     enforce_eager,
     trust_remote_code,
     max_num_seqs,
+    max_model_len,
     gpu_memory_utilization,
+    quantization,
 ):
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
     os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)
@@ -142,7 +159,9 @@ def main(
         enable_expert_parallel=True,
         trust_remote_code=trust_remote_code,
         max_num_seqs=max_num_seqs,
+        max_model_len=max_model_len,
         gpu_memory_utilization=gpu_memory_utilization,
+        quantization=quantization,
     )
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
@@ -198,14 +217,16 @@ if __name__ == "__main__":
                 args.enforce_eager,
                 args.trust_remote_code,
                 args.max_num_seqs,
+                args.max_model_len,
                 args.gpu_memory_utilization,
+                args.quantization,
             ),
         )
         proc.start()
         procs.append(proc)
     exit_code = 0
     for proc in procs:
-        proc.join(timeout=300)
+        proc.join(timeout=args.timeout)
         if proc.exitcode is None:
             print(f"Killing process {proc.pid} that didn't stop within 5 minutes.")
             proc.kill()
