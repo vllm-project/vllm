@@ -603,6 +603,7 @@ def launch_core_engines(
         Optional[Union[CoreEngineProcManager, CoreEngineActorManager]],
         Optional[DPCoordinator],
         EngineZmqAddresses,
+        Optional[dict],
 ]]:
     """Launch engine and DP coordinator processes as needed."""
 
@@ -664,7 +665,8 @@ def launch_core_engines(
             log_stats=log_stats,
         )
 
-        yield engine_actor_manager, coordinator, addresses
+        # NOTE(weaton): we currently don't support kv_metadata in ray
+        yield engine_actor_manager, coordinator, addresses, None
         return
 
     if offline_mode:
@@ -727,10 +729,7 @@ def launch_core_engines(
         else:
             local_engine_manager = None
 
-        yield local_engine_manager, coordinator, addresses
-
-        # Now wait for engines to start.
-        wait_for_engine_startup(
+        kv_metadata = wait_for_engine_startup(
             handshake_socket,
             addresses,
             engines_to_handshake,
@@ -739,6 +738,8 @@ def launch_core_engines(
             local_engine_manager,
             coordinator.proc if coordinator else None,
         )
+
+        yield local_engine_manager, coordinator, addresses, kv_metadata
 
 
 def wait_for_engine_startup(
@@ -749,10 +750,12 @@ def wait_for_engine_startup(
     cache_config: CacheConfig,
     proc_manager: Optional[CoreEngineProcManager],
     coord_process: Optional[Process],
-):
+) -> Optional[dict]:
     # Wait for engine core process(es) to send ready messages.
     local_count = parallel_config.data_parallel_size_local
     remote_count = len(core_engines) - local_count
+
+    collected_kv_metadata: Optional[dict] = None
     # [local, remote] counts
     conn_pending, start_pending = [local_count, remote_count], [0, 0]
     poller = zmq.Poller()
@@ -842,17 +845,15 @@ def wait_for_engine_startup(
             num_gpu_blocks += msg["num_gpu_blocks"]
             cache_config.num_gpu_blocks = num_gpu_blocks
 
-            # stash KV connector metadata in vllm_config if passed in.
             if txfer_metadata := msg.get("xfer_handshake_metadata"):
                 logger.debug(
                     "Received transfer handshake metadata from engine %s: %s",
                     eng_index, txfer_metadata)
-                if parallel_config.xfer_handshake_metadata is None:
-                    parallel_config.xfer_handshake_metadata = defaultdict(dict)
+                if collected_kv_metadata is None:
+                    collected_kv_metadata = defaultdict(dict)
                 for dp_rank, tp_dict in txfer_metadata.items():
                     for tp_rank, metadata in tp_dict.items():
-                        parallel_config.xfer_handshake_metadata[dp_rank][
-                            tp_rank] = metadata
+                        collected_kv_metadata[dp_rank][tp_rank] = metadata
             # In external DP LB mode, the coordinator address that the
             # front-end procs connect to is obtained from rank 0 via
             # one of the engine handshakes, and passed to the local
@@ -870,3 +871,5 @@ def wait_for_engine_startup(
 
         logger.debug("%s from %s core engine process %s.", status,
                      "local" if local else "remote", eng_index)
+
+    return collected_kv_metadata
