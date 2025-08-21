@@ -8,13 +8,13 @@ import dataclasses
 import functools
 import json
 import sys
-import threading
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
 from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
                     Literal, Optional, Type, TypeVar, Union, cast, get_args,
                     get_origin)
 
+import huggingface_hub
 import regex as re
 import torch
 from pydantic import TypeAdapter, ValidationError
@@ -24,22 +24,22 @@ import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
                          ConfigFormat, ConfigType, ConvertOption,
                          DecodingConfig, DetailedTraceModules, Device,
-                         DeviceConfig, DistributedExecutorBackend,
+                         DeviceConfig, DistributedExecutorBackend, EPLBConfig,
                          GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
-                         LoRAConfig, MambaDType, ModelConfig, ModelDType,
-                         ModelImpl, MultiModalConfig, ObservabilityConfig,
-                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
-                         RunnerOption, SchedulerConfig, SchedulerPolicy,
-                         SpeculativeConfig, TaskOption, TokenizerMode,
-                         VllmConfig, get_attr_docs, get_field)
+                         LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
+                         ModelDType, ModelImpl, MultiModalConfig,
+                         ObservabilityConfig, ParallelConfig, PoolerConfig,
+                         PrefixCachingHashAlgo, RunnerOption, SchedulerConfig,
+                         SchedulerPolicy, SpeculativeConfig, TaskOption,
+                         TokenizerMode, VllmConfig, get_attr_docs, get_field)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
-from vllm.transformers_utils.config import is_interleaved
+from vllm.transformers_utils.config import get_model_path, is_interleaved
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
@@ -304,11 +304,12 @@ class EngineArgs:
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
-    num_redundant_experts: int = ParallelConfig.num_redundant_experts
-    eplb_window_size: int = ParallelConfig.eplb_window_size
-    eplb_step_interval: int = ParallelConfig.eplb_step_interval
-    eplb_log_balancedness: bool = ParallelConfig.eplb_log_balancedness
+    num_redundant_experts: int = EPLBConfig.num_redundant_experts
+    eplb_window_size: int = EPLBConfig.window_size
+    eplb_step_interval: int = EPLBConfig.step_interval
+    eplb_log_balancedness: bool = EPLBConfig.log_balancedness
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
     block_size: Optional[BlockSize] = CacheConfig.block_size
@@ -351,6 +352,7 @@ class EngineArgs:
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: int = MultiModalConfig.mm_processor_cache_gb
+    mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     # LoRA fields
     enable_lora: bool = False
@@ -433,16 +435,14 @@ class EngineArgs:
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str = LoadConfig.pt_load_map_location
 
-    enable_multimodal_encoder_data_parallel: bool = \
-        ParallelConfig.enable_multimodal_encoder_data_parallel
+    # DEPRECATED
+    enable_multimodal_encoder_data_parallel: bool = False
 
     logits_processors: Optional[list[Union[
         str, type[LogitsProcessor]]]] = ModelConfig.logits_processors
     """Custom logitproc types"""
 
     async_scheduling: bool = SchedulerConfig.async_scheduling
-    # DEPRECATED
-    enable_prompt_adapter: bool = False
 
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
@@ -454,9 +454,19 @@ class EngineArgs:
         if isinstance(self.compilation_config, dict):
             self.compilation_config = CompilationConfig(
                 **self.compilation_config)
+        if isinstance(self.eplb_config, dict):
+            self.eplb_config = EPLBConfig.from_cli(json.dumps(
+                self.eplb_config))
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
+        # when use hf offline,replace model id to local model path
+        if huggingface_hub.constants.HF_HUB_OFFLINE:
+            model_id = self.model
+            self.model = get_model_path(self.model, self.revision)
+            logger.info(
+                "HF_HUB_OFFLINE is True, replace model_id [%s] " \
+                "to model_path [%s]",model_id, self.model)
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -505,6 +515,7 @@ class EngineArgs:
         model_group.add_argument("--max-logprobs",
                                  **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode",
+                                 choices=[f.value for f in LogprobsMode],
                                  **model_kwargs["logprobs_mode"])
         model_group.add_argument("--disable-sliding-window",
                                  **model_kwargs["disable_sliding_window"])
@@ -654,14 +665,32 @@ class EngineArgs:
             **parallel_kwargs["enable_expert_parallel"])
         parallel_group.add_argument("--enable-eplb",
                                     **parallel_kwargs["enable_eplb"])
-        parallel_group.add_argument("--num-redundant-experts",
-                                    **parallel_kwargs["num_redundant_experts"])
-        parallel_group.add_argument("--eplb-window-size",
-                                    **parallel_kwargs["eplb_window_size"])
-        parallel_group.add_argument("--eplb-step-interval",
-                                    **parallel_kwargs["eplb_step_interval"])
-        parallel_group.add_argument("--eplb-log-balancedness",
-                                    **parallel_kwargs["eplb_log_balancedness"])
+        parallel_group.add_argument("--eplb-config",
+                                    **parallel_kwargs["eplb_config"])
+        parallel_group.add_argument(
+            "--num-redundant-experts",
+            type=int,
+            help=
+            "[DEPRECATED] --num-redundant-experts will be removed in v0.12.0.",
+            deprecated=True)
+        parallel_group.add_argument(
+            "--eplb-window-size",
+            type=int,
+            help="[DEPRECATED] --eplb-window-size will be removed in v0.12.0.",
+            deprecated=True)
+        parallel_group.add_argument(
+            "--eplb-step-interval",
+            type=int,
+            help=
+            "[DEPRECATED] --eplb-step-interval will be removed in v0.12.0.",
+            deprecated=True)
+        parallel_group.add_argument(
+            "--eplb-log-balancedness",
+            action=argparse.BooleanOptionalAction,
+            help=
+            "[DEPRECATED] --eplb-log-balancedness will be removed in v0.12.0.",
+            deprecated=True)
+
         parallel_group.add_argument(
             "--max-parallel-loading-workers",
             **parallel_kwargs["max_parallel_loading_workers"])
@@ -677,7 +706,8 @@ class EngineArgs:
                                     **parallel_kwargs["worker_extension_cls"])
         parallel_group.add_argument(
             "--enable-multimodal-encoder-data-parallel",
-            **parallel_kwargs["enable_multimodal_encoder_data_parallel"])
+            action="store_true",
+            deprecated=True)
 
         # KV cache arguments
         cache_kwargs = get_kwargs(CacheConfig)
@@ -727,6 +757,8 @@ class EngineArgs:
         multimodal_group.add_argument("--disable-mm-preprocessor-cache",
                                       action="store_true",
                                       deprecated=True)
+        multimodal_group.add_argument(
+            "--mm-encoder-tp-mode", **multimodal_kwargs["mm_encoder_tp_mode"])
         multimodal_group.add_argument(
             "--interleave-mm-strings",
             **multimodal_kwargs["interleave_mm_strings"])
@@ -856,12 +888,6 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
-        parser.add_argument('--enable-prompt-adapter',
-                            action='store_true',
-                            deprecated=True,
-                            help='[DEPRECATED] Prompt adapter has been '
-                            'removed. Setting this flag to True or False'
-                            ' has no effect on vLLM behavior.')
 
         return parser
 
@@ -901,6 +927,14 @@ class EngineArgs:
 
             self.mm_processor_cache_gb = envs.VLLM_MM_INPUT_CACHE_GIB
 
+        if self.enable_multimodal_encoder_data_parallel:
+            logger.warning(
+                "--enable-multimodal-encoder-data-parallel` is deprecated "
+                "and will be removed in v0.13. "
+                "Please use `--mm-encoder-tp-mode data` instead.")
+
+            self.mm_encoder_tp_mode = "data"
+
         return ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
@@ -939,6 +973,7 @@ class EngineArgs:
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
             mm_processor_cache_gb=self.mm_processor_cache_gb,
+            mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             override_neuron_config=self.override_neuron_config,
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
@@ -1076,12 +1111,13 @@ class EngineArgs:
         # Set default arguments for V0 or V1 Engine.
         if use_v1:
             self._set_default_args_v1(usage_context, model_config)
-            # Disable chunked prefill for POWER (ppc64le)/ARM CPUs in V1
+            # Disable chunked prefill for POWER (ppc64le)/ARM/s390x CPUs in V1
             if current_platform.is_cpu(
             ) and current_platform.get_cpu_architecture() in (
-                    CpuArchEnum.POWERPC, CpuArchEnum.ARM):
+                    CpuArchEnum.POWERPC, CpuArchEnum.S390X, CpuArchEnum.ARM):
                 logger.info(
-                    "Chunked prefill is not supported for ARM and POWER CPUs; "
+                    "Chunked prefill is not supported for ARM and POWER "
+                    "and S390X CPUs; "
                     "disabling it for V1 backend.")
                 self.enable_chunked_prefill = False
         else:
@@ -1224,6 +1260,16 @@ class EngineArgs:
                     "Currently, speculative decoding is not supported with "
                     "async scheduling.")
 
+        # Forward the deprecated CLI args to the EPLB config.
+        if self.num_redundant_experts is not None:
+            self.eplb_config.num_redundant_experts = self.num_redundant_experts
+        if self.eplb_window_size is not None:
+            self.eplb_config.window_size = self.eplb_window_size
+        if self.eplb_step_interval is not None:
+            self.eplb_config.step_interval = self.eplb_step_interval
+        if self.eplb_log_balancedness is not None:
+            self.eplb_config.log_balancedness = self.eplb_log_balancedness
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -1237,10 +1283,7 @@ class EngineArgs:
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.num_redundant_experts,
-            eplb_window_size=self.eplb_window_size,
-            eplb_step_interval=self.eplb_step_interval,
-            eplb_log_balancedness=self.eplb_log_balancedness,
+            eplb_config=self.eplb_config,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
@@ -1249,8 +1292,6 @@ class EngineArgs:
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
-            enable_multimodal_encoder_data_parallel=self.
-            enable_multimodal_encoder_data_parallel,
         )
 
         if model_config.is_multimodal_model:
@@ -1484,11 +1525,6 @@ class EngineArgs:
             return False
         #############################################################
         # Experimental Features - allow users to opt in.
-
-        # Signal Handlers requires running in main thread.
-        if (threading.current_thread() != threading.main_thread()
-                and _warn_or_fallback("Engine in background thread")):
-            return False
 
         if self.pipeline_parallel_size > 1:
             supports_pp = getattr(self.distributed_executor_backend,
