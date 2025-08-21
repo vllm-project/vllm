@@ -133,7 +133,7 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         ]
 
         # Always provide multimodal hashes
-        mm_items = self._to_mm_items(mm_data)
+        mm_items = self._to_mm_items({"image": mm_data})
         mm_hashes = self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
                                         tokenization_kwargs or {})
 
