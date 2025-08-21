@@ -18,7 +18,7 @@
 """Inference-only IBM/NASA Prithvi Geospatial model."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -32,16 +32,45 @@ from vllm.model_executor.models.interfaces import (
     default_pooling_type)
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
+from vllm.multimodal.inputs import (ImageItem, ModalityData,
+                                    MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalFieldElem, MultiModalInputs,
                                     MultiModalKwargsItem,
                                     MultiModalKwargsItems,
                                     MultiModalSharedField, PlaceholderRange)
-from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.parse import (DictEmbeddingItems, ModalityDataItems,
+                                   MultiModalDataItems, MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+
+
+def mm_fields_config(
+    hf_inputs: BatchFeature, ) -> Mapping[str, MultiModalFieldConfig]:
+    return dict(
+        pixel_values=MultiModalFieldConfig.shared(batch_size=1,
+                                                  modality="image"),
+        location_coords=MultiModalFieldConfig.shared(batch_size=1,
+                                                     modality="image"),
+    )
+
+
+class PrithviGeoSpatialMAEMultiModalDataParser(MultiModalDataParser):
+
+    def _parse_image_data(
+        self,
+        data: Union[dict[str, torch.Tensor], ModalityData[ImageItem]],
+    ) -> Optional[ModalityDataItems[Any, Any]]:
+        if isinstance(data, dict):
+            return DictEmbeddingItems(
+                data,
+                modality="image",
+                required_fields={"pixel_values", "location_coords"},
+                fields_factory=mm_fields_config,
+            )
+
+        return super()._parse_image_data(data)
 
 
 class PrithviGeoSpatialMAEProcessingInfo(BaseProcessingInfo):
@@ -73,17 +102,14 @@ class PrithviGeoSpatialMAEInputBuilder(
 
 class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
 
+    def _get_data_parser(self) -> MultiModalDataParser:
+        return PrithviGeoSpatialMAEMultiModalDataParser()
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
-        hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return dict(
-            pixel_values=MultiModalFieldConfig.shared(batch_size=1,
-                                                      modality="image"),
-            location_coords=MultiModalFieldConfig.shared(batch_size=1,
-                                                         modality="image"),
-        )
+        return mm_fields_config(hf_inputs)
 
     def _get_prompt_updates(
         self,
