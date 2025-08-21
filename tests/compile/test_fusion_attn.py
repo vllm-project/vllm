@@ -14,8 +14,7 @@ from vllm import LLM, SamplingParams
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention import Attention
 from vllm.attention.selector import global_force_attn_backend_context_manager
-from vllm.compilation.fusion import (QUANT_OPS, QuantKey, kFp8StaticTensorSym,
-                                     kNvfp4Quant)
+from vllm.compilation.fusion import QUANT_OPS, kFp8StaticTensorSym, kNvfp4Quant
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.noop_elimination import NoOpEliminationPass
@@ -23,6 +22,7 @@ from vllm.config import (CacheConfig, CompilationConfig, CompilationLevel,
                          ModelConfig, PassConfig, SchedulerConfig, VllmConfig,
                          set_current_vllm_config)
 from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp)
 from vllm.platforms import current_platform

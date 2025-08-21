@@ -11,11 +11,12 @@ from torch._subclasses.fake_tensor import (FakeTensorMode,
 from vllm.attention import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 from vllm.utils import round_up
 
-from .fusion import (QUANT_OPS, QuantKey, empty_bf16, empty_fp32, empty_i32,
-                     kNvfp4Quant, kStaticTensorScale)
+from .fusion import (QUANT_OPS, empty_bf16, empty_fp32, empty_i32, kNvfp4Quant,
+                     kStaticTensorScale)
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)

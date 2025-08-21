@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """This file is used for /tests and /benchmarks"""
 from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import ClassVar, NamedTuple, Optional
 
 import numpy
 import torch
+from torch import fx
 
 from vllm._custom_ops import cutlass_scaled_mm_supports_fp4
 from vllm.platforms import current_platform
@@ -32,6 +34,53 @@ class GroupShape(_GroupShape):
 
 GroupShape.PER_TENSOR = GroupShape(-1, -1)
 GroupShape.PER_TOKEN = GroupShape(1, -1)
+
+
+@dataclass(frozen=True)
+class ScaleDesc:
+    """
+    Class for describing the scale of quantization.
+    dtype: data type of the scale
+    static: static scale if True, dynamic if False
+    group_shape: group shape of the scale
+    """
+    dtype: torch.dtype
+    static: bool
+    group_shape: GroupShape
+
+    def __str__(self):
+        group_shape = ('per_tensor'
+                       if self.group_shape == GroupShape.PER_TENSOR else
+                       ('per_token' if self.group_shape == GroupShape.PER_TOKEN
+                        else str(self.group_shape)))
+
+        return (f"{fx.graph.dtype_abbrs[self.dtype]},"
+                f"{'static' if self.static else 'dynamic'},{group_shape}")
+
+
+@dataclass(frozen=True)
+class QuantKey:
+    """
+    Class for identifying the type of quantization.
+    dtype: quantized data type
+    scale: scale descriptor
+    scale2: second-level scale descriptor
+    symmetric: symmetric if True, asymmetric if False
+
+    TODO(luka) use QuantDescriptor once standardized:
+    https://github.com/vllm-project/vllm/issues/8913
+
+    """
+    dtype: torch.dtype
+    scale: ScaleDesc
+    scale2: Optional[ScaleDesc] = None
+    symmetric: bool = True
+
+    def __str__(self):
+        scale2_str = f"scale2({self.scale2})," if self.scale2 else ""
+        return (f"QuantKey({fx.graph.dtype_abbrs[self.dtype]},"
+                f"scale({self.scale}),{scale2_str}"
+                f"{'a' if not self.symmetric else ''}symmetric)")
 
 
 # Normalize the group_shape to the full extent for any dims that are -1

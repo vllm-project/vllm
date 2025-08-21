@@ -12,7 +12,7 @@ from torch._ops import OpOverload
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape)
+    GroupShape, QuantKey, ScaleDesc)
 from vllm.platforms import current_platform
 
 from .fx_utils import find_getitem_maybe
@@ -38,52 +38,6 @@ def empty_i32(*args, **kwargs):
 
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
-
-
-class ScaleDesc(NamedTuple):
-    """
-    Named tuple for describing the scale of quantization.
-    dtype: data type of the scale
-    static: static scale if True, dynamic if False
-    group_shape: group shape of the scale
-    """
-    dtype: torch.dtype
-    static: bool
-    group_shape: GroupShape
-
-    def __str__(self):
-        group_shape = ('per_tensor'
-                       if self.group_shape == GroupShape.PER_TENSOR else
-                       ('per_token' if self.group_shape == GroupShape.PER_TOKEN
-                        else str(self.group_shape)))
-
-        return (f"{fx.graph.dtype_abbrs[self.dtype]},"
-                f"{'static' if self.static else 'dynamic'},{group_shape}")
-
-
-class QuantKey(NamedTuple):
-    """
-    Named tuple for identifying the type of quantization.
-    dtype: quantized data type
-    scale: scale descriptor
-    scale2: second-level scale descriptor
-    symmetric: symmetric if True, asymmetric if False
-
-    TODO(luka) use QuantDescriptor once standardized:
-    https://github.com/vllm-project/vllm/issues/8913
-
-    """
-    dtype: torch.dtype
-    scale: ScaleDesc
-    scale2: Optional[ScaleDesc] = None
-    symmetric: bool = True
-
-    def __str__(self):
-        scale2_str = f"scale2({self.scale2})," if self.scale2 else ""
-        return (f"QuantKey({fx.graph.dtype_abbrs[self.dtype]},"
-                f"scale({self.scale}),{scale2_str}"
-                f"{'a' if not self.symmetric else ''}symmetric)")
-
 
 kStaticTensorScale = ScaleDesc(torch.float32, True, GroupShape.PER_TENSOR)
 kFp8StaticTensorSym = QuantKey(FP8_DTYPE, kStaticTensorScale, symmetric=True)

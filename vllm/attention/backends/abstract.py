@@ -9,7 +9,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
 
 import torch
 
-from vllm.compilation.fusion import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.multimodal import MultiModalPlaceholderMap
 
 if TYPE_CHECKING:
