@@ -372,24 +372,36 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         self._cache.clear()
 
 
+def _enable_processor_cache(
+    model_config: "ModelConfig",
+    mm_registry: "MultiModalRegistry",
+) -> bool:
+    if not mm_registry.supports_multimodal_inputs(model_config):
+        return False
+
+    mm_config = model_config.get_multimodal_config()
+    return mm_config.mm_processor_cache_gb > 0
+
+
+def _enable_ipc_cache(vllm_config: "VllmConfig") -> bool:
+    parallel_config = vllm_config.parallel_config
+    supports_ipc_cache = (parallel_config.data_parallel_size == 1
+                          or parallel_config.data_parallel_external_lb)
+
+    return supports_ipc_cache
+
+
 def processor_cache_from_config(
     vllm_config: "VllmConfig",
     mm_registry: "MultiModalRegistry",
 ) -> Optional[BaseMultiModalProcessorCache]:
-    """Get the cache to use by P0."""
+    """Return a `BaseMultiModalProcessorCache`, if enabled."""
     model_config = vllm_config.model_config
 
-    if not mm_registry.supports_multimodal_inputs(model_config):
+    if not _enable_processor_cache(model_config, mm_registry):
         return None
 
-    mm_config = model_config.get_multimodal_config()
-    if mm_config.mm_processor_cache_gb == 0:
-        return None
-
-    parallel_config = vllm_config.parallel_config
-    supports_ipc_cache = (parallel_config.data_parallel_size == 1
-                          or parallel_config.data_parallel_external_lb)
-    if not supports_ipc_cache:
+    if not _enable_ipc_cache(vllm_config):
         return MultiModalProcessorOnlyCache(model_config)
 
     return MultiModalProcessorSenderCache(model_config)
@@ -399,12 +411,8 @@ def processor_only_cache_from_config(
     model_config: "ModelConfig",
     mm_registry: "MultiModalRegistry",
 ):
-    """As `processor_cache_from_config` but without IPC involved."""
-    if not mm_registry.supports_multimodal_inputs(model_config):
-        return None
-
-    mm_config = model_config.get_multimodal_config()
-    if mm_config.mm_processor_cache_gb == 0:
+    """Return a `MultiModalProcessorOnlyCache`, if enabled."""
+    if not _enable_processor_cache(model_config, mm_registry):
         return None
 
     return MultiModalProcessorOnlyCache(model_config)
@@ -460,20 +468,13 @@ def receiver_cache_from_config(
     vllm_config: "VllmConfig",
     mm_registry: "MultiModalRegistry",
 ) -> Optional[BaseMultiModalReceiverCache]:
-    """Get the cache to use by P1."""
+    """Return a `BaseMultiModalReceiverCache`, if enabled."""
     model_config = vllm_config.model_config
 
-    if not mm_registry.supports_multimodal_inputs(model_config):
+    if not _enable_processor_cache(model_config, mm_registry):
         return None
 
-    mm_config = model_config.get_multimodal_config()
-    if mm_config.mm_processor_cache_gb == 0:
-        return None
-
-    parallel_config = vllm_config.parallel_config
-    supports_ipc_cache = (parallel_config.data_parallel_size == 1
-                          or parallel_config.data_parallel_external_lb)
-    if not supports_ipc_cache:
+    if not _enable_ipc_cache(vllm_config):
         return None
 
     return MultiModalReceiverCache(model_config)
