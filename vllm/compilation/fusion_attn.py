@@ -14,8 +14,8 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import round_up
 
-from .fusion import (QUANT_OPS, GroupShape, QuantKey, empty_bf16, empty_fp32,
-                     empty_i32)
+from .fusion import (QUANT_OPS, QuantKey, empty_bf16, empty_fp32, empty_i32,
+                     kNvfp4Quant, kStaticTensorScale)
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
@@ -27,37 +27,23 @@ ATTN_OP = torch.ops.vllm.unified_attention_with_output.default
 RESHAPE_OP = torch.ops.aten.reshape.default
 
 
-class AttentionStaticQuantPattern:
+class AttentionQuantPattern:
     """
-    Fusion for Attention+StaticQuant.
-
-    Only triggers when the attention implementation returns True in
-    `fused_output_quant_supported()`. If the pattern is found, the StaticQuant
-    op will be removed from the graph, and its scale will be passed into
-    Attention op as the `output_scale` argument.
+    The base class for Attn+Quant fusions.
+    Should not be used directly.
     """
 
     def __init__(
         self,
         layer: Attention,
-        quant_dtype: torch.dtype,
-        symmetric=True,
+        quant_key: QuantKey,
     ):
         self.layer = layer
         self.layer_name = layer.layer_name
         self.num_heads = layer.num_heads
         self.head_size = layer.head_size
-        self.quant_dtype = quant_dtype
-
-        if quant_dtype == FP8_DTYPE:
-            self.quant_key = QuantKey(dtype=quant_dtype,
-                                      static=True,
-                                      group_shape=GroupShape.PER_TENSOR,
-                                      symmetric=symmetric)
-        elif quant_dtype == FP4_DTYPE:
-            self.quant_key = QuantKey(dtype=quant_dtype)
-        else:
-            raise ValueError(f"Unsupported quantization dtype: {quant_dtype}")
+        self.quant_key = quant_key
+        self.quant_dtype = quant_key.dtype
 
         assert self.quant_key in QUANT_OPS, \
             f"unsupported quantization scheme {self.quant_key}"
@@ -81,16 +67,32 @@ class AttentionStaticQuantPattern:
         view_to_reshape(gm)
         return gm
 
-    def register_if_supported(self, pm_pass: PatternMatcherPass):
-        if self.layer.impl.fused_output_quant_supported(
-                self.quant_dtype, self.quant_key.static,
-                self.quant_key.group_shape):
-            if self.quant_dtype == FP8_DTYPE:
-                self._register_fp8_quant(pm_pass)
-            elif self.quant_dtype == FP4_DTYPE:
-                self._register_nvfp4_quant(pm_pass)
 
-    def _register_fp8_quant(self, pm_pass: PatternMatcherPass):
+class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
+    """
+    Fusion for Attention+Fp8StaticQuant.
+
+    Only triggers when the attention implementation returns True in
+    `fused_output_quant_supported()`. If the pattern is found, the
+    Fp8StaticQuant op will be removed from the graph, and its scale
+    will be passed into Attention op as the `output_scale` argument.
+    """
+
+    def __init__(
+        self,
+        layer: Attention,
+        symmetric: bool = True,
+    ):
+        quant_key = QuantKey(dtype=FP8_DTYPE,
+                             scale=kStaticTensorScale,
+                             symmetric=symmetric)
+        super().__init__(layer, quant_key)
+
+    def register_if_supported(self, pm_pass: PatternMatcherPass):
+        if self.layer.impl.fused_output_quant_supported(self.quant_key):
+            self._register(pm_pass)
+
+    def _register(self, pm_pass: PatternMatcherPass):
 
         def pattern(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                     output_attn: torch.Tensor, output_quant: torch.Tensor,
@@ -145,11 +147,29 @@ class AttentionStaticQuantPattern:
 
             pm.register_replacement(
                 pattern, replacement, inputs,
-                AttentionStaticQuantPattern.wrap_trace_fn(
-                    AttentionStaticQuantPattern.fx_view_to_reshape,
-                    pm.fwd_only), pm_pass)
+                AttentionQuantPattern.wrap_trace_fn(
+                    AttentionQuantPattern.fx_view_to_reshape, pm.fwd_only),
+                pm_pass)
 
-    def _register_nvfp4_quant(self, pm_pass: PatternMatcherPass):
+
+class AttentionNvfp4QuantPattern(AttentionQuantPattern):
+    """
+    Fusion for Attention+Nvfp4Quant.
+
+    Only triggers when the attention implementation returns True in
+    `fused_output_quant_supported()`. If the pattern is found, the
+    Nvfp4Quant op will be removed from the graph, and its scale
+    will be passed into Attention op as the `output_scale` argument.
+    """
+
+    def __init__(self, layer: Attention):
+        super().__init__(layer, kNvfp4Quant)
+
+    def register_if_supported(self, pm_pass: PatternMatcherPass):
+        if self.layer.impl.fused_output_quant_supported(self.quant_key):
+            self._register(pm_pass)
+
+    def _register(self, pm_pass: PatternMatcherPass):
 
         def pattern(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                     output_attn: torch.Tensor, output_quant: torch.Tensor,
@@ -214,9 +234,9 @@ class AttentionStaticQuantPattern:
 
             pm.register_replacement(
                 pattern, replacement, inputs,
-                AttentionStaticQuantPattern.wrap_trace_fn(
-                    AttentionStaticQuantPattern.fx_view_to_reshape,
-                    pm.fwd_only), pm_pass)
+                AttentionQuantPattern.wrap_trace_fn(
+                    AttentionQuantPattern.fx_view_to_reshape, pm.fwd_only),
+                pm_pass)
 
 
 class AttnFusionPass(VllmInductorPass):
@@ -239,11 +259,11 @@ class AttnFusionPass(VllmInductorPass):
 
         attn_layers = get_layers_from_vllm_config(config, Attention)
         for layer_name, layer in attn_layers.items():
-            pattern_fp8 = AttentionStaticQuantPattern(layer, FP8_DTYPE)
+            pattern_fp8 = AttentionFp8StaticQuantPattern(layer)
             pattern_fp8.register_if_supported(self.patterns)
 
-            pattern_fp4 = AttentionStaticQuantPattern(layer, FP4_DTYPE)
-            pattern_fp4.register_if_supported(self.patterns)
+            pattern_nvfp4 = AttentionNvfp4QuantPattern(layer)
+            pattern_nvfp4.register_if_supported(self.patterns)
 
         if len(attn_layers) == 0:
             logger.warning(
@@ -267,4 +287,6 @@ class AttnFusionPass(VllmInductorPass):
         self.end_and_log()
 
     def uuid(self):
-        return VllmInductorPass.hash_source(self, AttentionStaticQuantPattern)
+        return VllmInductorPass.hash_source(self, AttentionQuantPattern,
+                                            AttentionFp8StaticQuantPattern,
+                                            AttentionNvfp4QuantPattern)

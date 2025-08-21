@@ -40,12 +40,33 @@ RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 
 
+class ScaleDesc(NamedTuple):
+    """
+    Named tuple for describing the scale of quantization.
+    dtype: data type of the scale
+    static: static scale if True, dynamic if False
+    group_shape: group shape of the scale
+    """
+    dtype: torch.dtype
+    static: bool
+    group_shape: GroupShape
+
+    def __str__(self):
+        group_shape = ('per_tensor'
+                       if self.group_shape == GroupShape.PER_TENSOR else
+                       ('per_token' if self.group_shape == GroupShape.PER_TOKEN
+                        else str(self.group_shape)))
+
+        return (f"{fx.graph.dtype_abbrs[self.dtype]},"
+                f"{'static' if self.static else 'dynamic'},{group_shape}")
+
+
 class QuantKey(NamedTuple):
     """
     Named tuple for identifying the type of quantization.
     dtype: quantized data type
-    static: static quantization if True, dynamic if False
-    group_shape: quantization group shape
+    scale: scale descriptor
+    scale2: second-level scale descriptor
     symmetric: symmetric if True, asymmetric if False
 
     TODO(luka) use QuantDescriptor once standardized:
@@ -53,29 +74,30 @@ class QuantKey(NamedTuple):
 
     """
     dtype: torch.dtype
-    static: Optional[bool] = None
-    group_shape: Optional[GroupShape] = None
-    symmetric: Optional[bool] = None
+    scale: ScaleDesc
+    scale2: Optional[ScaleDesc] = None
+    symmetric: bool = True
 
     def __str__(self):
-        if self.dtype == FP8_DTYPE:
-            group_shape = (
-                'per_tensor' if self.group_shape == GroupShape.PER_TENSOR else
-                ('per_token' if self.group_shape == GroupShape.PER_TOKEN else
-                 str(self.group_shape)))
-
-            return (f"QuantKey({'static' if self.static else 'dynamic'},"
-                    f"{fx.graph.dtype_abbrs[self.dtype]},{group_shape},"
-                    f"{'a' if not self.symmetric else ''}symmetric)")
-        if self.dtype == FP4_DTYPE:
-            return ("QuantKey("
-                    f"{fx.graph.dtype_abbrs[self.dtype]})")
+        scale2_str = f"scale2({self.scale2})," if self.scale2 else ""
+        return (f"QuantKey({fx.graph.dtype_abbrs[self.dtype]},"
+                f"scale({self.scale}),{scale2_str}"
+                f"{'a' if not self.symmetric else ''}symmetric)")
 
 
-kFp8StaticTensorSym = QuantKey(FP8_DTYPE, True, GroupShape.PER_TENSOR, True)
-kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, False, GroupShape.PER_TENSOR, True)
-kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, False, GroupShape.PER_TOKEN, True)
-kNvFp4Quant = QuantKey(FP4_DTYPE)
+kStaticTensorScale = ScaleDesc(torch.float32, True, GroupShape.PER_TENSOR)
+kFp8StaticTensorSym = QuantKey(FP8_DTYPE, kStaticTensorScale, symmetric=True)
+
+kDynamicTensorScale = ScaleDesc(torch.float32, False, GroupShape.PER_TENSOR)
+kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, kDynamicTensorScale, symmetric=True)
+
+kDynamicTokenScale = ScaleDesc(torch.float32, False, GroupShape.PER_TOKEN)
+kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, kDynamicTokenScale, symmetric=True)
+
+kNvfp4GroupScale = ScaleDesc(FP8_DTYPE, False, GroupShape(1, 16))
+kNvfp4Quant = QuantKey(FP4_DTYPE,
+                       scale=kNvfp4GroupScale,
+                       scale2=kStaticTensorScale)
 
 QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8StaticTensorSym:
@@ -84,7 +106,7 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
     torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
     kFp8DynamicTokenSym:
     torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
-    kNvFp4Quant: torch.ops._C.scaled_fp4_quant.default,  # noqa: E501
+    kNvfp4Quant: torch.ops._C.scaled_fp4_quant.default,  # noqa: E501
 }
 
 
@@ -198,11 +220,9 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
                  quant_dtype: torch.dtype,
                  symmetric=True):
         fused_key = FusedRMSQuantKey(fused_add=False,
-                                     quant=QuantKey(
-                                         dtype=quant_dtype,
-                                         static=True,
-                                         group_shape=GroupShape.PER_TENSOR,
-                                         symmetric=symmetric))
+                                     quant=QuantKey(dtype=quant_dtype,
+                                                    scale=kStaticTensorScale,
+                                                    symmetric=symmetric))
         super().__init__(epsilon, fused_key)
 
     def register(self, pm_pass: PatternMatcherPass):
@@ -255,11 +275,9 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
                  quant_dtype: torch.dtype,
                  symmetric=True):
         key = FusedRMSQuantKey(fused_add=True,
-                               quant=QuantKey(
-                                   dtype=quant_dtype,
-                                   static=True,
-                                   group_shape=GroupShape.PER_TENSOR,
-                                   symmetric=symmetric))
+                               quant=QuantKey(dtype=quant_dtype,
+                                              scale=kStaticTensorScale,
+                                              symmetric=symmetric))
         super().__init__(epsilon, key)
 
     def register(self, pm_pass: PatternMatcherPass,
@@ -348,10 +366,10 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
                  quant_dtype: torch.dtype,
                  group_shape: GroupShape = GroupShape.PER_TOKEN,
                  symmetric=True):
+        scale = ScaleDesc(torch.float32, False, group_shape)
         key = FusedRMSQuantKey(fused_add=False,
                                quant=QuantKey(dtype=quant_dtype,
-                                              static=False,
-                                              group_shape=group_shape,
+                                              scale=scale,
                                               symmetric=symmetric))
         super().__init__(epsilon, key)
 
@@ -446,10 +464,10 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
                  quant_dtype: torch.dtype,
                  group_shape: GroupShape = GroupShape.PER_TOKEN,
                  symmetric=True):
+        scale = ScaleDesc(torch.float32, False, group_shape)
         key = FusedRMSQuantKey(fused_add=True,
                                quant=QuantKey(dtype=quant_dtype,
-                                              static=False,
-                                              group_shape=group_shape,
+                                              scale=scale,
                                               symmetric=symmetric))
         super().__init__(epsilon, key)
 

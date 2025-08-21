@@ -236,7 +236,7 @@ class FlexAttentionMetadata:
     def get_bidirectional_mask_mod(self) -> _mask_mod_signature:
         """Creates the encoder mask_mod function for FlexAttention.
 
-        Since the encoder bidirectional attention doesn't run with
+        Since the encoder bidirectional attention doesn't run with 
         KV cache, this function creates a mask based on the
         packed query sequences.
         """

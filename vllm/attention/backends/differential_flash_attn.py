@@ -561,11 +561,11 @@ class DifferentialFlashAttentionMetadataBuilder(
 class DifferentialFlashAttentionImpl(AttentionImpl):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prefill_tokens ----------------->|
+    |<--------------- num_prefill_tokens ----------------->|	
     |<--prefill_0-->|<--prefill_1-->|...|<--prefill_N-1--->|
 
-    Otherwise, the layout is as follows:
-    |<----------------- num_decode_tokens ------------------>|
+    Otherwise, the layout is as follows:	
+    |<----------------- num_decode_tokens ------------------>|	
     |<--decode_0-->|..........|<--decode_M-1-->|<--padding-->|
 
     Generation tokens can contain padding when cuda-graph is used.
@@ -818,6 +818,11 @@ class DifferentialFlashAttentionImpl(AttentionImpl):
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
         """
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for DifferentialFlashAttentionImpl")
+
         if self.lambda_full is None:
             self.lambda_init = self.differential_flash_attention_config[
                 "lambda_init"]

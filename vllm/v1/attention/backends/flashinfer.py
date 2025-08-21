@@ -17,10 +17,9 @@ from flashinfer.utils import FP4Tensor
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
+from vllm.compilation.fusion import QuantKey, kFp8StaticTensorSym, kNvfp4Quant
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.flashinfer import (supports_trtllm_attention,
@@ -657,14 +656,10 @@ class FlashInferImpl(AttentionImpl):
         self.bmm2_scale: Optional[float] = None
         self.o_sf_scale: Optional[float] = None
 
-    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
-                                     group_shape: GroupShape):
-        supported_quant_type = ((dtype == FP8_DTYPE and static
-                                 and group_shape == GroupShape.PER_TENSOR)
-                                or (dtype == FP4_DTYPE))
+    def fused_output_quant_supported(self, quant_key: QuantKey):
         return (self.support_trtllm_attn
                 and self.kv_cache_dtype.startswith("fp8")
-                and supported_quant_type)
+                and quant_key in (kFp8StaticTensorSym, kNvfp4Quant))
 
     def forward(
         self,

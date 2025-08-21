@@ -355,11 +355,11 @@ class XFormersMetadataBuilder(CommonMetadataBuilder[XFormersMetadata]):
 class XFormersImpl(AttentionImpl[XFormersMetadata]):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prefill_tokens ----------------->|
+    |<--------------- num_prefill_tokens ----------------->|	
     |<--prefill_0-->|<--prefill_1-->|...|<--prefill_N-1--->|
 
-    Otherwise, the layout is as follows:
-    |<----------------- num_decode_tokens ------------------>|
+    Otherwise, the layout is as follows:	
+    |<----------------- num_decode_tokens ------------------>|	
     |<--decode_0-->|..........|<--decode_M-1-->|<--padding-->|
 
     Generation tokens can contain padding when cuda-graph is used.
@@ -450,10 +450,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
               (1) key and value tensors were cached during prefill, and
               (2) cross-attention key and value tensors do not grow during
                   decode
-
+        
         A note on how the attn_type (attention type enum) argument impacts
         attention forward() behavior:
-
+    
             * DECODER: normal decoder-only behavior;
                 use decoder self-attention block table
             * ENCODER: no KV caching; pass encoder sequence
@@ -461,7 +461,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 max_encoder_seq_len) to kernel, in lieu of decoder
                 sequence attributes (seq_lens/seq_lens_tensor/max_seq_len).
                 Used for encoder branch of encoder-decoder models.
-            * ENCODER_ONLY: no kv_caching, uses the normal attention
+            * ENCODER_ONLY: no kv_caching, uses the normal attention 
                 attributes (seq_lens/seq_lens_tensor/max_seq_len).
             * ENCODER_DECODER: cross-attention behavior;
                 use cross-attention block table for caching KVs derived
@@ -469,7 +469,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 will match encoder sequence lengths, pass encoder sequence
                 attributes to kernel (encoder_seq_lens/encoder_seq_lens_tensor/
                 max_encoder_seq_len)
-
+    
         Args:
             query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]

@@ -227,7 +227,7 @@ class FlashAttentionMetadataBuilder(
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> FlashAttentionMetadata:
         """
-        fast_build disables AOT scheduling, used when there will be few
+        fast_build disables AOT scheduling, used when there will be few 
         iterations i.e. spec-decode
         """
         num_reqs = common_attn_metadata.num_reqs
