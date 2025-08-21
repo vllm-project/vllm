@@ -18,7 +18,7 @@ logger = init_logger(__name__)
 
 def register_nccl_symmetric_ops(pynccl_comm):
     from vllm.distributed.device_communicators.pynccl_allocator import (
-        use_symmetric_memory)
+        use_symmetric_memory,how_symmetric_memory_registered)
     from vllm.utils import direct_register_custom_op
 
     def all_reduce_symmetric_with_copy_impl(
@@ -29,6 +29,7 @@ def register_nccl_symmetric_ops(pynccl_comm):
             symm_output = torch.empty_like(input_tensor)
             sm.tag(symm_input)
             sm.tag(symm_output)
+        print("symm regis",how_symmetric_memory_registered(symm_input),how_symmetric_memory_registered(symm_output))
         symm_input.copy_(input_tensor)
         symm_output = pynccl_comm.all_reduce(symm_input, symm_output)
         return symm_output

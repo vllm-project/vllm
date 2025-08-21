@@ -33,6 +33,7 @@ _allocator = None
 _mem_pool = None
 _registered_base_addrs = set()
 _registered_tensor_addrs = set()
+_registered_zero_base_addrs = set()
 _graph_pool_id = None
 _nccl_allocator_disabled = False
 
@@ -47,6 +48,16 @@ def set_graph_pool_id(graph_pool_id):
     global _graph_pool_id
     _graph_pool_id = graph_pool_id
 
+def how_symmetric_memory_registered(tensor: torch.tensor):
+    global _registered_base_addrs, _registered_zero_base_addrs
+    for segment in get_nccl_mem_pool().snapshot():
+        for block in segment["blocks"]:
+            if block["address"] == tensor.data_ptr():
+                if segment["stream"] == 0:
+                    return "registered_stream_zero"
+                else:
+                    return "registered_stream_non_zero"
+    return "not_registered"
 
 def get_nccl_mem_pool():
     global _allocator, _mem_pool, _nccl_allocator_disabled
@@ -142,9 +153,11 @@ class use_symmetric_memory:
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.disabled:
             return
-        global _registered_base_addrs
+        global _registered_base_addrs, _registered_zero_base_addrs
         self._mem_pool_ctx.__exit__(exc_type, exc_val, exc_tb)
         for segment in get_nccl_mem_pool().snapshot():
+            if segment["stream"] == 0 and segment["address"] not in _registered_zero_base_addrs:
+                _registered_zero_base_addrs.add(segment["address"])
             if segment["address"] not in _registered_base_addrs:
                 if (
                     segment["stream"] == 0
@@ -161,7 +174,6 @@ class use_symmetric_memory:
                     segment["address"], segment["total_size"]
                 )
                 _registered_base_addrs.add(segment["address"])
-
         if self.is_graph_capture:
             if self.pre_2_8_0:
                 torch._C._cuda_beginAllocateToPool(self.device, _graph_pool_id)
