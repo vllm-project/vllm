@@ -141,13 +141,15 @@ class TopKWeightAndReduce(ABC):
         raise NotImplementedError
 
 
-ReceiverType = Callable[[], tuple[
+PrepareResultType = tuple[
     torch.Tensor,
     Optional[torch.Tensor],
     Optional[ExpertTokensMetadata],
     Optional[torch.Tensor],
     Optional[torch.Tensor],
-]]
+]
+
+ReceiverType = Callable[[], PrepareResultType]
 
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
@@ -169,16 +171,9 @@ class FusedMoEPrepareAndFinalize(ABC):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[
-            torch.Tensor,
-            Optional[torch.Tensor],
-            Optional[ExpertTokensMetadata],
-            Optional[torch.Tensor],
-            Optional[torch.Tensor],
-    ]:
+    ) -> PrepareResultType:
         """
-        Perform any quantization (and/or) dispatching needed
-        for this kernel.
+        Perform any quantization (and/or) dispatching needed for this kernel.
         - a1: The (unquantized) input to the MoE layer.
         - a1_scale: Optional scales for a1
         - a2_scale: Optional scales for the second MoE gemm.  Required to make
@@ -202,11 +197,12 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
-    # Add comments
     def has_prepare_no_receive(self) -> bool:
+        """
+        Indicates whether or not this class implements prepare_no_receive.
+        """
         return False
 
-    #@abstractmethod
     def prepare_no_receive(
         self,
         a1: torch.Tensor,
@@ -219,6 +215,31 @@ class FusedMoEPrepareAndFinalize(ABC):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> ReceiverType:
+        """
+        Perform any quantization (and/or) dispatching needed for this kernel
+        but does not wait for results from other workers.
+        - a1: The (unquantized) input to the MoE layer.
+        - a1_scale: Optional scales for a1
+        - a2_scale: Optional scales for the second MoE gemm.  Required to make
+          sure the quantization is consistent for both gemms.
+        - topk_ids: The topk ids.
+        - topk_weights: The topk weights.
+        - num_experts: The total number of experts in the global expert space.
+        - expert_map: A tensor mapping expert indices from the global expert
+          space to the local expert space of the expert parallel shard.
+        - apply_router_weight_on_input: When True, apply the weights to the
+          activations, before quantization + dispatching.
+
+        Returns a callback that when invoked waits for results from other
+        workers and has the same return signature as `prepare`, e.g.
+
+        receiver = obj.prepare_no_receive(...)
+        a, a_scales, expert_meta, topk_ids, topk_weights = receiver()
+
+        is equivalent to:
+
+        a, a_scales, expert_meta, topk_ids, topk_weights = obj.prepare(...)
+        """
         raise NotImplementedError
 
     @abstractmethod

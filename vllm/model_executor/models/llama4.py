@@ -30,13 +30,13 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 
@@ -74,18 +74,8 @@ class Llama4MoE(nn.Module):
                                        quant_config=None,
                                        prefix=f"{prefix}.router")
 
+        # This is a temporary flag for testing.
         self.use_shared_fused = True
-
-        self.shared_expert = LlamaMLP(
-            hidden_size=config.hidden_size,
-            intermediate_size=intermediate_size_moe,
-            hidden_act="silu",
-            quant_config=quant_config,
-            bias=False,
-            prefix=f"{prefix}.shared_expert",
-            # This will be done inside of FusedMoE layer
-            reduce_results=not self.use_shared_fused, #self.experts.must_reduce_shared_expert_outputs(),
-        )
 
         if not self.use_shared_fused:
             self.experts = FusedMoE(
@@ -99,7 +89,27 @@ class Llama4MoE(nn.Module):
                 renormalize=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.experts")
+
+            self.shared_expert = LlamaMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size_moe,
+                hidden_act="silu",
+                quant_config=quant_config,
+                bias=False,
+                prefix=f"{prefix}.shared_expert",
+                reduce_results=self.experts.must_reduce_shared_expert_outputs(
+                ),
+            )
         else:
+            self.shared_expert = LlamaMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size_moe,
+                hidden_act="silu",
+                quant_config=quant_config,
+                bias=False,
+                prefix=f"{prefix}.shared_expert",
+                reduce_results=False,
+            )
             self.experts = SharedFusedMoE(
                 shared_experts=self.shared_expert,
                 num_experts=config.num_local_experts,
@@ -113,7 +123,6 @@ class Llama4MoE(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.experts",
             )
-            assert isinstance(self.experts, FusedMoE)
 
     def forward(self, hidden_states):
         router_logits, _ = self.router(hidden_states)
