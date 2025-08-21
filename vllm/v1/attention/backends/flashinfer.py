@@ -711,7 +711,7 @@ class FlashInferImpl(AttentionImpl):
             assert attn_metadata.q_data_type != FP8_DTYPE, \
                 "Query can only be FP8 if output fusion happened."
             assert output_block_scale is None, "output_block_scale "\
-                "is not supported when fusion is not happened"
+                "is not supported when fusion has not happened"
         else:
             assert attn_metadata.q_data_type == FP8_DTYPE, \
                 "Query must be FP8 when attn+quant fusion happened."
