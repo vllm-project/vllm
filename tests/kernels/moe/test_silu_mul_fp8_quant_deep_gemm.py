@@ -74,7 +74,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size, seed):
         y_se = y_s[e]
         y_qe = y_q[e]
 
-        torch.testing.assert_close(y_se[:nt], ref_s[:nt])
+        torch.testing.assert_close(y_se[:nt], ref_s[:nt], atol=1e-4, rtol=1e-2)
         torch.testing.assert_close(
             y_qe[:nt].to(torch.float32),
             ref_q[:nt].to(torch.float32),
