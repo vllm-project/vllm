@@ -27,7 +27,7 @@ logger = init_logger(__name__)
 
 class MultiModalProcessorCacheItem:
     """
-    The data to store inside `MultiModalProcessorSenderCache`.
+    The data to store inside `MultiModalProcessorOnlyCache`.
 
     Args:
         item: The processed tensor data corresponding to a multi-modal item.
@@ -49,12 +49,13 @@ class MultiModalProcessorCacheItem:
 
 class MultiModalProcessorCacheItemMetadata:
     """
-    The metadata to store inside `MultiModalProcessorOnlyCache`.
+    The metadata to store inside `MultiModalProcessorSenderCache`.
 
     Args:
         item: The processed tensor data corresponding to a multi-modal item.
             Since P1 already stores the tensor data, we only store its size
-            metadata in P0 to reduce memory usage.
+            metadata in P0 to reduce memory usage. The size metadata is still
+            needed to keep the same cache eviction policy as P0.
         prompt_updates: The prompt updates that are potentially applicable to
             that item, even if the item is later in a different position inside
             `items[modality]`.
@@ -278,10 +279,13 @@ class BaseMultiModalProcessorCache(
 
 class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
     """
+    The cache which is used on P0 when IPC caching is disabled.
+
     How to update each item:
 
-    - If the item is in the cache, put the cached data into the item.
-    - If the item is not in the cache, store the data into the cache.
+    - If the item is in the cache, replace the input with the cached item.
+    - If the item is not in the cache, store that item (which includes
+      tensor data and metadata) into the cache, and return the input.
     """
 
     def __init__(self, model_config: "ModelConfig") -> None:
@@ -320,13 +324,16 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
 
 class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
     """
+    The cache which is used on P0 when IPC caching is enabled.
+
     How to update each item:
 
-    - If the item is already in the cache, clear the data in that item to avoid
+    - If the item is already in the cache, clear the input to avoid
       unnecessary IPC.
 
     - If the item is not in the cache, store the metadata of that item so
-      that the eviction policy remains the same as the cache on P1.
+      that the eviction policy remains the same as the cache on P1,
+      and return the input.
       By only storing the metadata, we avoid keeping the data itself in
       memory inside P0.
     """
@@ -411,10 +418,13 @@ class BaseMultiModalReceiverCache(
 
 class MultiModalReceiverCache(BaseMultiModalReceiverCache):
     """
+    The cache which is used on P1 when IPC caching is enabled.
+
     How to update each item:
 
-    - If the item is in the cache, put the cached data into the item.
-    - If the item is not in the cache, store the data into the cache.
+    - If the item is in the cache, replace the input with the cached item.
+    - If the item is not in the cache, store that item (which includes tensor
+      data) into the cache, and return the input.
     """
 
     def __init__(self, model_config: "ModelConfig") -> None:
