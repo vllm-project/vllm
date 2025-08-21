@@ -337,6 +337,7 @@ class CompilationConfig:
         "vllm.unified_attention_with_output",
         "vllm.mamba_mixer2",
         "vllm.mamba_mixer",
+        "vllm.short_conv",
     ]
 
     def compute_hash(self) -> str:
