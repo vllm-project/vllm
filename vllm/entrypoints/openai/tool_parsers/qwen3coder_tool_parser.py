@@ -107,117 +107,131 @@ class Qwen3CoderToolParser(ToolParser):
         self.json_started = False
         self.json_closed = False
 
-    def _parse_xml_function_call(
-            self, function_call_str: str,
-            tools: Optional[list[ChatCompletionToolsParam]]
-    ) -> Optional[ToolCall]:
 
-        def get_arguments_config(func_name: str) -> dict:
-            if tools is None:
-                return {}
-            for config in tools:
-                if not hasattr(config, "type") or not (
-                        hasattr(config, "function")
-                        and hasattr(config.function, "name")):
-                    continue
-                if (config.type == "function"
-                        and config.function.name == func_name):
-                    if not hasattr(config.function, "parameters"):
-                        return {}
-                    params = config.function.parameters
-                    if isinstance(params, dict) and "properties" in params:
-                        return params["properties"]
-                    elif isinstance(params, dict):
-                        return params
-                    else:
-                        return {}
-            logger.warning("Tool '%s' is not defined in the tools list.",
-                           func_name)
+    def _get_arguments_config(
+        self,
+        tools: Optional[list[ChatCompletionToolsParam]],
+        func_name: str,
+    ) -> dict:
+        if tools is None:
             return {}
+        for config in tools:
+            if not hasattr(config, "type") or not (
+                    hasattr(config, "function")
+                    and hasattr(config.function, "name")):
+                continue
+            if (config.type == "function"
+                    and config.function.name == func_name):
+                if not hasattr(config.function, "parameters"):
+                    return {}
+                params = config.function.parameters
+                if isinstance(params, dict) and "properties" in params:
+                    return params["properties"]
+                elif isinstance(params, dict):
+                    return params
+                else:
+                    return {}
+        logger.warning("Tool '%s' is not defined in the tools list.",
+                        func_name)
+        return {}
 
-        def convert_param_value(param_value: str, param_name: str,
-                                param_config: dict, func_name: str) -> Any:
-            # Handle null value for any type
-            if param_value.lower() == "null":
-                return None
+    def _convert_param_value(
+        self,
+        param_value: str,
+        param_name: str,
+        param_config: dict,
+        func_name: str,
+    ) -> Any:
+        # Handle null value for any type
+        if param_value.lower() == "null":
+            return None
 
-            converted_value: Any
+        converted_value: Any
 
-            if param_name not in param_config:
-                if param_config != {}:
-                    logger.warning(
-                        "Parsed parameter '%s' is not defined in the tool "
-                        "parameters for tool '%s', directly returning the "
-                        "string value.", param_name, func_name)
-                return param_value
+        if param_name not in param_config:
+            if param_config != {}:
+                logger.warning(
+                    "Parsed parameter '%s' is not defined in the tool "
+                    "parameters for tool '%s', directly returning the "
+                    "string value.", param_name, func_name)
+            return param_value
 
-            if (isinstance(param_config[param_name], dict)
-                    and "type" in param_config[param_name]):
-                param_type = str(
-                    param_config[param_name]["type"]).strip().lower()
-            else:
-                param_type = "string"
-            if param_type in [
-                    "string", "str", "text", "varchar", "char", "enum"
-            ]:
-                return param_value
-            elif (param_type.startswith("int") or param_type.startswith("uint")
-                  or param_type.startswith("long")
-                  or param_type.startswith("short")
-                  or param_type.startswith("unsigned")):
+        if (isinstance(param_config[param_name], dict)
+                and "type" in param_config[param_name]):
+            param_type = str(
+                param_config[param_name]["type"]).strip().lower()
+        else:
+            param_type = "string"
+        if param_type in [
+                "string", "str", "text", "varchar", "char", "enum"
+        ]:
+            return param_value
+        elif (param_type.startswith("int") or param_type.startswith("uint")
+                or param_type.startswith("long")
+                or param_type.startswith("short")
+                or param_type.startswith("unsigned")):
+            try:
+                converted_value = int(param_value)
+                return converted_value
+            except ValueError:
+                logger.warning(
+                    "Parsed value '%s' of parameter '%s' is not an "
+                    "integer in tool '%s', degenerating to string.",
+                    param_value, param_name, func_name)
+            return param_value
+        elif (param_type.startswith("num")
+                or param_type.startswith("float")):
+            try:
+                float_param_value = float(param_value)
+                converted_value = (float_param_value if float_param_value -
+                                    int(float_param_value) != 0 else
+                                    int(float_param_value))
+                return converted_value
+            except ValueError:
+                logger.warning(
+                    "Parsed value '%s' of parameter '%s' is not a float "
+                    "in tool '%s', degenerating to string.", param_value,
+                    param_name, func_name)
+            return param_value
+        elif param_type in ["boolean", "bool", "binary"]:
+            param_value = param_value.lower()
+            if param_value not in ["true", "false"]:
+                logger.warning(
+                    "Parsed value '%s' of parameter '%s' is not a "
+                    "boolean (`true` of `false`) in tool '%s', "
+                    "degenerating to false.", param_value, param_name,
+                    func_name)
+            return param_value == "true"
+        else:
+            if param_type == "object" or param_type.startswith("dict"):
                 try:
-                    converted_value = int(param_value)
+                    converted_value = json.loads(param_value)
                     return converted_value
-                except ValueError:
-                    logger.warning(
-                        "Parsed value '%s' of parameter '%s' is not an "
-                        "integer in tool '%s', degenerating to string.",
-                        param_value, param_name, func_name)
-                return param_value
-            elif (param_type.startswith("num")
-                  or param_type.startswith("float")):
-                try:
-                    float_param_value = float(param_value)
-                    converted_value = (float_param_value if float_param_value -
-                                       int(float_param_value) != 0 else
-                                       int(float_param_value))
-                    return converted_value
-                except ValueError:
-                    logger.warning(
-                        "Parsed value '%s' of parameter '%s' is not a float "
-                        "in tool '%s', degenerating to string.", param_value,
-                        param_name, func_name)
-                return param_value
-            elif param_type in ["boolean", "bool", "binary"]:
-                param_value = param_value.lower()
-                if param_value not in ["true", "false"]:
+                except json.JSONDecodeError:
                     logger.warning(
                         "Parsed value '%s' of parameter '%s' is not a "
-                        "boolean (`true` of `false`) in tool '%s', "
-                        "degenerating to false.", param_value, param_name,
+                        "valid JSON object in tool '%s', will try other "
+                        "methods to parse it.", param_value, param_name,
                         func_name)
-                return param_value == "true"
-            else:
-                if param_type == "object" or param_type.startswith("dict"):
-                    try:
-                        converted_value = json.loads(param_value)
-                        return converted_value
-                    except json.JSONDecodeError:
-                        logger.warning(
-                            "Parsed value '%s' of parameter '%s' is not a "
-                            "valid JSON object in tool '%s', will try other "
-                            "methods to parse it.", param_value, param_name,
-                            func_name)
+            try:
+                converted_value = eval(param_value)
+                return converted_value
+            except Exception:
                 logger.warning(
-                    "Parameter '%s' has unknown type '%s'. "
-                    "The value will be treated as a string.", param_name,
-                    param_type)
-                return param_value
+                    "Parsed value '%s' of parameter '%s' cannot be "
+                    "converted via Python `eval()` in tool '%s', "
+                    "degenerating to string.", param_value, param_name,
+                    func_name)
+            return param_value
 
+    def _parse_xml_function_call(
+        self, function_call_str: str,
+        tools: Optional[list[ChatCompletionToolsParam]]
+    ) -> Optional[ToolCall]:
         # Extract function name
         end_index = function_call_str.index(">")
         function_name = function_call_str[:end_index]
-        param_config = get_arguments_config(function_name)
+        param_config = self._get_arguments_config(tools, function_name)
         parameters = function_call_str[end_index + 1:]
         param_dict = {}
         for match in self.tool_call_parameter_regex.findall(parameters):
@@ -231,7 +245,7 @@ class Qwen3CoderToolParser(ToolParser):
             if param_value.endswith("\n"):
                 param_value = param_value[:-1]
 
-            param_dict[param_name] = convert_param_value(
+            param_dict[param_name] = self._convert_param_value(
                 param_value, param_name, param_config, function_name)
         return ToolCall(
             type="function",
@@ -539,6 +553,8 @@ class Qwen3CoderToolParser(ToolParser):
 
             # Check if we should start a new parameter
             if not self.in_param and self.param_count < complete_params:
+                param_config = self._get_arguments_config(
+                    request.tools, self.current_function_name)
                 # Find the unprocessed parameter
                 # Count parameter starts
                 param_starts = []
@@ -576,15 +592,19 @@ class Qwen3CoderToolParser(ToolParser):
                             if param_value.endswith("\n"):
                                 param_value = param_value[:-1]
 
+                            param_value = self._convert_param_value(
+                                param_value, self.current_param_name,
+                                param_config, self.current_function_name)
+
                             # Build complete JSON fragment for this parameter
                             if self.param_count == 0:
                                 json_fragment = (
-                                    '"' + self.current_param_name + '": "' +
-                                    json.dumps(param_value)[1:-1] + '"')
+                                    '"' + self.current_param_name + '": ' +
+                                    json.dumps(param_value))
                             else:
                                 json_fragment = (
-                                    ', "' + self.current_param_name + '": "' +
-                                    json.dumps(param_value)[1:-1] + '"')
+                                    ', "' + self.current_param_name + '": ' +
+                                    json.dumps(param_value))
 
                             self.param_count += 1
 
