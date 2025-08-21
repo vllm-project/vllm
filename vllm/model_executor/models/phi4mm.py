@@ -262,9 +262,9 @@ class Phi4MMImageEncoder(nn.Module):
             img_features.shape[1]))
         assert base_feat_height == base_feat_height_target \
             and base_feat_width == base_feat_height_target, \
-                f'base_feat_height: {base_feat_height},"\
-                f" base_feat_width: {base_feat_width}, "\
-                f"expect {base_feat_height_target} features for hd transform'
+                (f"base_feat_height: {base_feat_height}, "
+                 f"base_feat_width: {base_feat_width}, "
+                 f"expect {base_feat_height_target} features for hd transform")
 
         # bs x max_num_crops x (24x24) x C
         img_features = img_features.view(bs, -1,

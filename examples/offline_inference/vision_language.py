@@ -283,8 +283,10 @@ def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
     )
 
     prompts = [
-        f"<|user|>\n<|begin_of_image|><|endoftext|><|end_of_image|>\
-        {question}<|assistant|>"
+        (
+            "<|user|>\n<|begin_of_image|><|endoftext|><|end_of_image|>"
+            f"{question}<|assistant|>"
+        )
         for question in questions
     ]
 
@@ -767,15 +769,13 @@ def run_llava_next_video(questions: list[str], modality: str) -> ModelRequestDat
 def run_llava_onevision(questions: list[str], modality: str) -> ModelRequestData:
     if modality == "video":
         prompts = [
-            f"<|im_start|>user <video>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
+            f"<|im_start|>user <video>\n{question}<|im_end|><|im_start|>assistant\n"
             for question in questions
         ]
 
     elif modality == "image":
         prompts = [
-            f"<|im_start|>user <image>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
+            f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
             for question in questions
         ]
 
@@ -998,8 +998,7 @@ def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
     )
 
     prompts = [
-        f"<|im_start|>user <image>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
+        f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
         for question in questions
     ]
 
