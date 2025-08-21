@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
 import json
 import uuid
 from collections.abc import Sequence
@@ -214,7 +215,7 @@ class Qwen3CoderToolParser(ToolParser):
                         "methods to parse it.", param_value, param_name,
                         func_name)
             try:
-                converted_value = eval(param_value)
+                converted_value = ast.literal_eval(param_value)
                 return converted_value
             except Exception:
                 logger.warning(
