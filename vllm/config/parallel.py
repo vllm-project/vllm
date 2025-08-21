@@ -339,7 +339,7 @@ class ParallelConfig:
     def use_ray(self) -> bool:
         return self.distributed_executor_backend == "ray" or (
             isinstance(self.distributed_executor_backend, type)
-            and self.distributed_executor_backend.uses_ray)
+            and getattr(self.distributed_executor_backend, "uses_ray", False))
 
     @model_validator(mode='after')
     def _verify_args(self) -> Self:

@@ -8,56 +8,63 @@ from typing import Any, Callable, Optional, Union
 import pytest
 
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.engine.llm_engine import LLMEngine
-from vllm.executor.uniproc_executor import UniProcExecutor
 from vllm.sampling_params import SamplingParams
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
 
 class Mock:
     ...
 
 
-class CustomUniExecutor(UniProcExecutor):
+class CustomMultiprocExecutor(MultiprocExecutor):
 
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: tuple = (),
-                       kwargs: Optional[dict] = None) -> list[Any]:
+                       kwargs: Optional[dict] = None,
+                       non_block: bool = False,
+                       unique_reply_rank: Optional[int] = None) -> list[Any]:
         # Drop marker to show that this was ran
         with open(".marker", "w"):
             ...
         return super().collective_rpc(method, timeout, args, kwargs)
 
 
-CustomUniExecutorAsync = CustomUniExecutor
+CustomMultiprocExecutorAsync = CustomMultiprocExecutor
+MODEL = "Qwen/Qwen3-0.6B"
 
 
-@pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
-def test_custom_executor_type_checking(model):
+def test_custom_executor_type_checking():
     with pytest.raises(ValueError):
-        engine_args = EngineArgs(model=model,
-                                 distributed_executor_backend=Mock)
+        engine_args = EngineArgs(
+            model=MODEL,
+            gpu_memory_utilization=0.2,
+            distributed_executor_backend=Mock,
+        )
         LLMEngine.from_engine_args(engine_args)
     with pytest.raises(ValueError):
-        engine_args = AsyncEngineArgs(model=model,
+        engine_args = AsyncEngineArgs(model=MODEL,
+                                      gpu_memory_utilization=0.2,
                                       distributed_executor_backend=Mock)
-        AsyncLLMEngine.from_engine_args(engine_args)
+        AsyncLLM.from_engine_args(engine_args)
 
 
-@pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
-@pytest.mark.parametrize(
-    "distributed_executor_backend",
-    [CustomUniExecutor, "tests.engine.test_executor.CustomUniExecutor"])
-def test_custom_executor(distributed_executor_backend, model, tmp_path):
+@pytest.mark.parametrize("distributed_executor_backend", [
+    CustomMultiprocExecutor,
+    "tests.v1.executor.test_executor.CustomMultiprocExecutor"
+])
+def test_custom_executor(distributed_executor_backend, tmp_path):
     cwd = os.path.abspath(".")
     os.chdir(tmp_path)
     try:
         assert not os.path.exists(".marker")
 
         engine_args = EngineArgs(
-            model=model,
+            model=MODEL,
+            gpu_memory_utilization=0.2,
             distributed_executor_backend=distributed_executor_backend,
             enforce_eager=True,  # reduce test time
         )
@@ -72,26 +79,29 @@ def test_custom_executor(distributed_executor_backend, model, tmp_path):
         os.chdir(cwd)
 
 
-@pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 @pytest.mark.parametrize("distributed_executor_backend", [
-    CustomUniExecutorAsync, "tests.engine.test_executor.CustomUniExecutorAsync"
+    CustomMultiprocExecutorAsync,
+    "tests.v1.executor.test_executor.CustomMultiprocExecutorAsync"
 ])
-def test_custom_executor_async(distributed_executor_backend, model, tmp_path):
+def test_custom_executor_async(distributed_executor_backend, tmp_path):
     cwd = os.path.abspath(".")
     os.chdir(tmp_path)
     try:
         assert not os.path.exists(".marker")
 
         engine_args = AsyncEngineArgs(
-            model=model,
+            model=MODEL,
+            gpu_memory_utilization=0.2,
             distributed_executor_backend=distributed_executor_backend,
             enforce_eager=True,  # reduce test time
         )
-        engine = AsyncLLMEngine.from_engine_args(engine_args)
+        engine = AsyncLLM.from_engine_args(engine_args)
         sampling_params = SamplingParams(max_tokens=1)
 
         async def t():
-            stream = await engine.add_request("0", "foo", sampling_params)
+            stream = engine.generate(request_id="0",
+                                     prompt="foo",
+                                     sampling_params=sampling_params)
             async for x in stream:
                 ...
 
@@ -100,18 +110,3 @@ def test_custom_executor_async(distributed_executor_backend, model, tmp_path):
         assert os.path.exists(".marker")
     finally:
         os.chdir(cwd)
-
-
-@pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
-def test_respect_ray(model):
-    # even for TP=1 and PP=1,
-    # if users specify ray, we should use ray.
-    # users might do this if they want to manage the
-    # resources using ray.
-    engine_args = EngineArgs(
-        model=model,
-        distributed_executor_backend="ray",
-        enforce_eager=True,  # reduce test time
-    )
-    engine = LLMEngine.from_engine_args(engine_args)
-    assert engine.model_executor.uses_ray
