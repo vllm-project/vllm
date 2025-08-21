@@ -104,7 +104,6 @@ if TYPE_CHECKING:
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: Optional[str] = None
     VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH: bool = True
-    VLLM_HPU_USE_DELAYED_SAMPLING: bool = False
     VLLM_HPU_FORCE_CHANNEL_FP8: bool = True
     VLLM_HPU_CONVERT_TO_FP8UZ: bool = True
     VLLM_DP_RANK: int = 0
@@ -732,12 +731,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # contiguous cache fetch will be used.
     "VLLM_USE_HPU_CONTIGUOUS_CACHE_FETCH":
     lambda: os.environ.get("VLLM_CONTIGUOUS_PA", "true").lower() in
-    ("1", "true"),
-
-    # Use delayed sampling for HPU to reduce host cpu overhead
-    # between each step.
-    "VLLM_HPU_USE_DELAYED_SAMPLING":
-    lambda: os.environ.get("VLLM_DELAYED_SAMPLING", "false").lower() in
     ("1", "true"),
 
     # Converts model weights to FP8UZ format.

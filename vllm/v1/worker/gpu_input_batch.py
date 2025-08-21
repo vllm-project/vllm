@@ -609,14 +609,7 @@ class InputBatch:
             for req_id, _ in req_id_output_token_ids
         ]
         prompt_token_ids = None
-        if not skip_copy:
-            self.temperature[req_indices].copy_(
-                self.temperature_cpu_tensor[req_indices], non_blocking=True)
-            self.top_p[req_indices].copy_(self.top_p_cpu_tensor[req_indices],
-                                          non_blocking=True)
-            self.top_k[req_indices].copy_(self.top_k_cpu_tensor[req_indices],
-                                          non_blocking=True)
-            if not self.no_penalties:
+        if not skip_copy and not self.no_penalties:
                 # Since syncing these tensors is expensive only copy them
                 # if necessary i.e. if there are requests which require
                 # penalties to be applied during sampling.

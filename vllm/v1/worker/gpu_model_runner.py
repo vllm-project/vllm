@@ -79,6 +79,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        self.count = 0
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -119,6 +120,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attention_chunk_size = model_config.attention_chunk_size
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
+
+        # Lookahead decoding
+        self.use_lookahead_decoding = get_config().lookahead_decoding
+        # Storage for lookahead tokens that are computed but not yet scheduled
+        self.lookahead_tokens: dict = {}
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
