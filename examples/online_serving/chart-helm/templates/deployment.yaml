@@ -115,7 +115,7 @@ spec:
         {{- if .Values.pvWithModels }} 
         - name: {{ .Values.pvWithModels }}
           persistentVolumeClaim:
-            claimName: {{ .Values.pvWithModels }}-claim   
+            claimName: {{ .Values.pvWithModels }}  
         {{- end }} 
 
       {{- with .Values.nodeSelector }}
