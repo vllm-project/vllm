@@ -40,7 +40,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -64,14 +64,15 @@ class GraniteSpeechAudioInputs(TensorSchema):
     
     Dimensions:
         - b: Batch size
-        - nf: Number of audio features (variable length)
+        - fi: Number of input features from the Mel spectrogram.
+        - fo: Number of output features, i.e. the embedding size.
         - 160: Fixed feature dimension for Mel spectrogram features
     """
 
-    input_features: Annotated[torch.Tensor, TensorShape("b", "nf", 160)]
+    input_features: Annotated[torch.Tensor, TensorShape("b", "fi", 160)]
     """Audio input features."""
 
-    input_features_mask: Annotated[torch.Tensor, TensorShape("b", "nf")]
+    input_features_mask: Annotated[torch.Tensor, TensorShape("b", "fo")]
     """Mask for variable length audio features."""
 
     audio_embed_sizes: Annotated[list[int], TensorShape("b")]
@@ -117,7 +118,7 @@ class GraniteSpeechMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()

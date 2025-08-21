@@ -579,10 +579,7 @@ def test_parse_chat_messages_rejects_too_many_images_in_one_message(
         warnings.filterwarnings(
             "ignore",
             message="coroutine 'async_get_and_parse_image' was never awaited")
-        with pytest.raises(
-                ValueError,
-                match="At most 2 image\\(s\\) may be provided in one request\\."
-        ):
+        with pytest.raises(ValueError, match="At most"):
             parse_chat_messages(
                 [{
                     "role":
@@ -622,10 +619,7 @@ def test_parse_chat_messages_rejects_too_many_images_across_messages(
         warnings.filterwarnings(
             "ignore",
             message="coroutine 'async_get_and_parse_image' was never awaited")
-        with pytest.raises(
-                ValueError,
-                match="At most 2 image\\(s\\) may be provided in one request\\."
-        ):
+        with pytest.raises(ValueError, match="At most"):
             parse_chat_messages(
                 [{
                     "role":

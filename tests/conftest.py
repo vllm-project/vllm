@@ -456,7 +456,15 @@ class HfRunner:
         outputs = []
         for inputs in all_inputs:
             output = self.model(**self.wrap_device(inputs))
-            logits = output.logits.softmax(dim=-1)[0].tolist()
+
+            problem_type = getattr(self.config, "problem_type", "")
+
+            if problem_type == "regression":
+                logits = output.logits[0].tolist()
+            elif problem_type == "multi_label_classification":
+                logits = output.logits.sigmoid()[0].tolist()
+            else:
+                logits = output.logits.softmax(dim=-1)[0].tolist()
             outputs.append(logits)
 
         return outputs
@@ -775,7 +783,7 @@ class VllmRunner:
         tokenizer_mode: str = "auto",
         trust_remote_code: bool = True,
         seed: Optional[int] = 0,
-        max_model_len: int = 1024,
+        max_model_len: Optional[int] = 1024,
         dtype: str = "auto",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
@@ -1051,6 +1059,10 @@ class VllmRunner:
 
     def encode(self, prompts: list[str]) -> list[list[float]]:
         req_outputs = self.llm.encode(prompts)
+        return [req_output.outputs.data for req_output in req_outputs]
+
+    def reward(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.llm.reward(prompts)
         return [req_output.outputs.data for req_output in req_outputs]
 
     def score(

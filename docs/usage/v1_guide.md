@@ -59,12 +59,13 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 
 ### Hardware
 
-| Hardware   | Status                             |
-|------------|------------------------------------|
-| **NVIDIA** | <nobr>🚀</nobr>                   |
-| **AMD**    | <nobr>🟢</nobr>                   |
-| **TPU**    | <nobr>🟢</nobr>                   |
-| **CPU**    | <nobr>🟢 (x86) 🟡 (MacOS) </nobr> |
+| Hardware   | Status                                        |
+|------------|-----------------------------------------------|
+| **NVIDIA** | <nobr>🚀</nobr>                               |
+| **AMD**    | <nobr>🟢</nobr>                               |
+| **INTEL GPU**    | <nobr>🟢</nobr>                               |
+| **TPU**    | <nobr>🟢</nobr>                               |
+| **CPU**    | <nobr>🟢 (x86\_64/aarch64) 🟡 (MacOS) </nobr> |
 
 !!! note
 
@@ -72,6 +73,7 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 
     - [vllm-ascend](https://github.com/vllm-project/vllm-ascend)
     - [vllm-spyre](https://github.com/vllm-project/vllm-spyre)
+    - [vllm-gaudi](https://github.com/vllm-project/vllm-gaudi)
     - [vllm-openvino](https://github.com/vllm-project/vllm-openvino)
 
     Please check their corresponding repositories for more details.
@@ -83,7 +85,7 @@ based on assigned priority, with FCFS as a tie-breaker), configurable via the
 | **Decoder-only Models**     | <nobr>🚀 Optimized</nobr>                                                          |
 | **Encoder-Decoder Models**  | <nobr>🟠 Delayed</nobr>                                                            |
 | **Embedding Models**        | <nobr>🟢 Functional</nobr>                                                         |
-| **Mamba Models**            | <nobr>🟢 (Mamba-2), 🟡 (Mamba-1)</nobr>                                            |
+| **Mamba Models**            | <nobr>🟢 (Mamba-2), 🟢 (Mamba-1)</nobr>                                            |
 | **Multimodal Models**       | <nobr>🟢 Functional</nobr>                                                         |
 
 vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol.
@@ -104,14 +106,16 @@ to enable simultaneous generation and embedding using the same engine instance i
 
 #### Mamba Models
 
-Models using selective state-space mechanisms instead of standard transformer attention are partially supported.
-Models that use Mamba-2 layers (e.g., `Mamba2ForCausalLM`) are supported, but models that use older Mamba-1 layers
-(e.g., `MambaForCausalLM`, `JambaForCausalLM`) are not yet supported. Please note that these models currently require
-disabling prefix caching in V1.
+Models using selective state-space mechanisms instead of standard transformer attention are supported.
+Models that use Mamba-2 and Mamba-1 layers (e.g., `Mamba2ForCausalLM`, `MambaForCausalLM`) are supported. Please note that these models currently require disabling prefix caching in V1. Additionally, Mamba-1 models require `enforce_eager=True`.
 
-Models that combine Mamba-2 layers with standard attention layers are also supported (e.g., `BambaForCausalLM`,
-`Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`). Please note that
+Models that combine Mamba-2 and Mamba-1 layers with standard attention layers are also supported (e.g., `BambaForCausalLM`,
+`Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`, `JambaForCausalLM`). Please note that
 these models currently require disabling prefix caching and using the FlashInfer attention backend in V1.
+
+Hybrid models with mechanisms different to Mamba are also supported (e.g, `MiniMaxText01ForCausalLM`, `MiniMaxM1ForCausalLM`).
+Please note that these models currently require disabling prefix caching, enforcing eager mode, and using the FlashInfer
+attention backend in V1.
 
 #### Encoder-Decoder Models
 
@@ -148,7 +152,7 @@ are not yet supported.
 vLLM V1 supports logprobs and prompt logprobs. However, there are some important semantic
 differences compared to V0:
 
-**Logprobs Calculation**
+##### Logprobs Calculation
 
 Logprobs in V1 are now returned immediately once computed from the model’s raw output (i.e.
 before applying any logits post-processing such as temperature scaling or penalty
@@ -157,7 +161,7 @@ probabilities used during sampling.
 
 Support for logprobs with post-sampling adjustments is in progress and will be added in future updates.
 
-**Prompt Logprobs with Prefix Caching**
+##### Prompt Logprobs with Prefix Caching
 
 Currently prompt logprobs are only supported when prefix caching is turned off via `--no-enable-prefix-caching`. In a future release, prompt logprobs will be compatible with prefix caching, but a recomputation will be triggered to recover the full prompt logprobs even upon a prefix cache hit. See details in [RFC #13414](gh-issue:13414).
 
@@ -165,7 +169,7 @@ Currently prompt logprobs are only supported when prefix caching is turned off v
 
 As part of the major architectural rework in vLLM V1, several legacy features have been deprecated.
 
-**Sampling features**
+##### Sampling features
 
 - **best_of**: This feature has been deprecated due to limited usage. See details at [RFC #13361](gh-issue:13361).
 - **Per-Request Logits Processors**: In V0, users could pass custom
@@ -173,11 +177,11 @@ As part of the major architectural rework in vLLM V1, several legacy features ha
   feature has been deprecated. Instead, the design is moving toward supporting **global logits
   processors**, a feature the team is actively working on for future releases. See details at [RFC #13360](gh-pr:13360).
 
-**KV Cache features**
+##### KV Cache features
 
 - **GPU <> CPU KV Cache Swapping**: with the new simplified core architecture, vLLM V1 no longer requires KV cache swapping
 to handle request preemptions.
 
-**Structured Output features**
+##### Structured Output features
 
 - **Request-level Structured Output Backend**: Deprecated, alternative backends (outlines, guidance) with fallbacks is supported now.

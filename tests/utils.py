@@ -4,6 +4,7 @@
 import asyncio
 import copy
 import functools
+import importlib
 import os
 import signal
 import subprocess
@@ -12,10 +13,12 @@ import tempfile
 import time
 import warnings
 from contextlib import contextmanager, suppress
+from multiprocessing import Process
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Union
 
 import cloudpickle
+import httpx
 import openai
 import pytest
 import requests
@@ -74,6 +77,23 @@ VLLM_PATH = Path(__file__).parent.parent
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
 
+    def _start_server(self, model: str, vllm_serve_args: list[str],
+                      env_dict: Optional[dict[str, str]]) -> None:
+        """Subclasses override this method to customize server process launch
+        """
+        env = os.environ.copy()
+        # the current process might initialize cuda,
+        # to be safe, we should use spawn method
+        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+        if env_dict is not None:
+            env.update(env_dict)
+        self.proc: subprocess.Popen = subprocess.Popen(
+            ["vllm", "serve", model, *vllm_serve_args],
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+
     def __init__(self,
                  model: str,
                  vllm_serve_args: list[str],
@@ -87,10 +107,12 @@ class RemoteOpenAIServer:
                 raise ValueError("You have manually specified the port "
                                  "when `auto_port=True`.")
 
-            # Don't mutate the input args
-            vllm_serve_args = vllm_serve_args + [
-                "--port", str(get_open_port())
-            ]
+            # No need for a port if using unix sockets
+            if "--uds" not in vllm_serve_args:
+                # Don't mutate the input args
+                vllm_serve_args = vllm_serve_args + [
+                    "--port", str(get_open_port())
+                ]
         if seed is not None:
             if "--seed" in vllm_serve_args:
                 raise ValueError("You have manually specified the seed "
@@ -103,8 +125,13 @@ class RemoteOpenAIServer:
         subparsers = parser.add_subparsers(required=False, dest="subparser")
         parser = ServeSubcommand().subparser_init(subparsers)
         args = parser.parse_args(["--model", model, *vllm_serve_args])
-        self.host = str(args.host or 'localhost')
-        self.port = int(args.port)
+        self.uds = args.uds
+        if args.uds:
+            self.host = None
+            self.port = None
+        else:
+            self.host = str(args.host or 'localhost')
+            self.port = int(args.port)
 
         self.show_hidden_metrics = \
             args.show_hidden_metrics_for_version is not None
@@ -119,18 +146,7 @@ class RemoteOpenAIServer:
             model_loader = get_model_loader(load_config)
             model_loader.download_model(model_config)
 
-        env = os.environ.copy()
-        # the current process might initialize cuda,
-        # to be safe, we should use spawn method
-        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
-        if env_dict is not None:
-            env.update(env_dict)
-        self.proc = subprocess.Popen(
-            ["vllm", "serve", model, *vllm_serve_args],
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-        )
+        self._start_server(model, vllm_serve_args, env_dict)
         max_wait_seconds = max_wait_seconds or 240
         self._wait_for_server(url=self.url_for("health"),
                               timeout=max_wait_seconds)
@@ -146,19 +162,25 @@ class RemoteOpenAIServer:
             # force kill if needed
             self.proc.kill()
 
+    def _poll(self) -> Optional[int]:
+        """Subclasses override this method to customize process polling"""
+        return self.proc.poll()
+
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check
         start = time.time()
+        client = (httpx.Client(transport=httpx.HTTPTransport(
+            uds=self.uds)) if self.uds else requests)
         while True:
             try:
-                if requests.get(url).status_code == 200:
+                if client.get(url).status_code == 200:
                     break
             except Exception:
                 # this exception can only be raised by requests.get,
                 # which means the server is not ready yet.
                 # the stack trace is not useful, so we suppress it
                 # by using `raise from None`.
-                result = self.proc.poll()
+                result = self._poll()
                 if result is not None and result != 0:
                     raise RuntimeError("Server exited unexpectedly.") from None
 
@@ -169,7 +191,8 @@ class RemoteOpenAIServer:
 
     @property
     def url_root(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        return (f"http://{self.uds.split('/')[-1]}"
+                if self.uds else f"http://{self.host}:{self.port}")
 
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
@@ -191,6 +214,48 @@ class RemoteOpenAIServer:
                                   api_key=self.DUMMY_API_KEY,
                                   max_retries=0,
                                   **kwargs)
+
+
+class RemoteOpenAIServerCustom(RemoteOpenAIServer):
+    """Launch test server with custom child process"""
+
+    def _start_server(self, model: str, vllm_serve_args: list[str],
+                      env_dict: Optional[dict[str, str]]) -> None:
+        self.proc: Process = Process(
+            target=self.child_process_fxn,
+            args=(env_dict, model,
+                  vllm_serve_args))  # type: ignore[assignment]
+        self.proc.start()
+
+    def __init__(self,
+                 model: str,
+                 vllm_serve_args: list[str],
+                 child_process_fxn: Callable[
+                     [Optional[dict[str, str]], str, list[str]], None],
+                 *,
+                 env_dict: Optional[dict[str, str]] = None,
+                 seed: Optional[int] = 0,
+                 auto_port: bool = True,
+                 max_wait_seconds: Optional[float] = None) -> None:
+        """Store custom child process function then invoke superclass
+        constructor which will indirectly launch it."""
+        self.child_process_fxn = child_process_fxn
+        super().__init__(model=model,
+                         vllm_serve_args=vllm_serve_args,
+                         env_dict=env_dict,
+                         seed=seed,
+                         auto_port=auto_port,
+                         max_wait_seconds=max_wait_seconds)
+
+    def _poll(self) -> Optional[int]:
+        return self.proc.exitcode
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.proc.terminate()
+        self.proc.join(8)
+        if self.proc.is_alive():
+            # force kill if needed
+            self.proc.kill()
 
 
 def _test_completion(
@@ -974,3 +1039,30 @@ def get_client_text_logprob_generations(
     return [(text_generations, text,
              (None if x.logprobs is None else x.logprobs.top_logprobs))
             for completion in completions for x in completion.choices]
+
+
+def has_module_attribute(module_name, attribute_name):
+    """
+    Helper function to check if a module has a specific attribute.
+    """
+    try:
+        module = importlib.import_module(module_name)
+        return hasattr(module, attribute_name)
+    except ImportError:
+        return False
+
+
+def get_attn_backend_list_based_on_platform() -> list[str]:
+    if current_platform.is_cuda():
+        return ["FLASH_ATTN_VLLM_V1", "TRITON_ATTN_VLLM_V1", "TREE_ATTN"]
+    elif current_platform.is_rocm():
+        attn_backend_list = ["TRITON_ATTN_VLLM_V1"]
+        try:
+            import aiter  # noqa: F401
+            attn_backend_list.append("FLASH_ATTN_VLLM_V1")
+        except Exception:
+            print("Skip FLASH_ATTN_VLLM_V1 on ROCm as aiter is not installed")
+
+        return attn_backend_list
+    else:
+        raise ValueError("Unsupported platform")
