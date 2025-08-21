@@ -268,6 +268,7 @@ def _test_processing_correctness_one(
     "Salesforce/blip2-opt-2.7b",
     "facebook/chameleon-7b",
     "deepseek-ai/deepseek-vl2-tiny",
+    "baidu/ERNIE-4.5-VL-28B-A3B-PT",
     "microsoft/Florence-2-base",
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",

@@ -179,11 +179,8 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                                    > 0)
         self.hidden_size = config.hidden_size
 
-        moe_num_experts = getattr(config, "moe_num_experts", 0)
-        if isinstance(moe_num_experts, list):
-            max_moe_num_experts = max(moe_num_experts)
-        else:
-            max_moe_num_experts = moe_num_experts
+        moe_num_experts = config.moe_num_experts
+        max_moe_num_experts = max(moe_num_experts)
 
         if self.tp_size > max_moe_num_experts:
             raise ValueError(
@@ -191,23 +188,14 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 f"the number of experts {moe_num_experts}.")
 
         moe_layer_start_index = config.moe_layer_start_index
-        if isinstance(moe_layer_start_index, int):
-            text_moe_layer_start_index = moe_layer_start_index
-            vision_moe_layer_start_index = moe_layer_start_index
-        else:
-            text_moe_layer_start_index = moe_layer_start_index[0]
-            vision_moe_layer_start_index = moe_layer_start_index[1]
-
+        text_moe_layer_start_index = moe_layer_start_index[0]
+        vision_moe_layer_start_index = moe_layer_start_index[1]
         moe_layer_end_index = config.moe_layer_end_index
-        if moe_layer_end_index is None:
-            text_moe_layer_end_index = config.num_layers
-            vision_moe_layer_end_index = config.num_layers
-        elif isinstance(moe_layer_end_index, int):
-            text_moe_layer_end_index = moe_layer_end_index
-            vision_moe_layer_end_index = moe_layer_end_index
-        else:
-            text_moe_layer_end_index = moe_layer_end_index[0]
-            vision_moe_layer_end_index = moe_layer_end_index[1]
+        moe_layer_end_index = getattr(config, "moe_layer_end_index",
+                                [config.num_hidden_layers - 1,
+                                config.num_hidden_layers - 1])
+        text_moe_layer_end_index = moe_layer_end_index[0]
+        vision_moe_layer_end_index = moe_layer_end_index[1]
 
         assert config.moe_num_experts[0] == config.moe_num_experts[1]
         self.e_score_correction_bias = nn.Parameter(
@@ -376,27 +364,15 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
         self.layer_idx = layer_idx
 
         # MoE
-        moe_layer_start_index = getattr(config, "moe_layer_start_index", 0)
-        if isinstance(moe_layer_start_index, list):
-            min_moe_layer_start_index = min(moe_layer_start_index)
-        else:
-            min_moe_layer_start_index = moe_layer_start_index
-
+        moe_layer_start_index = config.moe_layer_start_index
+        min_moe_layer_start_index = min(moe_layer_start_index)
         moe_layer_end_index = getattr(config, "moe_layer_end_index",
-                                      config.num_hidden_layers - 1)
-        if isinstance(moe_layer_end_index, list):
-            max_moe_layer_end_index = max(moe_layer_end_index)
-        else:
-            max_moe_layer_end_index = moe_layer_end_index
-
+                                      [config.num_hidden_layers - 1,
+                                       config.num_hidden_layers - 1])
+        max_moe_layer_end_index = max(moe_layer_end_index)
         assert min_moe_layer_start_index <= max_moe_layer_end_index
-
-        moe_num_experts = getattr(config, "moe_num_experts", 0)
-        if isinstance(moe_num_experts, list):
-            max_moe_num_experts = max(moe_num_experts)
-        else:
-            max_moe_num_experts = moe_num_experts
-
+        moe_num_experts = config.moe_num_experts
+        max_moe_num_experts = max(moe_num_experts)
         moe_layer_interval = getattr(config, "moe_layer_interval", 1)
         use_moe = getattr(config, "use_moe", max_moe_num_experts > 0)
 

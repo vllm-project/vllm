@@ -1059,20 +1059,22 @@ class Ernie4_5VLMultiModalProcessor(
                 if processor_output[key] is None:
                     del processor_output[key]
                     continue
-                if key == "images":
-                    processor_output['pixel_values'] = processor_output[
-                        'images']
-                    processor_output['pixel_values_videos'] = processor_output[
-                        'images']
-                    del processor_output['images']
                 if key == "grid_thw":
                     grid_thw = processor_output['grid_thw']
+                    pixel_values_all = processor_output['images']
                     # Identify elements where the first
                     # dimension is greater than 1 and
                     # treat them as the video modality
                     mask = grid_thw[:, 0] > 1
                     processor_output["video_grid_thw"] = grid_thw[mask]
                     processor_output["image_grid_thw"] = grid_thw[~mask]
+                    video_patch_num = processor_output["video_grid_thw"].prod(dim=1).sum()
+                    image_patch_num = processor_output["image_grid_thw"].prod(dim=1).sum()
+                    processor_output['pixel_values'] = pixel_values_all[:image_patch_num]
+                    processor_output['pixel_values_videos'] = pixel_values_all[image_patch_num:]
+                    del processor_output['images']
+                    
+                    
 
         return processor_output
 
@@ -1090,6 +1092,7 @@ class Ernie4_5VLMultiModalProcessor(
         }
 
         after_placeholder = {
+            # image and video have same placeholder
             "image": "<|IMAGE_PLACEHOLDER|>",
             "video": "<|IMAGE_PLACEHOLDER|>"
         }
@@ -1419,7 +1422,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(nn.Module, SupportsMultiModal,
         if not modalities:
             return None
 
-        # The result multimodal_embeddi ngs is tuple of tensors, with each
+        # The result multimodal_embeddings is tuple of tensors, with each
         # tensor correspoending to a multimodal data item (image or video).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
