@@ -269,7 +269,7 @@ class CLSPool(PoolingMethod):
         assert not pooling_cursor.is_partial_prefill(), \
             "partial prefill not supported with CLS pooling"
 
-        return hidden_states[pooling_cursor.first]
+        return hidden_states[pooling_cursor.first_token_indices_gpu]
 
 
 class LastPool(PoolingMethod):
@@ -282,7 +282,7 @@ class LastPool(PoolingMethod):
         hidden_states: torch.Tensor,
         pooling_cursor: PoolingCursor,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
-        return hidden_states[pooling_cursor.last]
+        return hidden_states[pooling_cursor.last_token_indices_gpu]
 
 
 class AllPool(PoolingMethod):
@@ -300,7 +300,8 @@ class AllPool(PoolingMethod):
             "partial prefill not supported with ALL pooling"
 
         hidden_states_lst = list(
-            hidden_states.split(pooling_cursor.num_scheduled_tokens.tolist()))
+            hidden_states.split(
+                pooling_cursor.num_scheduled_tokens_cpu.tolist()))
         return [hidden_states_lst[i] for i in pooling_cursor.index]
 
 
@@ -318,15 +319,15 @@ class MeanPool(PoolingMethod):
         assert not pooling_cursor.is_partial_prefill(), \
             "partial prefill not supported with MEAN pooling"
 
-        prompt_lens = pooling_cursor.prompt_lens.to(hidden_states.device,
-                                                    non_blocking=True)
+        prompt_lens = pooling_cursor.prompt_lens_cpu.to(hidden_states.device,
+                                                        non_blocking=True)
 
         # Use float32 for torch.cumsum in MeanPool,
         # otherwise precision will be lost significantly.
         cumsum = torch.cumsum(hidden_states, dim=0, dtype=torch.float32)
 
-        start_indices = pooling_cursor.first
-        end_indices = pooling_cursor.last
+        start_indices = pooling_cursor.first_token_indices_gpu
+        end_indices = pooling_cursor.last_token_indices_gpu
         return (cumsum[end_indices] - cumsum[start_indices] +
                 hidden_states[start_indices]) / prompt_lens.unsqueeze(1)
 

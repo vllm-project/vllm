@@ -14,22 +14,23 @@ pin_memory = is_pin_memory_available()
 @dataclass
 class PoolingCursor:
     index: list[int]
-    first: torch.Tensor  # GPU Tensor
-    last: torch.Tensor  # GPU Tensor
-    prompt_lens: torch.Tensor  # CPU Tensor
-    num_scheduled_tokens: torch.Tensor  # CPU Tensor
+    first_token_indices_gpu: torch.Tensor
+    last_token_indices_gpu: torch.Tensor
+    prompt_lens_cpu: torch.Tensor
+    num_scheduled_tokens_cpu: torch.Tensor
 
     def __getitem__(self, indices: slice):
         return PoolingCursor(
             index=self.index[indices],
-            first=self.first[indices],
-            last=self.last[indices],
-            prompt_lens=self.prompt_lens[indices],
-            num_scheduled_tokens=self.num_scheduled_tokens[indices],
+            first_token_indices_gpu=self.first_token_indices_gpu[indices],
+            last_token_indices_gpu=self.last_token_indices_gpu[indices],
+            prompt_lens_cpu=self.prompt_lens_cpu[indices],
+            num_scheduled_tokens_cpu=self.num_scheduled_tokens_cpu[indices],
         )
 
     def is_partial_prefill(self):
-        return not torch.all(self.prompt_lens == self.num_scheduled_tokens)
+        return not torch.all(
+            self.prompt_lens_cpu == self.num_scheduled_tokens_cpu)
 
 
 @dataclass
@@ -69,11 +70,8 @@ def build_pooling_cursor(num_scheduled_tokens: list[int],
                          device="cpu")
     torch.cumsum(num_scheduled_tokens, dim=0, out=cumsum[1:])
     cumsum = cumsum.to(device, non_blocking=True)
-
-    first = cumsum[:n_seq]
-    last = (cumsum[1:] - 1)
     return PoolingCursor(index=index,
-                         first=first,
-                         last=last,
-                         prompt_lens=prompt_lens,
-                         num_scheduled_tokens=num_scheduled_tokens)
+                         first_token_indices_gpu=cumsum[:n_seq],
+                         last_token_indices_gpu=cumsum[1:] - 1,
+                         prompt_lens_cpu=prompt_lens,
+                         num_scheduled_tokens_cpu=num_scheduled_tokens)
