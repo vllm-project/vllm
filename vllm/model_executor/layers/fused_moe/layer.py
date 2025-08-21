@@ -1785,31 +1785,22 @@ class FusedMoE(CustomOp):
                 final_hidden_states,
             )
 
-        if do_naive_dispatch_combine:
-            if self.shared_experts is None:
-                final_hidden_states = get_ep_group().combine(
-                    final_hidden_states)
-            else:
-                final_hidden_states = (
-                    get_ep_group().combine(final_hidden_states[0]),
-                    get_ep_group().combine(final_hidden_states[1]),
-                )
+        def reduce_output(states: torch.Tensor) -> torch.Tensor:
+            if do_naive_dispatch_combine:
+                states = get_ep_group().combine(states)
 
-        if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
-            # Default set to False. (May have to add shared expert outputs.
-            if self.shared_experts is None:
-                final_hidden_states = (
-                    self.maybe_all_reduce_tensor_model_parallel(
-                        final_hidden_states))
-            else:
-                final_hidden_states = (
-                    self.maybe_all_reduce_tensor_model_parallel(
-                        final_hidden_states[0]),
-                    self.maybe_all_reduce_tensor_model_parallel(
-                        final_hidden_states[1]),
-                )
+            if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+                states = self.maybe_all_reduce_tensor_model_parallel(states)
 
-        return final_hidden_states
+            return states
+
+        if self.shared_experts is None:
+            return reduce_output(final_hidden_states)
+        else:
+            return (
+                reduce_output(final_hidden_states[0]),
+                reduce_output(final_hidden_states[1]),
+            )
 
     @classmethod
     def make_expert_params_mapping(
