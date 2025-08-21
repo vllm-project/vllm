@@ -363,20 +363,12 @@ class PoolingRequestOutput(Generic[_O]):
         finished (bool): A flag indicating whether the pooling is completed.
     """
 
-    def __init__(self,
-                 request_id: str,
-                 outputs: _O,
-                 prompt_token_ids: list[int],
-                 finished: bool,
-                 task_output: Optional[Any] = None):
+    def __init__(self, request_id: str, outputs: _O,
+                 prompt_token_ids: list[int], finished: bool):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
         self.finished = finished
         self.outputs = outputs
-        # This field is used only when the pooling output data is
-        # post-procesed for a specific task. e.g., one of the
-        # multimodal_processor_plugins is aplpied to the output
-        self.task_output = task_output
 
     @staticmethod
     def from_seq_group(seq_group: SequenceGroup) -> "PoolingRequestOutput":

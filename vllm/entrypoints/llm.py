@@ -1165,7 +1165,11 @@ class LLM:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> Any:
 
-        assert self.io_processor is not None
+        if self.io_processor is None:
+            raise ValueError("No IOProcessor plugin installed. Please refer "
+                             "to the documentation and to the "
+                             "'prithvi_geospatial_mae_io_processor' "
+                             "offline inference example for more details.")
 
         # Validate the request data is valid for the loaded plugin
         validated_prompt = self.io_processor.parse_request(prompt)

@@ -238,11 +238,9 @@ class EngineClient(ABC):
         priority: int = 0,
     ) -> Any:
         """
-        Perform an encode request using the mulimodal
-        data processor plugin
+        Perform an encode request using the IOProcessor plugin
         """
-        raise NotImplementedError("encode_with_mm_data_plugin"
-                                  " is not implemented")
+        raise NotImplementedError
 
     @abstractmethod
     async def abort(self, request_id: Union[str, Iterable[str]]) -> None:

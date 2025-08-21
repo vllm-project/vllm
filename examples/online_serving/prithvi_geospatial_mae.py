@@ -12,7 +12,7 @@ import requests
 # perform inference.
 # Reuirements :
 # - install plugin at:
-#   https://github.com/christian-pinto/prithvi_multimodal_processor_plugin
+#   https://github.com/christian-pinto/prithvi_io_processor_plugin
 # - set the os env variable VLLM_USE_IO_PROCESSOR_PLUGIN="prithvi_to_tiff_india"
 # - start vllm in serving mode with the below args
 #   --model='christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM'

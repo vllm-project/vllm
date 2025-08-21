@@ -13,7 +13,7 @@ from vllm.pooling_params import PoolingParams
 # image as input, process it using the multimodal data processor, and
 # perform inference.
 # Reuirement - install plugin at:
-#   https://github.com/christian-pinto/prithvi_multimodal_processor_plugin
+#   https://github.com/christian-pinto/prithvi_io_processor_plugin
 
 
 def main():
