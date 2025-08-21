@@ -10,7 +10,7 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import ModelConfig, SchedulerConfig
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
+from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
@@ -28,15 +28,14 @@ class MultiModalBudget:
         model_config: ModelConfig,
         scheduler_config: SchedulerConfig,
         mm_registry: MultiModalRegistry,
-        *,
-        cache: Optional[BaseMultiModalProcessorCache] = None,
     ) -> None:
         super().__init__()
 
         self.model_config = model_config
         self.scheduler_config = scheduler_config
         self.mm_registry = mm_registry
-        self.cache = cache
+        self.cache = cache = processor_only_cache_from_config(
+            model_config, mm_registry)
 
         self.max_model_len = model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
