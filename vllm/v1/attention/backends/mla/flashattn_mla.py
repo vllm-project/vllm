@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
 import torch
 
@@ -57,7 +58,7 @@ class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
 class FlashAttnMLAMetadataBuilder(
         MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
     # TODO(lucas): tune this value
-    decode_threshold: int = 64
+    reorder_batch_threshold: ClassVar[int] = 64
 
     def __init__(self, runner):
         super().__init__(runner)
