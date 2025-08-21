@@ -53,7 +53,7 @@ class DummyLogitsProcessor(LogitsProcessor):
     def __init__(
         self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
     ):
-        self.req_info: dict[int, SamplingParams] = {}
+        self.req_info: dict[int, int] = {}
 
     def is_argmax_invariant(self) -> bool:
         """Never impacts greedy sampling"""
