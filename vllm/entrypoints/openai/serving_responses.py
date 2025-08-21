@@ -629,7 +629,7 @@ class OpenAIServingResponses(OpenAIServing):
                 python_description=self.tool_server.get_tool_description(
                     "python") if enable_code_interpreter
                 and self.tool_server is not None else None,
-                has_tools = bool(request.tools),
+                has_tools=bool(request.tools),
             )
             messages.append(sys_msg)
             dev_msg = get_developer_message(request.instructions,

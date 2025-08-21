@@ -37,6 +37,7 @@ def get_encoding():
             HarmonyEncodingName.HARMONY_GPT_OSS)
     return _harmony_encoding
 
+
 def get_system_message(
     model_identity: Optional[str] = None,
     reasoning_effort: Optional[Literal["high", "medium", "low"]] = None,
@@ -45,11 +46,14 @@ def get_system_message(
     python_description: Optional[str] = None,
     has_tools: bool = False,
 ) -> Message:
-    needs_commentary = has_tools or browser_description is not None or python_description is not None
+    needs_commentary = (has_tools or browser_description is not None
+                        or python_description is not None)
     if needs_commentary:
-        sys_msg_content = SystemContent.new().with_required_channels(["analysis", "commentary", "final"])
+        sys_msg_content = SystemContent.new().with_required_channels(
+            ["analysis", "commentary", "final"])
     else:
-        sys_msg_content = SystemContent.new().with_required_channels(["analysis", "final"])
+        sys_msg_content = SystemContent.new().with_required_channels(
+            ["analysis", "final"])
     if model_identity is not None:
         sys_msg_content = sys_msg_content.with_model_identity(model_identity)
     if reasoning_effort is not None:
