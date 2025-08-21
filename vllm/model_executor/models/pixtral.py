@@ -33,13 +33,14 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, MultiModalHashes,
+                                        BaseProcessingInfo,
+                                        MultiModalProcessingInfo,
                                         PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
@@ -273,7 +274,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
@@ -309,13 +310,8 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         tokenization_kwargs: Mapping[str, object],
         *,
         return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
-        (
-            prompt_ids,
-            mm_kwargs,
-            mm_hashes,
-            _,
-        ) = super()._cached_apply_hf_processor(
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+        prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
@@ -324,7 +320,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         )
 
         # NOTE: The tokens are already inserted by the chat template
-        return prompt_ids, mm_kwargs, mm_hashes, True
+        return prompt_ids, mm_info, True
 
 
 @MULTIMODAL_REGISTRY.register_processor(PixtralMultiModalProcessor,
@@ -671,7 +667,19 @@ class Attention(nn.Module):
         v = v.reshape(batch, patches, self.n_heads, self.head_dim)
 
         q, k = apply_rotary_emb_vit(q, k, freqs_cis=freqs_cis)
-        out = xops.memory_efficient_attention(q, k, v, attn_bias=mask)
+
+        if USE_XFORMERS_OPS:
+            out = xops.memory_efficient_attention(q, k, v, attn_bias=mask)
+        else:
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            out = nn.functional.scaled_dot_product_attention(q,
+                                                             k,
+                                                             v,
+                                                             attn_mask=mask)
+            out = out.transpose(1, 2)
+
         out = out.reshape(batch, patches, self.n_heads * self.head_dim)
         return self.wo(out)
 
@@ -814,8 +822,11 @@ class VisionTransformer(nn.Module):
             mask = xops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(
                 [p.shape[-2] * p.shape[-1] for p in patch_embeds_list], )
         else:
-            raise ImportError("Xformers is required for Pixtral inference "
-                              "with the Mistral format")
+            from transformers.models.pixtral.modeling_pixtral import (
+                generate_block_attention_mask)
+            mask = generate_block_attention_mask(
+                [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
+                patch_embeds)
         out = self.transformer(patch_embeds, mask=mask, freqs_cis=freqs_cis)
 
         # squeeze dim 0 and split into separate tensors for each image

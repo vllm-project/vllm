@@ -17,6 +17,7 @@ from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
+from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 # yapf: enable
@@ -64,11 +65,15 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
-    full_cudagraph_supported: ClassVar[bool] = True  # decode only
+    # TODO(luka, lucas): audit this as part of:
+    #  https://github.com/vllm-project/vllm/issues/22945
+    cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
-    def __init__(self, kv_cache_spec: AttentionSpec, vllm_config: VllmConfig,
-                 device: torch.device):
-        super().__init__(kv_cache_spec, vllm_config, device, AiterMLAMetadata)
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device,
+                         AiterMLAMetadata)
         assert self.kv_cache_spec.block_size == 1, "AITER MLA" \
             "only supports block size 1."
 
@@ -79,7 +84,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         max_num_pages = max_num_reqs * max_num_pages_per_req
 
         # Preparing persistent buffers
-        if vllm_config.compilation_config.full_cuda_graph:
+        # TODO: we can disambiguate between decode and mixed-prefill decode here
+        # so we can only use the persistent buffer if a cudagraph is actually
+        # being used.
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indptr = torch.zeros(max_num_reqs + 1,
                                                dtype=torch.int32,
                                                device=device)
@@ -117,7 +125,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             block_table_bounds.cumsum(dim=0, dtype=torch.int32)
         ])
 
-        if self.compilation_config.full_cuda_graph:
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
 
             num_actual_pages = paged_kv_indices.size(0)
 

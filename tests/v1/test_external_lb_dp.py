@@ -11,7 +11,7 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
-from vllm.platforms import Platform
+from vllm.platforms import current_platform
 
 MODEL_NAME = "ibm-research/PowerMoE-3b"
 
@@ -70,10 +70,11 @@ class ExternalLBServerManager:
                         sargs,
                         auto_port=False,
                         env_dict={
-                            "CUDA_VISIBLE_DEVICES":
+                            current_platform.device_control_env_var:
                             ",".join(
-                                str(Platform.device_id_to_physical_device_id(
-                                    i))
+                                str(
+                                    current_platform.
+                                    device_id_to_physical_device_id(i))
                                 for i in range(r * TP_SIZE, (r + 1) * TP_SIZE))
                         })
                     server.__enter__()

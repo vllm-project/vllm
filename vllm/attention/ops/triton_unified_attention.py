@@ -50,44 +50,52 @@ def find_seq_idx(query_start_len_ptr, target_idx, num_seqs,
 
 @triton.jit
 def kernel_unified_attention_2d(
-    output_ptr,  # [num_tokens, num_query_heads, head_size]
-    query_ptr,  # [num_tokens, num_query_heads, head_size]
-    key_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
-    value_cache_ptr,  # [num_blks, blk_size, num_kv_heads, head_size]
-    block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
-    seq_lens_ptr,  # [num_seqs]
-    alibi_slopes_ptr,  # [num_query_heads]
-    scale,  # float32
-    k_scale,  # float32
-    v_scale,  # float32
-    out_scale,  # float32
-    softcap,  # float32
-    num_query_heads: tl.constexpr,  # int
-    num_queries_per_kv: tl.constexpr,  # int
-    block_table_stride: tl.int64,  # int
-    query_stride_0: tl.int64,  # int
-    query_stride_1: tl.int64,  # int, should be equal to head_size
-    output_stride_0: tl.int64,  # int
+    output_ptr,  # [num_tokens, num_query_heads, head_size]              
+    query_ptr,  # [num_tokens, num_query_heads, head_size]              
+    key_cache_ptr,
+    # [num_blks, blk_size, num_kv_heads, head_size]
+    value_cache_ptr,
+    # [num_blks, blk_size, num_kv_heads,head_size]
+    sink_ptr,  # [num_query_heads]              
+    block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]              
+    seq_lens_ptr,  # [num_seqs]              
+    alibi_slopes_ptr,  # [num_query_heads] 
+    qq_bias_ptr,  # [num_query_tokens, num_query_tokens]             
+    scale,  # float32              
+    k_scale,  # float32              
+    v_scale,  # float32              
+    out_scale,  # float32              
+    softcap,  # float32              
+    num_query_heads: tl.constexpr,  # int              
+    num_queries_per_kv: tl.constexpr,  # int              
+    block_table_stride: tl.int64,  # int              
+    query_stride_0: tl.int64,  # int              
+    query_stride_1: tl.
+    int64,  # int, should be equal to head_size              
+    output_stride_0: tl.int64,  # int              
     output_stride_1: tl.int64,  # int, should be equal to head_size
-    BLOCK_SIZE: tl.constexpr,  # int
-    HEAD_SIZE: tl.constexpr,  # int
-    HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
+    qq_bias_stride_0: tl.int64,  # int           
+    BLOCK_SIZE: tl.constexpr,  # int              
+    HEAD_SIZE: tl.constexpr,  # int              
+    HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2              
     USE_ALIBI_SLOPES: tl.constexpr,  # bool
+    USE_QQ_BIAS: tl.constexpr,  # bool              
     USE_SOFTCAP: tl.constexpr,  # bool
-    SLIDING_WINDOW: tl.constexpr,  # int
-    stride_k_cache_0: tl.int64,  # int
-    stride_k_cache_1: tl.int64,  # int
-    stride_k_cache_2: tl.int64,  # int
-    stride_k_cache_3: tl.constexpr,  # int
-    stride_v_cache_0: tl.int64,  # int
-    stride_v_cache_1: tl.int64,  # int
-    stride_v_cache_2: tl.int64,  # int
-    stride_v_cache_3: tl.constexpr,  # int
-    query_start_len_ptr,  # [num_seqs+1]
-    BLOCK_Q: tl.constexpr,  # int
+    USE_SINKS: tl.constexpr,  # bool            
+    SLIDING_WINDOW: tl.constexpr,  # int              
+    stride_k_cache_0: tl.int64,  # int              
+    stride_k_cache_1: tl.int64,  # int              
+    stride_k_cache_2: tl.int64,  # int              
+    stride_k_cache_3: tl.constexpr,  # int              
+    stride_v_cache_0: tl.int64,  # int              
+    stride_v_cache_1: tl.int64,  # int              
+    stride_v_cache_2: tl.int64,  # int              
+    stride_v_cache_3: tl.constexpr,  # int              
+    query_start_len_ptr,  # [num_seqs+1]              
+    BLOCK_Q: tl.constexpr,  # int              
     num_seqs: tl.int32,
-    BLOCK_M: tl.constexpr,  # int
-    USE_FP8: tl.constexpr,  # bool
+    BLOCK_M: tl.constexpr,  # int              
+    USE_FP8: tl.constexpr,  # bool              
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
@@ -134,7 +142,15 @@ def kernel_unified_attention_2d(
 
     block_table_offset = seq_idx * block_table_stride
 
-    M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    if not USE_SINKS:
+        M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    else:
+        M = tl.load(
+            sink_ptr + query_offset_1,
+            mask=query_mask_1,
+            other=float("-inf"),
+        ).to(dtype=tl.float32)
+
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
 
@@ -149,6 +165,11 @@ def kernel_unified_attention_2d(
         alibi_slope = tl.load(alibi_slopes_ptr + query_offset_1,
                               mask=query_mask_1,
                               other=0.0)
+
+    # query-query attention bias
+    if USE_QQ_BIAS:
+        qq_bias_row_ptrs = (qq_bias_ptr + query_pos[:, None] * qq_bias_stride_0
+                            )  # shape: [BLOCK_M]
 
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
@@ -229,6 +250,18 @@ def kernel_unified_attention_2d(
         if USE_ALIBI_SLOPES:
             S += alibi_slope[:, None] * (seq_offset - context_len)
 
+        if USE_QQ_BIAS:
+            # compute key positions relative to query section
+            key_rel_pos = seq_offset - context_len  # shape: [BLOCK_SIZE]
+            # load bias only for keys that correspond to queries
+            is_query_key = key_rel_pos >= 0 and key_rel_pos < qq_bias_stride_0
+            qq_bias = tl.load(
+                qq_bias_row_ptrs + key_rel_pos[None, :],
+                mask=is_query_key[None, :],  # avoid OOB for context keys
+                other=0.0,
+            )
+            S += qq_bias
+
         # compute running maximum
         # m_j : (BLOCK_M,)
         m_j = tl.maximum(M, tl.max(S, axis=1))
@@ -281,9 +314,11 @@ def kernel_unified_attention_3d(
         query_ptr,  # [num_tokens, num_query_heads, head_size]
         key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
         value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
+        sink_ptr,  # [num_query_heads]
         block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
         seq_lens_ptr,  # [num_seqs]
         alibi_slopes_ptr,  # [num_query_heads]
+        qq_bias_ptr,  # [num_query_tokens, num_query_tokens]
         scale,  # float32
         k_scale,  # float32
         v_scale,  # float32
@@ -293,11 +328,14 @@ def kernel_unified_attention_3d(
         block_table_stride: tl.int64,  # int
         query_stride_0: tl.int64,  # int
         query_stride_1: tl.int64,  # int, should be equal to head_size
+        qq_bias_stride_0: tl.int64,  # int
         BLOCK_SIZE: tl.constexpr,  # int
         HEAD_SIZE: tl.constexpr,  # int
         HEAD_SIZE_PADDED: tl.constexpr,  # int, must be power of 2
         USE_ALIBI_SLOPES: tl.constexpr,  # bool
+        USE_QQ_BIAS: tl.constexpr,  # bool
         USE_SOFTCAP: tl.constexpr,  # bool
+        USE_SINKS: tl.constexpr,  # bool
         SLIDING_WINDOW: tl.constexpr,  # int
         stride_k_cache_0: tl.int64,  # int
         stride_k_cache_1: tl.int64,  # int
@@ -369,7 +407,18 @@ def kernel_unified_attention_3d(
 
     block_table_offset = seq_idx * block_table_stride
 
-    M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    if USE_SINKS:
+        if segm_idx == 0:
+            M = tl.load(
+                sink_ptr + query_offset_1,
+                mask=query_mask_1,
+                other=float("-inf"),
+            ).to(dtype=tl.float32)
+        else:
+            M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    else:
+        M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
 
@@ -381,6 +430,11 @@ def kernel_unified_attention_3d(
         alibi_slope = tl.load(alibi_slopes_ptr + query_offset_1,
                               mask=query_mask_1,
                               other=0.0)
+
+    # query-query attention bias
+    if USE_QQ_BIAS:
+        qq_bias_row_ptrs = (qq_bias_ptr + query_pos[:, None] * qq_bias_stride_0
+                            )  # shape: [BLOCK_M]
 
     num_blocks = cdiv_fn(seq_len, BLOCK_SIZE)
 
@@ -450,6 +504,18 @@ def kernel_unified_attention_3d(
 
         if USE_ALIBI_SLOPES:
             S += alibi_slope[:, None] * (seq_offset - context_len)
+
+        if USE_QQ_BIAS:
+            # compute key positions relative to query section
+            key_rel_pos = seq_offset - context_len  # shape: [BLOCK_SIZE]
+            # load bias only for keys that correspond to queries
+            is_query_key = key_rel_pos >= 0 and key_rel_pos < qq_bias_stride_0
+            qq_bias = tl.load(
+                qq_bias_row_ptrs + key_rel_pos[None, :],
+                mask=is_query_key[None, :],  # avoid OOB for context keys
+                other=0.0,
+            )
+            S += qq_bias
 
         # compute running maximum
         # m_j : (BLOCK_M,)
@@ -604,6 +670,9 @@ def unified_attention(
     v_descale,
     alibi_slopes=None,
     output_scale=None,
+    qq_bias=None,
+    # Optional tensor for sinks
+    sinks=None,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
@@ -612,7 +681,12 @@ def unified_attention(
     assert q.element_size() >= 2 or block_size >= 32, \
         "Block size must be at least 32 for fp8"
 
+    if sinks is not None:
+        assert sinks.shape[0] == q.shape[1], \
+        "Sinks must be num_query_heads size"
+
     use_alibi_slopes = alibi_slopes is not None
+    use_qq_bias = qq_bias is not None
 
     block_size = v.shape[1]
     num_seqs = len(seqused_k)
@@ -645,9 +719,11 @@ def unified_attention(
             query_ptr=q,
             key_cache_ptr=k,
             value_cache_ptr=v,
+            sink_ptr=sinks,
             block_tables_ptr=block_table,
             seq_lens_ptr=seqused_k,
             alibi_slopes_ptr=alibi_slopes,
+            qq_bias_ptr=qq_bias,
             scale=softmax_scale,
             k_scale=k_descale,
             v_scale=v_descale,
@@ -660,11 +736,14 @@ def unified_attention(
             query_stride_1=q.stride(1),
             output_stride_0=out.stride(0),
             output_stride_1=out.stride(1),
+            qq_bias_stride_0=qq_bias.stride(0) if use_qq_bias else 0,
             BLOCK_SIZE=block_size,
             HEAD_SIZE=head_size,
             HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
             USE_ALIBI_SLOPES=use_alibi_slopes,
+            USE_QQ_BIAS=use_qq_bias,
             USE_SOFTCAP=(softcap > 0),
+            USE_SINKS=(sinks is not None),
             SLIDING_WINDOW=(1 + window_size[0]),
             stride_k_cache_0=k.stride(0),
             stride_k_cache_1=k.stride(1),
@@ -716,9 +795,11 @@ def unified_attention(
                 query_ptr=q,
                 key_cache_ptr=k,
                 value_cache_ptr=v,
+                sink_ptr=sinks,
                 block_tables_ptr=block_table,
                 seq_lens_ptr=seqused_k,
                 alibi_slopes_ptr=alibi_slopes,
+                qq_bias_ptr=qq_bias,
                 scale=softmax_scale,
                 k_scale=k_descale,
                 v_scale=v_descale,
@@ -728,11 +809,14 @@ def unified_attention(
                 block_table_stride=block_table.stride(0),
                 query_stride_0=q.stride(0),
                 query_stride_1=q.stride(1),
+                qq_bias_stride_0=qq_bias.stride(0) if use_qq_bias else 0,
                 BLOCK_SIZE=block_size,
                 HEAD_SIZE=head_size,
                 HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
                 USE_ALIBI_SLOPES=use_alibi_slopes,
+                USE_QQ_BIAS=use_qq_bias,
                 USE_SOFTCAP=(softcap > 0),
+                USE_SINKS=(sinks is not None),
                 SLIDING_WINDOW=(1 + window_size[0]),
                 stride_k_cache_0=k.stride(0),
                 stride_k_cache_1=k.stride(1),

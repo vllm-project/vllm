@@ -11,6 +11,27 @@ from vllm._aiter_ops import aiter_ops
 from vllm.platforms import current_platform
 
 
+def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
+    # Shuffle weight along the last dimension so that
+    # we folded the weights to adjance location
+    # Example:
+    # input:
+    #       [[1, 2, 3, 4, 5, 6],
+    #        [7, 8, 9, 10, 11, 12]]
+    # output:
+    #       [[1, 4, 2, 5, 3, 6],
+    #        [7, 10, 8, 11, 9, 12]]
+    # This will be used together with triton swiglu kernel
+    shape = w.shape
+    N = shape[-1]
+    first = w[..., :N // 2]
+    second = w[..., N // 2:]
+
+    stacked = torch.stack((first, second), dim=-1)
+    w_shuffled = stacked.reshape(shape)
+    return w_shuffled
+
+
 def get_token_bin_counts_and_mask(
     tokens: torch.Tensor,
     vocab_size: int,
@@ -124,7 +145,8 @@ def cpu_unquantized_gemm(layer: torch.nn.Module,
 
 
 def dispatch_unquantized_gemm() -> Callable[
-    [torch.Tensor, torch.Tensor, Optional[torch.Tensor]], torch.Tensor]:
+    [torch.nn.Module, torch.Tensor, torch.Tensor, Optional[torch.Tensor]],
+    torch.Tensor]:
     if current_platform.is_rocm():
         return rocm_unquantized_gemm_wrapper()
     elif current_platform.is_cpu():

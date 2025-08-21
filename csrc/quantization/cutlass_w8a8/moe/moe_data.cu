@@ -47,13 +47,12 @@ __global__ void compute_problem_sizes(const int32_t* __restrict__ topk_ids,
 
 __global__ void compute_expert_offsets(
     const int32_t* __restrict__ problem_sizes1, int32_t* expert_offsets,
-    int32_t* atomic_buffer, const int num_experts, const int topk_length) {
+    int32_t* atomic_buffer, const int num_experts, const bool swap_ab) {
   int32_t tot_offset = 0;
   expert_offsets[0] = 0;
   for (int i = 0; i < num_experts; ++i) {
     atomic_buffer[i] = tot_offset;
-    tot_offset += topk_length > SWAP_AB_THRESHOLD ? problem_sizes1[i * 3]
-                                                  : problem_sizes1[i * 3 + 1];
+    tot_offset += swap_ab ? problem_sizes1[i * 3 + 1] : problem_sizes1[i * 3];
     expert_offsets[i + 1] = tot_offset;
   }
 }
@@ -61,15 +60,14 @@ __global__ void compute_expert_offsets(
 __global__ void compute_expert_blockscale_offsets(
     const int32_t* __restrict__ problem_sizes1, int32_t* expert_offsets,
     int32_t* blockscale_offsets, int32_t* atomic_buffer, const int num_experts,
-    const int topk_length) {
+    const bool swap_ab) {
   int32_t tot_offset = 0;
   int32_t tot_offset_round = 0;
   expert_offsets[0] = 0;
   blockscale_offsets[0] = 0;
   for (int i = 0; i < num_experts; ++i) {
-    int32_t cur_offset = topk_length > SWAP_AB_THRESHOLD
-                             ? problem_sizes1[i * 3]
-                             : problem_sizes1[i * 3 + 1];
+    int32_t cur_offset =
+        swap_ab ? problem_sizes1[i * 3 + 1] : problem_sizes1[i * 3];
     atomic_buffer[i] = tot_offset;
     tot_offset += cur_offset;
     expert_offsets[i + 1] = tot_offset;
@@ -119,15 +117,19 @@ void get_cutlass_moe_mm_data_caller(
 
   int num_threads = min(THREADS_PER_EXPERT, topk_ids.numel());
 
-  if (topk_ids.numel() > SWAP_AB_THRESHOLD) {
-    compute_problem_sizes<false><<<num_experts, num_threads, 0, stream>>>(
+  // Swap-AB should be disabled for FP4 path
+  bool may_swap_ab = (!blockscale_offsets.has_value()) &&
+                     (topk_ids.numel() <= SWAP_AB_THRESHOLD);
+
+  if (may_swap_ab) {
+    compute_problem_sizes<true><<<num_experts, num_threads, 0, stream>>>(
         static_cast<const int32_t*>(topk_ids.data_ptr()),
         static_cast<int32_t*>(problem_sizes1.data_ptr()),
         static_cast<int32_t*>(problem_sizes2.data_ptr()),
         static_cast<int32_t*>(atomic_buffer.data_ptr()), topk_ids.numel(), n,
         k);
   } else {
-    compute_problem_sizes<true><<<num_experts, num_threads, 0, stream>>>(
+    compute_problem_sizes<false><<<num_experts, num_threads, 0, stream>>>(
         static_cast<const int32_t*>(topk_ids.data_ptr()),
         static_cast<int32_t*>(problem_sizes1.data_ptr()),
         static_cast<int32_t*>(problem_sizes2.data_ptr()),
@@ -136,18 +138,19 @@ void get_cutlass_moe_mm_data_caller(
   }
 
   if (blockscale_offsets.has_value()) {
+    // fp4 path
     compute_expert_blockscale_offsets<<<1, 1, 0, stream>>>(
         static_cast<const int32_t*>(problem_sizes1.data_ptr()),
         static_cast<int32_t*>(expert_offsets.data_ptr()),
         static_cast<int32_t*>(blockscale_offsets.value().data_ptr()),
         static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts,
-        topk_ids.numel());
+        may_swap_ab);
   } else {
     compute_expert_offsets<<<1, 1, 0, stream>>>(
         static_cast<const int32_t*>(problem_sizes1.data_ptr()),
         static_cast<int32_t*>(expert_offsets.data_ptr()),
         static_cast<int32_t*>(atomic_buffer.data_ptr()), num_experts,
-        topk_ids.numel());
+        may_swap_ab);
   }
   compute_arg_sorts<<<num_experts, num_threads, 0, stream>>>(
       static_cast<const int32_t*>(topk_ids.data_ptr()),
@@ -158,6 +161,7 @@ void get_cutlass_moe_mm_data_caller(
       topk_ids.size(1));
 }
 
+template <bool SWAP_AB>
 __global__ void compute_pplx_data(int32_t* expert_offsets,
                                   int32_t* problem_sizes1,
                                   int32_t* problem_sizes2,
@@ -165,14 +169,23 @@ __global__ void compute_pplx_data(int32_t* expert_offsets,
                                   const int padded_m, const int n,
                                   const int k) {
   int expert_idx = threadIdx.x;
-
   expert_offsets[expert_idx] = expert_idx * padded_m;
-  problem_sizes1[expert_idx * 3] = expert_num_tokens[expert_idx];
-  problem_sizes1[expert_idx * 3 + 1] = 2 * n;
-  problem_sizes1[expert_idx * 3 + 2] = k;
-  problem_sizes2[expert_idx * 3] = expert_num_tokens[expert_idx];
-  problem_sizes2[expert_idx * 3 + 1] = k;
-  problem_sizes2[expert_idx * 3 + 2] = n;
+
+  if constexpr (!SWAP_AB) {
+    problem_sizes1[expert_idx * 3] = expert_num_tokens[expert_idx];
+    problem_sizes1[expert_idx * 3 + 1] = 2 * n;
+    problem_sizes1[expert_idx * 3 + 2] = k;
+    problem_sizes2[expert_idx * 3] = expert_num_tokens[expert_idx];
+    problem_sizes2[expert_idx * 3 + 1] = k;
+    problem_sizes2[expert_idx * 3 + 2] = n;
+  } else {
+    problem_sizes1[expert_idx * 3] = 2 * n;
+    problem_sizes1[expert_idx * 3 + 1] = expert_num_tokens[expert_idx];
+    problem_sizes1[expert_idx * 3 + 2] = k;
+    problem_sizes2[expert_idx * 3] = k;
+    problem_sizes2[expert_idx * 3 + 1] = expert_num_tokens[expert_idx];
+    problem_sizes2[expert_idx * 3 + 2] = n;
+  }
 }
 
 void get_cutlass_pplx_moe_mm_data_caller(torch::Tensor& expert_offsets,
@@ -184,10 +197,19 @@ void get_cutlass_pplx_moe_mm_data_caller(torch::Tensor& expert_offsets,
                                          const int64_t n, const int64_t k) {
   auto stream = at::cuda::getCurrentCUDAStream(expert_offsets.device().index());
 
-  compute_pplx_data<<<1, num_local_experts, 0, stream>>>(
-      static_cast<int32_t*>(expert_offsets.data_ptr()),
-      static_cast<int32_t*>(problem_sizes1.data_ptr()),
-      static_cast<int32_t*>(problem_sizes2.data_ptr()),
-      static_cast<const int32_t*>(expert_num_tokens.data_ptr()), padded_m, n,
-      k);
+  if (num_local_experts * padded_m > SWAP_AB_THRESHOLD) {
+    compute_pplx_data<false><<<1, num_local_experts, 0, stream>>>(
+        static_cast<int32_t*>(expert_offsets.data_ptr()),
+        static_cast<int32_t*>(problem_sizes1.data_ptr()),
+        static_cast<int32_t*>(problem_sizes2.data_ptr()),
+        static_cast<const int32_t*>(expert_num_tokens.data_ptr()), padded_m, n,
+        k);
+  } else {
+    compute_pplx_data<true><<<1, num_local_experts, 0, stream>>>(
+        static_cast<int32_t*>(expert_offsets.data_ptr()),
+        static_cast<int32_t*>(problem_sizes1.data_ptr()),
+        static_cast<int32_t*>(problem_sizes2.data_ptr()),
+        static_cast<const int32_t*>(expert_num_tokens.data_ptr()), padded_m, n,
+        k);
+  }
 }

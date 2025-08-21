@@ -57,15 +57,7 @@ def test_auto_gptq(model_arg_exptype: tuple[str, None, str]) -> None:
     model_path, quantization_arg, expected_type = model_arg_exptype
 
     try:
-        model_config = ModelConfig(model_path,
-                                   task="auto",
-                                   tokenizer=model_path,
-                                   tokenizer_mode="auto",
-                                   trust_remote_code=False,
-                                   seed=0,
-                                   dtype="float16",
-                                   revision=None,
-                                   quantization=quantization_arg)
+        model_config = ModelConfig(model_path, quantization=quantization_arg)
         found_quantization_type = model_config.quantization
     except ValueError:
         found_quantization_type = "ERROR"

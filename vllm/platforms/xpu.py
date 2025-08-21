@@ -30,13 +30,13 @@ class XPUPlatform(Platform):
     # see https://github.com/ray-project/ray/blob/6a5eb5865eeb9ccf058a79b44f107e327e360673/python/ray/_private/accelerators/intel_gpu.py#L20 # noqa: E501
     ray_device_key: str = "GPU"
     dist_backend: str = "ccl"  # ccl | xccl
-    device_control_env_var: str = "ONEAPI_DEVICE_SELECTOR"
+    device_control_env_var: str = "ZE_AFFINITY_MASK"
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+                             block_size: int, use_v1: bool, use_mla: bool,
+                             has_sink: bool) -> str:
         if selected_backend is not None and selected_backend != _Backend.IPEX:
             logger.info("Cannot use %s backend on XPU.", selected_backend)
         use_v1 = envs.VLLM_USE_V1
@@ -67,7 +67,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
+        return "vllm.lora.punica_wrapper.punica_xpu.PunicaWrapperXPU"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
@@ -100,16 +100,19 @@ class XPUPlatform(Platform):
         # Instances created using VllmConfig() typically have model_config as
         # None by default. The modification involves adding a check to prevent
         # potential null exceptions check and update model config.
-        if model_config is not None:
-            if model_config.dtype == torch.bfloat16:
-                bf16_supported = cls.device_support_bf16()
-                if not bf16_supported:
-                    model_config.dtype = torch.float16
-            if not model_config.enforce_eager:
-                logger.warning(
-                    "CUDA graph is not supported on XPU, fallback to the eager "
-                    "mode.")
-                model_config.enforce_eager = True
+        if model_config is not None and model_config.dtype == torch.bfloat16 \
+            and not cls.device_support_bf16():
+            model_config.dtype = torch.float16
+
+        # lazy import to avoid circular import
+        from vllm.config import CUDAGraphMode
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.cudagraph_mode is None or \
+                compilation_config.cudagraph_mode.max_cudagraph_mode() \
+                    != CUDAGraphMode.NONE:
+            logger.info("[XPU] CUDA graph is not supported on XPU, "
+                        "disabling cudagraphs.")
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config

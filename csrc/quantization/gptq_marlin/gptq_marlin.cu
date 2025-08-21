@@ -48,7 +48,8 @@ __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
 
 torch::Tensor gptq_marlin_gemm(
     torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
-    torch::Tensor& b_q_weight, torch::Tensor& b_scales,
+    torch::Tensor& b_q_weight,
+    std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
     std::optional<torch::Tensor> const& b_zeros_or_none,
     std::optional<torch::Tensor> const& g_idx_or_none,
     std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
@@ -187,7 +188,12 @@ int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
   int tb_m = thread_m_blocks * 16;
   int sh_a_size = pipe_stages * (tb_m * tb_k) * 2;
   int sh_b_size = pipe_stages * (tb_k * tb_n / pack_factor) * 4;
-  int sh_red_size = tb_m * (tb_n + 8);
+  int sh_red_size = tb_m * (tb_n + 8) * 2;
+  int sh_bias_size = tb_n * 2;
+  int tmp_size =
+      (sh_b_size > sh_red_size ? sh_red_size : sh_b_size) + sh_bias_size;
+  tmp_size = max(max(sh_b_size, sh_red_size), tmp_size);
+
   int sh_s_size =
       get_scales_cache_size(th_config, prob_m, prob_n, prob_k, num_bits,
                             group_size, has_act_order, is_k_full);
@@ -202,8 +208,8 @@ int get_kernel_cache_size(thread_config_t const& th_config, int thread_m_blocks,
       sh_zp_size = sh_s_size / 2;
   }
 
-  int total_size = max(sh_b_size, sh_red_size) + sh_a_size + sh_s_size +
-                   sh_zp_size + sh_g_idx_size;
+  int total_size =
+      tmp_size + sh_a_size + sh_s_size + sh_zp_size + sh_g_idx_size;
 
   return total_size;
 }
@@ -237,20 +243,25 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
   int cache_size = get_kernel_cache_size(
       th_config, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
       has_act_order, is_k_full, has_zp, is_zp_float);
-  return cache_size <= max_shared_mem;
+  return cache_size + 512 <= max_shared_mem;
 }
 
-  #define _GET_IF(W_TYPE, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS, \
-                  M_BLOCK_SIZE_8, GROUP_BLOCKS, NUM_THREADS, IS_ZP_FLOAT)    \
-    else if (q_type == W_TYPE && thread_m_blocks == THREAD_M_BLOCKS &&       \
-             thread_n_blocks == THREAD_N_BLOCKS &&                           \
-             thread_k_blocks == THREAD_K_BLOCKS &&                           \
-             m_block_size_8 == M_BLOCK_SIZE_8 &&                             \
-             group_blocks == GROUP_BLOCKS && num_threads == NUM_THREADS &&   \
-             is_zp_float == IS_ZP_FLOAT) {                                   \
-      kernel = Marlin<scalar_t, W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS,   \
-                      THREAD_N_BLOCKS, THREAD_K_BLOCKS, M_BLOCK_SIZE_8,      \
-                      pipe_stages, GROUP_BLOCKS, IS_ZP_FLOAT>;               \
+  #define _GET_IF(W_TYPE, THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,   \
+                  M_BLOCK_SIZE_8, GROUP_BLOCKS, NUM_THREADS, IS_ZP_FLOAT)      \
+    else if (q_type == W_TYPE && thread_m_blocks == THREAD_M_BLOCKS &&         \
+             thread_n_blocks == THREAD_N_BLOCKS &&                             \
+             thread_k_blocks == THREAD_K_BLOCKS &&                             \
+             m_block_size_8 == M_BLOCK_SIZE_8 &&                               \
+             group_blocks == GROUP_BLOCKS && num_threads == NUM_THREADS &&     \
+             is_zp_float == IS_ZP_FLOAT) {                                     \
+      constexpr auto S_TYPE =                                                  \
+          W_TYPE == vllm::kFE2M1f                                              \
+              ? (GROUP_BLOCKS == 1 ? vllm::kFE4M3fn : vllm::kFE8M0fnu)         \
+              : (std::is_same<scalar_t, half>::value ? vllm::kFloat16          \
+                                                     : vllm::kBFloat16);       \
+      kernel = Marlin<scalar_t, W_TYPE.id(), S_TYPE.id(), NUM_THREADS,         \
+                      THREAD_M_BLOCKS, THREAD_N_BLOCKS, THREAD_K_BLOCKS,       \
+                      M_BLOCK_SIZE_8, pipe_stages, GROUP_BLOCKS, IS_ZP_FLOAT>; \
     }
 
   // COMMON: cases for (group_blocks in [-1, 2, 4, 8] and is_zp_float == false)
@@ -315,22 +326,39 @@ bool is_valid_config(thread_config_t const& th_config, int thread_m_blocks,
     BIGGROUP_GET_IF_M234(W_TYPE, 8, 4, 128)  \
     BIGGROUP_GET_IF_M234(W_TYPE, 4, 8, 128)
 
-  #define FP4_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)        \
+  #define NVFP4_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)      \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 1, NUM_THREADS, false) \
     _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)
 
-  #define FP4_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
+  #define NVFP4_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)     \
     _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
     _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false) \
     _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 1, NUM_THREADS, false)
 
-  #define FP4_GET_IF(W_TYPE)            \
-    FP4_GET_IF_M1(W_TYPE, 8, 8, 256)    \
-    FP4_GET_IF_M1(W_TYPE, 8, 4, 128)    \
-    FP4_GET_IF_M1(W_TYPE, 4, 8, 128)    \
-    FP4_GET_IF_M234(W_TYPE, 16, 4, 256) \
-    FP4_GET_IF_M234(W_TYPE, 8, 4, 128)  \
-    FP4_GET_IF_M234(W_TYPE, 4, 8, 128)
+  #define NVFP4_GET_IF(W_TYPE)            \
+    NVFP4_GET_IF_M1(W_TYPE, 8, 8, 256)    \
+    NVFP4_GET_IF_M1(W_TYPE, 8, 4, 128)    \
+    NVFP4_GET_IF_M1(W_TYPE, 4, 8, 128)    \
+    NVFP4_GET_IF_M234(W_TYPE, 16, 4, 256) \
+    NVFP4_GET_IF_M234(W_TYPE, 8, 4, 128)  \
+    NVFP4_GET_IF_M234(W_TYPE, 4, 8, 128)
+
+  #define MXFP4_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)      \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, true, 2, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 1, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS, false)
+
+  #define MXFP4_GET_IF_M234(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)     \
+    _GET_IF(W_TYPE, 2, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 3, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS, false) \
+    _GET_IF(W_TYPE, 4, N_BLOCKS, K_BLOCKS, false, 2, NUM_THREADS, false)
+
+  #define MXFP4_GET_IF(W_TYPE)            \
+    MXFP4_GET_IF_M1(W_TYPE, 8, 8, 256)    \
+    MXFP4_GET_IF_M1(W_TYPE, 8, 4, 128)    \
+    MXFP4_GET_IF_M1(W_TYPE, 4, 8, 128)    \
+    MXFP4_GET_IF_M234(W_TYPE, 16, 4, 256) \
+    MXFP4_GET_IF_M234(W_TYPE, 8, 4, 128)  \
+    MXFP4_GET_IF_M234(W_TYPE, 4, 8, 128)
 
   // We currently have 4-bit models only with group_blocks == 4
   #define FZP_GET_IF_M1(W_TYPE, N_BLOCKS, K_BLOCKS, NUM_THREADS)       \
@@ -384,7 +412,7 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
   COMMON_GET_IF(vllm::kU4B8)
   COMMON_GET_IF(vllm::kU8B128)
 
-  FP4_GET_IF(vllm::kFE2M1f)
+  NVFP4_GET_IF(vllm::kFE2M1f)
 
   BIGGROUP_GET_IF(vllm::kFE4M3fn)
 
@@ -395,6 +423,11 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
     if (false) {
     }
     FZP_GET_IF(vllm::kU4)
+  }
+  if (std::is_same<scalar_t, nv_bfloat16>::value) {
+    if (false) {
+    }
+    MXFP4_GET_IF(vllm::kFE2M1f)
   }
 
   return kernel;
@@ -453,12 +486,12 @@ exec_config_t determine_exec_config(const vllm::ScalarType& q_type, int prob_m,
 }
 
 template <typename scalar_t>
-void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
-               void* s2, void* zp, void* g_idx, void* perm, void* a_tmp,
-               int prob_m, int prob_n, int prob_k, int lda, void* workspace,
-               vllm::ScalarType const& q_type, bool has_act_order,
-               bool is_k_full, bool has_zp, int num_groups, int group_size,
-               int dev, cudaStream_t stream, int thread_k_init,
+void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
+               void* s, void* s2, void* zp, void* g_idx, void* perm,
+               void* a_tmp, int prob_m, int prob_n, int prob_k, int lda,
+               void* workspace, vllm::ScalarType const& q_type, bool has_bias,
+               bool has_act_order, bool is_k_full, bool has_zp, int num_groups,
+               int group_size, int dev, cudaStream_t stream, int thread_k_init,
                int thread_n_init, int sms, bool use_atomic_add,
                bool use_fp32_reduce, bool is_zp_float) {
   if (has_zp) {
@@ -503,6 +536,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
   const int4* B_ptr = (const int4*)B;
   int4* C_ptr = (int4*)C;
   int4* C_tmp_ptr = (int4*)C_tmp;
+  const int4* bias_ptr = (const int4*)b_bias;
   const int4* s_ptr = (const int4*)s;
   const uint16_t* s2_ptr = (const uint16_t*)s2;
   const int4* zp_ptr = (const int4*)zp;
@@ -623,8 +657,9 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
     // avoid ">>>" being formatted to "> > >"
     // clang-format off
     kernel<<<blocks, num_threads, max_shared_mem_new, stream>>>(
-        A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, s2_ptr, zp_ptr, g_idx_ptr, num_groups,
-        prob_m_split, prob_n, prob_k, lda, locks, part_use_atomic_add,
+        A_ptr, B_ptr, C_ptr, C_tmp_ptr, bias_ptr, s_ptr, s2_ptr, zp_ptr,
+        g_idx_ptr, num_groups,
+        prob_m_split, prob_n, prob_k, lda, locks, has_bias, part_use_atomic_add,
         use_fp32_reduce, max_shared_mem_new);
     // clang-format on
 
@@ -638,7 +673,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
 
 torch::Tensor gptq_marlin_gemm(
     torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
-    torch::Tensor& b_q_weight, torch::Tensor& b_scales,
+    torch::Tensor& b_q_weight,
+    std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
     std::optional<torch::Tensor> const& global_scale_or_none,
     std::optional<torch::Tensor> const& b_zeros_or_none,
     std::optional<torch::Tensor> const& g_idx_or_none,
@@ -785,12 +821,24 @@ torch::Tensor gptq_marlin_gemm(
   torch::Tensor global_scale;
   if (global_scale_or_none.has_value()) {
     global_scale = global_scale_or_none.value();
-    TORCH_CHECK(b_q_type == vllm::kFE2M1f,
-                "global_scale can only be used for float4_e2m1f.");
+    TORCH_CHECK(b_q_type == vllm::kFE2M1f && group_size == 16,
+                "global_scale can only be used for nvfp4 format.");
   } else {
     global_scale = torch::empty({0}, options);
-    TORCH_CHECK(!(b_q_type == vllm::kFE2M1f),
-                "the global_scale parameter must be passed for float4_e2m1f.");
+    TORCH_CHECK(!(b_q_type == vllm::kFE2M1f && group_size == 16),
+                "the global_scale parameter must be passed for nvfp4 format.");
+  }
+
+  bool has_bias = b_bias_or_none.has_value();
+  torch::Tensor b_bias;
+  if (has_bias) {
+    b_bias = b_bias_or_none.value();
+    TORCH_CHECK(b_bias.device().is_cuda(), "b_bias is not on GPU");
+    TORCH_CHECK(b_bias.is_contiguous(), "b_bias is not contiguous");
+    TORCH_CHECK(b_bias.size(0) == size_n, "b_bias.size(0) != size_n");
+    TORCH_CHECK(b_bias.stride(0) == 1, "b_bias.stride(0) != 1");
+  } else {
+    b_bias = torch::empty({0}, options);
   }
 
   torch::Tensor b_zeros;
@@ -857,34 +905,50 @@ torch::Tensor gptq_marlin_gemm(
   if (a.scalar_type() == at::ScalarType::Half) {
     void* scales_ptr;
     if (b_q_type == vllm::kFE2M1f) {
-      scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
+      if (group_size == 16)
+        scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
+      else if (group_size == 32)
+        scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
+      else
+        TORCH_CHECK(false,
+                    "float4_e2m1f only supports group_size == 16 (NVFP4) ",
+                    "and group_size == 32 (MXFP4)");
     } else {
       scales_ptr = b_scales.data_ptr<at::Half>();
     }
 
     marlin::marlin_mm<half>(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
-        c_tmp.data_ptr<float>(), scales_ptr, global_scale.data_ptr<at::Half>(),
-        b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
-        a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k, a.stride(0),
-        workspace.data_ptr(), b_q_type, has_act_order, is_k_full, has_zp,
-        num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
-        thread_k, thread_n, sms, use_atomic_add, use_fp32_reduce, is_zp_float);
+        c_tmp.data_ptr<float>(), b_bias.data_ptr<at::Half>(), scales_ptr,
+        global_scale.data_ptr<at::Half>(), b_zeros.data_ptr(), g_idx.data_ptr(),
+        perm.data_ptr(), a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k,
+        a.stride(0), workspace.data_ptr(), b_q_type, has_bias, has_act_order,
+        is_k_full, has_zp, num_groups, group_size, dev,
+        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
+        use_atomic_add, use_fp32_reduce, is_zp_float);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
     void* scales_ptr;
     if (b_q_type == vllm::kFE2M1f) {
-      scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
+      if (group_size == 16)
+        scales_ptr = b_scales.data_ptr<at::Float8_e4m3fn>();
+      else if (group_size == 32)
+        scales_ptr = b_scales.data_ptr<at::Float8_e8m0fnu>();
+      else
+        TORCH_CHECK(false,
+                    "float4_e2m1f only supports group_size == 16 (NVFP4) ",
+                    "and group_size == 32 (MXFP4)");
     } else {
       scales_ptr = b_scales.data_ptr<at::BFloat16>();
     }
 
     marlin::marlin_mm<nv_bfloat16>(
         a.data_ptr<at::BFloat16>(), b_q_weight.data_ptr(),
-        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(), scales_ptr,
+        c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
+        b_bias.data_ptr<at::BFloat16>(), scales_ptr,
         global_scale.data_ptr<at::BFloat16>(), b_zeros.data_ptr(),
         g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
         size_m, size_n, size_k, a.stride(0), workspace.data_ptr(), b_q_type,
-        has_act_order, is_k_full, has_zp, num_groups, group_size, dev,
+        has_bias, has_act_order, is_k_full, has_zp, num_groups, group_size, dev,
         at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
   } else {

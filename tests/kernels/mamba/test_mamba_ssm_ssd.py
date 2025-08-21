@@ -9,7 +9,7 @@ from einops import rearrange, repeat
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined)
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.mamba_attn import (
+from vllm.v1.attention.backends.mamba2_attn import (
     _query_start_loc_to_chunk_indices_offsets)
 
 # Added by the IBM Team, 2024
@@ -187,11 +187,18 @@ def generate_continuous_batched_examples(example_lens_by_batch,
                          [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("n_heads", [3, 4, 11, 16, 32])
 @pytest.mark.parametrize("d_head", [5, 8, 19, 32, 128])
-@pytest.mark.parametrize("seq_len_chunk_size", [(119, 17), (128, 32)])
+@pytest.mark.parametrize("seq_len_chunk_size", [(112, 16), (128, 32)])
 def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
                                          itype):
 
     # this tests the kernels on a single example (no batching)
+
+    # TODO: the bfloat16 case requires higher thresholds. To be investigated
+
+    if itype == torch.bfloat16:
+        atol, rtol = 5e-2, 5e-2
+    else:
+        atol, rtol = 8e-3, 5e-3
 
     # set seed
     batch_size = 1  # batch_size
@@ -205,25 +212,26 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
 
     Y_min, final_state_min = ssd_minimal_discrete(X * dt.unsqueeze(-1), A * dt,
                                                   B, C, chunk_size)
-
-    Y, final_state = mamba_chunk_scan_combined(X,
-                                               dt,
-                                               A,
-                                               B,
-                                               C,
-                                               chunk_size,
-                                               D=None,
-                                               return_final_states=True)
+    Y = torch.empty_like(X)
+    final_state = mamba_chunk_scan_combined(X,
+                                            dt,
+                                            A,
+                                            B,
+                                            C,
+                                            chunk_size,
+                                            D=None,
+                                            return_final_states=True,
+                                            out=Y)
 
     # just test the last in sequence
-    torch.allclose(Y[:, -1], Y_min[:, -1], atol=1e-3, rtol=1e-3)
+    torch.testing.assert_close(Y[:, -1], Y_min[:, -1], atol=atol, rtol=rtol)
 
     # just test the last head
     # NOTE, in the kernel we always cast states to fp32
-    torch.allclose(final_state[:, -1],
-                   final_state_min[:, -1].to(torch.float32),
-                   atol=1e-3,
-                   rtol=1e-3)
+    torch.testing.assert_close(final_state[:, -1],
+                               final_state_min[:, -1].to(torch.float32),
+                               atol=atol,
+                               rtol=rtol)
 
 
 @pytest.mark.parametrize("itype", [torch.float32, torch.float16])
@@ -245,15 +253,15 @@ def test_mamba_chunk_scan_single_example(d_head, n_heads, seq_len_chunk_size,
             (8, 8, 16, 32, 16),
         ]),  # mode examples with varied lengths
 
-        # odd chunk_size
-        (64, 29, 2, [(11, 4), (13, 23), (19, 22),
-                     (21, 15)]),  # irregular sizes
-
         # large-ish chunk_size (256)
         (64, 256, 1, [(5, ), (1, ), (1, ),
                       (1, )]),  # irregular sizes with small sequences
         (64, 256, 2, [(5, 30), (1, 2), (1, 2),
                       (1, 2)]),  # irregular sizes with small sequences
+
+        # we also need to test some large seqlen
+        # to catch errors with init states decay
+        (768, 128, 2, [(138, 225), (138, 225)]),
     ])
 def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
                                      itype):
@@ -262,6 +270,12 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
     # (i.e. chunked prefill)
 
     seqlen, chunk_size, num_examples, cases = seq_len_chunk_size_cases
+
+    # This test can have larger error for longer sequences
+    if seqlen > 256:
+        atol, rtol = 1e-2, 5e-3
+    else:
+        atol, rtol = 5e-3, 5e-3
 
     # hold state during the cutting process so we know if an
     # example has been exhausted and needs to cycle
@@ -278,7 +292,8 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
             _query_start_loc_to_chunk_indices_offsets(
                 cu_seqlens, chunk_size, cu_seqlens[-1])
 
-        Y, new_states = mamba_chunk_scan_combined(
+        Y = torch.empty_like(X)
+        new_states = mamba_chunk_scan_combined(
             X,
             dt,
             A,
@@ -292,6 +307,7 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
             chunk_offsets=chunk_offsets,
             return_varlen_states=True,
             initial_states=states,
+            out=Y,
         )
 
         # just test the last in sequence
@@ -300,7 +316,7 @@ def test_mamba_chunk_scan_cont_batch(d_head, n_heads, seq_len_chunk_size_cases,
             # just test one dim and dstate
             Y_eg = Y[0, cu_seqlens[i]:cu_seqlens[i + 1], 0, 0]
             Y_min_eg = Y_min[i][:, 0, 0]
-            torch.allclose(Y_eg, Y_min_eg, atol=1e-3, rtol=1e-3)
+            torch.testing.assert_close(Y_eg, Y_min_eg, atol=atol, rtol=rtol)
 
         # update states
         states = new_states
