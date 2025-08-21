@@ -360,10 +360,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         elif current_platform.is_cpu():
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
                 from vllm.model_executor.layers.fused_moe import cpu_fused_moe
-                dtype = layer.w13_weight.dtype
+                from vllm.model_executor.layers.utils import (
+                    check_cpu_sgl_kernel)
+                dtype_w13 = layer.w13_weight.dtype
+                _, n_w13, k_w13 = layer.w13_weight.size()
+                dtype_w2 = layer.w2_weight.dtype
+                _, n_w2, k_w2 = layer.w2_weight.size()
                 if (envs.VLLM_CPU_SGL_KERNEL
-                        and torch._C._cpu._is_amx_tile_supported()
-                        and dtype == torch.bfloat16):
+                        and check_cpu_sgl_kernel(n_w13, k_w13, dtype_w13)
+                        and check_cpu_sgl_kernel(n_w2, k_w2, dtype_w2)):
                     packed_w13_weight = torch.ops._C.convert_weight_packed(
                         layer.w13_weight)
                     assert packed_w13_weight.size() == layer.w13_weight.size()
@@ -695,6 +700,26 @@ def determine_expert_map(
     return (local_num_experts, expert_map)
 
 
+def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
+    """
+        Compresses the expert map by removing any -1 entries.
+
+        Args:
+            expert_map (torch.Tensor): A tensor of shape (global_num_experts,)
+                mapping from global to local index. Contains -1 for experts not
+                assigned to the current rank.
+
+        Returns:
+            str: A string mapping from local to global index.
+                Using str to support hashing for logging once only.
+        """
+    global_indices = torch.where(expert_map != -1)[0]
+    local_indices = expert_map[global_indices]
+    return ", ".join(
+        f"{local_index.item()}->{global_index.item()}"
+        for local_index, global_index in zip(local_indices, global_indices))
+
+
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
@@ -795,6 +820,12 @@ class FusedMoE(CustomOp):
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts)
+            logger.info_once(
+                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                " number of experts: %s/%s. Experts local to global index map:"
+                " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
+                self.global_num_experts,
+                get_compressed_expert_map(self.expert_map))
         else:
             self.local_num_experts, self.expert_map = (self.global_num_experts,
                                                        None)
