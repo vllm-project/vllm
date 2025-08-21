@@ -104,9 +104,6 @@ def test_models(
         enforce_eager = False
         with monkeypatch.context() as m:
             m.setenv("VLLM_USE_V1", "1")
-            if model in HYBRID_MODELS:
-                # required due to reorder_batch behaviour
-                m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
 
             if model in ENFORCE_EAGER_MODELS_V1:
                 enforce_eager = True
