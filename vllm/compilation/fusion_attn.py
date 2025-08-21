@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from abc import ABC, abstractmethod
+
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -28,7 +30,7 @@ ATTN_OP = torch.ops.vllm.unified_attention_with_output.default
 RESHAPE_OP = torch.ops.aten.reshape.default
 
 
-class AttentionQuantPattern:
+class AttentionQuantPattern(ABC):
     """
     The base class for Attn+Quant fusions.
     Should not be used directly.
@@ -71,6 +73,10 @@ class AttentionQuantPattern:
     def register_if_supported(self, pm_pass: PatternMatcherPass):
         if self.layer.impl.fused_output_quant_supported(self.quant_key):
             self._register(pm_pass)
+
+    @abstractmethod
+    def _register(self, pm_pass: PatternMatcherPass):
+        raise NotImplementedError
 
 
 class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
