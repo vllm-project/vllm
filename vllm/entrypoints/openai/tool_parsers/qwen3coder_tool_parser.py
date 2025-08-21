@@ -108,7 +108,6 @@ class Qwen3CoderToolParser(ToolParser):
         self.json_started = False
         self.json_closed = False
 
-
     def _get_arguments_config(
         self,
         tools: Optional[list[ChatCompletionToolsParam]],
@@ -117,9 +116,8 @@ class Qwen3CoderToolParser(ToolParser):
         if tools is None:
             return {}
         for config in tools:
-            if not hasattr(config, "type") or not (
-                    hasattr(config, "function")
-                    and hasattr(config.function, "name")):
+            if not hasattr(config, "type") or not (hasattr(
+                    config, "function") and hasattr(config.function, "name")):
                 continue
             if (config.type == "function"
                     and config.function.name == func_name):
@@ -133,7 +131,7 @@ class Qwen3CoderToolParser(ToolParser):
                 else:
                     return {}
         logger.warning("Tool '%s' is not defined in the tools list.",
-                        func_name)
+                       func_name)
         return {}
 
     def _convert_param_value(
@@ -159,18 +157,15 @@ class Qwen3CoderToolParser(ToolParser):
 
         if (isinstance(param_config[param_name], dict)
                 and "type" in param_config[param_name]):
-            param_type = str(
-                param_config[param_name]["type"]).strip().lower()
+            param_type = str(param_config[param_name]["type"]).strip().lower()
         else:
             param_type = "string"
-        if param_type in [
-                "string", "str", "text", "varchar", "char", "enum"
-        ]:
+        if param_type in ["string", "str", "text", "varchar", "char", "enum"]:
             return param_value
         elif (param_type.startswith("int") or param_type.startswith("uint")
-                or param_type.startswith("long")
-                or param_type.startswith("short")
-                or param_type.startswith("unsigned")):
+              or param_type.startswith("long")
+              or param_type.startswith("short")
+              or param_type.startswith("unsigned")):
             try:
                 converted_value = int(param_value)
                 return converted_value
@@ -180,13 +175,12 @@ class Qwen3CoderToolParser(ToolParser):
                     "integer in tool '%s', degenerating to string.",
                     param_value, param_name, func_name)
             return param_value
-        elif (param_type.startswith("num")
-                or param_type.startswith("float")):
+        elif (param_type.startswith("num") or param_type.startswith("float")):
             try:
                 float_param_value = float(param_value)
                 converted_value = (float_param_value if float_param_value -
-                                    int(float_param_value) != 0 else
-                                    int(float_param_value))
+                                   int(float_param_value) != 0 else
+                                   int(float_param_value))
                 return converted_value
             except ValueError:
                 logger.warning(
@@ -226,8 +220,8 @@ class Qwen3CoderToolParser(ToolParser):
             return param_value
 
     def _parse_xml_function_call(
-        self, function_call_str: str,
-        tools: Optional[list[ChatCompletionToolsParam]]
+            self, function_call_str: str,
+            tools: Optional[list[ChatCompletionToolsParam]]
     ) -> Optional[ToolCall]:
         # Extract function name
         end_index = function_call_str.index(">")
@@ -490,7 +484,7 @@ class Qwen3CoderToolParser(ToolParser):
             return None
 
         # We've sent header, now handle function body
-        if self.in_function:
+        if self.in_function and self.current_function_name:
             # Send opening brace if not sent yet
             if (not self.json_started
                     and self.parameter_prefix not in delta_text):
@@ -599,13 +593,15 @@ class Qwen3CoderToolParser(ToolParser):
 
                             # Build complete JSON fragment for this parameter
                             if self.param_count == 0:
-                                json_fragment = (
-                                    '"' + self.current_param_name + '": ' +
-                                    json.dumps(param_value))
+                                json_fragment = ('"' +
+                                                 self.current_param_name +
+                                                 '": ' +
+                                                 json.dumps(param_value))
                             else:
-                                json_fragment = (
-                                    ', "' + self.current_param_name + '": ' +
-                                    json.dumps(param_value))
+                                json_fragment = (', "' +
+                                                 self.current_param_name +
+                                                 '": ' +
+                                                 json.dumps(param_value))
 
                             self.param_count += 1
 
