@@ -65,11 +65,12 @@ In vLLM logits processors operate at batch granularity. The contrived example be
                 return logits
 
             # Save target values before modification
-            rows_list = list(self.req_info.keys())
-            cols = torch.tensor([self.req_info[i] for i in rows_list],
-                                dtype=torch.long,
-                                device=logits.device)
-            rows = torch.tensor(rows_list, dtype=torch.long, device=logits.device)
+            cols = torch.tensor(
+                list(self.req_info.values()), dtype=torch.long, device=logits.device
+            )
+            rows = torch.tensor(
+                list(self.req_info.keys()), dtype=torch.long, device=logits.device
+            )
             values_to_keep = logits[rows, cols].clone()
     ```
 
