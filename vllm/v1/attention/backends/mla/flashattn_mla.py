@@ -87,7 +87,6 @@ class FlashAttnMLAMetadataBuilder(
                       seq_lens_device: torch.Tensor,
                       query_start_loc_cpu: torch.Tensor,
                       query_start_loc_device: torch.Tensor,
-                      input_positions: torch.Tensor,
                       block_table: torch.Tensor) -> FlashAttnMLADecodeMetadata:
 
         query_lens_cpu = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])
@@ -104,7 +103,6 @@ class FlashAttnMLAMetadataBuilder(
         )
 
         return FlashAttnMLADecodeMetadata(
-            input_positions=input_positions,
             block_table=block_table,
             seq_lens=seq_lens_device,
             query_start_loc=query_start_loc_device,

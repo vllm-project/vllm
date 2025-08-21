@@ -558,10 +558,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                       seq_lens_cpu: torch.Tensor,
                       seq_lens_device: torch.Tensor,
                       query_start_loc_cpu: torch.Tensor,
-                      query_start_loc_device: torch.Tensor,
-                      input_positions: torch.Tensor):
+                      query_start_loc_device: torch.Tensor):
         return MLACommonDecodeMetadata(
-            input_positions=input_positions,
             block_table=block_table_tensor,
             seq_lens=seq_lens_device,
         )
@@ -694,7 +692,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     self.chunked_prefill_workspace_size
 
             prefill_metadata = MLACommonPrefillMetadata(
-                input_positions=input_positions[tokens_start:],
                 block_table=block_table[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
                 max_query_len=max_query_len,
@@ -717,7 +714,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                                                         1],
                 seq_lens_device=seq_lens[:self._num_decodes],
                 seq_lens_cpu=seq_lens_cpu[:self._num_decodes],
-                input_positions=input_positions[:self._num_decode_tokens],
             )
 
         attn_metadata = self.metadata_cls(
