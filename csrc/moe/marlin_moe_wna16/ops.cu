@@ -165,8 +165,8 @@ thread_config_t large_batch_thread_configs[] = {
     // Ordered by priority
 
     // thread_k, thread_n, num_threads
+    // {128, 128, 256},
     {64, 256, 256},
-    {128, 128, 256},
     {64, 128, 128}};
 
 typedef struct {
@@ -302,12 +302,13 @@ exec_config_t determine_exec_config(const vllm::ScalarType& a_type,
                                     const vllm::ScalarType& b_type,
                                     const vllm::ScalarType& c_type,
                                     const vllm::ScalarType& s_type,
-                                    int prob_m,
-                                    int prob_n, int prob_k, int thread_m_blocks,
+                                    int prob_m, int prob_n, int prob_k,
+                                    int num_experts, int top_k,
+                                    int thread_m_blocks,
                                     bool m_block_size_8, int num_bits,
                                     int group_size, bool has_act_order,
                                     bool is_k_full, bool has_zp,
-                                    bool is_zp_float, int max_shared_mem, bool is_a_8bit) {
+                                    bool is_zp_float, int max_shared_mem, int sms, bool is_a_8bit) {
   exec_config_t exec_cfg = exec_config_t{1, thread_config_t{-1, -1, -1}};
   thread_config_t* thread_configs = thread_m_blocks > 1
                                         ? large_batch_thread_configs
@@ -480,9 +481,9 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     // Auto config
     exec_cfg = determine_exec_config(
         a_type, b_type, c_type, s_type,
-        prob_m, prob_n, prob_k, thread_m_blocks, m_block_size_8,
+        prob_m, prob_n, prob_k, num_experts, top_k, thread_m_blocks, m_block_size_8,
         num_bits, group_size, has_act_order, is_k_full, has_zp, is_zp_float,
-        max_shared_mem, is_a_8bit);
+        max_shared_mem, sms, is_a_8bit);
     thread_tfg = exec_cfg.tb_cfg;
   }
 
@@ -524,6 +525,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                 ", num_bits = ", num_bits);
   }
 
+  max_shared_mem = 90000;
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                        max_shared_mem);
   // avoid ">>>" being formatted to "> > >"

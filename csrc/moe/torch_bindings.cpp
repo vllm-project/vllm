@@ -45,7 +45,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "bool mul_topk_weights, bool is_ep, int b_type_id,"
       "int size_m, int size_n, int size_k,"
       "bool is_full_k, bool use_atomic_add,"
-      "bool use_fp32_reduce, bool is_zp_float, int moe_blocks_per_exec) -> Tensor");
+      "bool use_fp32_reduce, bool is_zp_float) -> Tensor");
   m.def(
       "marlin_gemm_moe(Tensor! a, Tensor! b_q_weights, Tensor! sorted_ids, "
       "Tensor! topk_weights, Tensor! topk_ids, Tensor! b_scales, Tensor! "

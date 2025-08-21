@@ -506,8 +506,8 @@ __global__ void Marlin(
   int part2_mn_iters = 0;
   bool in_part2 = false;
 
-  if (global_mn_tiles > 4 * gridDim.x) {
-    part1_mn_tiles = global_mn_tiles % gridDim.x + gridDim.x * 3;
+  if (global_mn_tiles > gridDim.x) {
+    part1_mn_tiles = global_mn_tiles % gridDim.x + gridDim.x;
     part2_mn_iters = (global_mn_tiles - part1_mn_tiles) / gridDim.x;
   }
 
@@ -572,53 +572,48 @@ __global__ void Marlin(
     locks_off = (iters * blockIdx.x) / k_tiles - 1;
   }
 
+  int prob_m_top_k = prob_m * top_k;
   // read moe block data given block_id
   // block_sorted_ids / block_num_valid_tokens / block_topk_weights
   auto read_moe_block_data = [&](int block_id) {
     block_num_valid_tokens = moe_block_size;
+
+    cp_async4_pred(
+      sh_block_sorted_ids_int4 + threadIdx.x,
+      reinterpret_cast<const int4*>(sorted_token_ids_ptr) +
+        (block_id * moe_block_size / 4 + threadIdx.x),
+      threadIdx.x < moe_block_size / 4);
+
+    cp_async_fence();
+    cp_async_wait<0>();
+
+    __syncthreads();
+
+    if (threadIdx.x == blockDim.x - 1) {
   #pragma unroll
-    for (int i = 0; i < moe_block_size / 4; i++) {
-      int4 sorted_token_ids_int4 = reinterpret_cast<const int4*>(
-          sorted_token_ids_ptr)[block_id * moe_block_size / 4 + i];
-      int* sorted_token_ids = reinterpret_cast<int*>(&sorted_token_ids_int4);
-  #pragma unroll
-      for (int j = 0; j < 4; j++) {
-        if (sorted_token_ids[j] >= prob_m * top_k) {
-          block_num_valid_tokens = i * 4 + j;
+      for (int i = 0; i < moe_block_size; i++) {
+        int idx = sh_block_sorted_ids[i];
+        if (idx >= prob_m_top_k) {
+          block_num_valid_tokens = i;
           break;
         }
       }
-      if (block_num_valid_tokens != moe_block_size) break;
+      reinterpret_cast<int*>(sh_new)[0] = block_num_valid_tokens;
     }
 
-    __syncthreads();
-    int tid4 = threadIdx.x / 4;
-    if (threadIdx.x % 4 == 0 && threadIdx.x < block_num_valid_tokens) {
-      sh_block_sorted_ids_int4[tid4] = reinterpret_cast<const int4*>(
-          sorted_token_ids_ptr)[block_id * moe_block_size / 4 + tid4];
-
-  #pragma unroll
-      for (int i = 0; i < 4; i++)
-        sh_rd_block_sorted_ids[tid4 * 4 + i] =
-            sh_block_sorted_ids[tid4 * 4 + i] / top_k;
+    if (threadIdx.x < moe_block_size) {
+      int idx = sh_block_sorted_ids[threadIdx.x];
+      sh_rd_block_sorted_ids[threadIdx.x] = idx / top_k;
 
       if (mul_topk_weights) {
-  #pragma unroll
-        for (int i = 0; i < 4; i++) {
-          int idx = tid4 * 4 + i;
-          idx = idx < block_num_valid_tokens ? idx : 0;
-          if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
-            sh_block_topk_weights[idx] = __hmul2(
-                global_scale, Cdtype::num2num2(Cdtype::float2num(
-                                  topk_weights_ptr[sh_block_sorted_ids[idx]])));
-          } else {
-            sh_block_topk_weights[idx] = Cdtype::num2num2(
-                Cdtype::float2num(topk_weights_ptr[sh_block_sorted_ids[idx]]));
-          }
-        }
+        sh_block_topk_weights[threadIdx.x] = Cdtype::num2num2(
+            Cdtype::float2num(topk_weights_ptr[idx]));
       }
     }
+
     __syncthreads();
+
+    block_num_valid_tokens = reinterpret_cast<int*>(sh_new)[0];
   };
 
   // when move to next moe block, find the next block_id and expert_id
@@ -754,7 +749,7 @@ __global__ void Marlin(
       if (slice_iters == 0 && part2_mn_iters) {
         in_part2 = true;
         slice_col_par = part1_mn_tiles + blockIdx.x;
-        slice_count = 0;
+        slice_count = 1;
         slice_idx = 0;
         init_part2_slice();
       }
@@ -998,14 +993,6 @@ __global__ void Marlin(
   static_assert(thread_m_blocks * 16 * thread_n_blocks * 16 / 8 <=
                 stages * b_sh_stage);
   int4* sh_a = sh_s + sh_s_size;
-  constexpr int shm_size_used = moe_block_size +
-                                stages * (g_idx_stage + zp_sh_stage) +
-                                sh_s_size + sh_b_red_bias_size;
-
-  // all remaining shared memory is used to cache A (input)
-  // sh_a_max_row is at least ` stages * 16 * thread_m_blocks `
-  int sh_a_max_row =
-      ((max_shared_mem - 1024) / 16 - shm_size_used) / (thread_k_blocks * 2);
 
   // Register storage for double buffer of shared memory reads.
   FragA frag_a[2][thread_m_blocks];
@@ -1080,26 +1067,19 @@ __global__ void Marlin(
   };
   // Asynchronously fetch the next A, B and s tile from global to the next
   // shared memory pipeline location.
-  bool should_load_a = true;
-  int max_num_stage_groups =
-      ((sh_a_max_row - moe_block_size) / moe_block_size + 1) / stages;
-  max_num_stage_groups = max(max_num_stage_groups, 1);
-  auto fetch_to_shared = [&](int pipe, int a_off, bool pred = true,
-                             int pipe_a = 0) {
+  auto fetch_to_shared = [&](int pipe, int a_off, bool pred = true) {
     if (pred) {
-      if (should_load_a) {
-        int4* sh_a_stage = sh_a + moe_block_size * a_sh_stride * pipe_a;
+      int4* sh_a_stage = sh_a + a_sh_stage * pipe;
   #pragma unroll
-        for (int i = 0; i < a_sh_wr_iters; i++) {
-          int row = a_gl_rd_delta_i / a_gl_stride * i + a_gl_rd_row;
-          int64_t sorted_row = 0;
-          if (!m_block_size_8 || row < 8)
-            sorted_row = sh_rd_block_sorted_ids[row];
-          int64_t true_idx =
-              sorted_row * a_gl_stride + a_gl_rd_col + a_gl_rd_delta_o * a_off;
-          cp_async4_pred(&sh_a_stage[a_sh_wr_trans[i]], &A[true_idx],
-                         row < block_num_valid_tokens);
-        }
+      for (int i = 0; i < a_sh_wr_iters; i++) {
+        int row = a_gl_rd_delta_i / a_gl_stride * i + a_gl_rd_row;
+        int64_t sorted_row = 0;
+        if (!m_block_size_8 || row < 8)
+          sorted_row = sh_rd_block_sorted_ids[row];
+        int64_t true_idx =
+            sorted_row * a_gl_stride + a_gl_rd_col + a_gl_rd_delta_o * a_off;
+        cp_async4_pred(&sh_a_stage[a_sh_wr_trans[i]], &A[true_idx],
+                        row < block_num_valid_tokens);
       }
 
       int4* sh_b_stage = sh_b + b_sh_stage * pipe;
@@ -1185,8 +1165,8 @@ __global__ void Marlin(
 
   // Load the next sub-tile from the current location in the shared memory pipe
   // into the current register buffer.
-  auto fetch_to_registers = [&](int k, int pipe, int pipe_a = 0) {
-    int4* sh_a_stage = sh_a + moe_block_size * a_sh_stride * pipe_a;
+  auto fetch_to_registers = [&](int k, int pipe) {
+    int4* sh_a_stage = sh_a + moe_block_size * a_sh_stride * pipe;
   #pragma unroll
     for (int i = 0; i < thread_m_blocks; i++)
       ldsm<m_block_size_8 ? 2 : 4, a_type_id>(
@@ -2002,7 +1982,7 @@ __global__ void Marlin(
           }
         }
       }
-      fetch_to_shared(i, i, i < slice_iters, i);
+      fetch_to_shared(i, i, i < slice_iters);
     }
 
     zero_accums();
@@ -2027,25 +2007,16 @@ __global__ void Marlin(
     // have even length meaning that the next iteration will always start at
     // index 0.
 
-    for (int stage_group_id = 0; stage_group_id < max_num_stage_groups;
-         stage_group_id++) {
   #pragma unroll
       for (int pipe = 0; pipe < stages;) {
   #pragma unroll
         for (int k = 0; k < b_sh_wr_iters; k++) {
-          int idx =
-              (pipe >= stages && stage_group_id == max_num_stage_groups - 1)
-                  ? (pipe - stages)
-                  : (pipe + stage_group_id * stages);
-          fetch_to_registers(k + 1, pipe % stages, idx);
+          fetch_to_registers(k + 1, pipe % stages);
           fetch_scales_to_registers(k + 1, pipe);
           fetch_zp_to_registers(k + 1, pipe);
           if (k == b_sh_wr_iters - 2) {
-            int idx = (pipe >= 1 && stage_group_id == max_num_stage_groups - 1)
-                          ? (pipe - 1)
-                          : (pipe + (stage_group_id + 1) * stages - 1);
             fetch_to_shared((pipe + stages - 1) % stages, pipe,
-                            slice_iters >= stages, idx);
+                            slice_iters >= stages);
             pipe++;
             wait_for_stage();
             init_same_group(pipe % stages);
@@ -2084,10 +2055,6 @@ __global__ void Marlin(
           }
         }
       }
-      if (slice_iters == 0) {
-        break;
-      }
-    }
 
     // Process results and, if necessary, proceed to the next column slice.
     // While this pattern may not be the most readable, other ways of writing
@@ -2253,7 +2220,6 @@ __global__ void Marlin(
       if (last || use_atomic_add)
         // only the last block in a slice actually writes the result
         write_result(last);
-      int old_slice_row = slice_row;
       slice_row = 0;
       if (in_part2) {
         slice_col_par += gridDim.x;
@@ -2263,21 +2229,6 @@ __global__ void Marlin(
       }
       is_first_matmul_in_slice = true;
       init_slice();
-
-      // Should we load A matrix in next slice?
-      // `slice_col == 0`: when move to a new moe block
-      // `old_slice_row > 0`:
-      //    when the last slice is not starting from k_index == 0
-      //    (only happen when it is the first slice of a threadblock)
-      // `prob_k > thread_k_blocks * 16 * stages * max_num_stage_groups`:
-      //    when the required shared memory size is larger than
-      //    the remaining shared memory
-      if (in_part2 || slice_col == 0 || old_slice_row ||
-          prob_k > thread_k_blocks * 16 * stages * max_num_stage_groups) {
-        should_load_a = true;
-      } else {
-        should_load_a = false;
-      }
 
       if (slice_iters) {
         a_gl_rd_col = (threadIdx.x % a_gl_rd_delta_o);
