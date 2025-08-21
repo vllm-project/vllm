@@ -1,7 +1,10 @@
 # Copyright (C) 2025 Habana Labs, Ltd. an Intel Company
 # SPDX-License-Identifier: Apache-2.0
 
-ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.20.0/rhel9.4/habanalabs/pytorch-installer-2.6.0:latest
+## Starting from the 1.22.x Intel Gaudi software version, we no longer provide RHEL Docker images.
+## These must be created manually, and the path below should be updated accordingly.
+ARG BASE_IMAGE=vault.habana.ai/gaudi-docker/1.21.4/rhel9.4/habanalabs/pytorch-installer-2.6.0:latest
+
 FROM ${BASE_IMAGE} as habana-base
 
 USER root
