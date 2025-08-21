@@ -1406,6 +1406,7 @@ def fused_experts(hidden_states: torch.Tensor,
             a2_scale=a2_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
+    else:
         return dispatch_fused_experts_func(inplace)(
             hidden_states=hidden_states,
             w1=w1,

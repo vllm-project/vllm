@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """ CUTLASS based Fused MoE kernels."""
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 import torch
 
@@ -1098,7 +1098,6 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
-        extra_expert_args: Optional[dict[str, Any]],
     ) -> torch.Tensor:
         assert w1_zp is None, "w1_zp is not supported in CUTLASS MoE"
         assert w2_zp is None, "w2_zp is not supported in CUTLASS MoE"

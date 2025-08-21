@@ -502,8 +502,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
             )
 
-        self.allow_cutlass_block_scaled_grouped_gemm = False
-
         # Check for DeepGemm support.
         self.allow_deep_gemm = False
         if envs.VLLM_USE_DEEP_GEMM:
@@ -520,6 +518,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     "DeepGemm not supported on the current platform.")
 
         # Check for CutlassBlockScaledGroupedGemm support.
+        self.allow_cutlass_block_scaled_grouped_gemm = False
         if not self.block_quant:
             logger.debug_once("Model is not block quantized. Not using "
                               "CutlassBlockScaledGroupedGemm kernels")
@@ -533,6 +532,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             logger.warning_once(
                 "CutlassBlockScaledGroupedGemm not supported on the current "
                 "platform.")
+
+        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
+        # kernel for fast weight-only FP8 quantization
+        self.use_marlin = (not self.allow_cutlass_block_scaled_grouped_gemm
+                           and not current_platform.has_device_capability(89)
+                           or envs.VLLM_TEST_FORCE_FP8_MARLIN)
+        # Disable marlin for rocm
+        if current_platform.is_rocm():
+            self.use_marlin = False
 
         self.topk_indices_dtype = None
 
