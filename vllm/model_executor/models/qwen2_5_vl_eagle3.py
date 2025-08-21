@@ -82,7 +82,14 @@ class Qwen2_5DecodeLayer(Qwen2DecoderLayer):
         return hidden_states, residual
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        # positions is of shape (3, seq_len) if mrope is enabled for qwen2-vl,
+        # otherwise (seq_len, ).
+        "positions": -1,
+        "inputs_embeds": 0,
+    })
 class Qwen2_5Model(nn.Module):
 
     def __init__(
