@@ -72,6 +72,12 @@ In vLLM logits processors operate at batch granularity. The contrived example be
                 list(self.req_info.keys()), dtype=torch.long, device=logits.device
             )
             values_to_keep = logits[rows, cols].clone()
+
+            # Mask all but target tokens
+            logits[rows] = float('-inf')
+            logits[rows, cols] = values_to_keep
+
+            return logits
     ```
 
 Throughout this document, we will use `DummyLogitsProcessor` as an example of a custom logits processor.
