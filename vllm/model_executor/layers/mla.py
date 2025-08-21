@@ -1,5 +1,7 @@
-from typing import Optional
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 
@@ -132,13 +134,13 @@ class MultiHeadLatentAttention(CustomOp):
 
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim],
                                    dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)
+        kv_c_normed = self.kv_a_layernorm(kv_c)  # type: ignore
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
+        q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(  # type: ignore
             positions, q[..., self.qk_nope_head_dim:], k_pe)
 
         attn_out = self.mla_attn(
@@ -147,7 +149,7 @@ class MultiHeadLatentAttention(CustomOp):
             k_pe,
             output_shape=(hidden_states.shape[0],
                           self.num_heads * self.v_head_dim))
-        return self.o_proj(attn_out)[0]
+        return self.o_proj(attn_out)[0]  # type: ignore
 
     def forward_cuda(self, *args, **kwargs):
         return self.forward_native(*args, **kwargs)
