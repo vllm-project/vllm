@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from concurrent.futures import Future
-from typing import Callable, Union
+from typing import Callable, Optional, Union
 
 import torch
 import torch.distributed as dist

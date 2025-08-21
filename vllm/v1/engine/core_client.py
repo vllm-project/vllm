@@ -445,8 +445,8 @@ class MPClient(EngineCoreClient):
                 # Engines are managed by this client.
                 with launch_core_engines(vllm_config, executor_class,
                                          log_stats) as (engine_manager,
-                                                        coordinator,
-                                                        addresses):
+                                                        coordinator, addresses,
+                                                        _):
                     self.resources.coordinator = coordinator
                     self.resources.engine_manager = engine_manager
 

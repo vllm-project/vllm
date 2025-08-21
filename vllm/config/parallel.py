@@ -27,8 +27,8 @@ if TYPE_CHECKING:
 else:
     RuntimeEnv = Any
     PlacementGroup = Any
-    ExecutorBase = Any
     KVConnectorHandshakeMetadata = Any
+    ExecutorBase = Any
 
 logger = init_logger(__name__)
 
@@ -173,17 +173,10 @@ class ParallelConfig:
     Set to be private as it's not intended to be configured by users.
     """
 
-    enable_multimodal_encoder_data_parallel: bool = False
-    """ Use data parallelism instead of tensor parallelism for vision encoder.
-    Only support LLama4 for now"""
-
-<<<<<<< HEAD
-=======
-    xfer_handshake_metadata: Optional[dict[int, dict[
+    kv_conn_endpoint_metadata: Optional[dict[int, dict[
         int, KVConnectorHandshakeMetadata]]] = None
     """ Metadata for KV transfer handshake between prefill and decode engine
     processes."""
->>>>>>> c04db8e34 (mr feedback round 3)
 
     @property
     def world_size_across_dp(self) -> int:
