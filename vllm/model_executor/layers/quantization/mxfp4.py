@@ -113,8 +113,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.topk_indices_dtype = None
         self.moe = moe
         self.use_marlin = self._should_use_marlin()
-        self.device_support_pdl = current_platform.is_cuda(
-        ) and current_platform.has_device_capability(90)
 
         if current_platform.is_device_capability(100) and not has_flashinfer():
             logger.warning_once(
