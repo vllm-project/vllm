@@ -569,6 +569,8 @@ class EngineArgs:
                                  **model_kwargs["override_attention_dtype"])
         model_group.add_argument("--logits-processors",
                                  **model_kwargs["logits_processors"])
+        model_group.add_argument("--io-processor-plugin",
+                                 **model_kwargs["io_processor_plugin"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -985,6 +987,7 @@ class EngineArgs:
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
+            io_processor_plugin=self.io_processor_plugin,
         )
 
     def validate_tensorizer_args(self):
@@ -1796,10 +1799,6 @@ class AsyncEngineArgs(EngineArgs):
                             action=argparse.BooleanOptionalAction,
                             default=not AsyncEngineArgs.enable_log_requests,
                             help='[DEPRECATED] Disable logging requests.',
-                            deprecated=True)
-        parser.add_argument('--io-processor-plugin',
-                            default=None,
-                            help='IOProcessor plugin to load.',
                             deprecated=True)
         current_platform.pre_register_and_update(parser)
         return parser

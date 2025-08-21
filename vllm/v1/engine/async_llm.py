@@ -65,7 +65,6 @@ class AsyncLLM(EngineClient):
         client_addresses: Optional[dict[str, str]] = None,
         client_count: int = 1,
         client_index: int = 0,
-        io_processor_plugin: Optional[str] = None,
     ) -> None:
         """
         Create an AsyncLLM.
@@ -170,6 +169,7 @@ class AsyncLLM(EngineClient):
             )
             self.profiler = None
         # Load the Input/Ouput processor plugin if any
+        io_processor_plugin = self.model_config.io_processor_plugin
         self.io_processor = get_io_processor(vllm_config, io_processor_plugin)
 
     @classmethod
@@ -189,7 +189,6 @@ class AsyncLLM(EngineClient):
             client_addresses: Optional[dict[str, str]] = None,
             client_count: int = 1,
             client_index: int = 0,
-            io_processor_plugin: Optional[str] = None,
             disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLM":
         if not envs.VLLM_USE_V1:
@@ -211,7 +210,6 @@ class AsyncLLM(EngineClient):
             client_addresses=client_addresses,
             client_count=client_count,
             client_index=client_index,
-            io_processor_plugin=io_processor_plugin,
         )
 
     @classmethod

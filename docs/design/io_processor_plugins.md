@@ -67,3 +67,13 @@ An implementation of the `encode_with_io_processor_plugin` method is available [
 The `plugin_out_to_response` method is used only for online serving and converts the plugin output to the `IOProcessorPluginResponse` type that is then returned by the APIServer. The implementation of the `/plugin_pooling` serving endpoint is [here](../../vllm/entrypoints/openai/serving_pooling_with_io_plugin.py).
 
 An example implementation of a plugin that enables generating geotiff images with the PrithviGeospatialMAE model is available [here](https://github.com/christian-pinto/prithvi_io_processor_plugin). Please, also refer to out [online](../../examples/online_serving/prithvi_geospatial_mae.py) and [offline](../../examples/offline_inference/prithvi_geospatial_mae_io_processor.py) inferences examples.
+
+## Using a IOProcessor plugin
+
+IOProcessor plugins are loaded at engine startup and there are three ways of specifying the name plugin to be loaded:
+
+1. setting the `VLLM_USE_IO_PROCESSOR_PLUGIN` environment variable.
+2. passing the `io_processor_plugin` argument to LLM in offline mode, or passing the `--io-processor-plugin` argument in serving mode.
+3. adding a `io_processor_plugin` field to the model HF config.
+
+The order also identifies the priority of the methods. e.g., setting the `VLLM_USE_IO_PROCESSOR_PLUGIN` environment variable will override values set via all the other methods.

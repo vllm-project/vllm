@@ -25,14 +25,13 @@ class IOProcessor(ABC):
     ) -> Union[PromptType, Sequence[PromptType]]:
         ...
 
-    @abstractmethod
     async def pre_process_async(
         self,
         prompt: Any,
         request_id: Optional[str] = None,
         **kwargs,
     ) -> Union[PromptType, Sequence[PromptType]]:
-        ...
+        return self.pre_process(prompt, request_id, **kwargs)
 
     @abstractmethod
     def post_process(self,
@@ -41,14 +40,13 @@ class IOProcessor(ABC):
                      **kwargs) -> Any:
         ...
 
-    @abstractmethod
     async def post_process_async(
         self,
         model_out: Sequence[Optional[PoolingRequestOutput]],
         request_id: Optional[str] = None,
         **kwargs,
     ) -> Any:
-        ...
+        self.post_process(model_out, request_id, **kwargs)
 
     @abstractmethod
     def parse_request(self, request: Any) -> Optional[Any]:

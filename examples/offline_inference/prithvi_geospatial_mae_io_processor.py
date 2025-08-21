@@ -18,7 +18,6 @@ from vllm.pooling_params import PoolingParams
 
 def main():
     torch.set_default_dtype(torch.float16)
-    # os.environ["VLLM_USE_IO_PROCESSOR_PLUGIN"] = "prithvi_to_tiff_india"
     image_url = "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/India_900498_S2Hand.tif"  # noqa: E501
 
     img_prompt = dict(

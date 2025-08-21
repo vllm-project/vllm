@@ -228,8 +228,7 @@ async def build_async_engine_client_from_engine_args(
                 disable_log_stats=engine_args.disable_log_stats,
                 client_addresses=client_config,
                 client_count=client_count,
-                client_index=client_index,
-                io_processor_plugin=engine_args.io_processor_plugin)
+                client_index=client_index)
 
             # Don't keep the dummy data in memory
             await async_llm.reset_mm_cache()

@@ -63,8 +63,8 @@ def get_io_processor(
 
     if model_plugin not in loadable_plugins:
         raise ValueError(
-            f"The model requires the '{model_plugin}' plugin but it"
-            " is not installed. "
+            f"The model requires theI '{model_plugin}' IO Processor plugin "
+            "but it is not installed. "
             f"Available plugins: {list(loadable_plugins.keys())}")
 
     activated_plugin_cls = loadable_plugins[model_plugin]
