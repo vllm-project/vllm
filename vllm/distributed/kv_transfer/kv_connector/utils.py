@@ -13,10 +13,8 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1)
+from vllm.distributed.kv_transfer.kv_connector.v1 import kv_connector_manager
 from vllm.logger import init_logger
-from vllm.plugins import ExtensionManager
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 logger = init_logger(__name__)
@@ -111,12 +109,11 @@ def get_kv_connector_cache_layout():
         if name is None:
             # With ExtensionManager, we no longer do on-the-fly imports,
             # as extensions must be registered via
-            # ExtensionManager.register(...) decorator.
+            # register(...) decorator.
             raise ValueError(
                 "KV connector name must be set in KVTransferConfig")
 
-        connector_cls = ExtensionManager.get_extension_class(
-            base_cls=KVConnectorBase_V1, name=name)
+        connector_cls = kv_connector_manager.get_extension_class(name=name)
         required_kvcache_layout = connector_cls.get_required_kvcache_layout(
             vllm_config)
         if required_kvcache_layout is not None:

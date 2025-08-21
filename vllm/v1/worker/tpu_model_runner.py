@@ -26,7 +26,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.base_loader import model_loader_manager
 from vllm.model_executor.model_loader.tpu import TPUModelLoader
 from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
@@ -35,7 +35,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
                                     PlaceholderRange)
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
-from vllm.plugins import ExtensionManager
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (LayerBlockType, cdiv, is_pin_memory_available,
@@ -1196,8 +1195,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         model_config=self.vllm_config.model_config,
                         mesh=self.mesh)
                 else:
-                    model_loader = ExtensionManager.create(
-                        BaseModelLoader, self.load_config.load_format)
+                    model_loader = model_loader_manager.create(
+                        self.load_config.load_format)
                     logger.info("Loading model from scratch...")
                     model = model_loader.load_model(
                         vllm_config=self.vllm_config,
@@ -1226,8 +1225,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def reload_weights(self) -> None:
         assert getattr(self, "model", None) is not None, \
             "Cannot reload weights before model is loaded."
-        model_loader = ExtensionManager.create(BaseModelLoader,
-                                               self.load_config.load_format)
+        model_loader = model_loader_manager.create(
+            self.load_config.load_format)
         logger.info("Reloading weights inplace...")
         model_loader.load_weights(self.model, model_config=self.model_config)
 

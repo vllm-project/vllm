@@ -13,7 +13,7 @@ import numpy.typing as npt
 from PIL import Image
 
 from vllm import envs
-from vllm.plugins import ExtensionManager
+from vllm.plugins.extension_manager import ExtensionManager
 
 from .base import MediaIO
 from .image import ImageMediaIO
@@ -63,7 +63,10 @@ class VideoLoader:
         raise NotImplementedError
 
 
-@ExtensionManager.register(base_cls=VideoLoader, names=["opencv"])
+video_loader_manager = ExtensionManager[VideoLoader]()
+
+
+@video_loader_manager.register(names=["opencv"])
 class OpenCVVideoBackend(VideoLoader):
 
     def get_cv2_video_api(self):
@@ -156,8 +159,7 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
         # for flexible control.
         self.kwargs = kwargs
         video_loader_backend = envs.VLLM_VIDEO_LOADER_BACKEND
-        self.video_loader = ExtensionManager.create(VideoLoader,
-                                                    video_loader_backend)
+        self.video_loader = video_loader_manager.create(video_loader_backend)
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
         return self.video_loader.load_bytes(data,

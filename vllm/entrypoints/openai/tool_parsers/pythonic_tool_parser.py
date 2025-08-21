@@ -16,9 +16,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser)
+    ToolParser, tool_parser_manager)
 from vllm.logger import init_logger
-from vllm.plugins import ExtensionManager
 
 logger = init_logger(__name__)
 
@@ -27,7 +26,7 @@ class _UnexpectedAstError(Exception):
     pass
 
 
-@ExtensionManager.register(base_cls=ToolParser, names=["pythonic"])
+@tool_parser_manager.register(names=["pythonic"])
 class PythonicToolParser(ToolParser):
     """
     Tool call parser for models that produce tool calls in a pythonic style,

@@ -2,8 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm import SamplingParams
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.plugins import ExtensionManager
+from vllm.model_executor.model_loader.base_loader import model_loader_manager
 
 load_format = "runai_streamer"
 test_model = "openai-community/gpt2"
@@ -19,7 +18,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
 
 
 def get_runai_model_loader():
-    return ExtensionManager.create(BaseModelLoader, load_format)
+    return model_loader_manager.create(load_format)
 
 
 def test_get_model_loader_with_runai_flag():

@@ -4,12 +4,11 @@
 from torch import nn
 
 from vllm.config import LoadConfig, ModelConfig
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
-from vllm.plugins import ExtensionManager
+from vllm.model_executor.model_loader.base_loader import (BaseModelLoader,
+                                                          model_loader_manager)
 
 
-@ExtensionManager.register(base_cls=BaseModelLoader,
-                           names=["custom_load_format"])
+@model_loader_manager.register(names=["custom_load_format"])
 class CustomModelLoader(BaseModelLoader):
 
     def __init__(self, load_config: LoadConfig) -> None:
@@ -24,6 +23,5 @@ class CustomModelLoader(BaseModelLoader):
 
 
 def test_register_model_loader():
-    assert isinstance(
-        ExtensionManager.create(BaseModelLoader, "custom_load_format"),
-        CustomModelLoader)
+    assert isinstance(model_loader_manager.create("custom_load_format"),
+                      CustomModelLoader)

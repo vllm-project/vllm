@@ -7,10 +7,10 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1 import kv_connector_manager
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
-from vllm.plugins import ExtensionManager
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
@@ -29,8 +29,7 @@ class MultiKVConnectorMetadata(KVConnectorMetadata):
     extra_async_saves: Optional[dict[str, int]] = None
 
 
-@ExtensionManager.register(base_cls=KVConnectorBase_V1,
-                           names=["MultiConnector"])
+@kv_connector_manager.register(names=["MultiConnector"])
 class MultiConnector(KVConnectorBase_V1):
     """
     A wrapper for using multiple KVConnectors at the same time.
@@ -58,12 +57,11 @@ class MultiConnector(KVConnectorBase_V1):
             if name is None:
                 # With ExtensionManager, we no longer do on-the-fly imports,
                 # as extensions must be registered via
-                # ExtensionManager.register(...) decorator.
+                # register(...) decorator.
                 raise ValueError(
                     "KV connector name must be set in KVTransferConfig")
 
-            self._connectors.append(
-                ExtensionManager.create(KVConnectorBase_V1, name, role))
+            self._connectors.append(kv_connector_manager.create(name, role))
 
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).

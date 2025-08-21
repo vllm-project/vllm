@@ -20,7 +20,7 @@ from vllm.model_executor.model_loader.sharded_state_loader import (
 from vllm.model_executor.model_loader.tensorizer_loader import TensorizerLoader
 from vllm.model_executor.model_loader.utils import (
     get_architecture_class_name, get_model_architecture, get_model_cls)
-from vllm.plugins import ExtensionManager
+from vllm.plugins.extension_manager import ExtensionManager
 
 logger = init_logger(__name__)
 

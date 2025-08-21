@@ -14,17 +14,16 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser)
+    ToolParser, tool_parser_manager)
 from vllm.entrypoints.openai.tool_parsers.utils import (
     extract_intermediate_diff)
 from vllm.logger import init_logger
-from vllm.plugins import ExtensionManager
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
 
 
-@ExtensionManager.register(base_cls=ToolParser, names=["minimax"])
+@tool_parser_manager.register(names=["minimax"])
 class MinimaxToolParser(ToolParser):
 
     def __init__(self, tokenizer: AnyTokenizer):

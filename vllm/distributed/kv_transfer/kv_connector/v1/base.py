@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 import torch
 
 from vllm.logger import init_logger
+from vllm.plugins.extension_manager import ExtensionManager
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -330,3 +331,6 @@ class KVConnectorBase_V1(ABC):
             raise TypeError("get_required_kvcache_layout should not be called "
                             "on the abstract base class")
         return None
+
+
+kv_connector_manager = ExtensionManager[KVConnectorBase_V1]()

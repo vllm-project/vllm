@@ -9,6 +9,7 @@ from vllm.config import LoadConfig, ModelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading, set_default_torch_dtype)
+from vllm.plugins.extension_manager import ExtensionManager
 
 logger = init_logger(__name__)
 
@@ -49,3 +50,6 @@ class BaseModelLoader(ABC):
             self.load_weights(model, model_config)
             process_weights_after_loading(model, model_config, target_device)
         return model.eval()
+
+
+model_loader_manager = ExtensionManager[BaseModelLoader]()

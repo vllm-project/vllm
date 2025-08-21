@@ -27,7 +27,8 @@ from vllm.model_executor.layers.linear import (LinearBase,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.base_loader import (BaseModelLoader,
+                                                          model_loader_manager)
 from vllm.model_executor.model_loader.utils import (ParamMapping,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -39,7 +40,6 @@ from vllm.model_executor.utils import (get_moe_expert_mapping,
                                        get_packed_modules_mapping,
                                        set_weight_attrs)
 from vllm.platforms import current_platform
-from vllm.plugins import ExtensionManager
 
 # yapf conflicts with isort for this block
 
@@ -52,7 +52,7 @@ def is_moe_model(model: torch.nn.Module) -> bool:
         isinstance(module, FusedMoE) for module in model.modules()))
 
 
-@ExtensionManager.register(base_cls=BaseModelLoader, names=["bitsandbytes"])
+@model_loader_manager.register(names=["bitsandbytes"])
 class BitsAndBytesModelLoader(BaseModelLoader):
     """Model loader to load model weights with BitAndBytes quantization."""
 

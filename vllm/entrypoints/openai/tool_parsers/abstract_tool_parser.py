@@ -9,6 +9,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
                                               ExtractedToolCallInformation)
 from vllm.logger import init_logger
+from vllm.plugins.extension_manager import ExtensionManager
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
@@ -76,3 +77,6 @@ class ToolParser:
         raise NotImplementedError(
             "AbstractToolParser.extract_tool_calls_streaming has not been "
             "implemented!")
+
+
+tool_parser_manager = ExtensionManager[ToolParser]()

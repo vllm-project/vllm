@@ -12,10 +12,10 @@ from typing import Any, Optional, Union
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
-                                                          KVConnectorRole)
+                                                          KVConnectorRole,
+                                                          kv_connector_manager)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.plugins import ExtensionManager
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -86,13 +86,11 @@ class Scheduler(SchedulerInterface):
             if kv_connector_name is None:
                 # With ExtensionManager, we no longer do on-the-fly imports,
                 # as extensions must be registered via
-                # ExtensionManager.register(...) decorator.
+                # register(...) decorator.
                 raise ValueError(
                     "KV connector name must be set in KVTransferConfig")
-            self.connector = ExtensionManager.create(
-                base_cls=KVConnectorBase_V1,
-                name=kv_connector_name,
-                role=KVConnectorRole.SCHEDULER)
+            self.connector = kv_connector_manager.create(
+                name=kv_connector_name, role=KVConnectorRole.SCHEDULER)
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,

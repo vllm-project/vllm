@@ -10,15 +10,15 @@ from huggingface_hub import hf_hub_download
 from transformers import AutoModelForCausalLM
 
 from vllm.config import LoadConfig, ModelConfig, VllmConfig
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.base_loader import (BaseModelLoader,
+                                                          model_loader_manager)
 from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading, set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     get_gguf_extra_tensor_names, gguf_quant_weights_iterator)
-from vllm.plugins import ExtensionManager
 
 
-@ExtensionManager.register(base_cls=BaseModelLoader, names=["gguf"])
+@model_loader_manager.register(names=["gguf"])
 class GGUFModelLoader(BaseModelLoader):
     """
     Model loader that can load GGUF files. This is useful for loading models

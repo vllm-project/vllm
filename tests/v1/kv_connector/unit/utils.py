@@ -9,11 +9,9 @@ import torch
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    KVConnectorBase_V1)
+from vllm.distributed.kv_transfer.kv_connector.v1 import kv_connector_manager
 from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa
     SharedStorageConnector)
-from vllm.plugins import ExtensionManager
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
@@ -208,8 +206,7 @@ def create_model_runner_output(
     )
 
 
-@ExtensionManager.register(base_cls=KVConnectorBase_V1,
-                           names=["TestSharedStorageConnector"])
+@kv_connector_manager.register(names=["TestSharedStorageConnector"])
 class TestSharedStorageConnector(SharedStorageConnector):
 
     def __init__(self, config: VllmConfig, role):

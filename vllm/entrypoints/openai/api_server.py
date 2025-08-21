@@ -99,7 +99,8 @@ from vllm.entrypoints.tool_server import (DemoToolServer, MCPToolServer,
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     log_non_default_args, with_cancellation)
 from vllm.logger import init_logger
-from vllm.plugins import ExtensionManager
+from vllm.plugins.extension_manager import (ExtensionManager,
+                                            tool_parser_manager)
 from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -1813,7 +1814,7 @@ def create_server_unix_socket(path: str) -> socket.socket:
 
 
 def validate_api_server_args(args):
-    valid_tool_parses = ExtensionManager.get_extension_names(
+    valid_tool_parses = tool_parser_manager.get_extension_names(
         base_cls=ToolParser)
     if args.enable_auto_tool_choice \
             and args.tool_call_parser not in valid_tool_parses:
