@@ -174,8 +174,12 @@ class TestAttentionStaticQuantPatternModel(torch.nn.Module):
 
         self.fp8_linear = Fp8LinearOp(
             act_quant_static=True, act_quant_group_shape=GroupShape.PER_TENSOR)
-        self.wscale = torch.tensor([1.0], dtype=torch.float32)
-        self.scale = torch.tensor([1.0], dtype=torch.float32)
+        self.wscale = torch.tensor([1.0],
+                                   device=self.device,
+                                   dtype=torch.float32)
+        self.scale = torch.tensor([1.0],
+                                  device=self.device,
+                                  dtype=torch.float32)
 
         self.block_size = 16
 
@@ -287,7 +291,8 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
                     num_kv_heads * head_size,
                     dtype=dtype,
                     device=device)
-    linear_w = torch.randn(hidden_size, hidden_size).to(FP8_DTYPE).t()
+    linear_w = torch.randn(hidden_size, hidden_size,
+                           device=device).to(FP8_DTYPE).t()
 
     # Mark first dimension as dynamic for realistic testing
     torch._dynamo.mark_dynamic(q, 0)
