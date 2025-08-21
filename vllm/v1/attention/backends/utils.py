@@ -5,8 +5,7 @@ import enum
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, make_dataclass
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Generic, Optional,
-                    TypeVar)
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
 
 import numpy as np
 import torch
@@ -20,8 +19,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import (AttentionBackend,
-                                              AttentionMetadata)
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
@@ -542,29 +540,6 @@ def make_local_attention_virtual_batches(
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
     )
-
-
-def subclass_attention_metadata_builder(
-    name_prefix: str,
-    builder_cls: type[AttentionMetadataBuilder[M]],
-    build: Callable[
-        [AttentionMetadataBuilder[M], int, CommonAttentionMetadata, bool],
-        AttentionMetadata,
-    ],
-) -> type[AttentionMetadataBuilder[M]]:
-    """
-    Return a new subclass of `builder_cls` whose .build(...) method
-    is monkey patched to a custom build function.
-    """
-    name: str = name_prefix + builder_cls.__name__  # type: ignore
-
-    Wrapped = type(
-        name,
-        (builder_cls, ),  # inherit from the original
-        {
-            "build": build,
-        })
-    return Wrapped  # type: ignore
 
 
 def subclass_attention_backend(

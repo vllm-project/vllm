@@ -12,7 +12,7 @@ from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig, QuantizationConfig
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata, make_local_attention_virtual_batches,
-    subclass_attention_backend, subclass_attention_metadata_builder)
+    subclass_attention_backend)
 
 from ..layer import Attention
 
@@ -25,27 +25,23 @@ def create_chunked_local_attention_backend(
 ) -> type[AttentionBackend]:
     prefix = f"ChunkedLocalAttention_{attention_chunk_size}_{block_size}_"
 
-    def build(self,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> AttentionMetadata:
-        common_attn_metadata = make_local_attention_virtual_batches(
-            attention_chunk_size, common_attn_metadata, block_size)
-        return super(self.__class__,
-                     self).build(common_prefix_len, common_attn_metadata,
+    underlying_builder = underlying_attn_backend.get_builder_cls()
+
+    class ChunkedLocalAttentionBuilder(underlying_builder):
+
+        def build(self,
+                  common_prefix_len: int,
+                  common_attn_metadata: CommonAttentionMetadata,
+                  fast_build: bool = False) -> AttentionMetadata:
+            common_attn_metadata = make_local_attention_virtual_batches(
+                attention_chunk_size, common_attn_metadata, block_size)
+            return super().build(common_prefix_len, common_attn_metadata,
                                  fast_build)
 
-    # Dynamically create a new attention backend that wraps the
-    # underlying attention backend but applies
-    # `make_local_attention_virtual_batches` before calling `build(...)`
-    builder_cls = subclass_attention_metadata_builder(
-        name_prefix=prefix,
-        builder_cls=underlying_attn_backend.get_builder_cls(),
-        build=build)
     attn_backend = subclass_attention_backend(
         name_prefix=prefix,
         attention_backend_cls=underlying_attn_backend,
-        builder_cls=builder_cls)
+        builder_cls=ChunkedLocalAttentionBuilder)
 
     return attn_backend
 

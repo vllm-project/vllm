@@ -12,34 +12,31 @@ from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
-from vllm.v1.attention.backends.utils import (
-    CommonAttentionMetadata, subclass_attention_backend,
-    subclass_attention_metadata_builder)
+from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
+                                              subclass_attention_backend)
 
 
 @functools.lru_cache
 def create_encoder_only_attention_backend(
     underlying_attn_backend: AttentionBackend, ) -> type[AttentionBackend]:
     prefix = "EncoderOnlyAttention_"
+    underlying_builder = underlying_attn_backend.get_builder_cls()
 
-    def build(self,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> AttentionMetadata:
-        new_common_attn_metadata = copy(common_attn_metadata)
-        new_common_attn_metadata.causal = False
-        return super(self.__class__,
-                     self).build(common_prefix_len, new_common_attn_metadata,
+    class EncoderOnlyAttentionBuilder(underlying_builder):
+
+        def build(self,
+                  common_prefix_len: int,
+                  common_attn_metadata: CommonAttentionMetadata,
+                  fast_build: bool = False) -> AttentionMetadata:
+            new_common_attn_metadata = copy(common_attn_metadata)
+            new_common_attn_metadata.causal = False
+            return super().build(common_prefix_len, new_common_attn_metadata,
                                  fast_build)
 
-    builder_cls = subclass_attention_metadata_builder(
-        name_prefix=prefix,
-        builder_cls=underlying_attn_backend.get_builder_cls(),
-        build=build)
     attn_backend = subclass_attention_backend(
         name_prefix=prefix,
         attention_backend_cls=underlying_attn_backend,
-        builder_cls=builder_cls)
+        builder_cls=EncoderOnlyAttentionBuilder)
 
     return attn_backend
 
