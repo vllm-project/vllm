@@ -23,7 +23,7 @@ class IOProcessor(ABC):
         request_id: Optional[str] = None,
         **kwargs,
     ) -> Union[PromptType, Sequence[PromptType]]:
-        ...
+        raise NotImplementedError
 
     async def pre_process_async(
         self,
@@ -38,7 +38,7 @@ class IOProcessor(ABC):
                      model_out: Sequence[Optional[PoolingRequestOutput]],
                      request_id: Optional[str] = None,
                      **kwargs) -> Any:
-        ...
+        raise NotImplementedError
 
     async def post_process_async(
         self,
@@ -46,13 +46,13 @@ class IOProcessor(ABC):
         request_id: Optional[str] = None,
         **kwargs,
     ) -> Any:
-        self.post_process(model_out, request_id, **kwargs)
+        return self.post_process(model_out, request_id, **kwargs)
 
     @abstractmethod
     def parse_request(self, request: Any) -> Optional[Any]:
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     def plugin_out_to_response(self,
                                plugin_out: Any) -> IOProcessorPluginResponse:
-        ...
+        raise NotImplementedError

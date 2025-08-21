@@ -21,42 +21,39 @@ class IOProcessor(ABC):
         request_id: Optional[str] = None,
         **kwargs,
     ) -> Union[PromptType, Sequence[PromptType]]:
-        ...
+        raise NotImplementedError
 
-    @abstractmethod
     async def pre_process_async(
         self,
         prompt: Any,
         request_id: Optional[str] = None,
         **kwargs,
     ) -> Union[PromptType, Sequence[PromptType]]:
-        ...
+        return self.pre_process(prompt, request_id, **kwargs)
 
     @abstractmethod
     def post_process(self,
                      model_out: Sequence[Optional[PoolingRequestOutput]],
                      request_id: Optional[str] = None,
                      **kwargs) -> Any:
-        ...
+        raise NotImplementedError
 
-    @abstractmethod
     async def post_process_async(
         self,
         model_out: Sequence[Optional[PoolingRequestOutput]],
         request_id: Optional[str] = None,
         **kwargs,
     ) -> Any:
-        ...
+        return self.post_process(model_out, request_id, **kwargs)
 
     @abstractmethod
     def parse_request(self, request: Any) -> Optional[Any]:
-        ...
+        raise NotImplementedError
 
     @abstractmethod
     def plugin_out_to_response(self,
                                plugin_out: Any) -> IOProcessorPluginResponse:
-        ...
-
+        raise NotImplementedError
 ```
 
 The `parse` method is used for validating the user prompt and converting it into the input expected by the `pre_process`/`pre_process_async` methods.
@@ -70,10 +67,9 @@ An example implementation of a plugin that enables generating geotiff images wit
 
 ## Using a IOProcessor plugin
 
-IOProcessor plugins are loaded at engine startup and there are three ways of specifying the name plugin to be loaded:
+IOProcessor plugins are loaded at engine startup and there are two ways of specifying the name plugin to be loaded:
 
-1. setting the `VLLM_USE_IO_PROCESSOR_PLUGIN` environment variable.
-2. passing the `io_processor_plugin` argument to LLM in offline mode, or passing the `--io-processor-plugin` argument in serving mode.
-3. adding a `io_processor_plugin` field to the model HF config.
+1. passing the `io_processor_plugin` argument to LLM in offline mode, or passing the `--io-processor-plugin` argument in serving mode.
+2. adding a `io_processor_plugin` field to the model HF config (config.json).
 
 The order also identifies the priority of the methods. e.g., setting the `VLLM_USE_IO_PROCESSOR_PLUGIN` environment variable will override values set via all the other methods.

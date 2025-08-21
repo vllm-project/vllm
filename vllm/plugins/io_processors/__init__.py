@@ -6,7 +6,6 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from vllm import envs
 from vllm.config import VllmConfig
 from vllm.plugins import load_plugins_by_group
 from vllm.plugins.io_processors.interface import IOProcessor
@@ -23,20 +22,17 @@ def get_io_processor(
     # plugins, these plugins register a function that returns the class
     # name for the processor to install.
 
-    # A plugin can be specified via the model config
-    # Retrieve the model specific plugin if available
-    # This is using a custom field in the hf_config for the model
-    hf_config = vllm_config.model_config.hf_config.to_dict()
-    config_plugin = hf_config.get("io_processor_plugin")
-
-    if envs.VLLM_USE_IO_PROCESSOR_PLUGIN:
-        # A plugin is specified ad startup via env variable
-        model_plugin = envs.VLLM_USE_IO_PROCESSOR_PLUGIN
-    elif plugin_from_init:
+    if plugin_from_init:
         model_plugin = plugin_from_init
-    elif config_plugin:
-        model_plugin = config_plugin
     else:
+        # A plugin can be specified via the model config
+        # Retrieve the model specific plugin if available
+        # This is using a custom field in the hf_config for the model
+        hf_config = vllm_config.model_config.hf_config.to_dict()
+        config_plugin = hf_config.get("io_processor_plugin")
+        model_plugin = config_plugin
+
+    if model_plugin is None:
         logger.info("No IOProcessor plugins requested by the model")
         return None
 
@@ -63,7 +59,7 @@ def get_io_processor(
 
     if model_plugin not in loadable_plugins:
         raise ValueError(
-            f"The model requires theI '{model_plugin}' IO Processor plugin "
+            f"The model requires the '{model_plugin}' IO Processor plugin "
             "but it is not installed. "
             f"Available plugins: {list(loadable_plugins.keys())}")
 

@@ -81,7 +81,6 @@ if TYPE_CHECKING:
     VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_PLUGINS: Optional[list[str]] = None
-    VLLM_USE_IO_PROCESSOR_PLUGIN: Optional[str] = None
     VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
@@ -661,11 +660,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_PLUGINS":
     lambda: None if "VLLM_PLUGINS" not in os.environ else os.environ[
         "VLLM_PLUGINS"].split(","),
-
-    "VLLM_USE_IO_PROCESSOR_PLUGIN":
-    lambda: (
-       os.getenv("VLLM_USE_IO_PROCESSOR_PLUGIN", None)
-    ),
 
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and
