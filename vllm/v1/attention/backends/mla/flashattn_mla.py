@@ -2,23 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Optional
+from typing import ClassVar, Optional
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.backends.abstract import (AttentionType,
+                                              is_quantized_kv_cache)
 from vllm.attention.utils.fa_utils import (flash_attn_supports_mla,
                                            get_flash_attn_version)
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonDecodeMetadata,
                                                    MLACommonImpl,
                                                    MLACommonMetadata,
                                                    MLACommonMetadataBuilder)
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
-
-if TYPE_CHECKING:
-    pass
 
 logger = init_logger(__name__)
 
@@ -60,8 +60,10 @@ class FlashAttnMLAMetadataBuilder(
     # TODO(lucas): tune this value
     reorder_batch_threshold: ClassVar[int] = 64
 
-    def __init__(self, runner):
-        super().__init__(runner)
+    def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
+                 vllm_config: VllmConfig, device: torch.device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device,
+                         FlashAttnMLAMetadata)
         self.fa_aot_schedule = (get_flash_attn_version() == 3)
         self.page_size = self.runner.block_size
 
@@ -112,7 +114,7 @@ class FlashAttnMLAMetadataBuilder(
         )
 
 
-class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
+class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
 
     def __init__(
             self,
@@ -123,47 +125,48 @@ class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
             alibi_slopes: Optional[list[float]],
             sliding_window: Optional[int],
             kv_cache_dtype: str,
-            blocksparse_params: Optional[dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
+            kv_sharing_target_layer_name: Optional[str],
             # MLA Specific Arguments
             **mla_args) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
-                         blocksparse_params, logits_soft_cap, attn_type,
-                         **mla_args)
+                         logits_soft_cap, attn_type,
+                         kv_sharing_target_layer_name, **mla_args)
 
         assert flash_attn_supports_mla(), \
             "FlashAttnMLA is not supported on this device"
 
-        unsupported_features = [
-            alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
-        ]
+        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
-                "FlashMLAImpl does not support one of the following: "
-                "alibi_slopes, sliding_window, blocksparse_params, "
-                "logits_soft_cap")
+                "FlashAttnMLAImpl does not support one of the following: "
+                "alibi_slopes, sliding_window, logits_soft_cap")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "FlashMLAImpl")
+                                      "FlashAttnMLAImpl")
+
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            raise NotImplementedError(
+                "FlashAttnMLA V1 with FP8 KV cache not yet supported")
 
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
+        attn_metadata: FlashAttnMLAMetadata,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
-        if self.kv_cache_dtype.startswith("fp8"):
-            raise NotImplementedError("FP8 FlashMLA not yet supported")
+        assert attn_metadata.decode is not None
 
-        decode_meta = attn_metadata.decode
-        assert decode_meta is not None
+        if self.kv_cache_dtype.startswith("fp8"):
+            raise NotImplementedError(
+                "FP8 FlashAttention MLA not yet supported")
 
         kv_c_cache = kv_c_and_k_pe_cache[..., :self.kv_lora_rank]
         kv_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank:]
@@ -173,15 +176,15 @@ class FlashAttnMLAImpl(MLACommonImpl[MLACommonMetadata]):
             k=kv_pe_cache.unsqueeze(-2),  # Add head dim of 1
             v=kv_c_cache.unsqueeze(-2),  # Add head dim of 1
             q_v=q_nope,
-            max_seqlen_q=decode_meta.max_query_len,
-            cu_seqlens_q=decode_meta.query_start_loc,
-            max_seqlen_k=decode_meta.max_seq_len,
-            seqused_k=decode_meta.seq_lens,
-            block_table=decode_meta.block_table,
+            max_seqlen_q=attn_metadata.decode.max_query_len,
+            cu_seqlens_q=attn_metadata.decode.query_start_loc,
+            max_seqlen_k=attn_metadata.decode.max_seq_len,
+            seqused_k=attn_metadata.decode.seq_lens,
+            block_table=attn_metadata.decode.block_table,
             softmax_scale=self.scale,
             causal=True,
             fa_version=3,  # only version 3 is supported
-            scheduler_metadata=decode_meta.scheduler_metadata,
+            scheduler_metadata=attn_metadata.decode.scheduler_metadata,
         )
 
-        return self._v_up_proj_and_o_proj(o)
+        return self._v_up_proj(o)

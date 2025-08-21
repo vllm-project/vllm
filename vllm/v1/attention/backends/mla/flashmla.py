@@ -85,11 +85,10 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
                 device=self.device,
                 dtype=torch.int32)
 
-    def _build_decode(self, block_table_tensor: torch.Tensor,
-                      seq_lens_cpu: torch.Tensor,
-                      seq_lens_device: torch.Tensor,
-                      query_start_loc_cpu: torch.Tensor,
-                      query_start_loc_device: torch.Tensor) -> FlashMLADecodeMetadata:
+    def _build_decode(
+            self, block_table_tensor: torch.Tensor, seq_lens_cpu: torch.Tensor,
+            seq_lens_device: torch.Tensor, query_start_loc_cpu: torch.Tensor,
+            query_start_loc_device: torch.Tensor) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = \
             get_mla_metadata(
             seq_lens_device,
