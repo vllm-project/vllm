@@ -45,6 +45,8 @@ from vllm.v1.outputs import KVConnectorOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+        KVTransferStats)
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
@@ -64,6 +66,13 @@ class KVConnectorRole(enum.Enum):
 
     # Connector running in the worker process
     WORKER = 1
+
+
+class KVConnectorType(enum.Enum):
+    NIXL = enum.auto()
+    LMCACHE = enum.auto()
+    NCCL = enum.auto()
+    SHARED_STORAGE = enum.auto()
 
 
 class KVConnectorMetadata(ABC):  # noqa: B024
@@ -330,3 +339,11 @@ class KVConnectorBase_V1(ABC):
             raise TypeError("get_required_kvcache_layout should not be called "
                             "on the abstract base class")
         return None
+
+    def get_kv_transfer_stats(
+            self) -> dict[KVConnectorType, "KVTransferStats"]:
+        """
+        Get the KV transfer stats for the connector. Results are aggregated by
+        connector type, hence a dict is returned.
+        """
+        return {}
