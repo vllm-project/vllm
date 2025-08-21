@@ -17,10 +17,10 @@ from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
-from vllm.compilation.fusion import kFp8StaticTensorSym
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey, kFp8StaticTensorSym)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)

@@ -12,7 +12,8 @@ from torch._ops import OpOverload
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape, QuantKey, ScaleDesc)
+    GroupShape, QuantKey, ScaleDesc, kFp8DynamicTensorSym, kFp8DynamicTokenSym,
+    kFp8StaticTensorSym, kNvfp4Quant, kStaticTensorScale)
 from vllm.platforms import current_platform
 
 from .fx_utils import find_getitem_maybe
@@ -38,20 +39,6 @@ def empty_i32(*args, **kwargs):
 
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
-
-kStaticTensorScale = ScaleDesc(torch.float32, True, GroupShape.PER_TENSOR)
-kFp8StaticTensorSym = QuantKey(FP8_DTYPE, kStaticTensorScale, symmetric=True)
-
-kDynamicTensorScale = ScaleDesc(torch.float32, False, GroupShape.PER_TENSOR)
-kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, kDynamicTensorScale, symmetric=True)
-
-kDynamicTokenScale = ScaleDesc(torch.float32, False, GroupShape.PER_TOKEN)
-kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, kDynamicTokenScale, symmetric=True)
-
-kNvfp4GroupScale = ScaleDesc(FP8_DTYPE, False, GroupShape(1, 16))
-kNvfp4Quant = QuantKey(FP4_DTYPE,
-                       scale=kNvfp4GroupScale,
-                       scale2=kStaticTensorScale)
 
 QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8StaticTensorSym:

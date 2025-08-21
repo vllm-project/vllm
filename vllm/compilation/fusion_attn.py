@@ -11,12 +11,12 @@ from torch._subclasses.fake_tensor import (FakeTensorMode,
 from vllm.attention import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey, kNvfp4Quant, kStaticTensorScale)
 from vllm.platforms import current_platform
 from vllm.utils import round_up
 
-from .fusion import (QUANT_OPS, empty_bf16, empty_fp32, empty_i32, kNvfp4Quant,
-                     kStaticTensorScale)
+from .fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
@@ -68,6 +68,10 @@ class AttentionQuantPattern:
         view_to_reshape(gm)
         return gm
 
+    def register_if_supported(self, pm_pass: PatternMatcherPass):
+        if self.layer.impl.fused_output_quant_supported(self.quant_key):
+            self._register(pm_pass)
+
 
 class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
     """
@@ -88,10 +92,6 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
                              scale=kStaticTensorScale,
                              symmetric=symmetric)
         super().__init__(layer, quant_key)
-
-    def register_if_supported(self, pm_pass: PatternMatcherPass):
-        if self.layer.impl.fused_output_quant_supported(self.quant_key):
-            self._register(pm_pass)
 
     def _register(self, pm_pass: PatternMatcherPass):
 
@@ -165,10 +165,6 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
 
     def __init__(self, layer: Attention):
         super().__init__(layer, kNvfp4Quant)
-
-    def register_if_supported(self, pm_pass: PatternMatcherPass):
-        if self.layer.impl.fused_output_quant_supported(self.quant_key):
-            self._register(pm_pass)
 
     def _register(self, pm_pass: PatternMatcherPass):
 

@@ -294,7 +294,6 @@ class AttentionImpl(ABC, Generic[T]):
         This is used by the AttnFusionPass to only fuse output quantization
         onto implementations that support it.
 
-        TODO(luka) merge parameters into QuantDescriptor
         :param quant_key: QuantKey object that describes the quantization op
         :return: is fusion supported for this type of quantization
         """

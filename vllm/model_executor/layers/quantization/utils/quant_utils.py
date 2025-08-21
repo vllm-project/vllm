@@ -14,6 +14,9 @@ from vllm._custom_ops import cutlass_scaled_mm_supports_fp4
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
+FP8_DTYPE = current_platform.fp8_dtype()
+FP4_DTYPE = torch.uint8
+
 
 # Use proxy as NamedTuple direct subclasses cannot have static members
 class _GroupShape(NamedTuple):
@@ -66,10 +69,6 @@ class QuantKey:
     scale: scale descriptor
     scale2: second-level scale descriptor
     symmetric: symmetric if True, asymmetric if False
-
-    TODO(luka) use QuantDescriptor once standardized:
-    https://github.com/vllm-project/vllm/issues/8913
-
     """
     dtype: torch.dtype
     scale: ScaleDesc
@@ -81,6 +80,21 @@ class QuantKey:
         return (f"QuantKey({fx.graph.dtype_abbrs[self.dtype]},"
                 f"scale({self.scale}),{scale2_str}"
                 f"{'a' if not self.symmetric else ''}symmetric)")
+
+
+kStaticTensorScale = ScaleDesc(torch.float32, True, GroupShape.PER_TENSOR)
+kFp8StaticTensorSym = QuantKey(FP8_DTYPE, kStaticTensorScale, symmetric=True)
+
+kDynamicTensorScale = ScaleDesc(torch.float32, False, GroupShape.PER_TENSOR)
+kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, kDynamicTensorScale, symmetric=True)
+
+kDynamicTokenScale = ScaleDesc(torch.float32, False, GroupShape.PER_TOKEN)
+kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, kDynamicTokenScale, symmetric=True)
+
+kNvfp4GroupScale = ScaleDesc(FP8_DTYPE, False, GroupShape(1, 16))
+kNvfp4Quant = QuantKey(FP4_DTYPE,
+                       scale=kNvfp4GroupScale,
+                       scale2=kStaticTensorScale)
 
 
 # Normalize the group_shape to the full extent for any dims that are -1
