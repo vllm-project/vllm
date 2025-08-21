@@ -600,8 +600,11 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Responses API")
-
-    generator = await handler.create_responses(request, raw_request)
+    try:
+        generator = await handler.create_responses(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
@@ -618,7 +621,11 @@ async def retrieve_responses(response_id: str, raw_request: Request):
         return base(raw_request).create_error_response(
             message="The model does not support Responses API")
 
-    response = await handler.retrieve_responses(response_id)
+    try:
+        response = await handler.retrieve_responses(response_id)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
 
     if isinstance(response, ErrorResponse):
         return JSONResponse(content=response.model_dump(),
@@ -633,7 +640,11 @@ async def cancel_responses(response_id: str, raw_request: Request):
         return base(raw_request).create_error_response(
             message="The model does not support Responses API")
 
-    response = await handler.cancel_responses(response_id)
+    try:
+        response = await handler.cancel_responses(response_id)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
 
     if isinstance(response, ErrorResponse):
         return JSONResponse(content=response.model_dump(),
@@ -667,9 +678,11 @@ async def create_chat_completion(request: ChatCompletionRequest,
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Chat Completions API")
-
-    generator = await handler.create_chat_completion(request, raw_request)
-
+    try:
+        generator = await handler.create_chat_completion(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
@@ -742,7 +755,11 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
         return base(raw_request).create_error_response(
             message="The model does not support Embeddings API")
 
-    generator = await handler.create_embedding(request, raw_request)
+    try:
+        generator = await handler.create_embedding(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
@@ -770,8 +787,11 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Pooling API")
-
-    generator = await handler.create_pooling(request, raw_request)
+    try:
+        generator = await handler.create_pooling(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
@@ -791,7 +811,11 @@ async def create_classify(request: ClassificationRequest,
         return base(raw_request).create_error_response(
             message="The model does not support Classification API")
 
-    generator = await handler.create_classify(request, raw_request)
+    try:
+        generator = await handler.create_classify(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
@@ -820,7 +844,11 @@ async def create_score(request: ScoreRequest, raw_request: Request):
         return base(raw_request).create_error_response(
             message="The model does not support Score API")
 
-    generator = await handler.create_score(request, raw_request)
+    try:
+        generator = await handler.create_score(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
@@ -878,8 +906,12 @@ async def create_transcriptions(raw_request: Request,
             message="The model does not support Transcriptions API")
 
     audio_data = await request.file.read()
-    generator = await handler.create_transcription(audio_data, request,
-                                                   raw_request)
+    try:
+        generator = await handler.create_transcription(audio_data, request,
+                                                       raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
@@ -919,8 +951,12 @@ async def create_translations(request: Annotated[TranslationRequest,
             message="The model does not support Translations API")
 
     audio_data = await request.file.read()
-    generator = await handler.create_translation(audio_data, request,
-                                                 raw_request)
+    try:
+        generator = await handler.create_translation(audio_data, request,
+                                                     raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
@@ -949,7 +985,11 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Rerank (Score) API")
-    generator = await handler.do_rerank(request, raw_request)
+    try:
+        generator = await handler.do_rerank(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
@@ -1922,6 +1962,8 @@ async def run_server_worker(listen_address,
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
+            h11_max_incomplete_event_size=args.h11_max_incomplete_event_size,
+            h11_max_header_count=args.h11_max_header_count,
             **uvicorn_kwargs,
         )
 
