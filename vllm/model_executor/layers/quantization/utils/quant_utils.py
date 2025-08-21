@@ -42,7 +42,7 @@ GroupShape.PER_TOKEN = GroupShape(1, -1)
 @dataclass(frozen=True)
 class ScaleDesc:
     """
-    Class for describing the scale of quantization.
+    Class for describing a single quantization scaling factor.
     dtype: data type of the scale
     static: static scale if True, dynamic if False
     group_shape: group shape of the scale
