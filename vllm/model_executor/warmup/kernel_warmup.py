@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
@@ -18,6 +19,8 @@ from vllm.utils.flashinfer import has_flashinfer
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
+
+logger = init_logger(__name__)
 
 
 def kernel_warmup(worker: "Worker"):
@@ -30,9 +33,26 @@ def kernel_warmup(worker: "Worker"):
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
 
-    # FlashInfer autotune for Blackwell (SM 10.0) GPUs
+    # FlashInfer kernel autotune for Blackwell (SM 10.0) GPUs
     if has_flashinfer() and current_platform.is_device_capability(100):
         flashinfer_autotune(worker.model_runner)
+
+    # FlashInfer attention warmup
+    # Check if the model runner has any flashinfer attention groups
+    if any(group.backend.get_name() == "FLASHINFER_VLLM_V1"
+           for groups in worker.model_runner.attn_groups for group in groups):
+        from vllm.config.compilation import CUDAGraphMode
+        logger.info("Warming up FlashInfer attention")
+        with torch.inference_mode():
+            # Warmup with mixed batch containing both prefill and decode tokens
+            worker.model_runner._dummy_run(
+                num_tokens=16,
+                skip_eplb=True,
+                is_profile=True,
+                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+                force_attention=True,
+                create_mixed_batch=True,
+            )
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
