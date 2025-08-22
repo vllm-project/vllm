@@ -267,7 +267,7 @@ class StructuredOutputManager:
             assert request.structured_output_request is not None
             assert request.structured_output_request.grammar is not None
         # by default, we should always advance
-        # for cases that doesn't uses thinking mode.
+        # for cases that don't use thinking mode.
         if self.reasoner is not None:
             structured_req = request.structured_output_request
 
@@ -276,7 +276,7 @@ class StructuredOutputManager:
 
             # Check if reasoning ends in *this* step
             if self.reasoner.is_reasoning_end(request.all_token_ids):
-                # Reasoning just ended, so we shouldn't advanced til
+                # Reasoning just ended, so we shouldn't advance til
                 # next pass
                 structured_req.reasoning_ended = True
 
