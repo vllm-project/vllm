@@ -50,7 +50,6 @@ def test_mixtral_lora(mixtral_lora_files, tp_size):
         max_loras=4,
         distributed_executor_backend="ray",
         tensor_parallel_size=tp_size,
-        enable_chunked_prefill=True,
     )
 
     expected_lora_output = [
