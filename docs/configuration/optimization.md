@@ -173,6 +173,7 @@ Currently, the following models support `mm_encoder_tp_mode="data"`:
 - Llama4 (<gh-pr:18368>)
 - Qwen2.5-VL (<gh-pr:22742>)
 - Step3 (<gh-pr:22697>)
+- MiniCPM-V-4 (<gh-pr:23327>)
 
 ## Input Processing
 
