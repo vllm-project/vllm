@@ -59,7 +59,7 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
         raise NotImplementedError
 ```
 
-The `parse` method is used for validating the user prompt and converting it into the input expected by the `pre_process`/`pre_process_async` methods.
+The `parse_request` method is used for validating the user prompt and converting it into the input expected by the `pre_process`/`pre_process_async` methods.
 The `pre_process*` methods take the validated plugin input to generate vLLM's model prompts for regular inference.
 The `post_process*` methods take `PoolingRequestOutput` objects as input and generate a custom plugin output.
 An implementation of the `encode_with_io_processor` method is available [here](../../vllm/entrypoints/llm.py) and [here](../../vllm/v1/engine/async_llm.py).
