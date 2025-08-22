@@ -1162,10 +1162,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         for modality, prompt_updates in mm_prompt_updates.items():
             if len(prompt_updates) > 1:
                 logger.warning_once(
-                    "Detected %s prompt updates for modality %r. "
+                    "Detected %d prompt updates for modality %r. "
                     "Multiple prompt updates per modality is now "
                     "deprecated and may be removed in v0.13. "
-                    "Instead, please define multiple update targets "
+                    "Instead, please specify multiple update targets "
                     "in the same prompt update definition by passing "
                     "a tuple to `PromptUpdate.target`.",
                     len(prompt_updates),
