@@ -18,18 +18,26 @@ class SharedFusedMoE(FusedMoE):
     def __init__(self, shared_experts: torch.nn.Module, **kwargs):
         super().__init__(**kwargs)
         self._shared_experts = shared_experts
+        self.naive_experts = False
 
     @property
     def shared_experts(self) -> Optional[torch.nn.Module]:
-        return self._shared_experts
+        return self._shared_experts if not self.naive_experts else None
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        shared_out, fused_out = super().forward(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-        )
+        if self.naive_experts:
+            shared_out = self._shared_experts(hidden_states)
+            fused_out = super().forward(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
+        else:
+            shared_out, fused_out = super().forward(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+            )
         return shared_out, fused_out

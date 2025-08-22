@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Callable, Optional, Union
 
 import deep_ep
 import torch
@@ -25,6 +25,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.num_dispatchers_ = num_dispatchers
         self.dp_size = dp_size
         self.rank_expert_offset = rank_expert_offset
+        self.async_prepare = True
+
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
@@ -56,10 +58,16 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             return None
         return deep_ep.Buffer.get_combine_config(self.dp_size)
 
-    def _do_dispatch(self, tokens: torch.Tensor,
-                     token_scales: Optional[torch.Tensor],
-                     rank_topk_ids: torch.Tensor,
-                     rank_topk_weights: torch.Tensor, num_experts: int):
+    def _do_dispatch(
+        self,
+        tokens: torch.Tensor,
+        token_scales: Optional[torch.Tensor],
+        rank_topk_ids: torch.Tensor,
+        rank_topk_weights: torch.Tensor,
+        num_experts: int,
+        a1_scale: Optional[torch.Tensor],
+        quant_config: FusedMoEQuantConfig,
+    ) -> Callable:
 
         has_scales = token_scales is not None
 
@@ -93,8 +101,35 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_alignment=1,
             config=self._get_dispatch_config(),
             previous_event=None,
-            async_finish=False,
+            async_finish=self.async_prepare,
             allocate_on_comm_stream=False)
+
+        return lambda: self._receiver(
+            event,
+            has_scales,
+            token_data,
+            expert_topk_ids,
+            num_experts,
+            expert_num_tokens_per_expert_list,
+            expert_topk_weights,
+            a1_scale,
+            quant_config,
+        )
+
+    def _receiver(
+        self,
+        event: Optional[deep_ep.EventOverlap],
+        has_scales: bool,
+        token_data: Union[tuple[torch.Tensor, torch.Tensor], torch.Tensor],
+        expert_topk_ids: Optional[torch.Tensor],
+        num_experts: int,
+        expert_num_tokens_per_expert_list: list[int],
+        expert_topk_weights: Optional[torch.Tensor],
+        a1_scale: Optional[torch.Tensor],
+        quant_config: FusedMoEQuantConfig,
+    ) -> mk.PrepareResultType:
+        if self.async_prepare:
+            event.current_stream_wait()
 
         if has_scales:
             expert_x, expert_x_scale = token_data
@@ -123,10 +158,28 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_tokens_meta = mk.ExpertTokensMetadata.make_from_list(
             expert_num_tokens_per_expert_list, device=expert_x.device)
 
+        # Dispatch and Quant
+        # DeepEP kernels only support dispatching block-quantized
+        # activation scales.
+        # Dispatch in bfloat16 and quantize afterwards
+        if not quant_config.is_block_quantized:
+            # Quantize after dispatch.
+            expert_x_scale = None
+            if expert_x.numel() != 0:
+                expert_x, expert_x_scale = moe_kernel_quantize_input(
+                    expert_x,
+                    a1_scale,
+                    quant_dtype=quant_config.quant_dtype,
+                    per_act_token_quant=False,
+                    block_shape=quant_config.block_shape)
+
         return (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
                 expert_topk_weights)
 
-    def prepare(
+    def has_prepare_no_receive(self) -> bool:
+        return True
+
+    def prepare_no_receive(
         self,
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
@@ -137,7 +190,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> mk.PrepareResultType:
+    ) -> Callable:
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
@@ -157,37 +210,38 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             )
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
-            (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
-             expert_topk_weights) = self._do_dispatch(
-                 tokens=a1q,
-                 token_scales=a1q_scale,
-                 rank_topk_ids=topk_ids,
-                 rank_topk_weights=topk_weights,
-                 num_experts=num_experts)
+            a1_post_scale = None
         else:
-            # Dispatch and Quant
-            # DeepEP kernels only support dispatching block-quantized
-            # activation scales.
-            # Dispatch in bfloat16
-            (expert_x, _, expert_tokens_meta, expert_topk_ids,
-             expert_topk_weights) = self._do_dispatch(
-                 tokens=a1,
-                 token_scales=None,
-                 rank_topk_ids=topk_ids,
-                 rank_topk_weights=topk_weights,
-                 num_experts=num_experts)
-            # Quantize after dispatch.
-            expert_x_scale = None
-            if expert_x.numel() != 0:
-                expert_x, expert_x_scale = moe_kernel_quantize_input(
-                    expert_x,
-                    a1_scale,
-                    quant_dtype=quant_config.quant_dtype,
-                    per_act_token_quant=False,
-                    block_shape=quant_config.block_shape)
+            a1q = a1
+            a1q_scale = None
+            a1_post_scale = a1_scale
 
-        return (expert_x, expert_x_scale, expert_tokens_meta, expert_topk_ids,
-                expert_topk_weights)
+        return self._do_dispatch(tokens=a1q,
+                                 token_scales=a1q_scale,
+                                 rank_topk_ids=topk_ids,
+                                 rank_topk_weights=topk_weights,
+                                 num_experts=num_experts,
+                                 a1_scale=a1_post_scale,
+                                 quant_config=quant_config)
+
+    def prepare(
+        self,
+        a1: torch.Tensor,
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
+    ) -> mk.PrepareResultType:
+        receiver = self.prepare_no_receive(a1, a1_scale, a2_scale,
+                                           topk_weights, topk_ids, num_experts,
+                                           expert_map,
+                                           apply_router_weight_on_input,
+                                           quant_config)
+        return receiver()
 
     def finalize(
         self,
