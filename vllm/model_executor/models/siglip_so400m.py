@@ -512,7 +512,7 @@ class SiglipSo400mModel(nn.Module, SupportsMultiModal):
         for name, loaded_weight in weights:
             # Replace using the rules defined in self.hf_to_vllm_mapper
             prefix_map = self.hf_to_vllm_mapper.orig_to_new_prefix.items()
-            for old_prefix, new_prefix in prefix_map():
+            for old_prefix, new_prefix in prefix_map:
                 if name.startswith(old_prefix):
                     name = name.replace(old_prefix, new_prefix, 1)
                     break
