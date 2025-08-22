@@ -553,39 +553,38 @@ class RandomDataset(BenchmarkDataset):
 
 class RandomMultiModalDataset(RandomDataset):
     """
-    Synthetic multimodal dataset (text + images) extending RandomDataset.
+    Synthetic multimodal dataset (text + images) that extends RandomDataset.
 
-    TODO: Add audio support.
-    TODO: Add video support (WIP) - Finish generate_synthetic_video method.
-    Strategy:
-    - Per request, first sample multimodal item count uniformly within
-      [num_mm_items*(1 - num_mm_items_range_ratio), num_mm_items*(1 + ...)],
-      capped by limit_mm_per_prompt.
-    - For each item in the multimodal item count, 
-      sample a modality from the supported modalities following
-      convention: 
-      {(256, 256, 1): 0.5, (720, 1280, 1): 0.4, (720, 1280, 16): 0.10}
-      To sample  
-      images with resolution 256x256 w.p. 0.5,
-      images with resolution 720x1280 w.p. 0.4,
-      videos with resolution 720x1280 and 16 frames w.p. 0.1.
-      Remove zero probability modalities from the bucket config.
-      Always ensure that the bucket config sums to 1.
-      NOTE: The mm item sampling strategy is as follows:
-      Consider that the number of max multimodal items per prompt is
-      at most the sum of mm-limits-per-prompt for all modalities whose
-      probability is non-zero in the bucket config.
-      This allows us to always sample the required number of multimodal items
-      per prompt.
-    - Optional `enable_multimodal_chat` formats prompt/content into chat style.
-    - Reuses the seeded RNG for reproducible text and image sampling.
+    Status:
+    - Images: supported via synthetic RGB data.
+    - Video: not yet supported (set probabilities for T>1 buckets to 0).
+    - Audio: not yet supported.
+
+    Sampling overview:
+    1) Number of items per request is sampled uniformly from the integer range
+       [floor(n·(1−r)), ceil(n·(1+r))], where n is the base count and r is
+       `num_mm_items_range_ratio` in [0, 1]. r=0 keeps it fixed; r=1 allows 0.
+       The maximum is further clamped to the sum of per-modality limits.
+    2) Each item’s modality and shape is sampled from `bucket_config`, a dict
+       mapping (height, width, num_frames) → probability. We treat T=1 as image
+       and `num_frames` > 1 as video. Entries with zero probability are removed
+       and the rest are renormalized to sum to 1.
+    3) Per-modality hard caps are enforced via `limit_mm_per_prompt`.
+       When a modality reaches its cap, all of its buckets are excluded and the
+       remaining probabilities are renormalized.
+
+    Example bucket configuration:
+    {(256, 256, 1): 0.5, (720, 1280, 1): 0.4, (720, 1280, 16): 0.1}
+      - Two image buckets (`num_frames`=1) and one video bucket 
+      (`num_frames`=16). 
+    OBS.: Only image sampling is supported for now.
     """
 
     IS_MULTIMODAL = True
     # NOTE: video sampling is WIP. Setting it to 0.
     DEFAULT_LIMIT_MM_PER_PROMPT = {"image": 255, "video": 0}
 
-    DEFAULT_NUM_MM_ITEMS = 1
+    DEFAULT_BASE_ITEMS_PER_REQUEST = 1
     DEFAULT_NUM_MM_ITEMS_RANGE_RATIO = 0.0
     DEFAULT_MM_ITEM_BUCKET_CONFIG = {
         (256, 256, 1): 0.5,
@@ -678,7 +677,7 @@ class RandomMultiModalDataset(RandomDataset):
 
     def get_mm_item_sampling_params(
         self,
-        num_mm_items: int,
+        base_items_per_request: int,
         num_mm_items_range_ratio: float,
         limit_mm_per_prompt: dict[str, int],
         bucket_config: dict[tuple[int, int, int], float],
@@ -686,9 +685,9 @@ class RandomMultiModalDataset(RandomDataset):
         """
         Get the sampling parameters for the multimodal items.
         """
-        # Enforce num_mm_items_range_ratio < 1
-        if not (0.0 <= num_mm_items_range_ratio < 1.0):
-            raise ValueError("num_mm_items_range_ratio must be in [0, 1).")
+        # Enforce num_mm_items_range_ratio <= 1
+        if not (0.0 <= num_mm_items_range_ratio <= 1.0):
+            raise ValueError("num_mm_items_range_ratio must be in [0, 1].")
 
         # Ensure modalities to sample are in limit_mm_per_prompt
         for k, v in bucket_config.items():
@@ -721,13 +720,15 @@ class RandomMultiModalDataset(RandomDataset):
 
         # Get max and min num mm items and ensure
         # it is at most the sum of limit_mm_per_prompt for all modalities
-        max_num_mm_items = min(sum(limit_mm_per_prompt.values()), 
-                                int(num_mm_items * (1 + num_mm_items_range_ratio
-                                )))
+        max_num_mm_items = min(
+            sum(limit_mm_per_prompt.values()), 
+            math.ceil(base_items_per_request * (1 + num_mm_items_range_ratio))
+        )
         # Ensure min num mm items is at least 0
-        min_num_mm_items = max(0, 
-                            int(num_mm_items * (1 - num_mm_items_range_ratio)
-                            ))
+        min_num_mm_items = max(
+            0, 
+            math.floor(base_items_per_request * (1 - num_mm_items_range_ratio))
+        )
         # Raise error if min num mm items is greater than max num mm items
         if min_num_mm_items > max_num_mm_items:
             raise ValueError(f"Min num mm items is greater than max mm items: "
@@ -814,7 +815,7 @@ class RandomMultiModalDataset(RandomDataset):
         input_len: int = RandomDataset.DEFAULT_INPUT_LEN,
         output_len: int = RandomDataset.DEFAULT_OUTPUT_LEN,
         limit_mm_per_prompt: dict[str, int] = DEFAULT_LIMIT_MM_PER_PROMPT,
-        num_mm_items: int = DEFAULT_NUM_MM_ITEMS,
+        base_items_per_request: int = DEFAULT_BASE_ITEMS_PER_REQUEST,
         num_mm_items_range_ratio: float = DEFAULT_NUM_MM_ITEMS_RANGE_RATIO,
         bucket_config: dict[tuple[int, int, int], float] = 
                                         DEFAULT_MM_ITEM_BUCKET_CONFIG,
@@ -840,7 +841,7 @@ class RandomMultiModalDataset(RandomDataset):
             limit_mm_per_prompt,
             bucket_config,
         ) = self.get_mm_item_sampling_params(
-            num_mm_items,
+            base_items_per_request,
             num_mm_items_range_ratio,
             limit_mm_per_prompt,
             bucket_config,
@@ -1104,20 +1105,26 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
     random_mm_group.add_argument(
         "--random-mm-base-items-per-request",
         type=int,
-        default=RandomMultiModalDataset.DEFAULT_NUM_MM_ITEMS,
-        help="Base number of multimodal items per request for "
-        "random-mm dataset.",
+        default=RandomMultiModalDataset.DEFAULT_BASE_ITEMS_PER_REQUEST,
+        help=(
+            "Base number of multimodal items per request for random-mm. "
+            "Actual per-request count is sampled around this base using "
+            "--random-mm-num-mm-items-range-ratio."
+        ),
     )
     random_mm_group.add_argument(
         "--random-mm-num-mm-items-range-ratio",
         type=float,
         default=RandomMultiModalDataset.DEFAULT_NUM_MM_ITEMS_RANGE_RATIO,
         help=(
-            "Range ratio for sampling number of multimodal items per request, "
-        "used only for random-mm sampling. Must be in the range [0, 1) to "
-        "define a symmetric sampling range. "
-        "Keeps the base number of multimodal items constant. "
-        "[num_mm_items * (1 - range_ratio), num_mm_items * (1 + range_ratio)]."
+            "Range ratio r in [0, 1] for sampling items per request. "
+            "We sample uniformly from the closed integer range "
+            "[floor(n*(1-r)), ceil(n*(1+r))] "
+            "where n is the base items per request. "
+            "r=0 keeps it fixed; r=1 allows 0 items. The maximum is clamped "
+            "to the sum of per-modality limits from "
+            "--random-mm-limit-mm-per-prompt. "
+            "An error is raised if the computed min exceeds the max."
         ),
     )
     random_mm_group.add_argument(
@@ -1125,10 +1132,12 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         type=json.loads,
         default=RandomMultiModalDataset.DEFAULT_LIMIT_MM_PER_PROMPT,
         help=(
-            "Maximum number of multimodal items per request for random-mm."
-            "Accepts JSON or dotted keys. Examples: "
-            "--random-mm-limit-mm-per-prompt "
-            "'{\"image\": 3, \"video\": 0}'"
+            "Per-modality hard caps for items attached per request, e.g. "
+            "'{\"image\": 3, \"video\": 0}'. The sampled per-request item "
+            "count is clamped to the sum of these limits. When a modality "
+            "reaches its cap, its buckets are excluded and probabilities are "
+            "renormalized."
+            "OBS.: Only image sampling is supported for now."
         ),
     )
 
@@ -1164,10 +1173,19 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         type=_parse_mm_bucket_config,
         default=RandomMultiModalDataset.DEFAULT_MM_ITEM_BUCKET_CONFIG,
         help=(
-            "Bucket config for sampling multimodal items for random-mm dataset."
-            "Pass a Python literal dict with tuple keys. Example: "
+            "The bucket config is a dictionary mapping a multimodal item"
+            "sampling configuration to a probability."
+            "Currently allows for 2 modalities: images and videos. "
+            "An bucket key is a tuple of (height, width, num_frames)"
+            "The value is the probability of sampling that specific item. "
+            "Example: "
             "--random-mm-bucket-config "
-            "'{(256, 256, 1): 0.25, (720, 1280, 1): 0.75}'"
+            "{(256, 256, 1): 0.5, (720, 1280, 1): 0.4, (720, 1280, 16): 0.10} "
+            "First item: images with resolution 256x256 w.p. 0.5"
+            "Second item: images with resolution 720x1280 w.p. 0.4 "
+            "Third item: videos with resolution 720x1280 and 16 frames w.p. 0.1"
+            "OBS.: If the probabilities do not sum to 1, they are normalized."
+            "OBS bis.: Only image sampling is supported for now."
         ),
     )
 
@@ -1357,7 +1375,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 range_ratio=args.random_range_ratio,
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
-                num_mm_items=args.random_mm_base_items_per_request,
+                base_items_per_request=args.random_mm_base_items_per_request,
                 limit_mm_per_prompt=args.random_mm_limit_mm_per_prompt,
                 num_mm_items_range_ratio=args.random_mm_num_mm_items_range_ratio,
                 bucket_config=args.random_mm_bucket_config,
