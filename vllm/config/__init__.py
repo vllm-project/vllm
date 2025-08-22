@@ -751,22 +751,6 @@ class ModelConfig:
             revision=self.revision,
         )
 
-        # Interleaved attention is not supported by some backends in V0
-        if (not self.disable_sliding_window
-                and is_interleaved(self.hf_text_config)
-                and not envs.VLLM_USE_V1
-                and (backend := envs.VLLM_ATTENTION_BACKEND)
-                in ("XFORMERS", "FLASHINFER")):
-            logger.warning_once(
-                "%s has interleaved attention, which is currently not "
-                "supported by the %s backend. Disabling sliding window and "
-                "capping the max length to the sliding window size (%d).",
-                self.hf_text_config.model_type,
-                backend,
-                self.hf_text_config.sliding_window,
-            )
-            self.disable_sliding_window = True
-
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
         self.multimodal_config = self._init_multimodal_config()

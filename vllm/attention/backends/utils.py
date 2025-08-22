@@ -344,13 +344,12 @@ class CommonAttentionState(AttentionState):
             use_cuda_graph=True,
         )
         if is_encoder_decoder_model:
-            # The encoder decoder model works only with XFormers and
-            # Flash Attention backend. Assert the same.
+            # The encoder decoder model works only with Flash Attention
+            # backends. Assert the same.
             assert self.runner.attn_backend.get_name() in \
-                   ["XFORMERS", "FLASH_ATTN", "ROCM_FLASH"], \
-                f"Expected attn_backend name to be either 'XFORMERS'," \
-                f"'ROCM_FLASH', or 'FLASH_ATTN', but " \
-                f"got '{self.runner.attn_backend.get_name()}'"
+                   ["FLASH_ATTN", "ROCM_FLASH"], \
+                f"Expected attn_backend name to be either 'ROCM_FLASH' or " \
+                f"'FLASH_ATTN', but got '{self.runner.attn_backend.get_name()}'"
             self._update_captured_metadata_for_enc_dec_model(
                 batch_size=batch_size, attn_metadata=attn_metadata)
 
@@ -366,13 +365,12 @@ class CommonAttentionState(AttentionState):
             "block_tables": attn_metadata.decode_metadata.block_tables,
         }
         if is_encoder_decoder_model:
-            # The encoder decoder model works only with XFormers and
-            # Flash Attention backend. Assert the same.
+            # The encoder decoder model works only with Flash Attention
+            # backends. Assert the same.
             assert self.runner.attn_backend.get_name() in \
-                   ["XFORMERS", "FLASH_ATTN", "ROCM_FLASH"], \
-                f"Expected attn_backend name to be either 'XFORMERS'," \
-                f"'ROCM_FLASH', or 'FLASH_ATTN', but " \
-                f"got '{self.runner.attn_backend.get_name()}'"
+                   ["FLASH_ATTN", "ROCM_FLASH"], \
+                f"Expected attn_backend name to be either 'ROCM_FLASH' or " \
+                f"'FLASH_ATTN', but got '{self.runner.attn_backend.get_name()}'"
             self._add_additional_input_buffers_for_enc_dec_model(
                 attn_metadata=attn_metadata, input_buffers=input_buffers)
         return input_buffers
@@ -387,13 +385,11 @@ class CommonAttentionState(AttentionState):
         input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
         if is_encoder_decoder_model:
-            # The encoder decoder model works only with XFormers and
-            # Flash Attention backend. Assert the same.
-            assert self.runner.attn_backend.get_name() in\
-                ["XFORMERS", "FLASH_ATTN"], \
-                f"Expected attn_backend name to be either 'XFORMERS' or "\
-                f"'FLASH_ATTN', but "\
-                f"got '{self.runner.attn_backend.get_name()}'"
+            # The encoder decoder model works only with Flash Attention
+            # backend. Assert the same.
+            assert self.runner.attn_backend.get_name() == "FLASH_ATTN", \
+                ("Expected attn_backend name to be 'FLASH_ATTN', but "
+                 f"got '{self.runner.attn_backend.get_name()}'")
             self._prepare_input_buffers_for_enc_dec_model(
                 attn_metadata, input_buffers)
 

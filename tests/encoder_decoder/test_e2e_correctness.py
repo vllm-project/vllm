@@ -18,7 +18,7 @@ from ..conftest import DecoderPromptType
 from ..models.utils import check_logprobs_close
 
 LIST_ENC_DEC_SUPPORTED_BACKENDS = [
-    _Backend.XFORMERS, _Backend.FLASH_ATTN, None
+    _Backend.FLASH_ATTN, None
 ]
 
 
