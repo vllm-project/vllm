@@ -431,9 +431,9 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device,
     os.makedirs(dummy_lora_files, exist_ok=True)
     create_peft_lora(
         dummy_model,
+        save_dir=dummy_lora_files,
         target_modules=["layer1.dense1", "dense2"],
         lora_dtype=DEFAULT_DTYPE,
-        save_dir=dummy_lora_files,
     )
     worker_adapter_manager = LRUCacheWorkerLoRAManager(
         4, 2,
@@ -527,9 +527,9 @@ def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device,
     os.makedirs(dummy_lora_files, exist_ok=True)
     create_peft_lora(
         dummy_model_gate_up,
+        save_dir=dummy_lora_files,
         target_modules=["layer1.dense1", "dense2"],
         lora_dtype=DEFAULT_DTYPE,
-        save_dir=dummy_lora_files,
     )
 
     mapping = LoRAMapping([], [])

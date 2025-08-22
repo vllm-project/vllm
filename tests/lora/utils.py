@@ -347,12 +347,12 @@ def generate_data_for_nslices(
 
 def create_peft_lora(
     model: torch.nn.Module,
+    save_dir: str,
     target_modules: list[str],
     rank: int = 8,
     alpha: int = 16,
     dropout: float = 0.1,
     lora_dtype: torch.dtype = torch.float16,
-    save_dir: str = None,
 ) -> dict[str, torch.Tensor]:
     lora_weights = {}
     adapter_config = {
