@@ -39,6 +39,9 @@ done
 # Parse list of configs.
 IFS=$'\n' read -d '' -r -a MODEL_CONFIGS < "$CONFIG"
 
+PASSED_MODELS=()
+FAILED_MODELS=()
+
 for MODEL_CONFIG in "${MODEL_CONFIGS[@]}"
 do
     LOCAL_SUCCESS=0
@@ -68,13 +71,35 @@ do
     kill -9 $TEST_PROCESS 2> /dev/null || true
     if [[ $LOCAL_SUCCESS == 0 ]]; then
         echo "=== PASSED MODEL: ${MODEL_CONFIG} ==="
+        PASSED_MODELS+=("$MODEL_CONFIG")
     else
         echo "=== FAILED MODEL: ${MODEL_CONFIG} ==="
+        FAILED_MODELS+=("$MODEL_CONFIG")
     fi
 
     SUCCESS=$((SUCCESS + LOCAL_SUCCESS))
 
 done
+
+echo
+if [ ${#PASSED_MODELS[@]} -gt 0 ]; then
+    echo "PASSED MODELS:"
+    for model in "${PASSED_MODELS[@]}"; do
+        echo "  $model"
+    done
+else
+    echo "No models passed."
+fi
+
+echo
+if [ ${#FAILED_MODELS[@]} -gt 0 ]; then
+    echo "FAILED MODELS:"
+    for model in "${FAILED_MODELS[@]}"; do
+        echo "  $model"
+    done
+else
+    echo "No models failed."
+fi
 
 if [ "${SUCCESS}" -eq "0" ]; then
     exit 0
