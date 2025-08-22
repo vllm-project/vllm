@@ -742,7 +742,7 @@ pycparser==2.22
     # via cffi
 pycryptodomex==3.22.0
     # via blobfile
-pydantic==2.11.5
+pydantic==2.11.7
     # via
     #   -r requirements/test.in
     #   albumentations
