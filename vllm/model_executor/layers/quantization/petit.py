@@ -127,6 +127,9 @@ class PetitNvFp4Config(QuantizationConfig):
     @classmethod
     def override_quantization_method(
             cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
+        if not current_platform.is_rocm():
+            return None
+
         qc = hf_quant_cfg.get("quantization", hf_quant_cfg)
         algo = (qc.get("quant_algo") or qc.get("quant_method") or "").upper()
         if algo in ("NVFP4", "MODELOPT_FP4", "MODELOPT"):
