@@ -246,7 +246,8 @@ class MultiprocExecutor(Executor):
                     result = self.io_thread_pool.submit(  # type: ignore
                         get_response, w, dequeue_timeout, self.shutdown_event)
                 else:
-                    result = get_response(w, dequeue_timeout)
+                    result = get_response(w, dequeue_timeout,
+                                          self.shutdown_event)
 
                 responses.append(result)
 
@@ -285,13 +286,7 @@ class MultiprocExecutor(Executor):
     def shutdown(self):
         """Properly shut down the executor and its workers"""
         if not getattr(self, 'shutting_down', False):
-            self.shutting_down = True
-            self.shutdown_event.set()
-
-            if self.io_thread_pool is not None:
-                self.io_thread_pool.shutdown(wait=False, cancel_futures=True)
-                self.io_thread_pool = None
-
+            # Make sure all the worker processes are terminated first.
             if workers := getattr(self, 'workers', None):
                 for w in workers:
                     # Close death_writer to signal child processes to exit
@@ -300,6 +295,13 @@ class MultiprocExecutor(Executor):
                         w.death_writer = None
                     w.worker_response_mq = None
                 self._ensure_worker_termination([w.proc for w in workers])
+
+            self.shutting_down = True
+            self.shutdown_event.set()
+
+            if self.io_thread_pool is not None:
+                self.io_thread_pool.shutdown(wait=False, cancel_futures=True)
+                self.io_thread_pool = None
 
         self.rpc_broadcast_mq = None
 
