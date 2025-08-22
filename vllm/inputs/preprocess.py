@@ -378,7 +378,7 @@ class InputPreprocessor:
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
                 mm_ids_override=cast(Optional[dict[str, list[str]]],
-                                     parsed_content.get("multi_modal_id")),
+                                     parsed_content.get("multi_modal_ids")),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
             )
