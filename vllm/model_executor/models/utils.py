@@ -4,7 +4,7 @@
 import itertools
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from typing import Callable, Literal, Optional, Protocol, Union, overload
+from typing import Any, Callable, Literal, Optional, Protocol, Union, overload
 
 import torch
 import torch.nn as nn
@@ -63,6 +63,19 @@ class WeightsMapper:
     ) -> Iterable[tuple[str, torch.Tensor]]:
         return ((out_name, data) for name, data in weights
                 if (out_name := self._map_name(name)) is not None)
+
+    def apply_list(self, values: list[str]) -> list[str]:
+        return [
+            out_name for name in values
+            if (out_name := self._map_name(name)) is not None
+        ]
+
+    def apply_dict(self, values: dict[str, Any]) -> dict[str, Any]:
+        return {
+            out_name: value
+            for name, value in values.items()
+            if (out_name := self._map_name(name)) is not None
+        }
 
 
 class AutoWeightsLoader:
@@ -380,7 +393,7 @@ def merge_multimodal_embeddings_from_map(
         inputs_embeds: torch.Tensor, multimodal_embeddings: NestedTensors,
         placeholder_map: MultiModalPlaceholderMap.IndexMap) -> torch.Tensor:
     """
-    Merge ``multimodal_embeddings`` into ``inputs_embeds`` using the provided 
+    Merge ``multimodal_embeddings`` into ``inputs_embeds`` using the provided
     placeholder map .
 
     Note:
@@ -388,7 +401,7 @@ def merge_multimodal_embeddings_from_map(
     """
     flattened_embeddings = _flatten_embeddings(multimodal_embeddings)
     inputs_embeds[placeholder_map.dest] = flattened_embeddings[
-        placeholder_map.src]
+        placeholder_map.src].to(dtype=inputs_embeds.dtype)
     return inputs_embeds
 
 
@@ -405,17 +418,24 @@ def _merge_multimodal_embeddings(
     Note:
         This updates ``inputs_embeds`` in place.
     """
-    num_expected_tokens = is_multimodal.sum().item()
-    assert isinstance(num_expected_tokens, int)
-
     flattened = _flatten_embeddings(multimodal_embeddings)
-    if flattened.shape[0] != num_expected_tokens:
-        expr = _embedding_count_expression(multimodal_embeddings)
-        raise ValueError(
-            f"Attempted to assign {expr} = {flattened.shape[0]} "
-            f"multimodal tokens to {num_expected_tokens} placeholders")
+    try:
+        # This is equivalent to: inputs_embeds[is_multimodal] = flattened.
+        inputs_embeds.masked_scatter_(is_multimodal.unsqueeze(-1),
+                                      flattened.to(dtype=inputs_embeds.dtype))
+    except RuntimeError as e:
+        num_expected_tokens = is_multimodal.sum().item()
+        assert isinstance(num_expected_tokens, int)
 
-    inputs_embeds[is_multimodal] = flattened
+        if flattened.shape[0] != num_expected_tokens:
+            expr = _embedding_count_expression(multimodal_embeddings)
+            raise ValueError(
+                f"Attempted to assign {expr} = {flattened.shape[0]} "
+                f"multimodal tokens to {num_expected_tokens} placeholders"
+            ) from e
+        else:
+            raise ValueError("Error during masked scatter operation") from e
+
     return inputs_embeds
 
 
@@ -465,11 +485,11 @@ def merge_multimodal_embeddings(
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
     positions in ``inputs_embeds`` corresponding to placeholder tokens in
     ``input_ids``.
-    
-    ``placeholder_token_id`` can be a list of token ids (e.g, token ids 
-    of img_start, img_break, and img_end tokens) when needed: This means 
-    the order of these tokens in the ``input_ids`` MUST MATCH the order of 
-    their embeddings in ``multimodal_embeddings`` since we need to 
+
+    ``placeholder_token_id`` can be a list of token ids (e.g, token ids
+    of img_start, img_break, and img_end tokens) when needed: This means
+    the order of these tokens in the ``input_ids`` MUST MATCH the order of
+    their embeddings in ``multimodal_embeddings`` since we need to
     slice-merge instead of individually scattering.
 
     For example, if input_ids is "TTTTTSIIIBIIIBIIIETTT", where
@@ -478,9 +498,9 @@ def merge_multimodal_embeddings(
     - I is image embedding token
     - B is image break token
     - E is image end token.
-    
-    Then the image embeddings (that correspond to I's) from vision encoder 
-    must be padded with embeddings of S, B, and E in the same order of 
+
+    Then the image embeddings (that correspond to I's) from vision encoder
+    must be padded with embeddings of S, B, and E in the same order of
     input_ids for a correct embedding merge.
 
     Note:
@@ -515,16 +535,10 @@ class PPMissingLayer(torch.nn.Identity):
 
     def __init__(self, *args, **kwargs):
         super().__init__()
-        self.return_tuple = kwargs.get("return_tuple", False)
 
     def forward(self, *args, **kwargs):
-        """
-        Return the first arg from args or the first value from kwargs.
-
-        Wraps the input in a tuple if `self.return_tuple` is True.
-        """
-        input = args[0] if args else next(iter(kwargs.values()))
-        return (input, ) if self.return_tuple else input
+        """Return the first arg from args or the first value from kwargs."""
+        return args[0] if args else next(iter(kwargs.values()))
 
 
 _CPU_OFFLOAD_BYTES = 0
@@ -722,7 +736,23 @@ def cast_overflow_tensors(
     return tensors
 
 
-def fast_topk(values, topk, dim):
+def fast_topk(values: torch.Tensor, topk: int,
+              dim: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Optimized topk implementation that uses torch.max for k=1 case.
+    
+    This function provides better performance for the common case of k=1
+    by using torch.max instead of the more general torch.topk.
+    
+    Args:
+        values: Input tensor to find top-k values from
+        topk: Number of top values to return (k). Must be > 0.
+        dim: Dimension along which to compute topk
+        
+    Returns:
+        Tuple of (values, indices) where values are the top-k values
+        and indices are their corresponding indices in the input tensor
+    """
     if topk == 1:
         # Use max along the specified dimension to get both value and index
         return torch.max(values, dim=dim, keepdim=True)

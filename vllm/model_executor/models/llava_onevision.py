@@ -3,7 +3,7 @@
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Final, Literal, Optional, Protocol, TypedDict, Union
+from typing import Annotated, Final, Literal, Optional, Protocol, Union
 
 import torch
 import torch.nn as nn
@@ -11,18 +11,18 @@ from transformers import (BatchFeature, LlavaOnevisionConfig,
                           LlavaOnevisionProcessor)
 from transformers.models.llava_onevision.modeling_llava_onevision import (
     get_anyres_image_grid_shape, unpad_image)
-from typing_extensions import NotRequired
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
                                    VideoEmbeddingItems, VideoProcessorItems)
 from vllm.multimodal.processing import PromptReplacement, PromptUpdate
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -38,44 +38,62 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
 _MAX_FRAMES_PER_VIDEO = 16
 
 
-class LlavaOnevisionVideoPixelInputs(TypedDict):
-    type: Literal["pixel_values_videos"]
-    pixel_values_videos: Union[torch.Tensor, list[torch.Tensor]]
+class LlavaOnevisionVideoPixelInputs(TensorSchema):
     """
-    Shape: `(batch_size * num_videos, num_frames, num_channels, height, width)`
+    Dimensions:
+        - bn: Batch size * number of videos
+        - f: Number of frames
+        - c: Number of channels (3)
+        - h: Height
+        - w: Width
 
-    Note that `num_videos` may be different for each batch, and 'num_frames'
-    may be different for each video, in which case the data is passed as a
-    list instead of a batched tensor.
+        Note that `num_videos` may be different for each batch, and 'num_frames'
+        may be different for each video, in which case the data is passed as a
+        list instead of a batched tensor.
     """
+    type: Literal["pixel_values_videos"] = "pixel_values_videos"
+
+    pixel_values_videos: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "f", 3, "h", "w", dynamic_dims={"f"}),
+    ]
 
 
-class LlavaOnevisionImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    pixel_values: Union[torch.Tensor, list[torch.Tensor]]
+class LlavaOnevisionImagePixelInputs(TensorSchema):
     """
-    Shape:
-    `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
+    Dimensions:
+        - bn: Batch size * number of images
+        - np: Number of patches (1 + num_patches)
+        - c: Number of channels (3)
+        - h: Height
+        - w: Width
 
-    Note that `num_patches` may be different per batch and image,
-    in which case the data is passed as a list instead of a batched tensor.
+        Note that `num_patches` may be different per batch and image,
+        in which case the data is passed as a list instead of a batched tensor.
     """
+    type: Literal["pixel_values"] = "pixel_values"
 
-    image_sizes: NotRequired[torch.Tensor]
+    pixel_values: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "np", 3, "h", "w"),
+    ]
+
+    image_sizes: Annotated[Optional[torch.Tensor], TensorShape("bn", 2)]
+
+
+class LlavaOnevisionImageEmbeddingInputs(TensorSchema):
     """
-    Shape: `(batch_size * num_images, 2)`
-
-    This should be in `(height, width)` format.
+    Dimensions:
+        - bn: Batch size * number of images
+        - ifs: Image feature size
+        - hs: Hidden size (must match language model backbone)
     """
+    type: Literal["image_embeds"] = "image_embeds"
 
-
-class LlavaOnevisionImageEmbeddingInputs(TypedDict):
-    type: Literal["image_embeds"]
-    data: torch.Tensor
-    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
-    """
+    data: Annotated[
+        torch.Tensor,
+        TensorShape("bn", "ifs", "hs"),
+    ]
 
 
 LlavaOnevisionImageInputs = Union[LlavaOnevisionImagePixelInputs,
@@ -286,6 +304,7 @@ class LlavaOnevisionMultiModalProcessor(
         prompt: str,
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         mm_data = dict(mm_data)
         videos = mm_data.pop("videos", [])
@@ -296,6 +315,7 @@ class LlavaOnevisionMultiModalProcessor(
                 prompt=prompt,
                 mm_data=mm_data,
                 mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
             )
 
         # LLaVA-OneVision processor doesn't support multiple videos
@@ -310,6 +330,7 @@ class LlavaOnevisionMultiModalProcessor(
             prompt=prompt,
             mm_data={},
             mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
         )
 
         images = mm_data.pop("images", [])
@@ -319,6 +340,7 @@ class LlavaOnevisionMultiModalProcessor(
                 prompt=image_token * len(images),
                 mm_data={"images": images},
                 mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
             )
             image_outputs = {
                 k: v
@@ -334,6 +356,7 @@ class LlavaOnevisionMultiModalProcessor(
                 prompt=video_token,
                 mm_data={"videos": video},
                 mm_kwargs=mm_kwargs,
+                tok_kwargs=tok_kwargs,
             )
 
             pixel_values_videos.append(item_outputs["pixel_values_videos"][0])
@@ -352,11 +375,13 @@ class LlavaOnevisionMultiModalProcessor(
         prompt_text: str,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
     ) -> bool:
         base_result = super()._hf_processor_applies_updates(
             prompt_text=prompt_text,
             mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         return base_result and mm_items.get_count("video", strict=False) == 0
@@ -365,7 +390,7 @@ class LlavaOnevisionMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         image_repls = super()._get_prompt_updates(
             mm_items=mm_items,
@@ -439,6 +464,15 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             "lm_head.": "language_model.lm_head.",
         })
 
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+        if modality.startswith("image"):
+            return "<image>"
+        if modality.startswith("video"):
+            return "<video>"
+
+        raise ValueError("Only image or video modality is supported")
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -466,44 +500,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.language_model.model.make_empty_intermediate_tensors)
 
-    def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
-        expected_dims = (2, )
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape)
-
-            if actual_dims != expected_dims:
-                expected_expr = str(expected_dims)
-                raise ValueError(
-                    f"The expected shape of image sizes per image per batch "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
-
-    def _validate_image_pixel_values(
-        self, data: Union[torch.Tensor, list[torch.Tensor]]
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
-
-        h = w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape[1:])
-
-            if actual_dims != expected_dims:
-                expected_expr = ("num_patches", *map(str, expected_dims))
-                raise ValueError(
-                    "The expected shape of pixel values per image per batch "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaOnevisionImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -524,11 +520,12 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
 
             return LlavaOnevisionImagePixelInputs(
                 type="pixel_values",
-                pixel_values=self._validate_image_pixel_values(
-                    flatten_bn(pixel_values)),
-                image_sizes=self._validate_image_sizes(
-                    flatten_bn(image_sizes, concat=True)),
-            )
+                pixel_values=flatten_bn(pixel_values),
+                image_sizes=flatten_bn(image_sizes, concat=True),
+                resolve_bindings={
+                    "h": self.config.vision_config.image_size,
+                    "w": self.config.vision_config.image_size
+                })
 
         if image_embeds is not None:
             if not isinstance(image_embeds, torch.Tensor):
@@ -541,27 +538,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             )
 
         raise AssertionError("This line should be unreachable.")
-
-    def _validate_video_pixel_values(
-        self, data: Union[torch.Tensor, list[torch.Tensor]]
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
-
-        h = w = self.config.vision_config.image_size
-        expected_dims = (3, h, w)
-
-        def _validate_shape(d: torch.Tensor):
-            actual_dims = tuple(d.shape[2:])
-
-            if actual_dims != expected_dims:
-                expected_expr = ("num_frames", *map(str, expected_dims))
-                raise ValueError(
-                    "The expected shape of pixel values in each video frame "
-                    f"is {expected_expr}. You supplied {tuple(d.shape)}.")
-
-        for d in data:
-            _validate_shape(d)
-
-        return data
 
     def _parse_and_validate_video_input(
             self,
@@ -584,7 +560,10 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         return LlavaOnevisionVideoPixelInputs(
             type="pixel_values_videos",
             pixel_values_videos=flatten_bn(pixel_values_videos),
-        )
+            resolve_bindings={
+                "h": self.config.vision_config.image_size,
+                "w": self.config.vision_config.image_size
+            })
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}

@@ -3,15 +3,13 @@
 
 import tempfile
 from collections import OrderedDict
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 import torch.nn as nn
 from huggingface_hub import snapshot_download
 
-import vllm
-from vllm.config import LoRAConfig
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
@@ -21,7 +19,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.platforms import current_platform
 
@@ -104,6 +101,7 @@ def dummy_model() -> nn.Module:
         ]))
     model.config = MagicMock()
     model.embedding_modules = {"lm_head": "lm_head"}
+    model.unpadded_vocab_size = 32000
     return model
 
 
@@ -137,6 +135,8 @@ def dummy_model_gate_up() -> nn.Module:
         ],
     }
     model.embedding_modules = {"lm_head": "lm_head"}
+    model.unpadded_vocab_size = 32000
+
     return model
 
 
@@ -219,51 +219,6 @@ def tinyllama_lora_files():
 @pytest.fixture(scope="session")
 def phi2_lora_files():
     return snapshot_download(repo_id="isotr0py/phi-2-test-sql-lora")
-
-
-@pytest.fixture(scope="session")
-def long_context_lora_files_16k_1():
-    return snapshot_download(repo_id="SangBinCho/long_context_16k_testing_1")
-
-
-@pytest.fixture
-def llama_2_7b_engine_extra_embeddings():
-    cleanup_dist_env_and_memory(shutdown_ray=True)
-    get_model_old = get_model
-
-    def get_model_patched(**kwargs):
-        kwargs["vllm_config"].lora_config = LoRAConfig(max_loras=4,
-                                                       max_lora_rank=8)
-        return get_model_old(**kwargs)
-
-    with patch("vllm.worker.model_runner.get_model", get_model_patched):
-        engine = vllm.LLM("meta-llama/Llama-2-7b-hf", enable_lora=False)
-    yield engine.llm_engine
-    del engine
-    cleanup_dist_env_and_memory(shutdown_ray=True)
-
-
-@pytest.fixture
-def llama_2_7b_model_extra_embeddings(llama_2_7b_engine_extra_embeddings):
-    yield (llama_2_7b_engine_extra_embeddings.model_executor.driver_worker.
-           model_runner.model)
-
-
-@pytest.fixture(params=[True, False])
-def run_with_both_engines_lora(request, monkeypatch):
-    # Automatically runs tests twice, once with V1 and once without
-    use_v1 = request.param
-    # Tests decorated with `@skip_v1` are only run without v1
-    skip_v1 = request.node.get_closest_marker("skip_v1")
-
-    if use_v1:
-        if skip_v1:
-            pytest.skip("Skipping test on vllm V1")
-        monkeypatch.setenv('VLLM_USE_V1', '1')
-    else:
-        monkeypatch.setenv('VLLM_USE_V1', '0')
-
-    yield
 
 
 @pytest.fixture

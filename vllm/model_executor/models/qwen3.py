@@ -23,7 +23,7 @@
 # limitations under the License.
 """Inference-only Qwen3 model compatible with HuggingFace weights."""
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
@@ -38,38 +38,40 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsCrossEncoding, SupportsLoRA, SupportsPP
+from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen2 import Qwen2Model
-from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
+from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
+                    maybe_prefix)
 
 logger = init_logger(__name__)
 
 
 class Qwen3Attention(nn.Module):
 
-    def __init__(self,
-                 hidden_size: int,
-                 num_heads: int,
-                 num_kv_heads: int,
-                 max_position: int = 4096 * 32,
-                 head_dim: Optional[int] = None,
-                 rms_norm_eps: float = 1e-06,
-                 qkv_bias: bool = False,
-                 rope_theta: float = 10000,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 rope_scaling: Optional[tuple] = None,
-                 prefix: str = "",
-                 attn_type: str = AttentionType.DECODER) -> None:
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        max_position: int = 4096 * 32,
+        head_dim: Optional[int] = None,
+        rms_norm_eps: float = 1e-06,
+        qkv_bias: bool = False,
+        rope_theta: float = 10000,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        rope_scaling: Optional[tuple] = None,
+        prefix: str = "",
+        attn_type: str = AttentionType.DECODER,
+        dual_chunk_attention_config: Optional[dict[str, Any]] = None,
+    ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -91,6 +93,7 @@ class Qwen3Attention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
+        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -115,15 +118,22 @@ class Qwen3Attention(nn.Module):
             max_position=max_position,
             base=self.rope_theta,
             rope_scaling=rope_scaling,
+            dual_chunk_attention_config=dual_chunk_attention_config,
         )
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn",
-                              attn_type=attn_type)
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            attn_type=attn_type,
+            **{
+                "layer_idx": extract_layer_index(prefix),
+                "dual_chunk_attention_config": dual_chunk_attention_config,
+            } if dual_chunk_attention_config else {},
+        )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
@@ -163,6 +173,9 @@ class Qwen3DecoderLayer(nn.Module):
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 1000000)
         rope_scaling = getattr(config, "rope_scaling", None)
+        dual_chunk_attention_config = getattr(config,
+                                              "dual_chunk_attention_config",
+                                              None)
 
         # By default, Qwen3 uses causal attention as it is a decoder-only model.
         # You can override the HF config with `is_causal=False` to enable
@@ -187,6 +200,7 @@ class Qwen3DecoderLayer(nn.Module):
             rope_scaling=rope_scaling,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
+            dual_chunk_attention_config=dual_chunk_attention_config,
         )
         self.mlp = Qwen3MLP(
             hidden_size=self.hidden_size,
@@ -247,7 +261,7 @@ class Qwen3Model(Qwen2Model):
                          decoder_layer_type=Qwen3DecoderLayer)
 
 
-class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -290,6 +304,13 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
+    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
@@ -321,116 +342,3 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
-
-
-class Qwen3ForSequenceClassification(nn.Module, SupportsLoRA,
-                                     SupportsCrossEncoding):
-
-    def __init__(
-        self,
-        vllm_config: "VllmConfig",
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        pooler_config = vllm_config.model_config.pooler_config
-
-        self.vllm_config = vllm_config
-        self.config = config
-        self.quant_config = quant_config
-        self.prefix = prefix
-        self.model = Qwen3Model(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "model"))
-        self.score = RowParallelLinear(config.hidden_size,
-                                       config.num_labels,
-                                       quant_config=quant_config,
-                                       input_is_parallel=False,
-                                       bias=False,
-                                       prefix=maybe_prefix(prefix, "score"))
-
-        self._pooler = Pooler.from_config_with_defaults(
-            pooler_config,
-            pooling_type=PoolingType.LAST,
-            normalize=False,
-            softmax=True)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        return self.model(input_ids=input_ids,
-                          positions=positions,
-                          inputs_embeds=inputs_embeds,
-                          intermediate_tensors=intermediate_tensors)
-
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        hidden_states = self._pooler.extract_states(hidden_states,
-                                                    pooling_metadata)
-
-        if isinstance(hidden_states, list):
-            logits = [self.score(state)[0] for state in hidden_states]
-        else:
-            logits, _ = self.score(hidden_states)
-
-        pooled_data = self._pooler.head(logits, pooling_metadata)
-        pooled_outputs = [
-            self._pooler.build_output(data.squeeze(-1)) for data in pooled_data
-        ]
-        return PoolerOutput(outputs=pooled_outputs)
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        is_original_qwen3_reranker = getattr(self.config,
-                                             "is_original_qwen3_reranker",
-                                             False)
-
-        if not is_original_qwen3_reranker:
-            loader = AutoWeightsLoader(self)
-            return loader.load_weights(weights)
-
-        return self.load_weights_from_original_qwen3_reranker(weights)
-
-    def load_weights_from_original_qwen3_reranker(
-            self, weights: Iterable[tuple[str, torch.Tensor]]):
-
-        model_config = self.vllm_config.model_config
-        tokens = getattr(self.config, "classifier_from_token", None)
-        device = self.score.weight.device
-
-        if self.config.tie_word_embeddings:
-            self.lm_head = self.model.embed_tokens
-        else:
-            self.lm_head = ParallelLMHead(self.config.vocab_size,
-                                          self.config.hidden_size,
-                                          quant_config=self.quant_config,
-                                          prefix=maybe_prefix(
-                                              self.prefix, "lm_head"))
-
-        loader = AutoWeightsLoader(self)
-        loaded_weights = loader.load_weights(weights)
-
-        from vllm.transformers_utils.tokenizer import get_tokenizer
-        tokenizer = get_tokenizer(
-            model_config.tokenizer,
-            revision=model_config.tokenizer_revision,
-            tokenizer_mode=model_config.tokenizer_mode,
-            trust_remote_code=model_config.trust_remote_code)
-
-        a = tokenizer.convert_tokens_to_ids(tokens[0])
-        b = tokenizer.convert_tokens_to_ids(tokens[1])
-        weight = self.lm_head.weight.data[b].to(
-            device) - self.lm_head.weight.data[a].to(device)
-        self.score.weight.data.copy_(weight)
-
-        del self.lm_head
-        loaded_weights.add("score.weight")
-        loaded_weights.discard("lm_head.weight")
-        return loaded_weights

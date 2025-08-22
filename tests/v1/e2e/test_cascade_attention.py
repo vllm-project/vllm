@@ -5,10 +5,10 @@ import pytest
 
 from vllm import LLM, SamplingParams
 
-from ...utils import fork_new_process_for_each_test
+from ...utils import create_new_process_for_each_test
 
 
-@fork_new_process_for_each_test
+@create_new_process_for_each_test()
 @pytest.mark.parametrize("attn_backend",
                          ["FLASH_ATTN_VLLM_V1", "FLASHINFER_VLLM_V1"])
 def test_cascade_attention(example_system_message, monkeypatch, attn_backend):

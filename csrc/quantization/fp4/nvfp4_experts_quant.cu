@@ -561,7 +561,7 @@ void scaled_fp4_experts_quant_sm100a(
   TORCH_CHECK(output_scale.size(1) * 4 == padded_k);
 
   auto in_dtype = input.dtype();
-  at::cuda::CUDAGuard device_guard{(char)input.get_device()};
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream =
       at::cuda::getCurrentCUDAStream(input.get_device());
   if (in_dtype == at::ScalarType::Half) {

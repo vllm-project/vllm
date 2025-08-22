@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm import SamplingParams
-from vllm.config import LoadConfig, LoadFormat
+from vllm.config import LoadConfig
 from vllm.model_executor.model_loader import get_model_loader
 
+load_format = "runai_streamer"
 test_model = "openai-community/gpt2"
 
 prompts = [
@@ -18,7 +19,7 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
 
 
 def get_runai_model_loader():
-    load_config = LoadConfig(load_format=LoadFormat.RUNAI_STREAMER)
+    load_config = LoadConfig(load_format=load_format)
     return get_model_loader(load_config)
 
 
@@ -28,6 +29,6 @@ def test_get_model_loader_with_runai_flag():
 
 
 def test_runai_model_loader_download_files(vllm_runner):
-    with vllm_runner(test_model, load_format=LoadFormat.RUNAI_STREAMER) as llm:
+    with vllm_runner(test_model, load_format=load_format) as llm:
         deserialized_outputs = llm.generate(prompts, sampling_params)
         assert deserialized_outputs

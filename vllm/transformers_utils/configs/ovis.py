@@ -3,8 +3,9 @@
 
 # yapf: disable
 # ruff: noqa: E501
-# copied from https://huggingface.co/AIDC-AI/Ovis2-1B/blob/main/configuration_aimv2.py
+# adapted from https://huggingface.co/AIDC-AI/Ovis2-1B/blob/main/configuration_aimv2.py
 # and https://huggingface.co/AIDC-AI/Ovis2-1B/blob/main/configuration_ovis.py
+# Ovis Config with AimV2 config registration removed for Transformers compatibility
 from typing import Any, Optional, Union
 
 from transformers import AutoConfig, PretrainedConfig
@@ -12,10 +13,8 @@ from transformers import AutoConfig, PretrainedConfig
 
 class AIMv2Config(PretrainedConfig):
     """This is the configuration class to store the configuration of an [`AIMv2Model`].
-
     Instantiating a configuration with the defaults will yield a similar configuration
     to that of the [apple/aimv2-large-patch14-224](https://huggingface.co/apple/aimv2-large-patch14-224).
-
     Args:
         hidden_size: Dimension of the hidden representations.
         intermediate_size: Dimension of the SwiGLU representations.
@@ -67,15 +66,6 @@ class AIMv2Config(PretrainedConfig):
         self.use_bias = use_bias
 
 
-IGNORE_ID = -100
-IMAGE_TOKEN_ID = -200
-IMAGE_TOKEN = "<image>"
-IMAGE_ATOM_ID = -300
-IMAGE_INDICATOR_IDS = [-301, -302, -303, -304, -305]
-
-AutoConfig.register("aimv2", AIMv2Config)
-
-
 # ----------------------------------------------------------------------
 #                     Visual Tokenizer Configuration
 # ----------------------------------------------------------------------
@@ -105,9 +95,11 @@ class BaseVisualTokenizerConfig(PretrainedConfig):
                 f"expect `backbone_config` to be instance of PretrainedConfig or dict, but got {type(backbone_config)} type"
             if not isinstance(backbone_config, PretrainedConfig):
                 model_type = backbone_config['model_type']
-                backbone_config.pop('model_type')
-                backbone_config = AutoConfig.for_model(model_type,
-                                                       **backbone_config)
+                if model_type != "aimv2":
+                    backbone_config.pop('model_type')
+                    backbone_config = AutoConfig.for_model(model_type, **backbone_config)
+                else:
+                    backbone_config = AIMv2Config(**backbone_config)
         self.backbone_config = backbone_config
         self.hidden_stride = hidden_stride
 

@@ -10,15 +10,17 @@ from typing import Optional, Union
 
 import numpy as np
 import numpy.typing as npt
+import PIL.Image
 import pytest
 import regex as re
 import torch
 from PIL.Image import Image
 from transformers import (AutoConfig, AutoTokenizer, BatchFeature,
                           GenerationConfig, GenerationMixin)
+from transformers.video_utils import VideoMetadata
 
 from vllm.sequence import SampleLogprobs
-from vllm.transformers_utils.tokenizer import patch_padding_side
+from vllm.utils import is_list_of
 
 from .....conftest import HfRunner, ImageAsset, ImageTestAssets
 from .types import RunnerOutput
@@ -341,7 +343,6 @@ def gemma3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 def glm4v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for GLM4V."""
     hf_processor = hf_model.processor
-    patch_padding_side(hf_processor)
 
     def processor(*args, text="", images=None, **kwargs):
         if images is None:
@@ -370,6 +371,28 @@ def glm4v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     hf_model.processor = processor
     hf_model.model.get_output_embeddings = lambda: \
         hf_model.model.transformer.output_layer
+    return hf_model
+
+
+def glm4_1v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for GLM4.1V."""
+    hf_processor = hf_model.processor
+
+    def processor(*args, videos=None, **kwargs):
+        if videos is not None and is_list_of(videos, tuple):
+            # If videos is a list of tuples, we assume each tuple contains
+            # (video_array, metadata) as in the case of GLM4.1V.
+            video_metadata = [[VideoMetadata(**video[1])] for video in videos]
+            videos = [[video[0]] for video in videos]
+        else:
+            video_metadata = None
+
+        return hf_processor(*args,
+                            videos=videos,
+                            video_metadata=video_metadata,
+                            **kwargs)
+
+    hf_model.processor = processor
     return hf_model
 
 
@@ -788,9 +811,78 @@ def ovis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
+def ovis2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for Ovis2."""
+    hf_model.model.get_output_embeddings = lambda: \
+        hf_model.model.llm.get_output_embeddings()
+
+    def processor(*args, text="", images=None, videos=None, **kwargs):
+        if images is None:
+            images = []
+        else:
+            images = [images] if isinstance(images, Image) else images
+        if videos is None:
+            videos = []
+        else:
+            videos = [videos] if isinstance(videos, np.ndarray) else videos
+            videos = [[PIL.Image.fromarray(frame) for frame in vid]
+                      for vid in videos]
+
+        prompt_start_and_end = {
+            "qwen2": ("<|im_start|>user\n", "<|im_end|>\n"),
+            "llama":
+            ("<|start_header_id|>user<|end_header_id|>\n\n", "<|eot_id|>"),
+            "gemma2": ("<start_of_turn>user\n", "<end_of_turn>\n"),
+        }
+        for start, end in prompt_start_and_end.values():
+            if start in text and end in text:
+                text = text.split(start)[1].split(end)[0]
+                break
+
+        images_message = [{"type": "image", "image": img} for img in images]
+        videos_message = [{"type": "video", "video": vid} for vid in videos]
+
+        messages = [{
+            "role":
+            "user",
+            "content": [
+                *images_message,
+                *videos_message,
+                {
+                    "type": "text",
+                    "text": text
+                },
+            ],
+        }]
+
+        input_ids, pixel_values, grid_thws = hf_model.model.preprocess_inputs(
+            messages=messages, enable_thinking=True)
+        inputs = {
+            "inputs": input_ids,
+            "pixel_values": pixel_values,
+            "grid_thws": grid_thws,
+        }
+        return BatchFeature(data=inputs, tensor_type="pt")
+
+    hf_model.processor = processor
+    return hf_model
+
+
 def qwen2_5_omni_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner for Qwen2.5-Omni."""
     thinker = hf_model.model.thinker
     thinker.get_output_embeddings = lambda: thinker.lm_head
     hf_model.model = thinker
+    return hf_model
+
+
+def tarsier_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    from vllm.model_executor.models.tarsier import get_vision_encoder_info
+
+    vision_encoder_info = get_vision_encoder_info(hf_model.config)
+
+    hf_processor = hf_model.processor
+    if hf_processor.patch_size is None:
+        hf_processor.patch_size = vision_encoder_info.get_patch_size()
+
     return hf_model

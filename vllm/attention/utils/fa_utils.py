@@ -66,3 +66,7 @@ def get_flash_attn_version(requires_alibi: bool = False) -> Optional[int]:
 def flash_attn_supports_fp8() -> bool:
     return get_flash_attn_version() == 3 and \
         current_platform.get_device_capability().major == 9
+
+
+def is_flash_attn_varlen_func_available() -> bool:
+    return current_platform.is_cuda() or current_platform.is_xpu()

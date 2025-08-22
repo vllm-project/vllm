@@ -6,7 +6,7 @@ import msgspec
 from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.sequence import ExecuteModelRequest
 
-from ..spec_decode.utils import create_batch
+from .utils import create_batch
 
 
 def test_msgspec_serialization():

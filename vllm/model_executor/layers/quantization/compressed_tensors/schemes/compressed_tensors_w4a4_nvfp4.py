@@ -1,21 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Callable, Optional
 
 import torch
 from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
-from vllm._custom_ops import (cutlass_scaled_fp4_mm,
-                              cutlass_scaled_mm_supports_fp4, scaled_fp4_quant)
+from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
     run_nvfp4_emulations)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    swizzle_blockscale)
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
-from vllm.platforms import current_platform
+from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm, has_flashinfer
 
 logger = init_logger(__name__)
 
@@ -25,6 +27,13 @@ __all__ = ["CompressedTensorsW4A4Fp4"]
 class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
 
     def __init__(self):
+        if envs.VLLM_USE_TRTLLM_FP4_GEMM:
+            assert has_flashinfer(), "TRTLLM FP4 GEMM requires FlashInfer"
+            self.backend = "flashinfer-trtllm"
+        elif has_flashinfer():
+            self.backend = "flashinfer-cutlass"
+        else:
+            self.backend = "cutlass"
         self.group_size = 16
 
     @classmethod
@@ -32,15 +41,6 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         if envs.VLLM_USE_NVFP4_CT_EMULATIONS:
             return 80
         return 100
-
-    @classmethod
-    def cutlass_fp4_supported(cls) -> bool:
-        if not current_platform.is_cuda():
-            return False
-        capability_tuple = current_platform.get_device_capability()
-        capability = -1 if capability_tuple is None else capability_tuple.to_int(  # noqa: E501
-        )
-        return cutlass_scaled_mm_supports_fp4(capability)
 
     def create_weights(self, layer: torch.nn.Module,
                        output_partition_sizes: list[int],
@@ -85,29 +85,6 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             weight_loader=weight_loader)
         layer.register_parameter("input_global_scale", input_global_scale)
 
-    def swizzle_blockscale(self, scale: torch.tensor):
-        assert (scale.dtype == torch.float8_e4m3fn)
-        # Pad and blockwise interleave weight_scale
-        scale_ndim = scale.ndim
-        if scale.ndim == 2:
-            scale = scale.unsqueeze(0)
-        assert scale.ndim == 3
-        B, M, K = scale.shape
-        round_up_multiple = lambda x, m: (x + m - 1) // m * m
-        M_padded = round_up_multiple(M, 128)
-        K_padded = round_up_multiple(K, 4)
-        padded_scale = torch.zeros((B, M_padded, K_padded), dtype=scale.dtype)
-        padded_scale[:B, :M, :K] = scale
-        batches, rows, cols = padded_scale.shape
-        assert rows % 128 == 0
-        assert cols % 4 == 0
-        padded_scale = padded_scale.reshape(batches, rows // 128, 4, 32,
-                                            cols // 4, 4)
-        swizzled_scale = padded_scale.permute((0, 1, 4, 3, 2, 5))
-        swizzled_scale = swizzled_scale.contiguous().cuda()
-        return (swizzled_scale.reshape(M, K)
-                if scale_ndim == 2 else swizzled_scale.reshape(B, M, K))
-
     def process_weights_after_loading(self, layer) -> None:
 
         global_input_scale = layer.input_global_scale.max().to(torch.float32)
@@ -118,16 +95,36 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             layer.weight_global_scale.max().to(torch.float32),
             requires_grad=False)
 
-        swizzled_weight_scale = self.swizzle_blockscale(layer.weight_scale)
-        layer.weight_scale_swizzled = Parameter(swizzled_weight_scale,
-                                                requires_grad=False)
+        if self.backend == "flashinfer-trtllm":
+            # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
+            # FlashInfer provides nvfp4_quantize to quantize + shuffle the
+            # layout but we use our own quantization so we have to call
+            # shuffles ourselves.
+            from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
 
-        # required by cutlass kernel; need Parameter, not ModelWeightParameter
-        layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
+            weight = layer.weight_packed.data
+            weight_scale = layer.weight_scale.data
 
-        layer.alpha = Parameter(layer.input_global_scale *
-                                layer.weight_global_scale,
-                                requires_grad=False)
+            epilogue_tile_m = 128
+            weight = shuffle_matrix_a(weight.view(torch.uint8),
+                                      epilogue_tile_m)
+            weight_scale = (shuffle_matrix_sf_a(weight_scale.view(
+                torch.uint8), epilogue_tile_m).reshape(
+                    weight_scale.shape).view(torch.float8_e4m3fn))
+
+            layer.weight_scale_swizzled = Parameter(weight_scale,
+                                                    requires_grad=False)
+            layer.weight_packed = Parameter(weight, requires_grad=False)
+        else:
+            swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
+            layer.weight_scale_swizzled = Parameter(swizzled_weight_scale,
+                                                    requires_grad=False)
+            layer.weight_packed = Parameter(layer.weight_packed.data,
+                                            requires_grad=False)
+
+        layer.alpha = Parameter(
+            1 / (layer.input_global_scale * layer.weight_global_scale),
+            requires_grad=False)
 
     def apply_weights(self,
                       layer: torch.nn.Module,
@@ -138,7 +135,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             out = run_nvfp4_emulations(
                 x=x,
                 input_global_scale=layer.input_global_scale,
-                weight=layer.weight,
+                weight=layer.weight_packed,
                 weight_scale_swizzled=layer.weight_scale_swizzled,
                 weight_global_scale=layer.weight_global_scale)
             if bias is not None:
@@ -146,14 +143,20 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             return out
 
         output_dtype = x.dtype
-        output_shape = [x.shape[0], layer.weight.shape[0]]
+        output_shape = [x.shape[0], layer.weight_packed.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
         x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
 
-        out = cutlass_scaled_fp4_mm(x_fp4, layer.weight, x_blockscale,
-                                    layer.weight_scale_swizzled,
-                                    1 / layer.alpha, output_dtype)
+        mm_args = (x_fp4, layer.weight_packed, x_blockscale,
+                   layer.weight_scale_swizzled, layer.alpha, output_dtype)
+        if self.backend == "flashinfer-trtllm":
+            out = flashinfer_scaled_fp4_mm(*mm_args, backend="trtllm")
+        elif self.backend == "flashinfer-cutlass":
+            out = flashinfer_scaled_fp4_mm(*mm_args, backend="cutlass")
+        else:
+            out = cutlass_scaled_fp4_mm(*mm_args)
+
         if bias is not None:
             out = out + bias
         return out.view(*output_shape)
