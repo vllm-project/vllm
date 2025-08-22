@@ -227,7 +227,6 @@ class AiterFlashAttentionMetadata:
     # For cascade attention.
     use_cascade: bool
     common_prefix_len: int
-    total_tokens: int
 
 
 class AiterFlashAttentionMetadataBuilder(
@@ -237,9 +236,11 @@ class AiterFlashAttentionMetadataBuilder(
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
+        self.scheduler_config = vllm_config.scheduler_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
+        self.compilation_config = vllm_config.compilation_config
         self.device = device
 
         self.num_heads_q = self.model_config.get_num_attention_heads(
@@ -252,16 +253,8 @@ class AiterFlashAttentionMetadataBuilder(
         # Sliding window size to be used with the AOT scheduler will be
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
-        self.total_tokens: int = 0
-
-    def build_for_cudagraph_capture(
-            self, common_attn_metadata: CommonAttentionMetadata):
-        self.total_tokens = self.model_config.max_model_len \
-            * self.vllm_config.scheduler_config.max_num_partial_prefills
-        res = self.build(common_prefix_len=0,
-                         common_attn_metadata=common_attn_metadata)
-        self.total_tokens = 0
-        return res
+        self.use_full_cuda_graph: bool = \
+            self.compilation_config.cudagraph_mode.has_full_cudagraphs()
 
     def build(self,
               common_prefix_len: int,
@@ -275,9 +268,7 @@ class AiterFlashAttentionMetadataBuilder(
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
-        if max_query_len > 1:
-            # We pre-compute cumulative seq len needed for prefill attention
-            # here to avoid recomputing it for every layer
+        if self.use_full_cuda_graph:
             cu_seq_lens = torch.zeros(seq_lens.shape[0] + 1,
                                       dtype=torch.int32,
                                       device=seq_lens.device)
@@ -285,10 +276,23 @@ class AiterFlashAttentionMetadataBuilder(
                          dim=0,
                          dtype=cu_seq_lens.dtype,
                          out=cu_seq_lens[1:])
-            num_actual_kv_tokens = int(cu_seq_lens[-1].item())
+            num_actual_kv_tokens = self.model_config.max_model_len * \
+                self.scheduler_config.max_num_partial_prefills
         else:
-            cu_seq_lens = None
-            num_actual_kv_tokens = 0
+            if max_query_len > 1:
+                # We pre-compute cumulative seq len needed for prefill attention
+                # here to avoid recomputing it for every layer
+                cu_seq_lens = torch.zeros(seq_lens.shape[0] + 1,
+                                          dtype=torch.int32,
+                                          device=seq_lens.device)
+                torch.cumsum(seq_lens,
+                             dim=0,
+                             dtype=cu_seq_lens.dtype,
+                             out=cu_seq_lens[1:])
+                num_actual_kv_tokens = int(cu_seq_lens[-1].item())
+            else:
+                cu_seq_lens = None
+                num_actual_kv_tokens = 0
 
         use_cascade = common_prefix_len > 0
 
@@ -304,7 +308,6 @@ class AiterFlashAttentionMetadataBuilder(
             cu_seq_lens=cu_seq_lens,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
-            total_tokens=self.total_tokens,
         )
         return attn_metadata
 
