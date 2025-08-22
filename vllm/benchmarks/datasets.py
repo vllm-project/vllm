@@ -557,7 +557,7 @@ class RandomMultiModalDataset(RandomDataset):
 
     Status:
     - Images: supported via synthetic RGB data.
-    - Video: not yet supported (set probabilities for T>1 buckets to 0).
+    - Video: not yet supported (TODO: implement video generation method).
     - Audio: not yet supported.
 
     Sampling overview:
@@ -566,9 +566,10 @@ class RandomMultiModalDataset(RandomDataset):
        `num_mm_items_range_ratio` in [0, 1]. r=0 keeps it fixed; r=1 allows 0.
        The maximum is further clamped to the sum of per-modality limits.
     2) Each item’s modality and shape is sampled from `bucket_config`, a dict
-       mapping (height, width, num_frames) → probability. We treat T=1 as image
-       and `num_frames` > 1 as video. Entries with zero probability are removed
-       and the rest are renormalized to sum to 1.
+       mapping (height, width, num_frames) → probability. We treat 
+       `num_frames`=1 as image and and `num_frames` > 1 as video. 
+       Entries with zero probability are removed and the rest are renormalized 
+       to sum to 1.
     3) Per-modality hard caps are enforced via `limit_mm_per_prompt`.
        When a modality reaches its cap, all of its buckets are excluded and the
        remaining probabilities are renormalized.
@@ -761,6 +762,12 @@ class RandomMultiModalDataset(RandomDataset):
         Loop until the number of multimodal items sampled is equal to 
         request_num_mm_items or limit of multimodal items per prompt 
         for all modalities is reached.
+
+        Note:
+        - This function operates on a per-request shallow copy of
+          `bucket_config` (tuple->float). The original dict passed to
+          `sample` is not mutated. If this ever changes, a test
+          is implemented and will fail.
         """
         # Get the number of multimodal items to sample
         request_num_mm_items = int(
