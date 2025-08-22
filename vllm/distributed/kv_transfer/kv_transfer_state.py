@@ -67,8 +67,10 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
                 raise ValueError(
                     "KV connector name must be set in KVTransferConfig")
 
-            _KV_CONNECTOR_AGENT = kv_connector_manager.create(
+            _KV_CONNECTOR_AGENT = kv_connector_manager.create_or_import(
                 name=name,
+                extension_path=vllm_config.kv_transfer_config.
+                kv_connector_module_path,
                 vllm_config=vllm_config,
                 role=KVConnectorRole.WORKER)
         else:

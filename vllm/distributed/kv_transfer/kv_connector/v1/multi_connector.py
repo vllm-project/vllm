@@ -61,7 +61,12 @@ class MultiConnector(KVConnectorBase_V1):
                 raise ValueError(
                     "KV connector name must be set in KVTransferConfig")
 
-            self._connectors.append(kv_connector_manager.create(name, role))
+            self._connectors.append(
+                kv_connector_manager.create_or_import(
+                    name=name,
+                    extension_path=temp_config.kv_transfer_config.
+                    kv_connector_module_path,
+                    role=role))
 
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).

@@ -3,6 +3,10 @@
 
 import pytest
 
+from vllm.config import CacheConfig, KVTransferConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1 import kv_connector_manager
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1, KVConnectorRole)
 from vllm.plugins.extension_manager import ExtensionManager
 
 
@@ -102,3 +106,36 @@ def test_extension_manager_valid_names():
 def test_extension_manager_must_be_unique_per_base_class():
     with pytest.raises(ValueError):
         _ = ExtensionManager(base_cls=BaseA)
+
+
+def test_extension_manager_lazy_import_and_register():
+    # Before any import, this should fail.
+    with pytest.raises(ValueError):
+        _ = kv_connector_manager.create("TestSharedStorageConnector",
+                                        KVConnectorRole.WORKER)
+
+    # Verify lazy import works.
+    cache_config = CacheConfig(
+        block_size=128,
+        gpu_memory_utilization=0.9,
+        swap_space=0,
+        cache_dtype="auto",
+    )
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="TestSharedStorageConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "name": "test",
+            "shared_storage_path": "local_storage"
+        },
+    )
+    vllm_config = VllmConfig(
+        cache_config=cache_config,
+        kv_transfer_config=kv_transfer_config,
+    )
+    test_connector = kv_connector_manager.create_or_import(
+        name="TestSharedStorageConnector",
+        extension_path="tests.v1.kv_connector.unit.utils",
+        config=vllm_config,
+        role=KVConnectorRole.WORKER)
+    assert isinstance(test_connector, KVConnectorBase_V1)

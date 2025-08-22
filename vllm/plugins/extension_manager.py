@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
 import os
-from typing import Any
+from typing import Any, Optional
 
 from vllm.logger import init_logger
 from vllm.utils import import_from_path
@@ -48,6 +49,27 @@ class ExtensionManagerRegistry:
             raise ValueError(f"Extension group {base_cls.__name__} not found")
 
     @staticmethod
+    def _create_or_import(base_cls: type, name: str,
+                          extension_path: Optional[str], *args,
+                          **kwargs) -> Any:
+        extension_group = ExtensionManagerRegistry._registry.get(
+            base_cls.__name__)
+        if extension_group is not None:
+            if name not in extension_group and extension_path:
+                logger.info(
+                    f"Importing extension {name} from {extension_path}")
+                importlib.import_module(extension_path)
+
+            if impl_cls := extension_group.get(name):
+                return impl_cls(*args, **kwargs)
+            else:
+                raise ValueError(
+                    f"Extension {name} not found in group {base_cls.__name__}")
+        else:
+            raise ValueError(
+                f"Extension base class {base_cls.__name__} not found")
+
+    @staticmethod
     def _get_extension_class(base_cls: type, name: str) -> type:
         if extension_group := ExtensionManagerRegistry._registry.get(
                 base_cls.__name__):
@@ -72,9 +94,6 @@ class ExtensionManagerRegistry:
     def import_extension(extension_path: str) -> None:
         """
         Import a user-defined extension by the path of the extension file.
-
-        Users should use the decorator to register implementations. 
-        This method is kept for backward compatibility reasons.
         """
         module_name = os.path.splitext(os.path.basename(extension_path))[0]
 
@@ -92,6 +111,7 @@ class ExtensionManager:
         if base_cls.__name__ in ExtensionManagerRegistry._registry:
             raise ValueError(
                 f"Extension group {base_cls.__name__} already exists.")
+        ExtensionManagerRegistry._registry[base_cls.__name__] = {}
         self.base_cls = base_cls
 
     def register(self, names: list[str]):
@@ -100,6 +120,11 @@ class ExtensionManager:
     def create(self, name: str, *args, **kwargs) -> Any:
         return ExtensionManagerRegistry._create(self.base_cls, name, *args,
                                                 **kwargs)
+
+    def create_or_import(self, name: str, extension_path: Optional[str], *args,
+                         **kwargs) -> Any:
+        return ExtensionManagerRegistry._create_or_import(
+            self.base_cls, name, extension_path, *args, **kwargs)
 
     def get_extension_class(self, name: str) -> type:
         return ExtensionManagerRegistry._get_extension_class(

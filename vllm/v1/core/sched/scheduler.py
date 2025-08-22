@@ -90,8 +90,11 @@ class Scheduler(SchedulerInterface):
                 # register(...) decorator.
                 raise ValueError(
                     "KV connector name must be set in KVTransferConfig")
-            self.connector = kv_connector_manager.create(
-                name=kv_connector_name, role=KVConnectorRole.SCHEDULER)
+            self.connector = kv_connector_manager.create_or_import(
+                name=kv_connector_name,
+                extension_path=self.vllm_config.kv_transfer_config.
+                kv_connector_module_path,
+                role=KVConnectorRole.SCHEDULER)
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
