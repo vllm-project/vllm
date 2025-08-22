@@ -232,6 +232,11 @@ class KVCacheManager:
             new_computed_block_list = tuple(
                 [] for _ in range(len(self.kv_cache_config.kv_cache_groups)))
 
+        # The number of computed tokens is the number of computed tokens plus
+        # the new prefix caching hits
+        num_computed_tokens = (request.num_computed_tokens +
+                               num_new_computed_tokens)
+
         # Free the blocks that are skipped during the attention computation
         # (e.g., tokens outside the sliding window).
         # We can do this even if we cannot schedule this request due to
@@ -239,12 +244,8 @@ class KVCacheManager:
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
         self.coordinator.remove_skipped_blocks(request.request_id,
-                                               request.num_computed_tokens)
+                                               num_computed_tokens)
 
-        # The number of computed tokens is the number of computed tokens plus
-        # the new prefix caching hits
-        num_computed_tokens = (request.num_computed_tokens +
-                               num_new_computed_tokens)
         num_tokens_need_slot = min(
             num_computed_tokens + num_new_tokens + num_lookahead_tokens,
             self.max_model_len)

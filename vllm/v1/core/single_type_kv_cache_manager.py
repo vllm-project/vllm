@@ -366,6 +366,8 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # Remove the blocks that are no longer be in the sliding window and
         # skipped during the attention computation.
         last_useful_token = num_computed_tokens - self.sliding_window + 1
+        if last_useful_token <= 0:
+            return
         last_useful_block = last_useful_token // self.block_size
         blocks = self.req_to_blocks[request_id]
         removed_blocks: list[KVCacheBlock] = []
