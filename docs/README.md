@@ -1,3 +1,9 @@
+---
+hide:
+  - navigation
+  - toc
+---
+
 # Welcome to vLLM
 
 <figure markdown="span">
@@ -20,6 +26,17 @@
 vLLM is a fast and easy-to-use library for LLM inference and serving.
 
 Originally developed in the [Sky Computing Lab](https://sky.cs.berkeley.edu) at UC Berkeley, vLLM has evolved into a community-driven project with contributions from both academia and industry.
+
+Where to get started with vLLM depends on the type of user. If you are looking to:
+
+- Run open-source models on vLLM, we recommend starting with the [Quickstart Guide](./getting_started/quickstart.md)
+- Build applications with vLLM, we recommend starting with the [User Guide](./usage)
+- Build vLLM, we recommend starting with [Developer Guide](./contributing)
+
+For information about the development of vLLM, see:
+
+- [Roadmap](https://roadmap.vllm.ai)
+- [Releases](https://github.com/vllm-project/vllm/releases)
 
 vLLM is fast with:
 

@@ -24,7 +24,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -161,7 +161,7 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         if not isinstance(processor, GotOcr2ImageProcessorFast):
             raise ValueError(f'GotOcr2ImageProcessorFast is expected but got '
                              f'{type(processor)}')
-        num_image_patches = processor.get_number_of_image_tokens(
+        num_image_patches = processor.get_number_of_image_patches(
             image_height, image_width, images_kwargs=dict())
         num_image_tokens = self.get_hf_processor(
         ).image_seq_length * num_image_patches
@@ -399,7 +399,7 @@ class InternS1MultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         img_context_token = hf_processor.image_token
@@ -407,15 +407,16 @@ class InternS1MultiModalProcessor(
         end_image_token = hf_processor.end_image_token
         video_token = hf_processor.video_token
 
-        if "video_num_patches" in out_mm_kwargs:
-            video_num_patches = out_mm_kwargs["video_num_patches"]
+        out_mm_data = out_mm_kwargs.get_data()
+        if "video_num_patches" in out_mm_data:
+            video_num_patches = out_mm_data["video_num_patches"]
             assert isinstance(video_num_patches, torch.Tensor)
             video_num_patches = video_num_patches.tolist()
         else:
             video_num_patches = []
 
-        if "image_num_patches" in out_mm_kwargs:
-            image_num_patches = out_mm_kwargs["image_num_patches"]
+        if "image_num_patches" in out_mm_data:
+            image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
             image_num_patches = image_num_patches.tolist()
         else:

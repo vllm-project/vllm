@@ -17,9 +17,18 @@ from openai.types.chat.chat_completion_audio import (
 from openai.types.chat.chat_completion_message import (
     Annotation as OpenAIAnnotation)
 # yapf: enable
-from openai.types.responses import (ResponseInputParam, ResponseOutputItem,
-                                    ResponseOutputMessage, ResponsePrompt,
-                                    ResponseStatus, ResponseTextConfig)
+from openai.types.responses import (ResponseFunctionToolCall,
+                                    ResponseInputItemParam, ResponseOutputItem,
+                                    ResponsePrompt, ResponseReasoningItem,
+                                    ResponseStatus)
+
+# Backward compatibility for OpenAI client versions
+try:  # For older openai versions (< 1.100.0)
+    from openai.types.responses import ResponseTextConfig
+except ImportError:  # For newer openai versions (>= 1.100.0)
+    from openai.types.responses import (ResponseFormatTextConfig as
+                                        ResponseTextConfig)
+
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
@@ -29,7 +38,7 @@ from typing_extensions import TypeAlias
 
 from vllm import envs
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
-                                         random_tool_call_id)
+                                         make_tool_call_id)
 from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam)
 from vllm.logger import init_logger
@@ -77,12 +86,15 @@ class OpenAIBaseModel(BaseModel):
         return result
 
 
-class ErrorResponse(OpenAIBaseModel):
-    object: str = "error"
+class ErrorInfo(OpenAIBaseModel):
     message: str
     type: str
     param: Optional[str] = None
     code: int
+
+
+class ErrorResponse(OpenAIBaseModel):
+    error: ErrorInfo
 
 
 class ModelPermission(OpenAIBaseModel):
@@ -234,6 +246,11 @@ def get_logits_processors(processors: Optional[LogitsProcessors],
     return None
 
 
+ResponseInputOutputItem: TypeAlias = Union[ResponseInputItemParam,
+                                           ResponseReasoningItem,
+                                           ResponseFunctionToolCall]
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -248,7 +265,7 @@ class ResponsesRequest(OpenAIBaseModel):
             "reasoning.encrypted_content",
         ],
     ]] = None
-    input: Union[str, ResponseInputParam]
+    input: Union[str, list[ResponseInputOutputItem]]
     instructions: Optional[str] = None
     max_output_tokens: Optional[int] = None
     max_tool_calls: Optional[int] = None
@@ -323,6 +340,7 @@ class ResponsesRequest(OpenAIBaseModel):
         if (top_p := self.top_p) is None:
             top_p = default_sampling_params.get(
                 "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"])
+        stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
         guided_decoding = None
@@ -339,11 +357,21 @@ class ResponsesRequest(OpenAIBaseModel):
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
-            logprobs=self.top_logprobs,
+            logprobs=self.top_logprobs
+            if self.is_include_output_logprobs() else None,
+            stop_token_ids=stop_token_ids,
             output_kind=(RequestOutputKind.DELTA
                          if self.stream else RequestOutputKind.FINAL_ONLY),
             guided_decoding=guided_decoding,
         )
+
+    def is_include_output_logprobs(self) -> bool:
+        """Check if the request includes output logprobs."""
+        if self.include is None:
+            return False
+        return isinstance(
+            self.include,
+            list) and "message.output_text.logprobs" in self.include
 
     @model_validator(mode="before")
     def validate_background(cls, data):
@@ -404,6 +432,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         Literal["required"],
         ChatCompletionNamedToolChoiceParam,
     ]] = "none"
+    reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
+    include_reasoning: bool = True
 
     # NOTE this will be ignored by vLLM -- the model determines the behavior
     parallel_tool_calls: Optional[bool] = False
@@ -555,6 +585,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
+    return_token_ids: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If specified, the result will include token IDs alongside the "
+            "generated text. In streaming mode, prompt_token_ids is included "
+            "only in the first chunk, and token_ids contains the delta tokens "
+            "for each chunk. This is useful for debugging or when you "
+            "need to map generated text back to input tokens."))
     cache_salt: Optional[str] = Field(
         default=None,
         description=(
@@ -1041,6 +1079,14 @@ class CompletionRequest(OpenAIBaseModel):
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
+    return_token_ids: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If specified, the result will include token IDs alongside the "
+            "generated text. In streaming mode, prompt_token_ids is included "
+            "only in the first chunk, and token_ids contains the delta tokens "
+            "for each chunk. This is useful for debugging or when you "
+            "need to map generated text back to input tokens."))
 
     cache_salt: Optional[str] = Field(
         default=None,
@@ -1459,7 +1505,9 @@ class CompletionResponseChoice(OpenAIBaseModel):
             "to stop, None if the completion finished for some other reason "
             "including encountering the EOS token"),
     )
+    token_ids: Optional[list[int]] = None  # For response
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    prompt_token_ids: Optional[list[int]] = None  # For prompt
 
 
 class CompletionResponse(OpenAIBaseModel):
@@ -1490,6 +1538,10 @@ class CompletionResponseStreamChoice(OpenAIBaseModel):
             "to stop, None if the completion finished for some other reason "
             "including encountering the EOS token"),
     )
+    # not part of the OpenAI spec but for tracing the tokens
+    # prompt tokens is put into choice to align with CompletionResponseChoice
+    prompt_token_ids: Optional[list[int]] = None
+    token_ids: Optional[list[int]] = None
 
 
 class CompletionStreamResponse(OpenAIBaseModel):
@@ -1591,7 +1643,7 @@ class FunctionCall(OpenAIBaseModel):
 
 
 class ToolCall(OpenAIBaseModel):
-    id: str = Field(default_factory=random_tool_call_id)
+    id: str = Field(default_factory=make_tool_call_id)
     type: Literal["function"] = "function"
     function: FunctionCall
 
@@ -1659,6 +1711,9 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     finish_reason: Optional[str] = "stop"
     # not part of the OpenAI spec but included in vLLM for legacy reasons
     stop_reason: Optional[Union[int, str]] = None
+    # not part of the OpenAI spec but is useful for tracing the tokens
+    # in agent scenarios
+    token_ids: Optional[list[int]] = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -1674,6 +1729,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
 
     # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    prompt_token_ids: Optional[list[int]] = None
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None, description="KVTransfer parameters.")
 
@@ -1691,6 +1747,8 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     logprobs: Optional[ChatCompletionLogProbs] = None
     finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = None
+    # not part of the OpenAI spec but for tracing the tokens
+    token_ids: Optional[list[int]] = None
 
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):
@@ -1700,6 +1758,8 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
+    # not part of the OpenAI spec but for tracing the tokens
+    prompt_token_ids: Optional[list[int]] = None
 
 
 class TranscriptionResponseStreamChoice(OpenAIBaseModel):
@@ -1717,13 +1777,20 @@ class TranscriptionStreamResponse(OpenAIBaseModel):
     usage: Optional[UsageInfo] = Field(default=None)
 
 
-class ResponseReasoningItem(OpenAIBaseModel):
-    id: str = Field(default_factory=lambda: f"rs_{random_uuid()}")
-    text: str
-    summary: list = Field(default_factory=list)
-    type: Literal["reasoning"] = "reasoning"
-    encrypted_content: Optional[str] = None
-    status: Optional[Literal["in_progress", "completed", "incomplete"]]
+class InputTokensDetails(OpenAIBaseModel):
+    cached_tokens: int
+
+
+class OutputTokensDetails(OpenAIBaseModel):
+    reasoning_tokens: int
+
+
+class ResponseUsage(OpenAIBaseModel):
+    input_tokens: int
+    input_tokens_details: InputTokensDetails
+    output_tokens: int
+    output_tokens_details: OutputTokensDetails
+    total_tokens: int
 
 
 class ResponsesResponse(OpenAIBaseModel):
@@ -1735,7 +1802,7 @@ class ResponsesResponse(OpenAIBaseModel):
     metadata: Optional[Metadata] = None
     model: str
     object: Literal["response"] = "response"
-    output: list[Union[ResponseOutputMessage, ResponseReasoningItem]]
+    output: list[ResponseOutputItem]
     parallel_tool_calls: bool
     temperature: float
     tool_choice: ToolChoice
@@ -1750,9 +1817,9 @@ class ResponsesResponse(OpenAIBaseModel):
     service_tier: Literal["auto", "default", "flex", "scale", "priority"]
     status: ResponseStatus
     text: Optional[ResponseTextConfig] = None
-    top_logprobs: int
+    top_logprobs: Optional[int] = None
     truncation: Literal["auto", "disabled"]
-    usage: Optional[UsageInfo] = None
+    usage: Optional[ResponseUsage] = None
     user: Optional[str] = None
 
     @classmethod
@@ -1764,7 +1831,7 @@ class ResponsesResponse(OpenAIBaseModel):
         created_time: int,
         output: list[ResponseOutputItem],
         status: ResponseStatus,
-        usage: Optional[UsageInfo] = None,
+        usage: Optional[ResponseUsage] = None,
     ) -> "ResponsesResponse":
         return cls(
             id=request.request_id,
