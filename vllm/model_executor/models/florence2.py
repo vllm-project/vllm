@@ -647,7 +647,8 @@ class Florence2LanguageModel(nn.Module):
 
         encoder_hidden_states = None
 
-        if inputs_embeds is not None or encoder_input_ids.numel() > 0:
+        if ((inputs_embeds is not None and inputs_embeds.numel() > 0)
+                or encoder_input_ids.numel() > 0):
             # Run encoder attention if a non-zero number of encoder tokens
             # are provided as input
             encoder_hidden_states = self.encoder(input_ids=encoder_input_ids,
@@ -682,7 +683,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
                                           config.d_model,
                                           embed_scale=embed_scale)
         if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.shared.weight
+            self.lm_head.tie_weights(self.model.shared)
 
         self.logits_processor = LogitsProcessor(self.vocab_size,
                                                 config.vocab_size)
