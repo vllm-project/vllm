@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom normalization layers."""
-from typing import Callable, Optional, Union, overload
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -10,11 +10,6 @@ import vllm.envs as envs
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
-
-RMSNormCallback = Callable[[torch.Tensor, torch.Tensor, float], torch.Tensor]
-RMSNormWithAddCallback = Callable[
-    [torch.Tensor, torch.Tensor, torch.Tensor, float], tuple[torch.Tensor,
-                                                             torch.Tensor]]
 
 
 def is_rocm_aiter_rmsnorm_enabled() -> bool:
@@ -107,16 +102,6 @@ if current_platform.is_rocm():
         fake_impl=rocm_aiter_rmsnorm2d_fwd_with_add_fake,
         dispatch_key=current_platform.dispatch_key,
     )
-
-
-@overload
-def dispatch_rmsnorm_func(mode: str) -> RMSNormCallback:
-    ...
-
-
-@overload
-def dispatch_rmsnorm_func(mode: None) -> RMSNormWithAddCallback:
-    ...
 
 
 def dispatch_rmsnorm_func(add_residual: bool, dtype: torch.dtype):
