@@ -292,6 +292,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b"),
+    "SeedOssForCausalLM": _HfExamplesInfo("ByteDance-Seed/Seed-OSS-36B-Instruct", # noqa: E501
+                                          trust_remote_code=True,
+                                          is_available_online=False),
     "SmolLM3ForCausalLM": _HfExamplesInfo("HuggingFaceTB/SmolLM3-3B"),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),  # noqa: E501
     "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
@@ -413,8 +416,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
                                                         {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"},    # noqa: E501
-                                                        min_transformers_version="4.55.1",
-                                                        transformers_version_reason="HF model broken in 4.55.0"),  # noqa: E501
+                                                        min_transformers_version="4.56",
+                                                        transformers_version_reason="HF model broken in 4.55"),  # noqa: E501
     "InternS1ForConditionalGeneration": _HfExamplesInfo("internlm/Intern-S1",
                                                         trust_remote_code=True),  # noqa: E501
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
@@ -496,8 +499,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B",
                                            trust_remote_code=True),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct",  # noqa: E501
-                                                       min_transformers_version="4.55.1",
-                                                       transformers_version_reason="HF model broken in 4.55.0"),  # noqa: E501
+                                                       min_transformers_version="4.56",
+                                                       transformers_version_reason="HF model broken in 4.55"),  # noqa: E501
     "Step3VLForConditionalGeneration": _HfExamplesInfo("stepfun-ai/step3",
                                                         trust_remote_code=True),
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
