@@ -42,6 +42,9 @@ class TokensPrompt(TypedDict):
     prompt_token_ids: list[int]
     """A list of token IDs to pass to the model."""
 
+    token_type_ids: NotRequired[list[int]]
+    """A list of token type IDs to pass to the cross encoder model."""
+
     multi_modal_data: NotRequired["MultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
@@ -170,9 +173,6 @@ class TokenInputs(TypedDict):
 
     prompt_token_ids: list[int]
     """The token IDs of the prompt."""
-
-    token_type_ids: NotRequired[list[int]]
-    """A list of token type IDs to pass to the cross encoder model."""
 
     prompt: NotRequired[str]
     """
