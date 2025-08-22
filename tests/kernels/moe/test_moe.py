@@ -429,11 +429,11 @@ def test_mixtral_moe(dtype: torch.dtype, padding: bool, use_rocm_aiter: bool,
                 vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[...,
                                                                       0:-128],
                                                     requires_grad=False)
-            torch.cuda.empty_cache()
             vllm_moe.experts.w2_weight = Parameter(F.pad(
                 vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[...,
                                                                      0:-128],
                                                    requires_grad=False)
+            torch.cuda.synchronize()
             torch.cuda.empty_cache()
 
         # Run forward passes for both MoE blocks
