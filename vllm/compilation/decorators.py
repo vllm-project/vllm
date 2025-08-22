@@ -63,6 +63,14 @@ def support_torch_compile(
 @overload
 def support_torch_compile(
     *,
+    no_weak_ref_output: bool = False,
+) -> Callable[[_T], _T]:
+    ...
+
+
+@overload
+def support_torch_compile(
+    *,
     dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]],
 ) -> Callable[[_T], _T]:
     ...
@@ -78,6 +86,7 @@ def support_torch_compile(
     *,
     dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]] = None,
     enable_if: Optional[Callable[[VllmConfig], bool]] = None,
+    no_weak_ref_output: bool = True,
 ) -> Union[Callable[[_T], _T], _T]:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -132,6 +141,31 @@ def support_torch_compile(
     returns a boolean value indicating whether to compile the model or not.
     This is useful if you want to compile the model only when certain
     conditions are met.
+
+    If `no_weak_ref_output` is set to `True`, the output of the last graph
+    of each compiled nn.Module will not be converted to a weakref (which saves
+    some memory) in piecewise cudagraph mode. This conversion is only safe when
+    the output of the last graph is not used by any subsequent CUDA graphs in
+    the model forward. 
+    
+    This defaults to `True`, because in most cases the entire model is being
+    compiled, so the assumption that there is no other cuda graph after the last
+    graph holds. However, in rare cases, multiple submodules are compiled within
+    a single model. In this case, only the output of the last graph of the last
+    submodule is safe to be converted to a weakref. For example, if a model has
+    2 submodules mod_A and mod_B that are piecewise compiled + graph captured
+    separately, e.g.:
+
+    def forward(self, x):
+        a_out = self.mod_A(x)
+        b_out = self.mod_B(a_out)
+        return a_out + b_out
+    
+    Then the output of mod_A should NOT be converted to a weakref, because the
+    call to mod_B may overwrite `a_out`. This is because vLLM shares a global
+    memory pool for all CUDA graphs, causing PyTorch to re-use memory where
+    possible.  To avoid its output from being overwritten, mod_A should specify
+    `@support_torch_compile(no_weak_ref_output=True)`
     """
 
     def cls_decorator_helper(cls: _T) -> _T:
@@ -164,7 +198,7 @@ def support_torch_compile(
                 raise ValueError(
                     f"Argument {k} not found in the forward method of {cls}")
         return _support_torch_compile(cls, inferred_dynamic_arg_dims,
-                                      enable_if)
+                                      enable_if, no_weak_ref_output)
 
     if cls is not None:
         # use `support_torch_compile` as a decorator without arguments
@@ -178,6 +212,7 @@ def _support_torch_compile(
     cls: _T,
     dynamic_arg_dims: dict[str, Union[int, list[int]]],
     enable_if: Optional[Callable[[VllmConfig], bool]] = None,
+    no_weak_ref_output: bool = True,
 ) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -211,7 +246,9 @@ def _support_torch_compile(
 
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
-            self, compilation_level=vllm_config.compilation_config.level)
+            self,
+            compilation_level=vllm_config.compilation_config.level,
+            no_weak_ref_output=no_weak_ref_output)
 
     cls.__init__ = __init__
 
