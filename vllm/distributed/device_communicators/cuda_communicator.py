@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from importlib.util import find_spec
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup
@@ -25,7 +25,7 @@ def is_rocm_aiter_custom_allreduce_enabled() -> bool:
         and find_spec("aiter.dist.custom_all_reduce") is not None \
 
 
-def dispatch_custom_allreduce() -> Any:
+def dispatch_custom_allreduce() -> type:
     """Dispatch the custom allreduce implementation based on the platform."""
     if is_rocm_aiter_custom_allreduce_enabled():
         from aiter.dist.custom_all_reduce import CustomAllreduce
@@ -73,7 +73,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
-        self.ca_comm: Optional[CustomAllreduce] = None
+        self.ca_comm: Optional[CustomAllreduce] = None  # type: ignore
         self.qr_comm: Optional[QuickAllReduce] = None
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
