@@ -802,7 +802,9 @@ class FusedMoE(CustomOp):
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
 
-        self.enable_eplb = enable_eplb
+        self.enable_eplb = (
+            True if vllm_config.parallel_config.enable_eplb else enable_eplb
+        )
         self.expert_load_view: Optional[torch.Tensor] = None
         self.logical_to_physical_map: Optional[torch.Tensor] = None
         self.logical_replica_count: Optional[torch.Tensor] = None
