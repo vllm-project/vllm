@@ -623,7 +623,7 @@ class GptOssModel(nn.Module):
                                             weights, stacked_params_mapping)
 
 
-class GptOssForCausalLM(nn.Module, SupportsPP):
+class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
     packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(
