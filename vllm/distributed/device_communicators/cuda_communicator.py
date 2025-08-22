@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from importlib.util import find_spec
-from typing import Optional, Union
+from typing import Optional, Protocol, Union
 
 import torch
 from torch.distributed import ProcessGroup
@@ -16,6 +16,15 @@ from .base_device_communicator import DeviceCommunicatorBase
 logger = init_logger(__name__)
 
 
+class CustomAllreduceProtocol(Protocol):
+    """Protocol for custom allreduce implementations. 
+    used just to bypass mypy error"""
+
+    def __init__(self, group: ProcessGroup,
+                 device: Union[int, str, torch.device]) -> None:
+        ...
+
+
 def is_rocm_aiter_custom_allreduce_enabled() -> bool:
     """Check if aiter custom allreduce is enabled for ROCm platform."""
     from vllm.platforms.rocm import on_gfx9
@@ -25,7 +34,7 @@ def is_rocm_aiter_custom_allreduce_enabled() -> bool:
         and find_spec("aiter.dist.custom_all_reduce") is not None \
 
 
-def dispatch_custom_allreduce() -> type:
+def dispatch_custom_allreduce() -> type[CustomAllreduceProtocol]:
     """Dispatch the custom allreduce implementation based on the platform."""
     if is_rocm_aiter_custom_allreduce_enabled():
         from aiter.dist.custom_all_reduce import CustomAllreduce
