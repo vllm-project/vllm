@@ -2,7 +2,7 @@ ARG BASE_IMAGE=registry-sc-harbor.amd.com/framework/compute-rocm-dkms-component-
 # ARG HIPBLASLT_BRANCH="aa0bda7b"
 # ARG HIPBLAS_COMMON_BRANCH="9b80ba8e"
 # ARG LEGACY_HIPBLASLT_OPTION=
-ARG TRITON_BRANCH="shared/oai-oss-bf16mx4-moe-launch"
+ARG TRITON_BRANCH="pytorch/rocm7.1_internal_testing"
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG PYTORCH_BRANCH="triton_kernel_wrap_fix"
 ARG PYTORCH_VISION_BRANCH="5dc9e7de"
@@ -62,16 +62,16 @@ RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cyth
 #     && make package
 # RUN mkdir -p /app/install && cp /app/hipBLASLt/build/release/*.deb /app/hipBLAS-common/build/*.deb /app/install
 
-#FROM base AS build_triton
-#ARG TRITON_BRANCH
-#ARG TRITON_REPO
-#RUN git clone ${TRITON_REPO}
-#RUN cd triton \
-#    && git checkout ${TRITON_BRANCH} \
-#    && python3 setup.py bdist_wheel --dist-dir=python/dist
-#RUN pip install build && cd triton/python/triton_kernels \
-#    && python3 -m build --wheel && cp dist/*.whl /app/triton/python/dist
-#RUN mkdir -p /app/install && cp /app/triton/python/dist/*.whl /app/install
+FROM base AS build_triton
+ARG TRITON_BRANCH
+ARG TRITON_REPO
+RUN git clone ${TRITON_REPO}
+RUN cd triton \
+    && git checkout ${TRITON_BRANCH} \
+    && python3 setup.py bdist_wheel --dist-dir=python/dist
+RUN pip install build && cd triton/python/triton_kernels \
+    && python3 -m build --wheel && cp dist/*.whl /app/triton/python/dist
+RUN mkdir -p /app/install && cp /app/triton/python/dist/*.whl /app/install
 
 FROM base AS build_amdsmi
 RUN cd /opt/rocm/share/amd_smi \
@@ -123,8 +123,8 @@ FROM base AS debs
 RUN mkdir /app/debs
 # RUN --mount=type=bind,from=build_hipblaslt,src=/app/install/,target=/install \
 #     cp /install/*.deb /app/debs
-#RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-#    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
@@ -138,8 +138,8 @@ FROM base AS final
 #     && perl -p -i -e 's/, hipblas-common-dev \([^)]*?\), /, /g' /var/lib/dpkg/status \
 #     && perl -p -i -e 's/, hipblaslt-dev \([^)]*?\), /, /g' /var/lib/dpkg/status \
 #     && perl -p -i -e 's/, hipblaslt \([^)]*?\), /, /g' /var/lib/dpkg/status
-#RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-#    pip install /install/*.whl
+RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+    pip install /install/*.whl
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     pip install /install/*.whl
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
