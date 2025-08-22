@@ -74,9 +74,7 @@ async def test_bigger_truncation_size(client: openai.AsyncOpenAI):
     }
 
     with pytest.raises(openai.BadRequestError) as err:
-        await client.post(path="embeddings",
-                         cast_to=object,
-                         body={**kwargs})
+        await client.post(path="embeddings", cast_to=object, body={**kwargs})
 
     assert str(err.value) == f"""openai.BadRequestError: 
                 Error code: 400 - {{'object': 'error', 
