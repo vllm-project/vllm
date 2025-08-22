@@ -302,7 +302,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
         logger.debug(
                 "making map: "
                 "rank=%d, world size=%d", rank, world_size)
-        print(f"At a2a initialize: {world_size}, {rank}, {gpus_per_node}, {4}")
+        # print(f"At a2a initialize: {world_size}, {rank}, {gpus_per_node}, {4}")
         # self.mapping = Mapping(
         #     world_size=world_size,
         #     rank=rank,
@@ -413,10 +413,10 @@ class FlashInferAllToAllManager(All2AllManagerBase):
                 ep_size,
             ))
         self.alltoall_info = alltoall_info
-        print(f"inside: before: {x.shape}, rank:{ep_rank}, max_num_token:{max_num_token}")
+        # print(f"inside: before: {x.shape}, rank:{ep_rank}, max_num_token:{max_num_token}")
         x = MnnvlMoe.mnnvl_moe_alltoallv(
             x, alltoall_info, self.workspace_tensor, ep_rank, ep_size)
-        print(f"inside: after: {x.shape}")
+        # print(f"inside: after: {x.shape}")
         return x, topk_ids, topk_weights
 
     def flashinfer_alltoall_combine(

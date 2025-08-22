@@ -24,8 +24,8 @@ def get_global_num_tokens_cpu():
 def get_local_sizes():
     return get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
 
-enable_flashinfer_fp4_allgather = True
-enable_flashinfer_alltoall = False
+enable_flashinfer_fp4_allgather = False
+enable_flashinfer_alltoall = True
 assert enable_flashinfer_fp4_allgather + enable_flashinfer_alltoall == 1
 class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
@@ -97,7 +97,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
                 # TODO(shuw): need to consider chunking for global_num_tokens_cpu
                 all2all_manager = get_ep_group().device_communicator.all2all_manager
-                # print(f"in prepare before all2all, a1:{a1.shape}, topk_ids:{topk_ids.shape}, topk_ids:{topk_ids}")
+                # print(f"in prepare before all2all, a1:{a1.shape}, topk_ids:{topk_ids.shape}, topk_ids:{topk_ids} and global_num_tokens_cpu:{global_num_tokens_cpu}")
                 a1, topk_ids, topk_weights = all2all_manager.dispatch(
                     get_dp_group().device_communicator,
                     global_num_tokens_cpu,
@@ -142,6 +142,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             if enable_flashinfer_fp4_allgather:
                 fused_expert_output = get_dp_group().reduce_scatterv(
                     fused_expert_output, dim=0, sizes=get_local_sizes())
+                output.copy_(fused_expert_output)
             
             if enable_flashinfer_alltoall:
                 all2all_manager = get_ep_group().device_communicator.all2all_manager
@@ -149,8 +150,8 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 # TODO(shuw): not sure which one
                 # token_count = fused_expert_output.shape[0]
                 token_count = output.shape[0]
-                # print(f"before combine fusedo:{fused_expert_output.shape}")
-                fused_expert_output = all2all_manager.flashinfer_alltoall_combine(
+                # print(f"before combine fused_expert_output:{fused_expert_output.shape} and token_count:{token_count}")
+                output_local = all2all_manager.flashinfer_alltoall_combine(
                     fused_expert_output,
                     # TODO(shuw): need to consider chunking for global_num_tokens_cpu
                     # ep_rank=self.ep_rank,
@@ -158,6 +159,8 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     top_k=top_k,
                     token_count=token_count,
                 )
-        # print(f"ouptut:{output.shape}; fusedo:{fused_expert_output.shape}")
-        output.copy_(fused_expert_output)
+                # print(f"after combine output:{output.shape}; fused_expert_output:{fused_expert_output.shape}")
+                output.copy_(output_local)
+        else:
+            output.copy_(fused_expert_output)
         # output.copy_(fused_expert_output[:output.shape[0]])
