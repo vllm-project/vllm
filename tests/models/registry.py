@@ -496,7 +496,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B",
                                            trust_remote_code=True),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct",  # noqa: E501
-                                                       max_transformers_version="4.56",
+                                                       min_transformers_version="4.56",
                                                        transformers_version_reason="HF model broken in 4.55"),  # noqa: E501
     "Step3VLForConditionalGeneration": _HfExamplesInfo("stepfun-ai/step3",
                                                         trust_remote_code=True),
