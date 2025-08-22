@@ -241,6 +241,7 @@ def test_find_token_matches(
     # Should not be used since there is nothing to convert to token IDs
     mock_tokenizer = cast(AnyTokenizer, object())
 
+    # Test single target per prompt update
     prompt_updates = [
         update_type(key, target, []).bind(mock_tokenizer)
         for key, target in target_by_key.items()
@@ -259,6 +260,22 @@ def test_find_token_matches(
         ]
         for key in expected_by_key
     } == expected_by_key
+
+    # Test multiple targets per prompt update
+    prompt_updates_all = [
+        update_type("all", tuple(target_by_key.values()), []) \
+            .bind(mock_tokenizer)
+    ]
+
+    result_all = find_token_matches(prompt, prompt_updates_all)
+
+    # Only displayed on error
+    print("result_all:", result_all)
+
+    assert [
+        dict(start_idx=item.start_idx, end_idx=item.end_idx)
+        for item in result_all
+    ] == [v for vs in expected_by_key.values() for v in vs]
 
 
 # yapf: disable
@@ -388,6 +405,7 @@ def test_find_text_matches(
     # Should not be used since there is nothing to convert to text
     mock_tokenizer = cast(AnyTokenizer, object())
 
+    # Test single target per prompt update
     prompt_updates = [
         update_type(key, target, []).bind(mock_tokenizer)
         for key, target in target_by_key.items()
@@ -406,6 +424,22 @@ def test_find_text_matches(
         ]
         for key in expected_by_key
     } == expected_by_key
+
+    # Test multiple targets per prompt update
+    prompt_updates_all = [
+        update_type("all", tuple(target_by_key.values()), []) \
+            .bind(mock_tokenizer)
+    ]
+
+    result_all = find_text_matches(prompt, prompt_updates_all)
+
+    # Only displayed on error
+    print("result_all:", result_all)
+
+    assert [
+        dict(start_idx=item.start_idx, end_idx=item.end_idx)
+        for item in result_all
+    ] == [v for vs in expected_by_key.values() for v in vs]
 
 
 # yapf: disable

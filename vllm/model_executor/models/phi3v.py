@@ -440,9 +440,9 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=tuple(image_tokens[:num_images]),
                 replacement=get_replacement_phi3v,
-            ) for image_token in image_tokens[:num_images]
+            )
         ]
 
     def _apply_prompt_updates(
