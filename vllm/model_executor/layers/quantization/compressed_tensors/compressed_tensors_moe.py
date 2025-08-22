@@ -813,8 +813,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             per_channel_quant = (
                 self.weight_quant.strategy == QuantizationStrategy.CHANNEL)
 
-            # small-batch fallback on SM100
-            if self.is_fp8_w8a8_sm100 and topk_ids.shape[0] <= 8:
+            # fused_moe flag or small-batch fallback on SM100
+            if envs.VLLM_USE_FUSED_MOE_KERNEL_IN_COMPRESSED_QUANTIZATION or (
+                    self.is_fp8_w8a8_sm100 and topk_ids.shape[0] <= 8):
                 from vllm.model_executor.layers.fused_moe import fused_experts
                 return fused_experts(
                     hidden_states=x,

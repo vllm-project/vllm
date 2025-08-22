@@ -981,6 +981,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0"))),
 
+    # Use fused MoE kernel regardless of batch size in compressed quantization.
+    "VLLM_USE_FUSED_MOE_KERNEL_IN_COMPRESSED_QUANTIZATION":
+    lambda: bool(int(os.getenv(
+        "VLLM_USE_FUSED_MOE_KERNEL_IN_COMPRESSED_QUANTIZATION", "0"))),
+
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
     # It can be changed with this variable if needed for some reason.
