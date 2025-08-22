@@ -15,21 +15,26 @@ class SharedFusedMoE(FusedMoE):
     can be interleaved with the fused all2all dispatch communication step.
     """
 
-    def __init__(self, shared_experts: torch.nn.Module, **kwargs):
+    def __init__(
+        self,
+        shared_experts: torch.nn.Module,
+        use_overlapped: bool = True,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self._shared_experts = shared_experts
-        self.naive_experts = False
+        self.use_overlapped = use_overlapped
 
     @property
     def shared_experts(self) -> Optional[torch.nn.Module]:
-        return self._shared_experts if not self.naive_experts else None
+        return self._shared_experts if self.use_overlapped else None
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.naive_experts:
+        if not self.use_overlapped:
             shared_out = self._shared_experts(hidden_states)
             fused_out = super().forward(
                 hidden_states=hidden_states,
