@@ -13,8 +13,8 @@ from PIL import Image
 from transformers import DonutProcessor
 
 from vllm import LLM, SamplingParams
+from vllm.assets.base import get_vllm_public_assets
 from vllm.inputs import ExplicitEncoderDecoderPrompt, TextPrompt, TokensPrompt
-from vllm.multimodal.utils import fetch_image
 
 
 # Copied from https://github.com/bytedance/Dolphin/utils/utils.py
@@ -233,9 +233,7 @@ if args.image_path:
         raise FileNotFoundError(f"Error: File not found at {args.image_path}")
     image = Image.open(args.image_path).convert("RGB")
 else:
-    image = fetch_image(
-        "https://huggingface.co/datasets/hf-internal-testing/example-documents/resolve/main/jpeg_images/0.jpg"
-    )
+    image = get_vllm_public_assets("ocr_test_images", "schedule").pil_image
 
 
 prompt = "Parse the reading order of this document. "

@@ -12,8 +12,8 @@ from typing import NamedTuple
 
 from vllm import LLM, EngineArgs, PromptType, SamplingParams
 from vllm.assets.audio import AudioAsset
+from vllm.assets.base import get_vllm_public_assets
 from vllm.assets.image import ImageAsset
-from vllm.multimodal.utils import fetch_image
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -51,9 +51,9 @@ def run_donut():
             "encoder_prompt": {
                 "prompt": "".join(["$"] * 4799),
                 "multi_modal_data": {
-                    "image": fetch_image(
-                        "https://huggingface.co/datasets/hf-internal-testing/example-documents/resolve/main/jpeg_images/0.jpg"
-                    )  # noqa: E501
+                    "image": get_vllm_public_assets(
+                        "ocr_test_images", "schedule"
+                    ).pil_image,
                 },
             },
             "decoder_prompt": "<s_docvqa><s_question>What time is the coffee break?</s_question><s_answer>",  # noqa: E501
