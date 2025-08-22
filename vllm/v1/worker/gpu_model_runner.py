@@ -629,12 +629,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                 scheduler_output: "SchedulerOutput") -> None:
         # Initialize generators for new seeded requests.
         for new_req_data in scheduler_output.scheduled_new_reqs:
-            req_state = self.requests[new_req_data.req_id]
+            req_id = new_req_data.req_id
+            req_state = self.requests[req_id]
             sampling_params = req_state.sampling_params
             if sampling_params and \
                     sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 req_state.generator = torch.Generator(device=self.device)
                 req_state.generator.manual_seed(sampling_params.seed)
+                req_index = self.input_batch.req_id_to_index[req_id]
+                self.input_batch.generators[req_index] = req_state.generator
 
         # Refresh logits processor states and sampling metadata
         # with any pending updates.
