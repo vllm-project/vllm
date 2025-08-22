@@ -1469,10 +1469,14 @@ def current_stream() -> torch.cuda.Stream:
             _current_stream_tls.value = torch.cuda.Stream()
         elif current_platform.is_cpu():
             _current_stream_tls.value = _StreamPlaceholder()
-        elif current_platform.is_cuda():
-            _current_stream_tls.value = torch.cuda.current_stream()
         else:
-            _current_stream_tls.value = current_platform.current_stream
+            current_stream = current_platform.current_stream
+            if current_stream is not None:
+                _current_stream_tls.value = current_stream()
+            else:
+                raise ValueError(
+                    "Fail to set current stream, current platform "
+                    "may not support current_stream with torch API")
     return _current_stream_tls.value
 
 
