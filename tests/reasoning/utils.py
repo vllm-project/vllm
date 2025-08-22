@@ -118,6 +118,7 @@ def run_reasoning_extraction_streaming(
             previous_tokens,
             current_tokens,
             token_delta,
+            request,
         )
         if delta_message is not None:
             reconstructor.append_delta(delta_message)
@@ -150,6 +151,7 @@ def run_reasoning_extraction_streaming_mistral(
             previous_tokens,
             current_tokens,
             token_delta,
+            request,
         )
         if delta_message is not None:
             reconstructor.append_delta(delta_message)

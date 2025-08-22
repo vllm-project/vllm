@@ -7,7 +7,11 @@ from typing import Optional, Union
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    DeltaMessage,
+    ResponsesRequest,
+)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
@@ -89,7 +93,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         return []
 
     def extract_reasoning_content(
-        self, model_output: str, request: ChatCompletionRequest
+        self, model_output: str, request: Union[ChatCompletionRequest, ResponsesRequest]
     ) -> tuple[Optional[str], Optional[str]]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
@@ -150,6 +154,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: Union[ChatCompletionRequest, ResponsesRequest],
     ) -> Union[DeltaMessage, None]:
         """Extract content using token ID sequence state machine"""
         # Define sequences

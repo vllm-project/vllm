@@ -4,6 +4,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from tests.reasoning.utils import DeltaMessage, run_reasoning_extraction
+from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "granite"
@@ -333,7 +334,7 @@ def test_streaming_subcases(param_dict):
         previous_token_ids=previous_token_ids,
         current_token_ids=current_token_ids,
         delta_token_ids=delta_token_ids,
-    )
+        request=ChatCompletionRequest(model="test-model"))
     # Streaming currently expects at least one of reasoning content / content,
     # so the response should return None in that case.
     if param_dict["reasoning_content"] is None and param_dict["content"] is None:

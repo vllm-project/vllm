@@ -1127,6 +1127,7 @@ class OpenAIServingResponses(OpenAIServing):
                             previous_token_ids=previous_token_ids,
                             current_token_ids=previous_token_ids + output.token_ids,
                             delta_token_ids=output.token_ids,
+                            request=request,
                         )
                     )
                 else:

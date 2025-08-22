@@ -7,7 +7,11 @@ from typing import Optional, Union
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    DeltaMessage,
+    ResponsesRequest,
+)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
@@ -50,6 +54,7 @@ class Step3ReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: Union[ChatCompletionRequest, ResponsesRequest],
     ) -> Union[DeltaMessage, None]:
         """
         Extract reasoning content from a delta message.
@@ -80,7 +85,7 @@ class Step3ReasoningParser(ReasoningParser):
             return DeltaMessage(reasoning_content=delta_text)
 
     def extract_reasoning_content(
-        self, model_output: str, request: ChatCompletionRequest
+        self, model_output: str, request: Union[ChatCompletionRequest, ResponsesRequest]
     ) -> tuple[Optional[str], Optional[str]]:
         # Check if the model output contains the </think> token
         if self.think_end_token not in model_output:
