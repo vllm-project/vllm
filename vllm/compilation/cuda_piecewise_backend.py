@@ -8,7 +8,6 @@ import torch.fx as fx
 
 import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
-from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import end_monitoring_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -29,7 +28,7 @@ class PiecewiseBackend:
                  piecewise_compile_index: int, total_piecewise_compiles: int,
                  sym_shape_indices: list[int],
                  compiled_graph_for_general_shape: Callable,
-                 module_index: int, vllm_backend: VllmBackend):
+                 vllm_backend: VllmBackend):
         """
         The backend for piecewise compilation.
         It mainly handles the compilation of static shapes and 
@@ -49,16 +48,8 @@ class PiecewiseBackend:
         self.is_first_graph = piecewise_compile_index == 0
 
         # Last graph in this compilation unit
-        self.is_last_graph_local = (
+        self.is_last_graph = (
             piecewise_compile_index == total_piecewise_compiles - 1)
-
-        # Last graph in the entire compilation
-        # If there are multiple compilation units (e.g. compile
-        # multiple submodules in a model), last graph in a compilation unit
-        # is not necessarily the last graph in the entire compilation.
-        self.is_last_graph_global = (
-            self.is_last_graph_local
-            and (module_index == compilation_counter.num_models_seen - 1))
 
         self.is_full_graph = total_piecewise_compiles == 1
 
@@ -88,7 +79,7 @@ class PiecewiseBackend:
             )
 
     def check_for_ending_compilation(self):
-        if self.is_last_graph_local and not self.to_be_compiled_sizes:
+        if self.is_last_graph and not self.to_be_compiled_sizes:
             # no specific sizes to compile
             # save the hash of the inductor graph for the next run
             self.vllm_backend.compiler_manager.save_to_file()
@@ -122,7 +113,7 @@ class PiecewiseBackend:
                 runtime_shape=runtime_shape)
 
             # finished compilations for all required shapes
-            if self.is_last_graph_local and not self.to_be_compiled_sizes:
+            if self.is_last_graph and not self.to_be_compiled_sizes:
                 self.check_for_ending_compilation()
 
         return entry.runnable(*args)
