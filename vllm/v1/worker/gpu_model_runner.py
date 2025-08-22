@@ -1513,7 +1513,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self._sample_scheduler_output = scheduler_output
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            print("NO SCHEDULED TOKENS **********************************")
             return
 
         # Prepare the decoder inputs.
