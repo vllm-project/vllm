@@ -53,8 +53,7 @@ class MinPLogitsProcessor(LogitsProcessor):
         # Process added requests.
         for index, params, _, _ in batch_update.added:
             min_p = params.min_p
-            min_p_before = 0 if index >= self.min_p.shape[0] \
-                else self.min_p_cpu[index]
+            min_p_before = self.min_p_cpu[index]
             if min_p_before != min_p:
                 needs_update = True
                 self.min_p_cpu[index] = min_p
@@ -69,6 +68,7 @@ class MinPLogitsProcessor(LogitsProcessor):
                 needs_update = True
                 for index in batch_update.removed:
                     if self.min_p_cpu[index]:
+                        self.min_p_cpu[index] = 0
                         self.min_p_count -= 1
 
             # Process moved requests, unidirectional (a->b) and swap (a<->b).
@@ -79,6 +79,11 @@ class MinPLogitsProcessor(LogitsProcessor):
                     self.min_p_cpu[bdx] = min_p_a
                     if direct == MoveDirectionality.SWAP:
                         self.min_p_cpu[adx] = min_p_b
+                if direct == MoveDirectionality.UNIDIRECTIONAL:
+                    if min_p_a:
+                        self.min_p_cpu[adx] = 0
+                    if min_p_b:
+                        self.min_p_count -= 1
 
         # Update tensors if needed.
         size = batch_update.batch_size
