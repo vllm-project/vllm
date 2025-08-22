@@ -14,9 +14,8 @@ from vllm.config.utils import config
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
-    from vllm.config.cache import CacheConfig
     from vllm.config import ModelConfig
-
+    from vllm.config.cache import CacheConfig
 
 LoRADType = Literal["auto", "float16", "bfloat16"]
 

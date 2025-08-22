@@ -2,9 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from dataclasses import field
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Optional, Union
-from dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.logger import init_logger

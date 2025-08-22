@@ -3,7 +3,7 @@
 
 import hashlib
 from dataclasses import field
-from typing import Any, Optional, Union, Literal
+from typing import Any, Literal, Optional, Union
 
 import torch
 from pydantic import SkipValidation
