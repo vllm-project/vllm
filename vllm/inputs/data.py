@@ -171,6 +171,9 @@ class TokenInputs(TypedDict):
     prompt_token_ids: list[int]
     """The token IDs of the prompt."""
 
+    token_type_ids: NotRequired[list[int]]
+    """A list of token type IDs to pass to the cross encoder model."""
+
     prompt: NotRequired[str]
     """
     The original prompt text corresponding to the token IDs, if available.
