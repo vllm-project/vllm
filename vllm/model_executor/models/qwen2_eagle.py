@@ -169,4 +169,4 @@ class Qwen2ForCausalLMEagle(Qwen2ForCausalLM):
             if "lm_head" not in name:
                 name = "model." + name
             model_weights[name] = loaded_weight
-        loader.load_weights(model_weights.items())
+        return loader.load_weights(model_weights.items())
