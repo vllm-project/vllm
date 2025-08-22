@@ -43,8 +43,7 @@ class DeepSeekV31ToolParser(ToolParser):
         )
 
         self.stream_tool_call_portion_regex = re.compile(
-            r"(?P<function_name>.*)<｜tool▁sep｜>(?P<function_arguments>.*)"
-        )
+            r"(?P<function_name>.*)<｜tool▁sep｜>(?P<function_arguments>.*)")
 
         self.stream_tool_call_name_regex = re.compile(
             r"(?P<function_name>.*)<｜tool▁sep｜>")
@@ -238,8 +237,7 @@ class DeepSeekV31ToolParser(ToolParser):
                     self.stream_tool_call_portion_regex.match(
                         tool_call_portion))
                 if current_tool_call_matches:
-                    tool_name, tool_args = (
-                        current_tool_call_matches.groups())
+                    tool_name, tool_args = current_tool_call_matches.groups()
                     current_tool_call["name"] = tool_name
                     current_tool_call["arguments"] = tool_args
                 else:
@@ -247,8 +245,7 @@ class DeepSeekV31ToolParser(ToolParser):
                         self.stream_tool_call_name_regex.match(
                             tool_call_portion))
                     if current_tool_call_name_matches:
-                        tool_name = (
-                            current_tool_call_name_matches.groups())
+                        tool_name = current_tool_call_name_matches.groups()
                         current_tool_call["name"] = tool_name
                         current_tool_call["arguments"] = ""
                     else:
