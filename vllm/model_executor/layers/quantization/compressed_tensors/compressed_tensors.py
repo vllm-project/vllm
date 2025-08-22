@@ -528,9 +528,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Find the "target" in the compressed-tensors config
         # that our layer conforms to.
-        # TODO (@robertgshaw): add compressed-tensors as dep
-        # so we do not have to re-write these functions
-
+        # TODO (@kylesayrs): support better matching with ct matching utils
         if should_ignore_layer(layer_name,
                                ignore=self.ignore,
                                fused_mapping=self.packed_modules_mapping):

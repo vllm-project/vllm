@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from fractions import Fraction
-from typing import Any, Optional, Union
+from typing import Callable, Optional, Union
 
 import torch
 from torch.nn import Parameter
@@ -32,7 +32,7 @@ class BasevLLMParameter(Parameter):
 
         return super().__new__(cls, data=data, requires_grad=False)
 
-    def __init__(self, data: torch.Tensor, weight_loader: Any):
+    def __init__(self, data: torch.Tensor, weight_loader: Callable):
         """
         Initialize the BasevLLMParameter
 
@@ -54,27 +54,11 @@ class BasevLLMParameter(Parameter):
         if current_platform.is_tpu():
             weight_loader = _make_synced_weight_loader(weight_loader)
 
-        self._weight_loader: Optional[Any] = weight_loader
+        self._weight_loader = weight_loader
 
     @property
-    def weight_loader(self) -> Any:
-        # NOTE(@ksayers) some models such as mamba_mixer2 override the
-        # weight loader to support custom loading. In the future, model-specific
-        # weight loading should be implemented via Model.load_weights. In the
-        # meantime, support deleting and overriding `weight_loader`` attribute
-        if self._weight_loader is None:
-            raise AttributeError(f"{self.__class__.__name__} weight_loader "
-                                 "attribute has been deleted")
-
-        return self._weight_loader
-
-    @weight_loader.setter
-    def weight_loader(self, value: Any):
-        self._weight_loader = value
-
-    @weight_loader.deleter
     def weight_loader(self):
-        self._weight_loader = None
+        return self._weight_loader
 
     def _is_1d_and_scalar(self, loaded_weight: torch.Tensor):
         cond1 = self.data.ndim == 1 and self.data.numel() == 1
@@ -97,17 +81,6 @@ class BasevLLMParameter(Parameter):
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         self._assert_and_load(loaded_weight)
-
-    def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
-        if isinstance(shard_id, int):
-            return shard_id
-
-        # if not int, assume shard_id for qkv
-        # map to int and return
-        qkv_idxs = {"q": 0, "k": 1, "v": 2}
-        assert isinstance(shard_id, str)
-        assert shard_id in qkv_idxs
-        return qkv_idxs[shard_id]
 
 
 class _ColumnvLLMParameter(BasevLLMParameter):
@@ -253,6 +226,20 @@ class PerTensorScaleParameter(BasevLLMParameter):
     process_weights_after_loading 
     """
 
+    def __init__(self, **kwargs):
+        self.qkv_idxs = {"q": 0, "k": 1, "v": 2}
+        super().__init__(**kwargs)
+
+    def _shard_id_as_int(self, shard_id: Union[str, int]) -> int:
+        if isinstance(shard_id, int):
+            return shard_id
+
+        # if not int, assume shard_id for qkv
+        # map to int and return
+        assert isinstance(shard_id, str)
+        assert shard_id in self.qkv_idxs
+        return self.qkv_idxs[shard_id]
+
     # For row parallel layers, no sharding needed
     # load weight into parameter as is
     def load_row_parallel_weight(self, *args, **kwargs):
@@ -273,6 +260,7 @@ class PerTensorScaleParameter(BasevLLMParameter):
         Slice the parameter data based on the shard id for 
         loading.
         """
+
         param_data = self.data
         shard_id = self._shard_id_as_int(shard_id)
 

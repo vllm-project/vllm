@@ -368,10 +368,9 @@ class ReplicatedLinear(LinearBase):
         return output, output_bias
 
     def extra_repr(self) -> str:
-        has_bias = getattr(self, "bias", None) is not None
         s = f"in_features={self.input_size}"
         s += f", output_features={self.output_size}"
-        s += f", bias={has_bias}"
+        s += f", bias={self.bias is not None}"
         return s
 
 
@@ -597,10 +596,9 @@ class ColumnParallelLinear(LinearBase):
         return output, output_bias
 
     def extra_repr(self) -> str:
-        has_bias = getattr(self, "bias", None) is not None
         s = f"in_features={self.input_size}"
         s += f", output_features={self.output_size_per_partition}"
-        s += f", bias={has_bias}"
+        s += f", bias={self.bias is not None}"
         s += f", tp_size={get_tensor_model_parallel_world_size()}"
         s += f", gather_output={self.gather_output}"
         return s
@@ -1381,10 +1379,9 @@ class RowParallelLinear(LinearBase):
         return output, output_bias
 
     def extra_repr(self) -> str:
-        has_bias = getattr(self, "bias", None) is not None
         s = f"input_features={self.input_size_per_partition}"
         s += f", output_features={self.output_size}"
-        s += f", bias={has_bias}"
+        s += f", bias={self.bias is not None}"
         s += f", tp_size={self.tp_size}"
         s += f", reduce_results={self.reduce_results}"
         return s
@@ -1609,11 +1606,10 @@ class QKVCrossParallelLinear(LinearBase):
             layer.weight_loader(target_param, loaded_weight, *shard_id_args)
 
     def extra_repr(self) -> str:
-        has_bias = getattr(self, "bias", None) is not None
         s = f"in_features={self.input_size}"
         s += f", q_size={self.q_size}"
         s += f", kv_size={self.kv_size}"
-        s += f", bias={has_bias}"
+        s += f", bias={self.bias is not None}"
         s += f", tp_size={get_tensor_model_parallel_world_size()}"
         s += ", gather_output=False"
         return s
