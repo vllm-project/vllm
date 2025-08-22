@@ -139,7 +139,7 @@ class PaddingAwareSchedulingBudget(SchedulingBudget):
         from vllm_hpu_extension.bucketing.common import get_bucketing_manager
         hpu_bucketing_manager = get_bucketing_manager()
         padded_bs, padded_seq, _ = hpu_bucketing_manager.find_prompt_bucket(
-            batch_size, max_seq_len)
+            batch_size, max_seq_len, ctx=0, use_fallback=False)
         if padded_bs is None or padded_seq is None:
             return None
         return padded_bs * padded_seq
