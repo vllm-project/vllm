@@ -85,7 +85,7 @@ def format_output(title: str, output: str):
 
 
 def generate_output(prompt: str, sampling_params: SamplingParams, llm: LLM):
-    outputs = llm.generate(prompts=prompt, sampling_params=sampling_params)
+    outputs = llm.generate(prompt, sampling_params=sampling_params)
     return outputs[0].outputs[0].text
 
 
