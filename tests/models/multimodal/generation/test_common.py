@@ -11,7 +11,6 @@ from pathlib import PosixPath
 import pytest
 from transformers import (AutoModel, AutoModelForImageTextToText,
                           AutoModelForTextToWaveform, AutoModelForVision2Seq)
-from transformers.utils import is_flash_attn_2_available
 
 from vllm.platforms import current_platform
 from vllm.utils import identity
@@ -637,10 +636,7 @@ VLM_TEST_SETTINGS = {
         dtype="half",
         num_logprobs=10,
         patch_hf_runner=model_utils.ovis2_5_patch_hf_runner,
-        marks=[pytest.mark.skipif(
-            not is_flash_attn_2_available(),
-            reason="HF model needs `flash_attn` installed"
-        )],
+        hf_model_kwargs={"revision": "refs/pr/5"},
     ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],

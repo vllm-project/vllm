@@ -3,16 +3,24 @@
 """Implementation of SiglipVisionModel intended to be only used
 within a vision language model."""
 
-from typing import Optional, Union
+from collections.abc import Iterable
+from typing import Optional
 
 import torch
 from einops import rearrange, repeat
 from torch import nn
 from torch.nn import functional as F
-from transformers.activations import ACT2FN
+from transformers import Siglip2VisionConfig
 from transformers.configuration_utils import PretrainedConfig
-from transformers.modeling_outputs import BaseModelOutputWithNoAttention
 
+from vllm.config import QuantizationConfig
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               LinearBase, QKVParallelLinear,
+                                               ReplicatedLinear,
+                                               RowParallelLinear)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import _Backend
 
 from .vision import get_vit_attn_backend
@@ -48,10 +56,11 @@ class Siglip2VisionEmbeddings(nn.Module):
 
         # siglip2 naflex
         if self.num_patches > 0:
-            self.patch_embedding = nn.Linear(
-                in_features=config.num_channels * self.patch_size *
+            self.patch_embedding = ReplicatedLinear(
+                input_size=config.num_channels * self.patch_size *
                 self.patch_size,
-                out_features=self.embed_dim,
+                output_size=self.embed_dim,
+                return_bias=False,
             )
             if self.preserve_original_pe:
                 self.position_embedding_size = int(self.num_patches**0.5)
@@ -89,7 +98,7 @@ class Siglip2VisionEmbeddings(nn.Module):
 
         # Apply patch embeddings to already patchified pixel values
         target_dtype = self.patch_embedding.weight.dtype
-        if isinstance(self.patch_embedding, nn.Linear):
+        if isinstance(self.patch_embedding, LinearBase):
             patch_embeds = self.patch_embedding(
                 pixel_values.to(dtype=target_dtype))
         elif isinstance(self.patch_embedding, nn.Conv2d):
@@ -184,7 +193,13 @@ def apply_rotary_pos_emb(
 class Siglip2Attention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config):
+    def __init__(
+        self,
+        config: Siglip2VisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        use_data_parallel: bool = False,
+    ):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -199,11 +214,25 @@ class Siglip2Attention(nn.Module):
         self.dropout = config.attention_dropout
         self.is_causal = False
 
-        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim)
-        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim)
+        # TODO(Isotr0py): Enable data parallel after we support
+        # disabling TP on parallel linear layer
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=self.embed_dim,
+            head_size=self.head_dim,
+            total_num_heads=self.num_heads,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+        self.out_proj = RowParallelLinear(
+            input_size=self.embed_dim,
+            output_size=self.embed_dim,
+            quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
+        )
 
+        self.tp_size = (1 if use_data_parallel else
+                        get_tensor_model_parallel_world_size())
+        self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
         self.use_rope = config.use_rope
 
         # Detect attention implementation.
@@ -228,13 +257,15 @@ class Siglip2Attention(nn.Module):
 
         seq_length, embed_dim = hidden_states.shape
 
-        queries = self.q_proj(hidden_states)
-        keys = self.k_proj(hidden_states)
-        values = self.v_proj(hidden_states)
+        qkv_states, _ = self.qkv_proj(hidden_states)
+        queries, keys, values = qkv_states.chunk(3, dim=-1)
 
-        queries = queries.view(seq_length, self.num_heads, self.head_dim)
-        keys = keys.view(seq_length, self.num_heads, self.head_dim)
-        values = values.view(seq_length, self.num_heads, self.head_dim)
+        queries = queries.view(seq_length, self.num_heads_per_partition,
+                               self.head_dim)
+        keys = keys.view(seq_length, self.num_heads_per_partition,
+                         self.head_dim)
+        values = values.view(seq_length, self.num_heads_per_partition,
+                             self.head_dim)
 
         if self.use_rope:
             cos, sin = position_embeddings
@@ -276,41 +307,72 @@ class Siglip2Attention(nn.Module):
                                                           v_i,
                                                           dropout_p=0.0)
                 # (1, num_heads, seq_len, head_dim) -> (seq_len, embed_dim)
-                output_i = output_i.transpose(1, 2).reshape(-1, self.embed_dim)
+                output_i = output_i.transpose(1, 2).reshape(
+                    end_idx - start_idx, -1)
                 outputs.append(output_i)
 
             attn_output = torch.cat(outputs, dim=0)
-        attn_output = self.out_proj(attn_output)
+        attn_output, _ = self.out_proj(attn_output)
         return attn_output
 
 
 class Siglip2MLP(nn.Module):
 
-    def __init__(self, config):
+    def __init__(
+        self,
+        config: Siglip2VisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        use_data_parallel: bool = False,
+    ):
         super().__init__()
         self.config = config
-        self.activation_fn = ACT2FN[config.hidden_act]
-        self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size)
-        self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.activation_fn = get_act_fn(config.hidden_act)
+        # TODO(Isotr0py): Enable data parallel after we support
+        # disabling TP on parallel linear layer
+        self.fc1 = ColumnParallelLinear(
+            config.hidden_size,
+            config.intermediate_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.fc1",
+        )
+        self.fc2 = RowParallelLinear(
+            config.intermediate_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.fc2",
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.fc1(hidden_states)
+        hidden_states, _ = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
-        hidden_states = self.fc2(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
         return hidden_states
 
 
 class Siglip2EncoderLayer(nn.Module):
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(
+        self,
+        config: Siglip2VisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        use_data_parallel: bool = False,
+    ):
         super().__init__()
         self.embed_dim = config.hidden_size
         self.layer_norm1 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
-        self.self_attn = Siglip2Attention(config)
+        self.self_attn = Siglip2Attention(config,
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.self_attn",
+                                          use_data_parallel=use_data_parallel)
         self.layer_norm2 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
-        self.mlp = Siglip2MLP(config)
+        self.mlp = Siglip2MLP(config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.mlp",
+                              use_data_parallel=use_data_parallel)
 
     def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor,
                 position_embeddings: torch.Tensor) -> tuple[torch.FloatTensor]:
@@ -347,14 +409,22 @@ class Siglip2Encoder(nn.Module):
         config: PretrainedConfig
     """
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(
+        self,
+        config: Siglip2VisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        use_data_parallel: bool = False,
+    ):
         super().__init__()
         self.config = config
         self.layers = nn.ModuleList([
-            Siglip2EncoderLayer(config)
-            for _ in range(config.num_hidden_layers)
+            Siglip2EncoderLayer(config,
+                                quant_config=quant_config,
+                                prefix=f"{prefix}.layers.{idx}",
+                                use_data_parallel=use_data_parallel)
+            for idx in range(config.num_hidden_layers)
         ])
-        self.gradient_checkpointing = False
 
         self.rotary_pos_emb = VisionRotaryEmbedding(
             config.hidden_size // config.num_attention_heads // 2)
@@ -445,13 +515,11 @@ class Siglip2Encoder(nn.Module):
 
         return window_index, cu_window_seqlens
 
-    # Ignore copy
     def forward(
         self,
-        inputs_embeds,
+        inputs_embeds: torch.Tensor,
         grid_thws: torch.Tensor,
-        output_hidden_states: bool = False,
-    ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, ...]]]:
+    ) -> torch.Tensor:
         r"""
         Args:
             inputs_embeds (`torch.FloatTensor` of shape
@@ -506,7 +574,6 @@ class Siglip2Encoder(nn.Module):
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         reverse_indices = torch.argsort(window_index)
-        encoder_states = () if output_hidden_states else None
 
         hidden_states = inputs_embeds
         for index, block in enumerate(self.layers):
@@ -517,45 +584,40 @@ class Siglip2Encoder(nn.Module):
                 cu_seqlens_tmp = cu_window_seqlens
             hidden_states = block(hidden_states, cu_seqlens_tmp,
                                   position_embeddings)
-            if output_hidden_states:
-                hidden_states_ = hidden_states.reshape(
-                    seq_len // self.spatial_merge_unit,
-                    self.spatial_merge_unit, -1)
-                encoder_states += (hidden_states_[reverse_indices, :].reshape(
-                    seq_len, -1), )
-        # tokens = self.post_trunk_norm(tokens)
+
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         hidden_states = hidden_states[reverse_indices, :].reshape(seq_len, -1)
 
-        return hidden_states, encoder_states
+        return hidden_states
 
 
 class Siglip2VisionTransformer(nn.Module):
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(
+        self,
+        config: Siglip2VisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        use_data_parallel: bool = False,
+    ):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
 
         self.embeddings = Siglip2VisionEmbeddings(config)
-        self.encoder = Siglip2Encoder(config)
+        self.encoder = Siglip2Encoder(config,
+                                      quant_config=quant_config,
+                                      prefix=f"{prefix}.encoder",
+                                      use_data_parallel=use_data_parallel)
         self.post_layernorm = nn.LayerNorm(embed_dim,
                                            eps=config.layer_norm_eps)
-        self._use_flash_attention_2 = \
-            (config._attn_implementation == "flash_attention_2")
 
     def forward(
         self,
         pixel_values: torch.FloatTensor,
         grid_thws: torch.LongTensor,
-        output_hidden_states: Optional[bool] = True,
-        return_dict: Optional[bool] = True,
-    ) -> Union[
-            tuple[torch.Tensor],
-            tuple[torch.Tensor, tuple[torch.Tensor, ...]],
-            BaseModelOutputWithNoAttention,
-    ]:
+    ) -> torch.Tensor:
         r"""
         spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
             Tensor containing the spatial dimensions (height, width)
@@ -563,45 +625,64 @@ class Siglip2VisionTransformer(nn.Module):
         """
         hidden_states = self.embeddings(pixel_values, grid_thws)
 
-        last_hidden_state, hidden_states = self.encoder(
-            hidden_states, grid_thws, output_hidden_states)
+        last_hidden_state = self.encoder(hidden_states, grid_thws)
         last_hidden_state = self.post_layernorm(last_hidden_state)
-
-        if not return_dict:
-            output = (last_hidden_state, )
-            output += (hidden_states, ) if output_hidden_states else ()
-            return output
 
         return last_hidden_state
 
 
 class Siglip2NavitModel(torch.nn.Module):
 
-    def __init__(self, config: PretrainedConfig):
+    def __init__(
+        self,
+        config: Siglip2VisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        use_data_parallel: bool = False,
+    ):
         super().__init__()
 
-        self.vision_model = Siglip2VisionTransformer(config)
+        self.vision_model = Siglip2VisionTransformer(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.vision_model",
+            use_data_parallel=use_data_parallel)
 
     def forward(
         self,
         pixel_values: torch.FloatTensor,
         grid_thws: torch.LongTensor,
-        output_hidden_states: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
-    ) -> Union[
-            tuple[torch.Tensor],
-            tuple[torch.Tensor, tuple[torch.Tensor, ...]],
-            BaseModelOutputWithNoAttention,
-    ]:
-
-        if output_hidden_states is None:
-            output_hidden_states = self.config.output_hidden_states
-        if return_dict is None:
-            return_dict = self.config.use_return_dict
-
+    ) -> torch.Tensor:
         return self.vision_model(
             pixel_values=pixel_values,
             grid_thws=grid_thws,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
         )
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        for name, loaded_weight in weights:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
