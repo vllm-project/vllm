@@ -457,14 +457,8 @@ class SiglipSo400mModel(nn.Module, SupportsMultiModal):
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
-        self.pooler = DispatchPooler({
-            "encode":
-            Pooler.for_encode(pooler_config),
-            "classify":
-            Pooler.for_classify(pooler_config, classifier=None),
-            "score":
-            Pooler.for_classify(pooler_config, classifier=None),
-        })
+        self.pooler = DispatchPooler(
+            {"encode": Pooler.for_encode(pooler_config)})
 
     def get_multimodal_embeddings(
             self, **kwargs: object) -> SiglipNavitVisionEmbeddings:
