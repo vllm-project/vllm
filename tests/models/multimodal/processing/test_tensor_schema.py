@@ -24,13 +24,12 @@ from vllm.utils import GiB_bytes, is_list_of, set_default_torch_num_threads
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
-from ...conftest import VllmRunner
-from ..registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
-from ..utils import dummy_hf_overrides
+from ....conftest import VllmRunner
+from ...registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
+from ...utils import dummy_hf_overrides
 
 ARCH_TO_SKIP = {
     "MolmoForCausalLM": "incompatible requirements",
-    "MiniMaxVL01ForConditionalGeneration": "broken model",
 }
 ARCH_NEEDS_EXTRAS = [
     "InternVLChatModel",
@@ -128,7 +127,7 @@ def create_batched_mm_kwargs(
     )["mm_kwargs"]
     items = [
         item for modality in supported_mm_limits
-        for item in mm_kwargs.get_items(modality)
+        for item in mm_kwargs[modality]
     ]
     return group_mm_kwargs_by_modality(items)
 
@@ -148,7 +147,6 @@ def get_model_id_to_test(
     return filtered_results
 
 
-@pytest.mark.core_model
 @pytest.mark.parametrize(
     "model_arch, model_id",
     get_model_id_to_test(_MULTIMODAL_EXAMPLE_MODELS.keys()))

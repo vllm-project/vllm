@@ -102,7 +102,7 @@ def _test_processing_correctness(
         partial(random_video,
                 rng,
                 min_frames=2,
-                max_frames=8,
+                max_frames=16,
                 min_wh=128,
                 max_wh=256),
         "audio":
@@ -162,6 +162,7 @@ def _test_processing_correctness(
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
     "mllama": False,
     "ovis": False,
+    "ovis2_5": False,
     "paligemma": False,
     "ultravox": False,
     "whisper": False,
@@ -267,6 +268,7 @@ def _test_processing_correctness_one(
     "CohereForAI/aya-vision-8b",
     "Salesforce/blip2-opt-2.7b",
     "facebook/chameleon-7b",
+    "CohereLabs/command-a-vision-07-2025",
     "deepseek-ai/deepseek-vl2-tiny",
     "microsoft/Florence-2-base",
     "adept/fuyu-8b",
@@ -274,16 +276,17 @@ def _test_processing_correctness_one(
     "google/gemma-3n-E2B-it",
     "zai-org/glm-4v-9b",
     "zai-org/GLM-4.1V-9B-Thinking",
+    "zai-org/GLM-4.5V",
     "ibm-granite/granite-speech-3.3-2b",
     "h2oai/h2ovl-mississippi-800m",
+    "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
+    "HuggingFaceM4/Idefics3-8B-Llama3",
     "internlm/Intern-S1",
     "OpenGVLab/InternVL2-1B",
     "OpenGVLab/InternVL3-1B",
-    "HuggingFaceM4/Idefics3-8B-Llama3",
-    "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
+    "Kwai-Keye/Keye-VL-8B-Preview",
     "moonshotai/Kimi-VL-A3B-Instruct",
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-    "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
     "llava-hf/llava-1.5-7b-hf",
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "llava-hf/LLaVA-NeXT-Video-7B-hf",
@@ -301,6 +304,7 @@ def _test_processing_correctness_one(
     "AIDC-AI/Ovis1.6-Gemma2-9B",
     "AIDC-AI/Ovis1.6-Llama3.2-3B",
     "AIDC-AI/Ovis2-1B",
+    "AIDC-AI/Ovis2.5-2B",
     "google/paligemma-3b-mix-224",
     "google/paligemma2-3b-ft-docci-448",
     "microsoft/Phi-3.5-vision-instruct",
@@ -312,11 +316,15 @@ def _test_processing_correctness_one(
     "Qwen/Qwen2.5-VL-3B-Instruct",
     "Qwen/Qwen2-Audio-7B-Instruct",
     "Qwen/Qwen2.5-Omni-3B",
+    "YannQi/R-4B",
     "Skywork/Skywork-R1V-38B",
+    "HuggingFaceTB/SmolVLM2-2.2B-Instruct",
+    "stepfun-ai/step3",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     "openai/whisper-large-v3",
     "omni-research/Tarsier-7b",
     "omni-research/Tarsier2-Recap-7b",
+    "mistralai/Voxtral-Mini-3B-2507",
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
@@ -370,10 +378,16 @@ def _assert_inputs_equal(
     if ignore_mm_keys is None:
         ignore_mm_keys = set()
 
-    assert "mm_kwargs" in a and "mm_kwargs" in b, msg
+    a_rest = {k: v for k, v in a.items() if k != "mm_kwargs"}
+    b_rest = {k: v for k, v in b.items() if k != "mm_kwargs"}
+
+    assert a_rest == b_rest, msg
+
+    a_data = a["mm_kwargs"].get_data()
+    b_data = b["mm_kwargs"].get_data()
 
     for key in ignore_mm_keys:
-        a["mm_kwargs"].pop(key, None)
-        b["mm_kwargs"].pop(key, None)
+        a_data.pop(key, None)
+        b_data.pop(key, None)
 
-    assert a == b, msg
+    assert a_data == b_data, msg

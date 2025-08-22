@@ -58,6 +58,8 @@ class CommonAttentionMetadata:
     """Total number of tokens in batch"""
     max_query_len: int
     """Longest query in batch"""
+    max_seq_len: int
+    """Longest context length in batch"""
 
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
@@ -107,6 +109,7 @@ def _make_metadata_with_slice(
 
     seq_lens = attn_metadata.seq_lens[request_slice]
     seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
+    max_seq_len = int(seq_lens_cpu.max())
     num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[
         request_slice]
 
@@ -128,6 +131,7 @@ def _make_metadata_with_slice(
         num_reqs=num_requests,
         num_actual_tokens=num_actual_tokens,
         max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
     )
@@ -464,8 +468,9 @@ def make_local_attention_virtual_batches(
         attn_chunk_size)[arange > 0]
 
     # convert from q_seqlens to cu_seqlens_q
-    cu_seqlens_q_local = np.pad(np.cumsum(seqlens_q_local), (1, 0))\
-        .astype(np.int32)
+    cu_seqlens_q_local = np.empty(virtual_batches + 1, dtype=np.int32)
+    np.cumsum(seqlens_q_local, out=cu_seqlens_q_local[1:])
+    cu_seqlens_q_local[0] = 0
 
     # compute the seqlens_k_local,
     #  basically a full local attention block for all but the last block in each
@@ -508,11 +513,10 @@ def make_local_attention_virtual_batches(
     #     [ 22, 23 ], < local-batch 6, (batch 2, starting from k[4])
     #     [ 24, 25 ], < local-batch 7, (batch 2, starting from k[8])
     #   ]
-    block_indices= np.broadcast_to(
-        np.arange(pages_per_local_batch, dtype=np.int32),
-        (virtual_batches, pages_per_local_batch)) \
-            + np.expand_dims(block_starts, axis=1)
-    block_indices = block_indices.flatten().clip(max=block_table.shape[1] - 1)
+    block_indices = (block_starts[:, None] +
+                     np.arange(pages_per_local_batch, dtype=np.int32))
+    block_indices = block_indices.reshape(-1).clip(max=block_table.shape[1] -
+                                                   1)
     batch_indices = np.repeat(np.arange(actual_batch_size, dtype=np.int32),
                               local_blocks * pages_per_local_batch)
     block_table_local = block_table[batch_indices, block_indices]\
@@ -520,6 +524,7 @@ def make_local_attention_virtual_batches(
 
     query_start_loc_cpu = torch.from_numpy(cu_seqlens_q_local)
     seq_lens_cpu = torch.from_numpy(seqlens_k_local)
+    max_seq_len = int(seq_lens_cpu.max())
 
     return CommonAttentionMetadata(
         query_start_loc_cpu=query_start_loc_cpu,
@@ -531,6 +536,7 @@ def make_local_attention_virtual_batches(
         num_reqs=len(seq_lens_cpu),
         num_actual_tokens=common_attn_metadata.num_actual_tokens,
         max_query_len=seqlens_q_local.max(),
+        max_seq_len=max_seq_len,
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,

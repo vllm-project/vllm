@@ -48,7 +48,7 @@ You can tune the performance by adjusting `max_num_batched_tokens`:
 
 - Smaller values (e.g., 2048) achieve better inter-token latency (ITL) because there are fewer prefills slowing down decodes.
 - Higher values achieve better time to first token (TTFT) as you can process more prefill tokens in a batch.
-- For optimal throughput, we recommend setting `max_num_batched_tokens > 8096` especially for smaller models on large GPUs.
+- For optimal throughput, we recommend setting `max_num_batched_tokens > 8192` especially for smaller models on large GPUs.
 - If `max_num_batched_tokens` is the same as `max_model_len`, that's almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).
 
 ```python
@@ -128,6 +128,52 @@ Data parallelism replicates the entire model across multiple GPU sets and proces
 
 Data parallelism can be combined with the other parallelism strategies and is set by `data_parallel_size=N`.
 Note that MoE layers will be sharded according to the product of the tensor parallel size and data parallel size.
+
+### Batch-level DP for Multi-Modal Encoders
+
+By default, TP is used to shard the weights of multi-modal encoders just like for language decoders,
+in order to reduce the memory and compute load on each GPU.
+
+However, since the size of multi-modal encoders is very small compared to language decoders,
+there is relatively little gain from TP. On the other hand, TP incurs significant communication
+overhead because of all-reduce being performed after every layer.
+
+Given this, it may be advantageous to instead shard the batched input data using TP, essentially
+performing batch-level DP. This has been shown to improve the throughput by around 10% for
+`tensor_parallel_size=8`. For vision encoders that use hardware-unoptimized Conv3D operations,
+batch-level DP can provide another 40% increase to throughput compared to regular TP.
+
+Nevertheless, since the weights of the multi-modal encoder are replicated across each TP rank,
+there will be a minor increase in memory consumption and may cause OOM if you can barely fit the model already.
+
+You can enable batch-level DP by setting `mm_encoder_tp_mode="data"`, for example:
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-72B-Instruct",
+    tensor_parallel_size=4,
+    # When mm_encoder_tp_mode="data",
+    # the vision encoder uses TP=4 (not DP=1) to shard the input data,
+    # so the TP size becomes the effective DP size.
+    # Note that this is independent of the DP size for language decoder which is used in expert parallel setting.
+    mm_encoder_tp_mode="data",
+    # The language decoder uses TP=4 to shard the weights regardless
+    # of the setting of mm_encoder_tp_mode
+)
+```
+
+!! important
+    Batch-level DP is not to be confused with API request-level DP
+    (which is instead controlled by `data_parallel_size`).
+
+The availablilty of batch-level DP is based on model implementation.
+Currently, the following models support `mm_encoder_tp_mode="data"`:
+
+- Llama4 (<gh-pr:18368>)
+- Qwen2.5-VL (<gh-pr:22742>)
+- Step3 (<gh-pr:22697>)
 
 ## Input Processing
 
