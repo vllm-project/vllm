@@ -3,7 +3,7 @@
 
 import enum
 from enum import Enum
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import torch
 from compressed_tensors import CompressionFormat
@@ -292,6 +292,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: Any,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         """Return the appropriate GEMM experts implementation."""
         experts = select_nvfp4_gemm_impl(
@@ -688,11 +689,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 device=device,
                 dtype=torch.int64)
 
-    def select_gemm_impl(
-        self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
-        moe: FusedMoEConfig,
-    ) -> FusedMoEPermuteExpertsUnpermute:
+    def select_gemm_impl(self, prepare_finalize: FusedMoEPrepareAndFinalize,
+                         moe: FusedMoEConfig,
+                         layer: Any) -> FusedMoEPermuteExpertsUnpermute:
         # cutlass path
         if self.use_cutlass:
             from vllm.model_executor.layers.fused_moe import (

@@ -9,7 +9,6 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP)
-from vllm.model_executor.layers.fused_moe.utils import extract_required_args
 from vllm.utils import next_power_of_2
 
 if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
@@ -19,9 +18,14 @@ if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
 
 class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
-    def __init__(self, moe: FusedMoEConfig):
+    def __init__(self, moe: FusedMoEConfig, layer: Any):
         super().__init__(moe.quant_config)
         self.moe = moe
+        self.gemm1_alpha = layer.gemm1_alpha
+        self.gemm1_beta = layer.gemm1_beta
+        self.gemm1_clamp_limit = layer.gemm1_clamp_limit
+        self.w1_bias = layer.w1_bias
+        self.w2_bias = layer.w2_bias
 
     @property
     def activation_formats(
@@ -55,7 +59,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # TODO(varun) : workspace1 is could be used as the output tensor. This
         # is error-prone. Allow the `workspace_shapes` to return None workspaces
         workspace1 = (M, K)
-        workspace2 = (1, 1)  # (1, 1) as we cant return None.
+        workspace2 = (0, 0)
         output = (M, K)
         return (workspace1, workspace2, output, a.dtype)
 
@@ -117,14 +121,6 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if x_scale is not None:
             x_scale = x_scale.view(torch.float8_e4m3fn).reshape(-1)
 
-        # Extract extra args
-        required_keys = [
-            'gemm1_alpha', 'gemm1_beta', 'gemm1_clamp_limit', "w1_bias",
-            "w2_bias"
-        ]
-        gemm1_alpha, gemm1_beta, gemm1_clamp_limit, w1_bias, w2_bias = (
-            extract_required_args(extra_expert_args, required_keys))
-
         packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
             torch.bfloat16).view(torch.int16)
 
@@ -144,19 +140,19 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "gemm1_weights_scale":
             w1_scale,
             "gemm1_bias":
-            w1_bias,
+            self.w1_bias,
             "gemm1_alpha":
-            gemm1_alpha,
+            self.gemm1_alpha,
             "gemm1_beta":
-            gemm1_beta,
+            self.gemm1_beta,
             "gemm1_clamp_limit":
-            gemm1_clamp_limit,
+            self.gemm1_clamp_limit,
             "gemm2_weights":
             w2,
             "gemm2_weights_scale":
             w2_scale,
             "gemm2_bias":
-            w2_bias,
+            self.w2_bias,
             "output1_scale_scalar":
             None,
             "output1_scale_gate_scalar":
