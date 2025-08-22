@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Optional, Union
 
 import torch

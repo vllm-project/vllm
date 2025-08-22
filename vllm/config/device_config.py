@@ -6,7 +6,7 @@ from dataclasses import field
 from typing import Any, Literal, Optional, Union
 
 import torch
-from pydantic import SkipValidation
+from pydantic import ConfigDict, SkipValidation
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -15,7 +15,7 @@ Device = Literal["auto", "cuda", "neuron", "cpu", "tpu", "xpu"]
 
 
 @config
-@dataclass
+@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
