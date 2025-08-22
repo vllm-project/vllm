@@ -3,15 +3,13 @@
 
 import itertools
 from collections.abc import Sequence
-from contextlib import contextmanager
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union,
-                    cast, overload)
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
 
 import cloudpickle
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
-from typing_extensions import TypeVar, deprecated
+from typing_extensions import TypeVar
 
 import vllm.envs as envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
@@ -40,7 +38,6 @@ from vllm.entrypoints.score_utils import (ScoreContentPartParam,
 from vllm.entrypoints.utils import (_validate_truncation_size,
                                     log_non_default_args)
 from vllm.inputs import PromptType, SingletonPrompt, TextPrompt, TokensPrompt
-from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -54,7 +51,7 @@ from vllm.tasks import PoolingTask
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, Device, deprecate_kwargs, is_list_of
+from vllm.utils import Counter, Device, is_list_of
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
@@ -156,18 +153,6 @@ class LLM:
         This class is intended to be used for offline inference. For online
         serving, use the [AsyncLLMEngine][vllm.AsyncLLMEngine] class instead.
     """
-
-    DEPRECATE_LEGACY: ClassVar[bool] = True
-    """A flag to toggle whether to deprecate the legacy generate/encode API."""
-
-    @classmethod
-    @contextmanager
-    def deprecate_legacy_api(cls):
-        cls.DEPRECATE_LEGACY = True
-
-        yield
-
-        cls.DEPRECATE_LEGACY = False
 
     def __init__(
         self,
@@ -325,97 +310,12 @@ class LLM:
             return SamplingParams.from_optional(**self.default_sampling_params)
         return SamplingParams()
 
-    @overload
     def generate(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
-        /,
         sampling_params: Optional[Union[SamplingParams,
                                         Sequence[SamplingParams]]] = None,
         *,
-        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: single (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: str,
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
-        prompt_token_ids: Optional[list[int]] = None,
-        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: multi (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: list[str],
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
-        prompt_token_ids: Optional[list[list[int]]] = None,
-        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: single (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: Optional[str] = None,
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
-        *,
-        prompt_token_ids: list[int],
-        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: multi (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: Optional[list[str]] = None,
-        sampling_params: Optional[Union[SamplingParams,
-                                        list[SamplingParams]]] = None,
-        *,
-        prompt_token_ids: list[list[int]],
-        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @overload  # LEGACY: single or multi token ids [pos-only]
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def generate(
-        self,
-        prompts: None,
-        sampling_params: None,
-        prompt_token_ids: Union[list[int], list[list[int]]],
-        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-    ) -> list[RequestOutput]:
-        ...
-
-    @deprecate_kwargs(
-        "prompt_token_ids",
-        is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
-        additional_message="Please use the 'prompts' parameter instead.",
-    )
-    def generate(
-        self,
-        prompts: Union[Union[PromptType, Sequence[PromptType]],
-                       Optional[Union[str, list[str]]]] = None,
-        sampling_params: Optional[Union[SamplingParams,
-                                        Sequence[SamplingParams]]] = None,
-        prompt_token_ids: Optional[Union[list[int], list[list[int]]]] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         priority: Optional[list[int]] = None,
@@ -460,15 +360,6 @@ class LLM:
                 "Try passing `--runner generate` to use the model as a "
                 "generative model.")
 
-        if prompt_token_ids is not None:
-            parsed_prompts = self._convert_v1_inputs(
-                prompts=cast(Optional[Union[str, list[str]]], prompts),
-                prompt_token_ids=prompt_token_ids,
-            )
-        else:
-            parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
-                                  prompts)
-
         if sampling_params is None:
             # Use default sampling params.
             sampling_params = self.get_default_sampling_params()
@@ -483,10 +374,10 @@ class LLM:
 
         # Add any modality specific loras to the corresponding prompts
         lora_request = self._get_modality_specific_lora_reqs(
-            parsed_prompts, lora_request)
+            prompts, lora_request)
 
         self._validate_and_add_requests(
-            prompts=parsed_prompts,
+            prompts=prompts,
             params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
@@ -498,7 +389,7 @@ class LLM:
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def _get_modality_specific_lora_reqs(
-            self, parsed_prompts: Union[PromptType, Sequence[PromptType]],
+            self, prompts: Union[PromptType, Sequence[PromptType]],
             lora_request: Optional[Union[list[LoRARequest], LoRARequest]]):
         # Grab the lora config off the vllm config on the engine,
         # since this is the same for both v0 & v1.
@@ -511,35 +402,33 @@ class LLM:
                 or (lora_config and lora_config.default_mm_loras is None)):
             return lora_request
 
-        if not isinstance(parsed_prompts, Sequence):
-            parsed_prompts = [parsed_prompts]
+        if not isinstance(prompts, Sequence):
+            prompts = [prompts]
 
-        optional_loras = ([lora_request] * len(parsed_prompts)
+        optional_loras = ([lora_request] * len(prompts)
                           if not isinstance(lora_request, Sequence) else
                           lora_request)
 
         return [
             self._resolve_single_prompt_mm_lora(
-                parsed_prompt,
+                prompt,
                 opt_lora_req,
                 lora_config.default_mm_loras,
-            ) for parsed_prompt, opt_lora_req in zip(parsed_prompts,
-                                                     optional_loras)
+            ) for prompt, opt_lora_req in zip(prompts, optional_loras)
         ]
 
-    def _resolve_single_prompt_mm_lora(self, parsed_prompt: PromptType,
+    def _resolve_single_prompt_mm_lora(self, prompt: PromptType,
                                        lora_request: Optional[LoRARequest],
                                        default_mm_loras: Optional[dict[str,
                                                                        str]]):
-        if (not default_mm_loras or not isinstance(parsed_prompt, dict)
-                or "multi_modal_data" not in parsed_prompt):
+        if (not default_mm_loras or not isinstance(prompt, dict)
+                or "multi_modal_data" not in prompt):
             return lora_request
 
-        parsed_prompt = cast(Union[TextPrompt, TokensPrompt], parsed_prompt)
+        prompt = cast(Union[TextPrompt, TokensPrompt], prompt)
 
-        intersection = set(
-            parsed_prompt["multi_modal_data"].keys()).intersection(
-                default_mm_loras.keys())
+        intersection = set(prompt["multi_modal_data"].keys()) \
+            .intersection(default_mm_loras.keys())
         if not intersection:
             return lora_request
         if len(intersection) > 1:
@@ -933,11 +822,9 @@ class LLM:
             lora_request=lora_request,
         )
 
-    @overload
     def encode(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
-        /,
         pooling_params: Optional[Union[PoolingParams,
                                        Sequence[PoolingParams]]] = None,
         *,
@@ -945,107 +832,6 @@ class LLM:
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         pooling_task: PoolingTask = "encode",
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-    ) -> list[PoolingRequestOutput]:
-        ...
-
-    @overload  # LEGACY: single (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def encode(
-        self,
-        prompts: str,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
-        prompt_token_ids: Optional[list[int]] = None,
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        pooling_task: PoolingTask = "encode",
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-    ) -> list[PoolingRequestOutput]:
-        ...
-
-    @overload  # LEGACY: multi (prompt + optional token ids)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def encode(
-        self,
-        prompts: list[str],
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
-        prompt_token_ids: Optional[list[list[int]]] = None,
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        pooling_task: PoolingTask = "encode",
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-    ) -> list[PoolingRequestOutput]:
-        ...
-
-    @overload  # LEGACY: single (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def encode(
-        self,
-        prompts: Optional[str] = None,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
-        *,
-        prompt_token_ids: list[int],
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        pooling_task: PoolingTask = "encode",
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-    ) -> list[PoolingRequestOutput]:
-        ...
-
-    @overload  # LEGACY: multi (token ids + optional prompt)
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def encode(
-        self,
-        prompts: Optional[list[str]] = None,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
-        *,
-        prompt_token_ids: list[list[int]],
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        pooling_task: PoolingTask = "encode",
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-    ) -> list[PoolingRequestOutput]:
-        ...
-
-    @overload  # LEGACY: single or multi token ids [pos-only]
-    @deprecated("'prompt_token_ids' will become part of 'prompts'")
-    def encode(
-        self,
-        prompts: None,
-        pooling_params: None,
-        prompt_token_ids: Union[list[int], list[list[int]]],
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        pooling_task: PoolingTask = "encode",
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
-    ) -> list[PoolingRequestOutput]:
-        ...
-
-    @deprecate_kwargs(
-        "prompt_token_ids",
-        is_deprecated=lambda: LLM.DEPRECATE_LEGACY,
-        additional_message="Please use the 'prompts' parameter instead.",
-    )
-    def encode(
-        self,
-        prompts: Union[Union[PromptType, Sequence[PromptType]],
-                       Optional[Union[str, list[str]]]] = None,
-        pooling_params: Optional[Union[PoolingParams,
-                                       Sequence[PoolingParams]]] = None,
-        prompt_token_ids: Optional[Union[list[int], list[list[int]]]] = None,
-        truncate_prompt_tokens: Optional[int] = None,
-        use_tqdm: Union[bool, Callable[..., tqdm]] = True,
-        lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
-        pooling_task: Optional[PoolingTask] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> list[PoolingRequestOutput]:
         """Apply pooling to the hidden states corresponding to the input
@@ -1108,15 +894,6 @@ class LLM:
             raise ValueError(
                 f"pooling_task must be one of {self.supported_tasks}.")
 
-        if prompt_token_ids is not None:
-            parsed_prompts = self._convert_v1_inputs(
-                prompts=cast(Optional[Union[str, list[str]]], prompts),
-                prompt_token_ids=prompt_token_ids,
-            )
-        else:
-            parsed_prompts = cast(Union[PromptType, Sequence[PromptType]],
-                                  prompts)
-
         if pooling_params is None:
             # Use default pooling params.
             pooling_params = PoolingParams()
@@ -1134,7 +911,7 @@ class LLM:
                                       tokenization_kwargs)
 
         self._validate_and_add_requests(
-            prompts=parsed_prompts,
+            prompts=prompts,
             params=pooling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
@@ -1148,7 +925,6 @@ class LLM:
     def embed(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
-        /,
         *,
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
@@ -1198,7 +974,6 @@ class LLM:
     def classify(
         self,
         prompts: Union[PromptType, Sequence[PromptType]],
-        /,
         *,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         pooling_params: Optional[Union[PoolingParams,
@@ -1348,7 +1123,7 @@ class LLM:
         _validate_truncation_size(model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
 
-        parsed_prompts = []
+        prompts = list[PromptType]()
 
         input_pairs = [(t1, t2) for t1, t2 in zip(data_1, data_2)]
 
@@ -1372,10 +1147,10 @@ class LLM:
             else:
                 pooling_params_list.append(pooling_params)
 
-            parsed_prompts.append(engine_prompt)
+            prompts.append(engine_prompt)
 
         self._validate_and_add_requests(
-            prompts=parsed_prompts,
+            prompts=prompts,
             params=pooling_params_list,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
@@ -1584,48 +1359,6 @@ class LLM:
         from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
         assert isinstance(self.llm_engine, V1LLMEngine)
         return self.llm_engine.get_metrics()
-
-    # LEGACY
-    def _convert_v1_inputs(
-        self,
-        prompts: Optional[Union[str, list[str]]],
-        prompt_token_ids: Optional[Union[list[int], list[list[int]]]],
-    ):
-        # skip_tokenizer_init is now checked in engine
-
-        if prompts is None and prompt_token_ids is None:
-            raise ValueError(
-                "Either prompts or prompt_token_ids must be provided.")
-        if prompts is not None and prompt_token_ids is not None \
-                and len(prompts) != len(prompt_token_ids):
-            raise ValueError(
-                "The lengths of prompts and prompt_token_ids must be the same."
-            )
-
-        if prompts is not None:
-            prompts = [p["content"] for p in parse_and_batch_prompt(prompts)]
-        if prompt_token_ids is not None:
-            prompt_token_ids = [
-                p["content"] for p in parse_and_batch_prompt(prompt_token_ids)
-            ]
-        if prompts is not None:
-            num_requests = len(prompts)
-        elif prompt_token_ids is not None:
-            num_requests = len(prompt_token_ids)
-        parsed_prompts: list[PromptType] = []
-        for i in range(num_requests):
-            item: PromptType
-
-            if prompts is not None:
-                item = TextPrompt(prompt=prompts[i])
-            elif prompt_token_ids is not None:
-                item = TokensPrompt(prompt_token_ids=prompt_token_ids[i])
-            else:
-                raise AssertionError
-
-            parsed_prompts.append(item)
-
-        return parsed_prompts
 
     def _validate_and_add_requests(
         self,
