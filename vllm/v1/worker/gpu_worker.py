@@ -292,7 +292,6 @@ class Worker(WorkerBase):
             allocator = CuMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
         else:
-            from contextlib import nullcontext
             context = nullcontext()
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
