@@ -9,7 +9,10 @@ When performing inference with plugins, the prompt type is defined by the plugin
 IO Processor plugins implement the `IOProcessor` interface (<gh-file:vllm/plugins/io_processors/interface.py>):
 
 ```python
-class IOProcessor(ABC):
+IOProcessorInput = TypeVar('IOProcessorInput')
+IOProcessorOutput = TypeVar('IOProcessorOutput')
+
+class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
 
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
@@ -17,7 +20,7 @@ class IOProcessor(ABC):
     @abstractmethod
     def pre_process(
         self,
-        prompt: Any,
+        prompt: IOProcessorInput,
         request_id: Optional[str] = None,
         **kwargs,
     ) -> Union[PromptType, Sequence[PromptType]]:
@@ -25,7 +28,7 @@ class IOProcessor(ABC):
 
     async def pre_process_async(
         self,
-        prompt: Any,
+        prompt: IOProcessorInput,
         request_id: Optional[str] = None,
         **kwargs,
     ) -> Union[PromptType, Sequence[PromptType]]:
@@ -33,26 +36,26 @@ class IOProcessor(ABC):
 
     @abstractmethod
     def post_process(self,
-                     model_out: Sequence[Optional[PoolingRequestOutput]],
+                     model_output: Sequence[Optional[PoolingRequestOutput]],
                      request_id: Optional[str] = None,
-                     **kwargs) -> Any:
+                     **kwargs) -> IOProcessorOutput:
         raise NotImplementedError
 
     async def post_process_async(
         self,
-        model_out: Sequence[Optional[PoolingRequestOutput]],
+        model_output: Sequence[Optional[PoolingRequestOutput]],
         request_id: Optional[str] = None,
         **kwargs,
-    ) -> Any:
-        return self.post_process(model_out, request_id, **kwargs)
+    ) -> IOProcessorOutput:
+        return self.post_process(model_output, request_id, **kwargs)
 
     @abstractmethod
-    def parse_request(self, request: Any) -> Optional[Any]:
+    def parse_request(self, request: Any) -> IOProcessorInput:
         raise NotImplementedError
 
     @abstractmethod
-    def plugin_out_to_response(self,
-                               plugin_out: Any) -> IOProcessorResponse:
+    def output_to_response(
+            self, plugin_output: IOProcessorOutput) -> IOProcessorResponse:
         raise NotImplementedError
 ```
 
