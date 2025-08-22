@@ -208,6 +208,12 @@ class SamplingParams(
     implementations, plugins, etc. Not used by any in-tree sampling
     implementations."""
 
+    # Fields used to invoke speculative execution.
+    """If provided, we will invoke speculative decoding validation
+    with the provided predicted outputs to generate a result.
+    Text and tokens are supported."""
+    predicted_outputs: Optional[Union[str, list[int]]] = None
+
     # Fields used for bad words
     bad_words: Optional[list[str]] = None
     """Words that are not allowed to be generated. More precisely, only the
@@ -247,6 +253,7 @@ class SamplingParams(
         logit_bias: Optional[Union[dict[int, float], dict[str, float]]] = None,
         allowed_token_ids: Optional[list[int]] = None,
         extra_args: Optional[dict[str, Any]] = None,
+        predicted_outputs: Optional[Union[str, list[int]]] = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Convert token_id to integer
@@ -289,6 +296,7 @@ class SamplingParams(
             logit_bias=logit_bias,
             allowed_token_ids=allowed_token_ids,
             extra_args=extra_args,
+            predicted_outputs=predicted_outputs,
         )
 
     def __post_init__(self) -> None:
@@ -553,7 +561,8 @@ class SamplingParams(
             f"{self.spaces_between_special_tokens}, "
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"guided_decoding={self.guided_decoding}, "
-            f"extra_args={self.extra_args})")
+            f"extra_args={self.extra_args}, "
+            f"predicted_outputs={self.predicted_outputs}),")
 
 
 class BeamSearchParams(

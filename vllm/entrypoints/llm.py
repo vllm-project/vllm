@@ -364,6 +364,18 @@ class LLM:
             # Use default sampling params.
             sampling_params = self.get_default_sampling_params()
 
+        def eagerly_tokenize_predicted(_sampling_params):
+            if isinstance(_sampling_params.predicted_outputs, str):
+                _sampling_params.predicted_outputs = self.get_tokenizer(
+                ).encode(_sampling_params.predicted_outputs,
+                         add_special_tokens=False)
+
+        for sp in sampling_params if isinstance(
+                sampling_params, Sequence) else (sampling_params, ):
+            if isinstance(sp, SamplingParams):
+                eagerly_tokenize_predicted(sp)
+                assert not isinstance(sp.predicted_outputs, str)
+
         tokenization_kwargs: dict[str, Any] = {}
         truncate_prompt_tokens = None
         if isinstance(sampling_params, SamplingParams):
@@ -1388,6 +1400,8 @@ class LLM:
             if isinstance(sp, SamplingParams):
                 # We only care about the final output
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
+                assert sp.predicted_outputs is None or not isinstance(
+                    sp.predicted_outputs, str)
 
         # Add requests to the engine.
         it = prompts
