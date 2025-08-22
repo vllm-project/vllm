@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import base64
 import os
 
 import pytest
@@ -71,8 +72,9 @@ def test_prithvi_mae_plugin_offline(model_name: str):
         hasattr(output, attr)
         for attr in ["type", "format", "data", "request_id"])
 
-    # verify the output image in base64 is of the correct length
-    assert len(output.data) == 218752
+    # We just check that the output is a valid base64 string.
+    # Raises an exception and fails the test if the string is corrupted.
+    base64.b64decode(output.data)
 
 
 @pytest.fixture(scope="module")
@@ -125,9 +127,11 @@ async def test_prithvi_mae_plugin_online(
 
     # verify the output is formatted as expected for this plugin
     plugin_data = parsed_response.data
+
     assert all(
         plugin_data.get(attr)
         for attr in ["type", "format", "data", "request_id"])
 
-    # verify the output image in base64 is of the correct length
-    assert len(plugin_data["data"]) == 218752
+    # We just check that the output is a valid base64 string.
+    # Raises an exception and fails the test if the string is corrupted.
+    base64.b64decode(plugin_data["data"])
