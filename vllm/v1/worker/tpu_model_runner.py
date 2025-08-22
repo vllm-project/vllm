@@ -939,7 +939,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 mm_hash = mm_hashes[i]
                 encoder_output = self.encoder_cache.get(mm_hash, None)
-                assert encoder_output is not None, f"Encoder cache miss for {mm_hash}."
+                assert encoder_output is not None,\
+                      f"Encoder cache miss for {mm_hash}."
                 assert pos_info.is_embed is None, "Expected all positions to"\
                 " be contiguous and embeddings."
                 encoder_output = self.encoder_cache[mm_hash]

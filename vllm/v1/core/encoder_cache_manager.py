@@ -33,9 +33,10 @@ class EncoderCacheManager:
     within requests, allowing for fine-grained memory management and enabling
     chunked processing of multimodal inputs.
 
-    Cache is enabled to share embeddings of same multimodal data item 
-    (identified by their hash value) between different requests, and eviction 
-    takes place at allocation time when there's no free space for new embeddings.
+    Cache is enabled to share embeddings of same multimodal data 
+    item (identified by their hash value) between different requests, 
+    and eviction takes place at allocation time when there's no free 
+    space for new embeddings.
     Oldest cached embeddings with no request referenced will be first evicted.
     
     Args:
