@@ -56,7 +56,7 @@ class DummyLogitsProcessor(LogitsProcessor):
             self.req_info,
             batch_update,
             lambda params, _, __: params.extra_args and
-            (params.extra_args.get("target_tokens")),
+            (params.extra_args.get("target_token")),
         )
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
