@@ -353,7 +353,6 @@ class CompilationConfig:
         # Opt-out: default-include declared fields; keep a tiny exclude set;
         # normalize types; keep SHA-256. For nested opaque configs, include a
         # stable identifier (e.g., pass_config.uuid()) instead of object id.
-        from vllm.config.utils import canon_value as _canon
 
         EXCLUDE_FROM_HASH = {
             # Paths/dirs and runtime/metrics that don’t affect compiled graph
@@ -368,23 +367,16 @@ class CompilationConfig:
             "static_forward_context",
         }
 
-        field_names = list(self.__dataclass_fields__.keys())
-        items = []
-        for k in sorted(field_names):
-            if k in EXCLUDE_FROM_HASH:
-                continue
-            v = getattr(self, k, None)
-            # Use stable identity for pass_config
-            if k == "pass_config":
-                try:
-                    items.append((k, self.pass_config.uuid()))
-                except Exception:
-                    continue
-                continue
-            try:
-                items.append((k, _canon(v)))
-            except TypeError:
-                continue
+        from vllm.config.utils import (
+            build_opt_out_items_with_overrides as _build_items_overrides)
+        items = _build_items_overrides(self,
+                                       EXCLUDE_FROM_HASH,
+                                       overrides={
+                                           "pass_config":
+                                           (lambda v:
+                                            (v.uuid()
+                                             if v is not None else None))
+                                       })
 
         return hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
 

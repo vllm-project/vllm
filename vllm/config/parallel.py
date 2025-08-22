@@ -273,7 +273,7 @@ class ParallelConfig:
         normalize types; keep SHA-256; explicitly include
         envs.VLLM_ALL2ALL_BACKEND as before.
         """
-        from vllm.config.utils import canon_value as _canon
+        from vllm.config.utils import build_opt_out_items as _build_items
 
         EXCLUDE_FROM_HASH = {
             # Derived/runtime topology, networking, or launch details
@@ -297,16 +297,7 @@ class ParallelConfig:
             "enable_multimodal_encoder_data_parallel",
         }
 
-        field_names = list(self.__dataclass_fields__.keys())
-        items = []
-        for k in sorted(field_names):
-            if k in EXCLUDE_FROM_HASH:
-                continue
-            v = getattr(self, k, None)
-            try:
-                items.append((k, _canon(v)))
-            except TypeError:
-                continue
+        items = _build_items(self, EXCLUDE_FROM_HASH)
 
         # Explicitly include backend affecting env factor as before
         items.append(("VLLM_ALL2ALL_BACKEND", str(envs.VLLM_ALL2ALL_BACKEND)))

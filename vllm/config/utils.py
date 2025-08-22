@@ -18,10 +18,10 @@ def config(cls: ConfigT) -> ConfigT:
     A decorator that ensures all fields in a dataclass have default values
     and that each field has a docstring.
 
-    If a `ConfigT` is used as a CLI argument itself, the `type` keyword argument
-    provided by `get_kwargs` will be
-    `pydantic.TypeAdapter(ConfigT).validate_json(cli_arg)` which treats the
-    `cli_arg` as a JSON string which gets validated by `pydantic`.
+    If a `ConfigT` is used as a CLI argument itself, the `type` keyword
+    argument provided by `get_kwargs` will be
+    `pydantic.TypeAdapter(ConfigT).validate_json(cli_arg)`, which treats the
+    `cli_arg` as a JSON string to be validated by `pydantic`.
 
     Config validation is performed by the tools/validate_config.py
     script, which is invoked during the pre-commit checks.
@@ -123,3 +123,32 @@ def hash_items_sha256(items: list[tuple[str, object]]) -> str:
     """Return a SHA-256 hex digest of the canonical items structure."""
     import hashlib
     return hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
+
+
+def build_opt_out_items_with_overrides(
+    cfg,
+    exclude: set[str],
+    overrides: dict[str, "callable"],
+) -> list[tuple[str, object]]:
+    """Canonical (key, value) items with per-field overrides.
+
+    - Default: use canon_value for values.
+    - If a field has an override, call it to produce a stable value.
+    - Skip values that cannot be canonicalized.
+    """
+    items: list[tuple[str, object]] = []
+    for key in sorted(get_declared_field_names(cfg)):
+        if key in exclude:
+            continue
+        value = getattr(cfg, key, None)
+        if key in overrides:
+            try:
+                items.append((key, overrides[key](value)))
+            except Exception:
+                continue
+            continue
+        try:
+            items.append((key, canon_value(value)))
+        except TypeError:
+            continue
+    return items

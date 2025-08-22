@@ -133,7 +133,7 @@ class CacheConfig:
         """
         # Opt-out: default-include declared fields; keep a tiny exclude list;
         # normalize types for deterministic hashing; keep MD5 for compatibility.
-        from vllm.config.utils import canon_value as _canon
+        from vllm.config.utils import build_opt_out_items as _build_items
 
         EXCLUDE_FROM_HASH = {
             # Runtime/derived knobs that don't affect compiled graph shape
@@ -155,16 +155,7 @@ class CacheConfig:
             "kv_sharing_fast_prefill",
         }
 
-        field_names = list(self.__dataclass_fields__.keys())
-        items = []
-        for k in sorted(field_names):
-            if k in EXCLUDE_FROM_HASH:
-                continue
-            v = getattr(self, k, None)
-            try:
-                items.append((k, _canon(v)))
-            except TypeError:
-                continue
+        items = _build_items(self, EXCLUDE_FROM_HASH)
 
         hash_str = hashlib.md5(repr(tuple(items)).encode(),
                                usedforsecurity=False).hexdigest()
