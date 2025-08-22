@@ -120,34 +120,47 @@ def read_geotiff(
 
     if all([x is None for x in [file_path, path_type, file_data]]):
         raise Exception("All input fields to read_geotiff are None")
-
+    write_to_file: Optional[bytes] = None
+    path: Optional[str] = None
     if file_data is not None:
-        with tempfile.NamedTemporaryFile() as tmpfile:
-            tmpfile.write(file_data)
-            path = tmpfile.name
+        # with tempfile.NamedTemporaryFile() as tmpfile:
+        #     tmpfile.write(file_data)
+        #     path = tmpfile.name
+
+        write_to_file = file_data
     elif file_path is not None and path_type == "url":
         resp = urllib.request.urlopen(file_path)
-        with tempfile.NamedTemporaryFile() as tmpfile:
-            tmpfile.write(resp.read())
-            path = tmpfile.name
+        # with tempfile.NamedTemporaryFile() as tmpfile:
+        #     tmpfile.write(resp.read())
+        #     path = tmpfile.name
+        write_to_file = resp.read()
     elif file_path is not None and path_type == "path":
         path = file_path
     elif file_path is not None and path_type == "b64_json":
         image_data = base64.b64decode(file_path)
-        with tempfile.NamedTemporaryFile() as tmpfile:
-            tmpfile.write(image_data)
-            path = tmpfile.name
+        # with tempfile.NamedTemporaryFile() as tmpfile:
+        #     tmpfile.write(image_data)
+        #     path = tmpfile.name
+        write_to_file = image_data
     else:
         raise Exception("Wrong combination of parameters to read_geotiff")
 
-    with rasterio.open(path) as src:
-        img = src.read()
-        meta = src.meta
-        try:
-            coords = src.lnglat()
-        except Exception:
-            # Cannot read coords
-            coords = None
+    with tempfile.NamedTemporaryFile() as tmpfile:
+        path_to_use = None
+        if write_to_file:
+            tmpfile.write(write_to_file)
+            path_to_use = tmpfile.name
+        elif path:
+            path_to_use = path
+
+        with rasterio.open(path_to_use) as src:
+            img = src.read()
+            meta = src.meta
+            try:
+                coords = src.lnglat()
+            except Exception:
+                # Cannot read coords
+                coords = None
 
     return img, meta, coords
 
