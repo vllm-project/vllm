@@ -411,6 +411,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                                       "are not implemented for "
                                       "FlashAttentionImpl")
         self.sinks = sinks
+        if self.sinks is not None:
+            raise NotImplementedError("Sinks are not supported for ROCM AITER")
 
     def forward(
         self,
