@@ -24,6 +24,18 @@ def is_rocm_aiter_custom_allreduce_enabled() -> bool:
         and envs.VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE
 
 
+def dispatch_custom_allreduce():
+    """Dispatch the custom allreduce implementation based on the platform."""
+    if is_rocm_aiter_custom_allreduce_enabled():
+        from aiter.dist.custom_all_reduce import CustomAllreduce
+        logger.info("Using aiter.dist.custom_all_reduce for ROCm platform")
+    else:
+        from vllm.distributed.device_communicators.custom_all_reduce import (  # noqa: E501
+            CustomAllreduce)
+
+    return CustomAllreduce
+
+
 class CudaCommunicator(DeviceCommunicatorBase):
 
     def __init__(self,
@@ -47,12 +59,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_custom_allreduce = use_custom_allreduce
 
         # lazy import to avoid documentation build error
-        if is_rocm_aiter_custom_allreduce_enabled():
-            from aiter.dist.custom_all_reduce import CustomAllreduce
-            logger.info("Using aiter.dist.custom_all_reduce for ROCm platform")
-        else:
-            from vllm.distributed.device_communicators.custom_all_reduce import (  # noqa: E501
-                CustomAllreduce)
+        CustomAllreduce = dispatch_custom_allreduce()
         from vllm.distributed.device_communicators.pynccl import (
             PyNcclCommunicator)
         from vllm.distributed.device_communicators.quick_all_reduce import (
