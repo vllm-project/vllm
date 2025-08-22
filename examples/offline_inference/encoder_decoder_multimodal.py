@@ -52,7 +52,7 @@ def run_donut():
                 "prompt": "".join(["$"] * 4799),
                 "multi_modal_data": {
                     "image": get_vllm_public_assets(
-                        "ocr_test_images", "schedule"
+                        "schedule.jpg", "ocr_test_images"
                     ).pil_image,
                 },
             },

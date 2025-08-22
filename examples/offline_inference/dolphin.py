@@ -233,7 +233,7 @@ if args.image_path:
         raise FileNotFoundError(f"Error: File not found at {args.image_path}")
     image = Image.open(args.image_path).convert("RGB")
 else:
-    image = get_vllm_public_assets("ocr_test_images", "schedule").pil_image
+    image = get_vllm_public_assets("schedule.jpg", "ocr_test_images").pil_image
 
 
 prompt = "Parse the reading order of this document. "
