@@ -1208,8 +1208,12 @@ def compute_hash() -> str:
             continue
         try:
             value = environment_variables[name]()
+        except Exception:
+            # Skip envs that raise during retrieval.
+            continue
+        try:
             items.append((name, canon_value(value)))
-        except TypeError:
+        except Exception:
             # Skip values we cannot canonicalize deterministically.
             continue
 

@@ -105,8 +105,7 @@ def build_opt_out_items(cfg, exclude: set[str]) -> list[tuple[str, object]]:
     """Default-include (opt-out) canonical (key, value) pairs for hashing.
 
     - Includes declared fields not in `exclude`.
-    - Canonicalizes values for stable hashing.
-    - Skips values that cannot be canonicalized.
+    - Skips non-canonicalizable values.
     """
     items: list[tuple[str, object]] = []
     for key in sorted(get_declared_field_names(cfg)):
@@ -126,7 +125,7 @@ def hash_items_sha256(items: list[tuple[str, object]]) -> str:
     return hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
 
 
-def opt_items_override(
+def build_opt_items_override(
     cfg,
     exclude: set[str],
     overrides: dict[str, "callable"],
