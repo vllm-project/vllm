@@ -33,20 +33,19 @@ from vllm.config.cache import (BlockSize, CacheConfig, CacheDType, MambaDType,
                                PrefixCachingHashAlgo)
 from vllm.config.compilation import (CompilationConfig, CompilationLevel,
                                      CUDAGraphMode, PassConfig)
-from vllm.config.decoding_config import DecodingConfig, GuidedDecodingBackend
-from vllm.config.device_config import Device, DeviceConfig
-from vllm.config.kvevents_config import KVEventsConfig
-from vllm.config.kvtransfer_config import KVTransferConfig
-from vllm.config.load_config import LoadConfig
-from vllm.config.lora_config import LoRAConfig, LoRADType
-from vllm.config.observability_config import (DetailedTraceModules,
-                                              ObservabilityConfig)
+from vllm.config.decoding import DecodingConfig, GuidedDecodingBackend
+from vllm.config.device import Device, DeviceConfig
+from vllm.config.kvevents import KVEventsConfig
+from vllm.config.kvtransfer import KVTransferConfig
+from vllm.config.load import LoadConfig
+from vllm.config.lora import LoRAConfig, LoRADType
+from vllm.config.observability import DetailedTraceModules, ObservabilityConfig
 from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
-from vllm.config.speculative_config import SpeculativeConfig, SpeculativeMethod
-from vllm.config.speech_to_text_config import SpeechToTextConfig
+from vllm.config.speculative import SpeculativeConfig, SpeculativeMethod
+from vllm.config.speech_to_text import SpeechToTextConfig
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
