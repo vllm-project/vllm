@@ -340,8 +340,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             If False, we can skip copying SamplingMetadata to the GPU.
         """
         # Remove finished requests from the cached states.
-        # The multimodal embedding cache is not removed here
-        # It only remove when scheduler free it
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
 

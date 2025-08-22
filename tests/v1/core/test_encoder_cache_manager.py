@@ -21,12 +21,12 @@ def test_basic_allocate_and_reuse():
     cache = EncoderCacheManager(cache_size=10)
     req = MockRequest("r1", ["imgA"], [4])
 
-    assert not cache.has_cache(req, 0)
+    assert not cache.check_and_update_cache(req, 0)
     assert cache.can_allocate(req, 0)
 
     cache.allocate(req, 0)
 
-    assert cache.has_cache(req, 0)
+    assert cache.check_and_update_cache(req, 0)
     assert "r1" in cache.cached["imgA"]
     assert cache.num_free_slots == 6
 
@@ -120,7 +120,7 @@ def test_has_cache_restores_from_freeable():
     manager.free_encoder_input(req, 0)
 
     # Should restore from freeable.
-    assert manager.has_cache(req, 0)
+    assert manager.check_and_update_cache(req, 0)
     assert len(manager.cached["imgZ"]) == 1
     assert "imgZ" not in manager.freeable
     assert manager.num_freeable_slots == 6

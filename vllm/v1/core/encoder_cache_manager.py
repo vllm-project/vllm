@@ -59,7 +59,6 @@ class EncoderCacheManager:
             last call to get_freed_mm_hashes(). This list is cleared on return.
     """
 
-    # ------------------------------------------------------------------ #
     def __init__(self, cache_size: int):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
@@ -72,8 +71,13 @@ class EncoderCacheManager:
         self.freeable: OrderedDict[str, int] = OrderedDict()
         self.freed: list[str] = []
 
-    def has_cache(self, request: Request, input_id: int) -> bool:
+    def check_and_update_cache(self, request: Request, input_id: int) -> bool:
         """Check if encoder output for a specific multimodal input is cached.
+
+        If the encoder output is cached, update `cached` to add the request id
+        to the set of request ids that reference the cached encoder output.
+        If the encoder output was previously not referenced by any request,
+        update `freeable` and `num_freeable_slots` accordingly.
 
         Args:
             request: The request containing the multimodal input
@@ -88,14 +92,12 @@ class EncoderCacheManager:
             return False
 
         # Cached but currently not referenced by any request
-        self.check_and_update_cache(mm_hash, request.request_id)
-        return True
-
-    def check_and_update_cache(self, mm_hash, request_id):
         if not self.cached[mm_hash]:
             num_tokens = self.freeable.pop(mm_hash)
             self.num_freeable_slots -= num_tokens
-        self.cached[mm_hash].add(request_id)
+
+        self.cached[mm_hash].add(request.request_id)
+        return True
 
     def can_allocate(self, request: Request, input_id: int) -> bool:
         """Check if there's sufficient cache space for a multimodal input.
@@ -103,9 +105,11 @@ class EncoderCacheManager:
         If there is not enough free space in `num_free_slots` but there is
         enough reclaimable space in `num_freeable_slots`, entries will be
         evicted from `freeable` (their mm_hash appended to `freed`) until
-        enough space is available, and then this method returns True. Returns
-        False only if the requested number of tokens exceeds both the free and
-        reclaimable capacities combined.
+        enough space is available, and then this method returns True. 
+        Older entries are evicted first.
+        
+        Returns False only if the requested number of tokens exceeds both 
+        the free and reclaimable capacities combined.
 
         Args:
             request: The request containing the multimodal input.
@@ -121,7 +125,9 @@ class EncoderCacheManager:
             return True
         if num_tokens > self.num_freeable_slots:
             return False
-        # Free some slot
+        
+        # NOTE: Eviction takes place here, but physical memory is not freed
+        # until model runner is notified by the scheduler output.
         while num_tokens > self.num_free_slots:
             mm_hash, num_free_token = self.freeable.popitem(last=False)
             del self.cached[mm_hash]
@@ -148,6 +154,10 @@ class EncoderCacheManager:
             self.cached[mm_hash] = set()
 
         self.cached[mm_hash].add(request_id)
+
+        # Encoder cache space is guaranteed to be enough for the input.
+        assert self.num_free_slots >= num_encoder_tokens
+        assert self.num_freeable_slots >= num_encoder_tokens
         self.num_free_slots -= num_encoder_tokens
         self.num_freeable_slots -= num_encoder_tokens
 
@@ -204,7 +214,9 @@ class EncoderCacheManager:
 
         Returns:
             List of mm_hash strings that were actually evicted since the last
-            call. The internal list is cleared after this call.
+            call to be used by the scheduler to notify workers about which 
+            encoder outputs can be removed from their caches. The internal 
+            list is cleared after this call. 
         """
         freed = self.freed
         self.freed = []

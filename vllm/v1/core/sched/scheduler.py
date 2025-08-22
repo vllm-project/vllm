@@ -718,7 +718,7 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
-            if self.encoder_cache_manager.has_cache(request, i):
+            if self.encoder_cache_manager.check_and_update_cache(request, i):
                 # The encoder input is already computed and cached.
                 continue
 
