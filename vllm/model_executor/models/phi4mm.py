@@ -844,21 +844,18 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         num_images = mm_items.get_count("image", strict=False)
         num_audios = mm_items.get_count("audio", strict=False)
 
-        image_repl = [
+        return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=tuple(image_tokens[:num_images]),
                 replacement=get_image_replacement_phi4mm,
-            ) for image_token in image_tokens[:num_images]
-        ]
-        audio_repl = [
+            ),
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=tuple(audio_tokens[:num_audios]),
                 replacement=get_audio_replacement_phi4mm,
-            ) for audio_token in audio_tokens[:num_audios]
+            ),
         ]
-        return image_repl + audio_repl
 
 
 @MULTIMODAL_REGISTRY.register_processor(

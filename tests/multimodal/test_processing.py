@@ -260,6 +260,21 @@ def test_find_token_matches(
         for key in expected_by_key
     } == expected_by_key
 
+    prompt_updates_all = [
+        update_type("all", tuple(target_by_key.values()), []) \
+            .bind(mock_tokenizer)
+    ]
+
+    result_all = find_token_matches(prompt, prompt_updates_all)
+
+    # Only displayed on error
+    print("result_all:", result_all)
+
+    assert [
+        dict(start_idx=item.start_idx, end_idx=item.end_idx)
+        for item in result_all
+    ] == [v for vs in expected_by_key.values() for v in vs]
+
 
 # yapf: disable
 @pytest.mark.parametrize(
@@ -406,6 +421,21 @@ def test_find_text_matches(
         ]
         for key in expected_by_key
     } == expected_by_key
+
+    prompt_updates_all = [
+        update_type("all", tuple(target_by_key.values()), []) \
+            .bind(mock_tokenizer)
+    ]
+
+    result_all = find_text_matches(prompt, prompt_updates_all)
+
+    # Only displayed on error
+    print("result_all:", result_all)
+
+    assert [
+        dict(start_idx=item.start_idx, end_idx=item.end_idx)
+        for item in result_all
+    ] == [v for vs in expected_by_key.values() for v in vs]
 
 
 # yapf: disable

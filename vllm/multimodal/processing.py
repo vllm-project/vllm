@@ -190,8 +190,12 @@ class PromptUpdate(ABC):
     modality: str
     """The modality for which the update is made."""
 
-    target: PromptTarget
-    """The token sequence (or text) to update."""
+    target: Union[PromptTarget, tuple[PromptTarget, ...]]
+    """
+    The token sequence (or text) to update.
+    
+    Can pass a tuple to specify multiple targets.
+    """
 
     @property
     @abstractmethod
@@ -471,15 +475,21 @@ class BoundPromptUpdate:
     def modality(self) -> str:
         return self._origin.modality
 
-    @property
-    def target(self) -> Union[_BoundPromptSequence, PromptIndex]:
-        """The token sequence (or text) to update."""
-        target = self._origin.target
-
+    def _get_target(self, target: PromptTarget):
         if isinstance(target, PromptIndex):
             return target
 
         return _BoundPromptSequence.from_seq(self.tokenizer, target)
+
+    @property
+    def targets(self) -> tuple[Union[_BoundPromptSequence, PromptIndex], ...]:
+        """The token sequence (or text) to update."""
+        targets = self._origin.target
+
+        if not isinstance(targets, tuple):
+            targets = (targets, )
+
+        return tuple(self._get_target(target) for target in targets)
 
     @property
     def content(self) -> PromptUpdateContent:
@@ -671,23 +681,27 @@ def find_token_matches(
 ) -> Sequence[PromptTargetMatch]:
     """Return each target of `prompt_updates` found in `prompt`."""
 
-    def get_matches(update: BoundPromptUpdate):
-        target = update.target
+    def get_all_matches(update: BoundPromptUpdate):
 
-        if isinstance(target, PromptIndex):
-            match_idx = target.get_match_index(update.tokenizer, prompt)
-            if match_idx is None:
-                return []
+        def get_matches(target: Union[_BoundPromptSequence, PromptIndex]):
+            if isinstance(target, PromptIndex):
+                match_idx = target.get_match_index(update.tokenizer, prompt)
+                if match_idx is None:
+                    return []
 
-            return [_PromptTargetIndexMatch(update, match_idx)]
+                return [_PromptTargetIndexMatch(update, match_idx)]
+
+            return [
+                _PromptTargetTokenMatch(update, match)
+                for match in iter_token_matches(prompt, target.token_ids)
+            ]
 
         return [
-            _PromptTargetTokenMatch(update, match)
-            for match in iter_token_matches(prompt, target.token_ids)
+            match for target in update.targets for match in get_matches(target)
         ]
 
     return [
-        match for update in prompt_updates for match in get_matches(update)
+        match for update in prompt_updates for match in get_all_matches(update)
     ]
 
 
@@ -697,23 +711,27 @@ def find_text_matches(
 ) -> Sequence[PromptTargetMatch]:
     """Return each target of `prompt_updates` found in `prompt`."""
 
-    def get_matches(update: BoundPromptUpdate):
-        target = update.target
+    def get_all_matches(update: BoundPromptUpdate):
 
-        if isinstance(target, PromptIndex):
-            match_idx = target.get_match_index(update.tokenizer, prompt)
-            if match_idx is None:
-                return []
+        def get_matches(target: Union[_BoundPromptSequence, PromptIndex]):
+            if isinstance(target, PromptIndex):
+                match_idx = target.get_match_index(update.tokenizer, prompt)
+                if match_idx is None:
+                    return []
 
-            return [_PromptTargetIndexMatch(update, match_idx)]
+                return [_PromptTargetIndexMatch(update, match_idx)]
+
+            return [
+                _PromptTargetTextMatch(update, match)
+                for match in re.finditer(re.escape(target.text), prompt)
+            ]
 
         return [
-            _PromptTargetTextMatch(update, match)
-            for match in re.finditer(re.escape(target.text), prompt)
+            match for target in update.targets for match in get_matches(target)
         ]
 
     return [
-        match for update in prompt_updates for match in get_matches(update)
+        match for update in prompt_updates for match in get_all_matches(update)
     ]
 
 
@@ -1126,6 +1144,36 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """
         raise NotImplementedError
 
+    def _get_mm_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> MultiModalPromptUpdates:
+        unbound_prompt_updates = self._get_prompt_updates(
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            out_mm_kwargs=out_mm_kwargs,
+        )
+
+        mm_prompt_updates = self._bind_and_group_updates(
+            unbound_prompt_updates)
+
+        for modality, prompt_updates in mm_prompt_updates.items():
+            if len(prompt_updates) > 1:
+                logger.warning_once(
+                    "Detected %s prompt updates for modality %r. "
+                    "Multiple prompt updates per modality is now "
+                    "deprecated and may be removed in v0.13. "
+                    "Instead, please define multiple update targets "
+                    "in the same prompt update definition by passing "
+                    "a tuple to `PromptUpdate.target`.",
+                    len(prompt_updates),
+                    modality,
+                )
+
+        return mm_prompt_updates
+
     def _find_mm_placeholders(
         self,
         mm_prompt_updates: Mapping[str, Sequence[BoundPromptUpdate]],
@@ -1421,13 +1469,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_hashes = self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
                                         tokenization_kwargs)
 
-        unbound_prompt_updates = self._get_prompt_updates(
+        mm_prompt_updates = self._get_mm_prompt_updates(
             mm_data_items,
             hf_processor_mm_kwargs,
             mm_kwargs,
         )
-        mm_prompt_updates = self._bind_and_group_updates(
-            unbound_prompt_updates)
 
         mm_info = MultiModalProcessingInfo(
             kwargs=mm_kwargs,
@@ -1497,13 +1543,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_missing_kwargs=mm_missing_kwargs,
         )
 
-        unbound_prompt_updates = self._get_prompt_updates(
+        mm_prompt_updates = self._get_mm_prompt_updates(
             mm_data_items,
             hf_processor_mm_kwargs,
             mm_kwargs,
         )
-        mm_prompt_updates = self._bind_and_group_updates(
-            unbound_prompt_updates)
 
         mm_info = MultiModalProcessingInfo(
             kwargs=mm_kwargs,
