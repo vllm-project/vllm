@@ -11,6 +11,8 @@ from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
 from vllm.platforms import current_platform
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(),
+                    reason="This test is skipped on non-CUDA platform.")
 @pytest.mark.parametrize("n_token", [1, 33, 64])
 @pytest.mark.parametrize("n_hidden", [1024, 2048])
 @pytest.mark.parametrize("n_expert", [16])

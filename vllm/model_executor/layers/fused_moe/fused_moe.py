@@ -953,8 +953,9 @@ def grouped_topk(
     routed_scaling_factor: float = 1.0,
     enable_fused: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if enable_fused and num_expert_group <= 32 and \
-            topk <= 32 and e_score_correction_bias is not None:
+    if current_platform.is_cuda() and enable_fused and \
+            num_expert_group <= 32 and topk <= 32 and \
+            e_score_correction_bias is not None:
         return fused_grouped_topk(
             hidden_states=hidden_states,
             gating_output=gating_output,
