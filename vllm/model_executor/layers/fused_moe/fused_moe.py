@@ -950,9 +950,11 @@ def grouped_topk(
     topk_group: int = 0,
     scoring_func: str = "softmax",
     e_score_correction_bias: Optional[torch.Tensor] = None,
+    routed_scaling_factor: float = 1.0,
+    enable_fused: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if num_expert_group <= 32 and topk <= 32 and \
-            e_score_correction_bias is not None:
+    if enable_fused and num_expert_group <= 32 and \
+            topk <= 32 and e_score_correction_bias is not None:
         return fused_grouped_topk(
             hidden_states=hidden_states,
             gating_output=gating_output,
@@ -961,7 +963,8 @@ def grouped_topk(
             e_score_correction_bias=e_score_correction_bias,
             num_expert_group=num_expert_group,
             topk_group=topk_group,
-            routed_scaling_factor=2.5)
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor)
 
     assert hidden_states.size(0) == gating_output.size(0), (
         "Number of tokens mismatch")
@@ -1007,6 +1010,7 @@ def grouped_topk(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
+    topk_weights = topk_weights * routed_scaling_factor
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
