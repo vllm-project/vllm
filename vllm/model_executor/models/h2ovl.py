@@ -20,8 +20,9 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItems
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
-from vllm.multimodal.processing import (MultiModalHashes, PromptReplacement,
-                                        PromptUpdate, PromptUpdateDetails)
+from vllm.multimodal.processing import (MultiModalProcessingInfo,
+                                        PromptReplacement, PromptUpdate,
+                                        PromptUpdateDetails)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .intern_vit import InternVisionModel
@@ -478,10 +479,7 @@ class H2OVLMultiModalProcessor(
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        *,
-        return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargsItems, Optional[MultiModalHashes],
-               bool]:
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         # The processor logic is different for len(images) <= 1 vs > 1
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
@@ -492,7 +490,6 @@ class H2OVLMultiModalProcessor(
                 mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
                 tokenization_kwargs=tokenization_kwargs,
-                return_mm_hashes=return_mm_hashes,
             )
 
         return super()._cached_apply_hf_processor(
@@ -500,7 +497,6 @@ class H2OVLMultiModalProcessor(
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            return_mm_hashes=return_mm_hashes,
         )
 
 

@@ -28,7 +28,8 @@ from vllm.tasks import SupportedTask
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
+                             ModelRunnerOutput)
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
@@ -386,6 +387,9 @@ class Worker(WorkerBase):
         assert isinstance(output, ModelRunnerOutput)
         return output
 
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        return self.model_runner.take_draft_token_ids()
+
     def profile(self, is_start: bool = True):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
@@ -511,7 +515,7 @@ class Worker(WorkerBase):
             assert self.model_runner.eplb_state is not None
             new_physical_experts = \
                 self.model_runner.eplb_state.physical_to_logical_map.shape[1]
-            parallel_config.num_redundant_experts = (
+            parallel_config.eplb_config.num_redundant_experts = (
                 new_physical_experts -
                 self.model_runner.eplb_state.logical_replica_count.shape[1])
             global_expert_load = None
@@ -527,7 +531,7 @@ class Worker(WorkerBase):
             assert self.model_runner.eplb_state is not None
             global_expert_load = self.model_runner.eplb_state.rearrange(
                 self.model_runner.model, execute_shuffle=False)
-            parallel_config.num_redundant_experts = (
+            parallel_config.eplb_config.num_redundant_experts = (
                 new_physical_experts - global_expert_load.shape[1])
         prepare_communication_buffer_for_model(self.model_runner.model)
         self.model_runner.model.update_physical_experts_metadata(

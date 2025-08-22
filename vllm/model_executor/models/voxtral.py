@@ -35,7 +35,8 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, MultiModalHashes,
+                                        BaseProcessingInfo,
+                                        MultiModalProcessingInfo,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -287,21 +288,16 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        *,
-        return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargsItems, Optional[MultiModalHashes],
-               bool]:
-        prompt_ids, mm_kwargs, mm_hashes, _ = super(
-        )._cached_apply_hf_processor(
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+        prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            return_mm_hashes=return_mm_hashes,
         )
 
         # NOTE: The tokens are already inserted by the chat template
-        return prompt_ids, mm_kwargs, mm_hashes, True
+        return prompt_ids, mm_info, True
 
     def _get_data_parser(self) -> MultiModalDataParser:
         sampling_rate = self.info.get_hf_processor().sampling_rate
