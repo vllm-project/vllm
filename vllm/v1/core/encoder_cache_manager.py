@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
@@ -188,35 +188,47 @@ def compute_encoder_budget(
         - Space budget for encoder cache size, in unit of number of tokens 
             in the input sequence.
     """
+    if mm_registry.supports_multimodal_inputs(model_config):
+        max_tokens_by_modality = mm_registry \
+            .get_max_tokens_per_item_by_nonzero_modality(model_config)
 
-    if not mm_registry.supports_multimodal_inputs(model_config):
-        return 0, 0
+        return compute_mm_encoder_budget(
+            scheduler_config,
+            max_tokens_by_modality,
+        )
 
-    # TODO: handle encoder-decoder models once we support them.
-    (
-        encoder_compute_budget,
-        encoder_cache_size,
-    ) = _compute_encoder_budget_multimodal(
-        model_config,
-        scheduler_config,
-        mm_registry,
-    )
-
-    return encoder_compute_budget, encoder_cache_size
+    return compute_text_encoder_budget(scheduler_config)
 
 
-def _compute_encoder_budget_multimodal(
-    model_config: "ModelConfig",
+def compute_text_encoder_budget(
+        scheduler_config: "SchedulerConfig") -> tuple[int, int]:
+    """Compute the encoder cache budget based on the model and scheduler 
+    configurations for a text-only model.
+
+    Args:
+        scheduler_config: Scheduler configuration.
+
+    Returns:
+        - Compute budget for encoder execution, in unit of number of tokens 
+            in the input sequence.
+        - Space budget for encoder cache size, in unit of number of tokens 
+            in the input sequence.
+    """
+    # Currently text-only encoder-decoder models are not supported
+    return 0, 0
+
+
+def compute_mm_encoder_budget(
     scheduler_config: "SchedulerConfig",
-    mm_registry: MultiModalRegistry,
+    max_tokens_by_modality: Mapping[str, int],
 ) -> tuple[int, int]:
     """Compute the encoder cache budget based on the model and scheduler 
     configurations for a multimodal model.
 
     Args:
-        model_config: Model configuration.
         scheduler_config: Scheduler configuration.
-        mm_registry: Provides information about the token cost.
+        max_tokens_by_modality: The maximum number of tokens for each
+            non-text modality.
 
     Returns:
         - Compute budget for encoder execution, in unit of number of tokens 
@@ -225,18 +237,14 @@ def _compute_encoder_budget_multimodal(
             in the input sequence.
     """
 
-    max_tokens_by_modality_dict = mm_registry \
-        .get_max_tokens_per_item_by_nonzero_modality(model_config)
-
-    if not max_tokens_by_modality_dict:
+    if not max_tokens_by_modality:
         logger.warning(
             "All non-text modalities supported by the model have been "
             "explicitly disabled via limit_mm_per_prompt. Encoder cache will "
             "not be initialized.")
         return 0, 0
 
-    _, max_tokens_per_mm_item = max(max_tokens_by_modality_dict.items(),
-                                    key=lambda item: item[1])
+    max_tokens_per_mm_item = max(max_tokens_by_modality.values())
 
     if (scheduler_config.disable_chunked_mm_input and max_tokens_per_mm_item
             > scheduler_config.max_num_batched_tokens):
