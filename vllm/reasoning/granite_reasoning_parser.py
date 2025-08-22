@@ -83,6 +83,7 @@ class GraniteReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
+        request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
         """Extract the reasoning content / content emitted by granite models;
         If the sequence doesn't match what we expect, i.e., the model generates
