@@ -10,7 +10,9 @@ import pytest
 from tests.entrypoints.openai.tool_parsers.utils import (
     run_tool_extraction, run_tool_extraction_streaming)
 from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from vllm.entrypoints.openai.tool_parsers import ToolParser
+from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
+    tool_parser_manager)
 
 
 def make_tool_call(name, arguments):
@@ -88,7 +90,7 @@ def make_tool_call(name, arguments):
 def test_hunyuan_a13b_tool_parser_extract(model_output, expected_tool_calls,
                                           expected_content):
     mock_tokenizer = MagicMock()
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser(
+    tool_parser: ToolParser = tool_parser_manager.get_extension_class(
         "hunyuan_a13b")(mock_tokenizer)
     content, tool_calls = run_tool_extraction(tool_parser,
                                               model_output,

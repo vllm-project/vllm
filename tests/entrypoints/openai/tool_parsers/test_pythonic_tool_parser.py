@@ -8,7 +8,9 @@ import pytest
 from tests.entrypoints.openai.tool_parsers.utils import (
     run_tool_extraction, run_tool_extraction_streaming)
 from vllm.entrypoints.openai.protocol import FunctionCall
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from vllm.entrypoints.openai.tool_parsers import ToolParser
+from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
+    tool_parser_manager)
 
 # https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#model-response-format-1
 SIMPLE_FUNCTION_OUTPUT = "get_weather(city='San Francisco', metric='celsius')"
@@ -58,8 +60,8 @@ ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
 @pytest.mark.parametrize("streaming", [True, False])
 def test_no_tool_call(streaming: bool):
     mock_tokenizer = MagicMock()
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser("pythonic")(
-        mock_tokenizer)
+    tool_parser: ToolParser = tool_parser_manager.get_extension_class(
+        "pythonic")(mock_tokenizer)
     model_output = "How can I help you today?"
 
     content, tool_calls = run_tool_extraction(tool_parser,

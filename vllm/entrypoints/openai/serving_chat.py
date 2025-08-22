@@ -119,7 +119,8 @@ class OpenAIServingChat(OpenAIServing):
                         "Llama3.2 models may struggle to emit valid pythonic"
                         " tool calls")
                 assert tool_parser is not None
-                self.tool_parser = tool_parser_manager.create(name=tool_parser)
+                self.tool_parser = tool_parser_manager.get_extension_class(
+                    name=tool_parser)
             except Exception as e:
                 raise TypeError("Error: --enable-auto-tool-choice requires "
                                 f"tool_parser:'{tool_parser}' which has not "
