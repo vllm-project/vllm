@@ -2482,7 +2482,7 @@ class PlaceholderModule(_PlaceholderBase):
     A placeholder object to use when a module does not exist.
 
     This enables more informative errors when trying to access attributes
-    of a module that does not exists.
+    of a module that does not exist.
     """
 
     def __init__(self, name: str) -> None:
@@ -3109,7 +3109,7 @@ class LazyLoader(types.ModuleType):
     """
     LazyLoader module borrowed from Tensorflow
     https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py
-    with a addition of "module caching".
+    with an addition of "module caching".
 
     Lazily import a module, mainly to avoid pulling in large dependencies.
     Modules such as `xgrammar` might do additional side effects, so we
