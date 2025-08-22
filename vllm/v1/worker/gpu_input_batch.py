@@ -287,6 +287,8 @@ class InputBatch:
             req_index = self.num_reqs
 
         req_id = request.req_id
+        if req_id in self.req_id_to_index:
+            req_index = self.req_id_to_index[req_id]
         if req_index == len(self._req_ids):
             self._req_ids.append(req_id)
             self.req_output_token_ids.append(request.output_token_ids)
