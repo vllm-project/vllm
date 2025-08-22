@@ -55,10 +55,10 @@ def calculate_diff(batch_size, seq_len, hidden_dim):
     dtype = torch.bfloat16
     x = torch.randn(batch_size, seq_len, hidden_dim, dtype=dtype, device="cuda")
     weight = torch.ones(3, dtype=dtype, device="cuda")
-    bais = torch.ones(1, dtype=dtype, device="cuda")
+    bias = torch.ones(1, dtype=dtype, device="cuda")
 
-    output_naive = polynorm_naive(x, weight, bais)
-    output_vllm = polynorm_vllm(x, weight, bais)
+    output_naive = polynorm_naive(x, weight, bias)
+    output_vllm = polynorm_vllm(x, weight, bias)
 
     if torch.allclose(output_naive, output_vllm, atol=1e-2, rtol=1e-2):
         print("✅ All implementations match")
