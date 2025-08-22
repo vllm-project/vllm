@@ -221,7 +221,7 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
     processor = factories.build_processor(ctx, cache=None)
 
     with initialize_dummy_model(model_cls, model_config) as model:
-        for _, _, mm_kwargs in create_batched_mm_kwargs(
+        for modality, _, mm_kwargs in create_batched_mm_kwargs(
                 model_config, processor):
             for method_name in inputs_parse_methods:
-                getattr(model, method_name)(**mm_kwargs)
+                getattr(model, method_name)(modality=modality, **mm_kwargs)
