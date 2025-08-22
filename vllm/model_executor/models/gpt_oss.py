@@ -29,6 +29,7 @@ from vllm.utils import cdiv
 
 from .utils import (AutoWeightsLoader, WeightsMapper, extract_layer_index,
                     maybe_prefix)
+from .interfaces import SupportsEagle3
 
 
 class OAIAttention(nn.Module):
@@ -210,6 +211,8 @@ class GptOssModel(nn.Module):
             self.config.vocab_size,
             self.config.hidden_size,
         )
+        # For modeling_speculative, different name expected
+        self.embed_tokens = self.embedding
         self.layers = torch.nn.ModuleList([
             TransformerBlock(
                 self.config,
@@ -218,13 +221,22 @@ class GptOssModel(nn.Module):
             ) for layer_idx in range(self.config.num_hidden_layers)
         ])
         self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
+        # Layers at which to emit auxiliary hidden states (for EAGLE3)
+        self.aux_hidden_state_layers: tuple[int] = tuple()
 
     def forward(self, input_ids: torch.Tensor,
-                positions: torch.Tensor) -> torch.Tensor:
+                positions: torch.Tensor):
         x = self.embedding(input_ids)
-        for layer in self.layers:
+        aux_hidden_states: list[torch.Tensor] = []
+        for idx, layer in enumerate(self.layers):
+            # Collect auxiliary hidden states before running the selected layer,
+            # following the convention used in other models (e.g., LLaMA/Qwen).
+            if idx in self.aux_hidden_state_layers:
+                aux_hidden_states.append(x)
             x = layer(x, positions)
         x = self.norm(x)
+        if len(self.aux_hidden_state_layers) > 0:
+            return x, aux_hidden_states
         return x
 
     def _load_weights_mxfp4(
@@ -619,6 +631,13 @@ class GptOssForCausalLM(nn.Module):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (1, num_layers // 2-1, num_layers - 4)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:

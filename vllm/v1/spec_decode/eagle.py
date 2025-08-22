@@ -21,6 +21,9 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.flashinfer import FlashInferMetadata
+from vllm.v1.attention.backends.rocm_aiter_fa import (
+    AiterFlashAttentionMetadata)
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
@@ -119,7 +122,7 @@ class EagleProposer:
             self.allowed_attn_types = tuple(rocm_types)
         else:
             self.allowed_attn_types = (FlashAttentionMetadata,
-                                       TreeAttentionMetadata)
+                                       TreeAttentionMetadata, FlashInferMetadata)
 
         # Parse the speculative token tree.
         spec_token_tree = self.speculative_config.speculative_token_tree
@@ -159,6 +162,8 @@ class EagleProposer:
         sampling_metadata: SamplingMetadata,
         mm_embeds: Optional[list[torch.Tensor]] = None,
     ) -> torch.Tensor:
+        # Ensure locals are always initialized to avoid UnboundLocalError
+        inputs_embeds = None
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
@@ -168,6 +173,12 @@ class EagleProposer:
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
+            try:
+                logger.info(
+                    "[EAGLE3 dbg] combined hidden_states shape=%s",  # noqa: G004
+                    tuple(target_hidden_states.shape))
+            except Exception:
+                pass
 
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
@@ -182,6 +193,7 @@ class EagleProposer:
         attn_metadata = self.runner.attn_groups[0][0].metadata_builder\
             .build_for_drafting(common_attn_metadata=common_attn_metadata,
                                 draft_index=0)
+
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -224,6 +236,12 @@ class EagleProposer:
                 last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
+        try:
+            logger.info(
+                "[EAGLE3 dbg] first draft pass: last_token_indices[0:4]=%s, logits=%s",  # noqa: G004
+                last_token_indices[:4].tolist(), tuple(logits.shape))
+        except Exception:
+            pass
         positions = target_positions[last_token_indices]
         hidden_states = hidden_states[last_token_indices]
 
@@ -262,6 +280,39 @@ class EagleProposer:
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
+
+        # After the first draft forward, switch FlashInfer to decode-only (len=1)
+        if isinstance(attn_metadata, FlashInferMetadata):
+            qsl_gpu = self.arange[:batch_size + 1]
+            qsl_cpu = qsl_gpu.cpu().to(torch.int32)
+            seq_lens_gpu = attn_metadata.seq_lens[:batch_size]
+            seq_lens_cpu = seq_lens_gpu.detach().cpu().to(torch.int32)
+            block_table_tensor = getattr(attn_metadata, 'block_table_tensor',
+                                         None)
+            if block_table_tensor is None:
+                block_table_tensor = getattr(attn_metadata, 'block_table')
+
+            new_common = CommonAttentionMetadata(
+                query_start_loc=qsl_gpu,
+                query_start_loc_cpu=qsl_cpu,
+                seq_lens=seq_lens_gpu,
+                seq_lens_cpu=seq_lens_cpu,
+                num_computed_tokens_cpu=torch.zeros(batch_size,
+                                                    dtype=torch.int32),
+                num_reqs=batch_size,
+                num_actual_tokens=batch_size,
+                max_query_len=1,
+                block_table_tensor=block_table_tensor[:batch_size],
+                slot_mapping=attn_metadata.slot_mapping,
+                causal=True,
+            )
+
+            builder = self.runner.attn_groups[0][0].metadata_builder
+            attn_metadata = builder.build_for_drafting(
+                common_attn_metadata=new_common, draft_index=0)
+
+            for layer_name in self.attn_layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
         for _ in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
@@ -308,6 +359,7 @@ class EagleProposer:
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
+
             if self.is_multimodal_model:
                 inputs_embeds = self.model.get_input_embeddings(input_ids)
                 self.inputs_embeds[:batch_size] = inputs_embeds
@@ -330,6 +382,12 @@ class EagleProposer:
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
+            try:
+                logger.info(
+                    "[EAGLE3 dbg] k-loop step logits=%s",  # noqa: G004
+                    tuple(logits.shape))
+            except Exception:
+                pass
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
 

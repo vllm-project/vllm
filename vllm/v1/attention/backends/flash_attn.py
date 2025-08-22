@@ -452,7 +452,6 @@ class FlashAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
                 " for FlashAttentionImpl")
-
         if attn_metadata is None:
             # Profiling run.
             return output
@@ -634,7 +633,6 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
         )
-
         return output
 
 

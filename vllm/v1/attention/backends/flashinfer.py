@@ -132,7 +132,7 @@ class FlashInferMetadata:
     max_q_len: int
     max_seq_len: int
     seq_lens: torch.Tensor
-    block_table_tensor: torch.Tensor
+    block_table: torch.Tensor
     prefill_use_trtllm: bool
     decode_use_trtllm: bool
 
@@ -401,7 +401,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             max_q_len=max_q_len,
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
-            block_table_tensor=block_table_tensor,
+            block_table=block_table_tensor,
             prefill_use_trtllm=prefill_use_trtllm,
             decode_use_trtllm=decode_use_trtllm,
             num_decodes=num_decodes,
@@ -771,7 +771,7 @@ class FlashInferImpl(AttentionImpl):
                 # prefill_query may be non-contiguous
                 prefill_query = prefill_query.contiguous()
                 workspace_buffer = prefill_wrapper._float_workspace_buffer
-                block_tables_prefill = attn_metadata.block_table_tensor[
+                block_tables_prefill = attn_metadata.block_table[
                     num_decode_tokens:]
                 seq_lens_prefill = attn_metadata.seq_lens[num_decode_tokens:]
 
@@ -835,7 +835,7 @@ class FlashInferImpl(AttentionImpl):
                 decode_query = decode_query.contiguous()
                 workspace_buffer = decode_wrapper._float_workspace_buffer
                 block_tables_decode = attn_metadata.\
-                        block_table_tensor[:num_decode_tokens]
+                        block_table[:num_decode_tokens]
                 seq_lens_decode = attn_metadata.seq_lens[:num_decode_tokens]
 
                 # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND

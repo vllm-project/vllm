@@ -1311,7 +1311,6 @@ class EngineArgs:
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_log_stats=self.disable_log_stats,
         )
-
         # make sure num_lookahead_slots is set appropriately depending on
         # whether speculative decoding is enabled
         num_lookahead_slots = self.num_lookahead_slots

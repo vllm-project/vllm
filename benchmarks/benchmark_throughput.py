@@ -12,6 +12,7 @@ import warnings
 from typing import Any, Optional, Union
 
 import torch
+import torch.cuda.profiler
 import uvloop
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
@@ -87,6 +88,7 @@ def run_vllm(
 
     use_beam_search = False
 
+    torch.cuda.profiler.start()
     outputs = None
     if not use_beam_search:
         start = time.perf_counter()
@@ -94,6 +96,8 @@ def run_vllm(
             prompts, sampling_params, lora_request=lora_requests, use_tqdm=True
         )
         end = time.perf_counter()
+        torch.cuda.profiler.stop()
+
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
         prompts = [request.prompt for request in requests]
@@ -111,6 +115,7 @@ def run_vllm(
             ),
         )
         end = time.perf_counter()
+        torch.cuda.profiler.stop()
     return end - start, outputs
 
 
