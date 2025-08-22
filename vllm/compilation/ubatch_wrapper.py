@@ -53,6 +53,8 @@ class UBatchWrapper:
         self.comm_stream = torch.cuda.Stream()
         self.device = device
 
+        self.cudagraphs = {}
+
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
     def __getattr__(self, key: str):
@@ -240,6 +242,7 @@ class UBatchWrapper:
             return self.runnable(*args, **kwargs)
 
         attn_metadata = forward_context.attn_metadata
+        num_tokens = (ubatch_slices[0].token_slice.stop - ubatch_slices[0].token_slice.start) * 2
         input_ids = kwargs['input_ids']
         positions = kwargs['positions']
         intermediate_tensors = kwargs['intermediate_tensors']
@@ -252,16 +255,45 @@ class UBatchWrapper:
         assert dp_metadata is not None
         num_tokens_across_dp = dp_metadata._num_tokens_across_dp
 
-        ubatch_metadata = self._make_ubatch_metadata(
-                ubatch_slices=ubatch_slices,
-                attn_metadata=attn_metadata,
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                compute_stream=compute_stream,
-                num_tokens_across_dp=num_tokens_across_dp,
-                batch_descriptor=batch_descriptor,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE)
+        # Check the cudagraph_runtime_mode
+        cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
+        print(f"CUDAGRAPH RUNTIME MODE {cudagraph_runtime_mode}")
+        # return self._run_ubatches(ubatch_metadata, self.runnable) 
 
-        return self._run_ubatches(ubatch_metadata, self.runnable) 
+
+        if num_tokens not in self.cudagraphs \
+            and cudagraph_runtime_mode is CUDAGraphMode.FULL:
+            logger.debug(f"CAPTURING {num_tokens}")
+            ubatch_metadata = self._make_ubatch_metadata(
+                    ubatch_slices=ubatch_slices,
+                    attn_metadata=attn_metadata,
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    compute_stream=compute_stream,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    batch_descriptor=batch_descriptor,
+                    cudagraph_runtime_mode=CUDAGraphMode.NONE)
+
+            return self._capture_ubatches(ubatch_metadata, self.model)
+        elif num_tokens in self.cudagraphs \
+            and cudagraph_runtime_mode is CUDAGraphMode.FULL:
+            cudagraph_metadata = self.cudagraphs[num_tokens]
+            logger.debug(f"UBATCH REPLAY {num_tokens}")
+            cudagraph_metadata.cudagraph.replay()
+            return cudagraph_metadata.outputs
+        else:
+            logger.debug(f"RUNNING NORMALLY {num_tokens}")
+            ubatch_metadata = self._make_ubatch_metadata(
+                    ubatch_slices=ubatch_slices,
+                    attn_metadata=attn_metadata,
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    compute_stream=compute_stream,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    batch_descriptor=batch_descriptor,
+                    cudagraph_runtime_mode=CUDAGraphMode.NONE)
+            return self._run_ubatches(ubatch_metadata, self.model)

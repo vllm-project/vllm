@@ -3007,20 +3007,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     f"Cudagraph runtime mode mismatch at dummy_run. "
                     f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}.")
 
-            outputs = self._run_model(
-                attn_metadata,
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                model_kwargs=model_kwargs,
-                num_scheduled_tokens=num_tokens,
-                scheduler_output=None,
-                ubatch_slices=ubatch_slices,
-                is_dummy_run=True,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
-                batch_descriptor=batch_descriptor)
+            if ubatch_slices is not None:
+                num_tokens = num_tokens // 2
+            with self.maybe_randomize_inputs(input_ids), set_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_tokens,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    batch_descriptor=batch_descriptor,
+                    ubatch_slices=ubatch_slices):
+                outputs = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
