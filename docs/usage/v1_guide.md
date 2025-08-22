@@ -163,7 +163,7 @@ Support for logprobs with post-sampling adjustments is in progress and will be a
 
 ##### Prompt Logprobs with Prefix Caching
 
-Logprobs are not cached. For a request requiring logprobs, the engine will ignore the prefix cache and recompute the prefill of full prompt to generate the logprobs.
+Logprobs are not cached. For a request requiring prompt logprobs, the engine will ignore the prefix cache and recompute the prefill of full prompt to generate the logprobs.
 
 #### Deprecated Features
 
