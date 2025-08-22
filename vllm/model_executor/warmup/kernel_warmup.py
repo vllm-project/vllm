@@ -38,13 +38,14 @@ def kernel_warmup(worker: "Worker"):
         flashinfer_autotune(worker.model_runner)
 
     # FlashInfer attention warmup
-    # Check if the model runner has any flashinfer attention groups
+    # Only warmup if the model has FlashInfer attention groups
     if any(group.backend.get_name() == "FLASHINFER_VLLM_V1"
            for groups in worker.model_runner.attn_groups for group in groups):
         from vllm.config.compilation import CUDAGraphMode
         logger.info("Warming up FlashInfer attention")
         with torch.inference_mode():
             # Warmup with mixed batch containing both prefill and decode tokens
+            # This is to warm up both prefill and decode attention kernels
             worker.model_runner._dummy_run(
                 num_tokens=16,
                 skip_eplb=True,
