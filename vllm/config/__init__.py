@@ -1103,7 +1103,6 @@ class ModelConfig:
         if quant_cfg is None:
             # compressed-tensors uses a "compression_config" key
             quant_cfg = getattr(self.hf_config, "compression_config", None)
-
         else:
             # Set quant_method for ModelOpt models.
             producer_name = quant_cfg.get("producer", {}).get("name")
@@ -1117,7 +1116,8 @@ class ModelConfig:
                 elif quant_algo is not None:
                     raise ValueError(
                         f"Unknown ModelOpt quant algo: {quant_algo}")
-
+                else:
+                    return None
         return quant_cfg
 
     def _verify_quantization(self) -> None:
@@ -2076,7 +2076,6 @@ class SpeculativeConfig:
         return hf_config
 
     def __post_init__(self):
-
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
         # will be used to set the draft model, eagle head, or additional weight
@@ -2392,7 +2391,7 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        eagle3_target_supported = ["llama", "qwen"]
+        eagle3_target_supported = ["llama", "qwen","gpt_oss" ]
         if self.method == "eagle3" and self.target_model_config and not any(
                 supported_model in
                 self.target_model_config.hf_text_config.model_type
