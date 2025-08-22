@@ -22,7 +22,7 @@ image_url = "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/
 def test_loading_missing_plugin():
     vllm_config = VllmConfig()
     with pytest.raises(ValueError):
-        get_io_processor(vllm_config, "plugin")
+        get_io_processor(vllm_config, "wrong_plugin")
 
 
 def test_loading_engine_with_wrong_plugin():
@@ -33,7 +33,7 @@ def test_loading_engine_with_wrong_plugin():
         model="christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM",
         enforce_eager=True,
         skip_tokenizer_init=True,
-        io_processor_plugin="plugin")
+        io_processor_plugin="wrong_plugin")
 
     with pytest.raises(ValueError):
         AsyncLLM.from_engine_args(engine_args)
@@ -71,7 +71,7 @@ def test_prithvi_mae_plugin_offline(model_name: str):
         hasattr(output, attr)
         for attr in ["type", "format", "data", "request_id"])
 
-    # verify the output image in base64 is of the corerct length
+    # verify the output image in base64 is of the correct length
     assert len(output.data) == 218752
 
 
@@ -129,5 +129,5 @@ async def test_prithvi_mae_plugin_online(
         plugin_data.get(attr)
         for attr in ["type", "format", "data", "request_id"])
 
-    # verify the output image in base64 is of the corerct length
+    # verify the output image in base64 is of the correct length
     assert len(plugin_data["data"]) == 218752
