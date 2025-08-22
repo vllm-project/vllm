@@ -241,6 +241,7 @@ def test_find_token_matches(
     # Should not be used since there is nothing to convert to token IDs
     mock_tokenizer = cast(AnyTokenizer, object())
 
+    # Test single target per prompt update
     prompt_updates = [
         update_type(key, target, []).bind(mock_tokenizer)
         for key, target in target_by_key.items()
@@ -260,6 +261,7 @@ def test_find_token_matches(
         for key in expected_by_key
     } == expected_by_key
 
+    # Test multiple targets per prompt update
     prompt_updates_all = [
         update_type("all", tuple(target_by_key.values()), []) \
             .bind(mock_tokenizer)
@@ -403,6 +405,7 @@ def test_find_text_matches(
     # Should not be used since there is nothing to convert to text
     mock_tokenizer = cast(AnyTokenizer, object())
 
+    # Test single target per prompt update
     prompt_updates = [
         update_type(key, target, []).bind(mock_tokenizer)
         for key, target in target_by_key.items()
@@ -422,6 +425,7 @@ def test_find_text_matches(
         for key in expected_by_key
     } == expected_by_key
 
+    # Test multiple targets per prompt update
     prompt_updates_all = [
         update_type("all", tuple(target_by_key.values()), []) \
             .bind(mock_tokenizer)
