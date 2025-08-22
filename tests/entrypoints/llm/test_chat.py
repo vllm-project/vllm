@@ -18,10 +18,9 @@ def text_llm():
               enforce_eager=True,
               seed=0)
 
-    with llm.deprecate_legacy_api():
-        yield weakref.proxy(llm)
+    yield weakref.proxy(llm)
 
-        del llm
+    del llm
 
     cleanup_dist_env_and_memory()
 
@@ -88,10 +87,9 @@ def vision_llm():
         seed=0,
     )
 
-    with llm.deprecate_legacy_api():
-        yield weakref.proxy(llm)
+    yield weakref.proxy(llm)
 
-        del llm
+    del llm
 
     cleanup_dist_env_and_memory()
 
@@ -158,10 +156,9 @@ def thinking_llm():
         seed=0,
     )
 
-    with llm.deprecate_legacy_api():
-        yield weakref.proxy(llm)
+    yield weakref.proxy(llm)
 
-        del llm
+    del llm
 
     cleanup_dist_env_and_memory()
 
