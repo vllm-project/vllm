@@ -197,7 +197,6 @@ class GLMBlock(nn.Module):
                                            cache_config,
                                            quant_config,
                                            prefix=f"{prefix}.self_attention")
-        self.hidden_dropout = config.hidden_dropout
 
         # Layernorm on the attention output
         self.post_attention_layernorm = layer_norm_func(

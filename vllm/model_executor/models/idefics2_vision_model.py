@@ -129,7 +129,6 @@ class Idefics2VisionAttention(nn.Module):
                 f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim} and `num_heads`:"  # noqa: E501
                 f" {self.num_heads}).")
         self.scale = self.head_dim**-0.5
-        self.dropout = config.attention_dropout
         self.qkv_proj = QKVParallelLinear(
             self.embed_dim,
             self.head_dim,
