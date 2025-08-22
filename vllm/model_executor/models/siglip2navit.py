@@ -14,6 +14,7 @@ from transformers import Siglip2VisionConfig
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.config import QuantizationConfig
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, QKVParallelLinear,
@@ -229,6 +230,9 @@ class Siglip2Attention(nn.Module):
             prefix=f"{prefix}.out_proj",
         )
 
+        self.tp_size = (1 if use_data_parallel else
+                        get_tensor_model_parallel_world_size())
+        self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
         self.use_rope = config.use_rope
 
         # Detect attention implementation.
@@ -256,9 +260,12 @@ class Siglip2Attention(nn.Module):
         qkv_states, _ = self.qkv_proj(hidden_states)
         queries, keys, values = qkv_states.chunk(3, dim=-1)
 
-        queries = queries.view(seq_length, self.num_heads, self.head_dim)
-        keys = keys.view(seq_length, self.num_heads, self.head_dim)
-        values = values.view(seq_length, self.num_heads, self.head_dim)
+        queries = queries.view(seq_length, self.num_heads_per_partition,
+                               self.head_dim)
+        keys = keys.view(seq_length, self.num_heads_per_partition,
+                         self.head_dim)
+        values = values.view(seq_length, self.num_heads_per_partition,
+                             self.head_dim)
 
         if self.use_rope:
             cos, sin = position_embeddings
@@ -300,7 +307,8 @@ class Siglip2Attention(nn.Module):
                                                           v_i,
                                                           dropout_p=0.0)
                 # (1, num_heads, seq_len, head_dim) -> (seq_len, embed_dim)
-                output_i = output_i.transpose(1, 2).reshape(-1, self.embed_dim)
+                output_i = output_i.transpose(1, 2).reshape(
+                    end_idx - start_idx, -1)
                 outputs.append(output_i)
 
             attn_output = torch.cat(outputs, dim=0)
@@ -336,9 +344,9 @@ class Siglip2MLP(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.fc1(hidden_states)
+        hidden_states, _ = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
-        hidden_states = self.fc2(hidden_states)
+        hidden_states, _ = self.fc2(hidden_states)
         return hidden_states
 
 
