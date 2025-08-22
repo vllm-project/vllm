@@ -143,7 +143,7 @@ def test_hunyuan_a13b_tool_parser_extract(model_output, expected_tool_calls,
 def test_hunyuan_a13b_tool_parser_streaming(model_deltas, expected_tool_calls):
     mock_tokenizer = MagicMock()
 
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser(
+    tool_parser: ToolParser = tool_parser_manager.get_extension_class(
         "hunyuan_a13b")(mock_tokenizer)
     reconstructor = run_tool_extraction_streaming(
         tool_parser, model_deltas, assert_one_tool_per_delta=False)

@@ -9,6 +9,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
+import vllm.distributed.kv_transfer.kv_connector.factory  # noqa: F401
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,

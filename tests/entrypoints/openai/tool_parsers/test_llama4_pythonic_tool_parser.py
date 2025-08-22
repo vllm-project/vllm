@@ -163,7 +163,7 @@ TEST_CASES = [
 def test_tool_call(streaming: bool, model_output: str,
                    expected_tool_calls: list[FunctionCall]):
     mock_tokenizer = MagicMock()
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser(
+    tool_parser: ToolParser = tool_parser_manager.get_extension_class(
         "llama4_pythonic")(mock_tokenizer)
 
     content, tool_calls = run_tool_extraction(tool_parser,
@@ -178,7 +178,7 @@ def test_tool_call(streaming: bool, model_output: str,
 
 def test_streaming_tool_call_with_large_steps():
     mock_tokenizer = MagicMock()
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser(
+    tool_parser: ToolParser = tool_parser_manager.get_extension_class(
         "llama4_pythonic")(mock_tokenizer)
     model_output_deltas = [
         "<|python_start|>[get_weather(city='LA', metric='C'), "
@@ -200,7 +200,7 @@ def test_streaming_tool_call_with_large_steps():
 def test_regex_timeout_handling(streaming: bool):
     """test regex timeout is handled gracefully"""
     mock_tokenizer = MagicMock()
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser(
+    tool_parser: ToolParser = tool_parser_manager.get_extension_class(
         "llama4_pythonic")(mock_tokenizer)
 
     fake_problematic_input = "hello world[A(A=" + "\t)A(A=,\t" * 2

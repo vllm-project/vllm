@@ -3,10 +3,10 @@
 from typing import TYPE_CHECKING, Optional
 
 from vllm import envs
-from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
+from vllm.distributed.kv_transfer.kv_connector.base import (
+    KVConnectorBaseType, kv_connector_manager)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
-                                                          KVConnectorRole,
-                                                          kv_connector_manager)
+                                                          KVConnectorRole)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -68,6 +68,8 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
                     "KV connector name must be set in KVTransferConfig")
 
             _KV_CONNECTOR_AGENT = kv_connector_manager.create(
-                name=name, role=KVConnectorRole.WORKER)
+                name=name,
+                vllm_config=vllm_config,
+                role=KVConnectorRole.WORKER)
         else:
             raise ValueError("V0 is no longer supported")
