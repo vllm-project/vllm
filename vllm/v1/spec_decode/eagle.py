@@ -194,6 +194,88 @@ class EagleProposer:
             .build_for_drafting(common_attn_metadata=common_attn_metadata,
                                 draft_index=0)
 
+        # For FlashInfer first pass, reorder to decode-first contiguous layout
+        # so that prefill slice matches num_prefill_tokens.
+        if isinstance(attn_metadata, FlashInferMetadata):
+            qsl_cpu = common_attn_metadata.query_start_loc_cpu
+            query_lens_cpu = qsl_cpu[1:] - qsl_cpu[:-1]
+            decode_req_idxs = torch.nonzero(query_lens_cpu <= 1,
+                                            as_tuple=False).view(-1)
+            prefill_req_idxs = torch.nonzero(query_lens_cpu > 1,
+                                             as_tuple=False).view(-1)
+            if decode_req_idxs.numel() > 0 and prefill_req_idxs.numel() > 0:
+                req_order = torch.cat([decode_req_idxs, prefill_req_idxs], 0)
+
+                # Build token permutation by concatenating per-request spans
+                spans_start = qsl_cpu[:-1]
+                spans_end = qsl_cpu[1:]
+                token_indices = []
+                for r in req_order.tolist():
+                    start = int(spans_start[r].item())
+                    end = int(spans_end[r].item())
+                    if end > start:
+                        token_indices.append(
+                            torch.arange(start, end, dtype=torch.int64))
+                if token_indices:
+                    token_perm_cpu = torch.cat(token_indices, dim=0)
+                else:
+                    token_perm_cpu = torch.arange(0,
+                                                  common_attn_metadata.
+                                                  num_actual_tokens,
+                                                  dtype=torch.int64)
+
+                # Build reordered CommonAttentionMetadata
+                reordered_query_lens = query_lens_cpu[req_order]
+                new_qsl_cpu = torch.zeros_like(qsl_cpu)
+                new_qsl_cpu[1:] = torch.cumsum(reordered_query_lens,
+                                               dim=0, dtype=qsl_cpu.dtype)
+                new_max_q_len = int(reordered_query_lens.max().item())
+
+                new_common = CommonAttentionMetadata(
+                    query_start_loc=new_qsl_cpu.to(
+                        device=common_attn_metadata.query_start_loc.device,
+                        non_blocking=True),
+                    query_start_loc_cpu=new_qsl_cpu,
+                    seq_lens=common_attn_metadata.seq_lens[req_order].to(
+                        device=common_attn_metadata.seq_lens.device,
+                        non_blocking=True),
+                    seq_lens_cpu=common_attn_metadata.seq_lens_cpu[req_order],
+                    num_computed_tokens_cpu=common_attn_metadata.
+                    num_computed_tokens_cpu[req_order],
+                    num_reqs=common_attn_metadata.num_reqs,
+                    num_actual_tokens=common_attn_metadata.num_actual_tokens,
+                    max_query_len=new_max_q_len,
+                    block_table_tensor=common_attn_metadata.
+                    block_table_tensor[req_order],
+                    slot_mapping=common_attn_metadata.slot_mapping[
+                        token_perm_cpu.to(
+                            device=common_attn_metadata.slot_mapping.device)],
+                    causal=True,
+                )
+
+                # Rebuild FlashInfer metadata on reordered batch
+                builder = self.runner.attn_groups[0][0].metadata_builder
+                attn_metadata = builder.build_for_drafting(
+                    common_attn_metadata=new_common, draft_index=0)
+
+                # Apply new order to inputs
+                token_perm = token_perm_cpu.to(device=target_positions.device,
+                                               dtype=torch.int64)
+                target_positions = target_positions[token_perm]
+                target_hidden_states = target_hidden_states[token_perm]
+
+                # Rebuild input_ids for new order: start from existing shifted
+                # view, then set last tokens per reordered request
+                permuted_input_ids = self.input_ids[:num_tokens][token_perm]
+                last_token_indices = (new_common.query_start_loc[1:].to(
+                    device=target_positions.device,
+                    dtype=torch.int64) - 1)
+                next_token_ids_reordered = next_token_ids[req_order.to(
+                    device=next_token_ids.device)]
+                permuted_input_ids[last_token_indices] = (
+                    next_token_ids_reordered)
+                self.input_ids[:num_tokens] = permuted_input_ids
+
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
