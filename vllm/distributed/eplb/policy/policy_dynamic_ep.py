@@ -12,7 +12,7 @@ class DynamicTable:
     placement_table = None
 
 
-class DynamicEplb(EplbPolicy):
+class SwiftBalancer(EplbPolicy):
 
     def __init__(self, config: DynamicConfig):
         super().__init__(config)
@@ -684,4 +684,5 @@ class DynamicEplb(EplbPolicy):
                                                                                                   layer_num, expert_num)
 
         return physical_to_logical_map, logical_to_physical_map, logical_replica_count
+
 
