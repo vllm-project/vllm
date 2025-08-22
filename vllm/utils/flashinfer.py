@@ -132,6 +132,11 @@ def has_nvidia_artifactory() -> bool:
     This checks connectivity to the kernel inference library artifactory
     which is required for downloading certain cubin kernels like TRTLLM FHMA.
     """
+    # Since FLASHINFER_CUBIN_DIR defines the pre-downloaded cubins path, when
+    # it's true, we could assume the cubins are available.
+    if envs.VLLM_HAS_FLASHINFER_CUBIN:
+        return True
+
     try:
         # Use a short timeout to avoid blocking for too long
         response = requests.get(FLASHINFER_CUBINS_REPOSITORY, timeout=5)
