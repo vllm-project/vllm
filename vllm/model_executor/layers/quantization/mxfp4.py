@@ -43,8 +43,9 @@ def _should_use_flashinfer_mxfp4_bf16():
             or current_platform.is_device_capability(90) and has_flashinfer()
             and not envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8")):
         logger.info_once(
-            "Enabling FlashInfer MXFP4 BF16 backend by default for Blackwell and Hopper. "
-            "For faster performance, consider setting "
+            "Enabling FlashInfer MXFP4 BF16 backend by "
+            "default for Blackwell and Hopper. "
+            "For faster performance on Blackwell, consider setting "
             "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1, "
             "though this may impact accuracy.")
         return True
@@ -392,12 +393,24 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                                       requires_grad=False)
         elif _should_use_flashinfer_mxfp4_bf16(
         ) and current_platform.is_device_capability(90):
-            assert layer.w13_weight.dtype == torch.uint8, f"layer.w13_weight.dtype: {layer.w13_weight.dtype}, expected: {torch.uint8}"
-            assert layer.w2_weight.dtype == torch.uint8, f"layer.w2_weight.dtype: {layer.w2_weight.dtype}, expected: {torch.uint8}"
-            assert layer.w13_weight_scale.dtype == torch.uint8, f"layer.w13_weight_scale.dtype: {layer.w13_weight_scale.dtype}, expected: {torch.uint8}"
-            assert layer.w2_weight_scale.dtype == torch.uint8, f"layer.w2_weight_scale.dtype: {layer.w2_weight_scale.dtype}, expected: {torch.uint8}"
-            assert layer.w13_bias.dtype == torch.bfloat16, f"layer.w13_bias.dtype: {layer.w13_bias.dtype}, expected: {torch.bfloat16}"
-            assert layer.w2_bias.dtype == torch.bfloat16, f"layer.w2_bias.dtype: {layer.w2_bias.dtype}, expected: {torch.bfloat16}"
+            assert layer.w13_weight.dtype == torch.uint8, (
+                f"layer.w13_weight.dtype: {layer.w13_weight.dtype}, "
+                f"expected: {torch.uint8}")
+            assert layer.w2_weight.dtype == torch.uint8, (
+                f"layer.w2_weight.dtype: {layer.w2_weight.dtype}, "
+                f"expected: {torch.uint8}")
+            assert layer.w13_weight_scale.dtype == torch.uint8, (
+                f"layer.w13_weight_scale.dtype: {layer.w13_weight_scale.dtype}, "  # noqa: E501
+                f"expected: {torch.uint8}")
+            assert layer.w2_weight_scale.dtype == torch.uint8, (
+                f"layer.w2_weight_scale.dtype: {layer.w2_weight_scale.dtype}, "  # noqa: E501
+                f"expected: {torch.uint8}")
+            assert layer.w13_bias.dtype == torch.bfloat16, (
+                f"layer.w13_bias.dtype: {layer.w13_bias.dtype}, "
+                f"expected: {torch.bfloat16}")
+            assert layer.w2_bias.dtype == torch.bfloat16, (
+                f"layer.w2_bias.dtype: {layer.w2_bias.dtype}, "
+                f"expected: {torch.bfloat16}")
 
             layer.gemm1_alpha = Parameter(torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32).cuda(),
@@ -435,7 +448,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     and layer.w2_bias.shape[0] == self.num_experts
                     and layer.w2_bias.shape[1] == self.hidden_size)
 
-            # De-interleave weights, scales, and biases for gate and up projections
+            # De-interleave weights, scales, and biases
             w13_weight_data = layer.w13_weight.data
             gate_w, up_w = w13_weight_data[:, ::2, :], w13_weight_data[:,
                                                                        1::2, :]
