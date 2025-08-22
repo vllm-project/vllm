@@ -521,6 +521,11 @@ class _BoundPromptContent:
     is_embed: Optional[Callable[["_BoundPromptSequence"], torch.Tensor]]
 
 
+class PromptTargetMatch(NamedTuple):
+    start_idx: int
+    end_idx: int
+
+
 @dataclass(frozen=True)
 class ResolvedPromptUpdate:
     """
@@ -549,7 +554,7 @@ class ResolvedPromptUpdate:
         tokenizer: AnyTokenizer,
         *,
         start_idx: int = 0,
-    ) -> Generator["PromptTargetMatch"]:
+    ) -> Generator[PromptTargetMatch]:
         """Yield each instance of `self.target` found in `prompt`."""
         target = self.target
 
@@ -571,7 +576,7 @@ class ResolvedPromptUpdate:
         tokenizer: AnyTokenizer,
         *,
         start_idx: int = 0,
-    ) -> Generator["PromptTargetMatch"]:
+    ) -> Generator[PromptTargetMatch]:
         """Yield each instance of `self.target` found in `prompt`."""
         target = self.target
 
@@ -592,7 +597,7 @@ class ResolvedPromptUpdate:
         tokenizer: AnyTokenizer,
         *,
         start_idx: int = 0,
-    ) -> Generator["PromptTargetMatch"]:
+    ) -> Generator[PromptTargetMatch]:
         """Yield each instance of `self.target` found in `prompt`."""
         if isinstance(prompt, str):
             return self.iter_text_matches(prompt,
@@ -661,11 +666,6 @@ def replace_token_matches(
     out_seqs.append(token_ids[prev_end_idx:])
 
     return flatten_2d_lists(out_seqs)
-
-
-class PromptTargetMatch(NamedTuple):
-    start_idx: int
-    end_idx: int
 
 
 @dataclass
@@ -751,13 +751,6 @@ def _apply_matches(
     mm_prompt_updates: "MultiModalPromptUpdates",
     tokenizer: AnyTokenizer,
 ) -> tuple[list[_S], "MultiModalPromptUpdatesApplyResult"]:
-    """
-    Match and apply `mm_prompt_updates` to `prompt`.
-
-    Matches are exclusive even when multiple modalities share
-    the same placeholder tokens. In that case, the modality that
-    appears earlier in `mm_prompt_updates` takes priority.
-    """
     prompt_len = len(prompt)
 
     out_seqs = list[Union[str, list[int]]]()
