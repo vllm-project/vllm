@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
+from importlib.util import find_spec
+from typing import Any, Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup
@@ -21,10 +22,10 @@ def is_rocm_aiter_custom_allreduce_enabled() -> bool:
     return current_platform.is_rocm() \
         and on_gfx9() \
         and envs.VLLM_ROCM_USE_AITER \
-        and envs.VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE
+        and find_spec("aiter.dist.custom_all_reduce") is not None \
 
 
-def dispatch_custom_allreduce():
+def dispatch_custom_allreduce() -> Any:
     """Dispatch the custom allreduce implementation based on the platform."""
     if is_rocm_aiter_custom_allreduce_enabled():
         from aiter.dist.custom_all_reduce import CustomAllreduce
