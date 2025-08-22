@@ -566,16 +566,22 @@ class CompilationConfig:
             else:
                 self.splitting_ops = self._attention_ops
         elif len(self.splitting_ops) == 0:
-            logger.warning_once("Using piecewise compilation with empty "
-                                "splitting_ops.")
-            if self.cudagraph_mode.has_piecewise_cudagraphs():
+            logger.info_once("Using piecewise compilation with empty "
+                             "splitting_ops.")
+            if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
                 logger.warning_once(
-                    "When compilation level is piecewise with empty "
-                    "splitting_ops, cudagraph_mode containing PIECEWISE will "
-                    "be treated as FULL cudagraph_mode. Please ensure you are "
-                    "using attention backends that support cudagraph or set "
-                    "cudagraph_mode to NONE explicitly if encountering "
-                    "any problems.")
+                    "Piecewise compilation with empty splitting_ops do not" \
+                    "contains piecewise cudagraph. Setting cudagraph_"
+                    "mode to NONE. Hint: If you are using attention backends "
+                    "that support cudagraph, consider manually setting "
+                    "cudagraph_mode to FULL or FULL_DECODE_ONLY to enable "
+                    "full cudagraphs.")
+                self.cudagraph_mode = CUDAGraphMode.NONE
+            elif self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+                logger.warning_once(
+                    "Piecewise compilation with empty splitting_ops do not "
+                    "contains piecewise cudagraph. Setting cudagraph_mode "
+                    "to FULL.")
                 self.cudagraph_mode = CUDAGraphMode.FULL
             self.splitting_ops = []
         else:  # len(self.splitting_ops) > 0:

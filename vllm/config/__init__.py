@@ -3624,23 +3624,22 @@ class VllmConfig:
                            "to True to enable.")
         current_platform.check_and_update_config(self)
 
-        # final check of cudagraph mode after platform-specific update
+        # Do this after all the updates to compilation_config.level
+        if envs.VLLM_USE_V1 and \
+            self.compilation_config.level == CompilationLevel.PIECEWISE:
+            self.compilation_config.set_splitting_ops_for_v1()
+
+        # final check of cudagraph mode after all possible updates
         if envs.VLLM_USE_V1 and current_platform.is_cuda_alike():
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs()\
                 and self.model_config is not None and \
-                not self.model_config.disable_cascade_attn:
-                warn_msg = ("Cascade attention is not supported with full "
-                            "cudagraphs currently. ")
-                if self.compilation_config.cudagraph_mode.\
-                    has_piecewise_cudagraphs():
-                    logger.warning_once(
-                        warn_msg + "It will dispatched to "
-                        "piecewise cudagraphs if a batch runs into cascade "
-                        "attentions")
-                else:
-                    logger.warning_once(
-                        warn_msg + "It will fallback to eager execution if a "
-                        "batch runs into cascade attentions")
+                not self.model_config.disable_cascade_attn and\
+                not self.compilation_config.cudagraph_mode.\
+                has_piecewise_cudagraphs():
+                logger.warning_once(
+                    "No piecewise cudagraph for executing cascade attention."
+                    " Will fall back to eager execution if a batch runs "
+                    "into cascade attentions")
 
             if self.compilation_config.cudagraph_mode\
                 .requires_piecewise_compilation():
@@ -3652,11 +3651,6 @@ class VllmConfig:
 
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
-
-        # Do this after all the updates to compilation_config.level
-        if envs.VLLM_USE_V1 and \
-            self.compilation_config.level == CompilationLevel.PIECEWISE:
-            self.compilation_config.set_splitting_ops_for_v1()
 
         if (envs.VLLM_USE_V1
                 and not self.scheduler_config.disable_hybrid_kv_cache_manager):
