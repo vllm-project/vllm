@@ -251,6 +251,46 @@ A variety of EAGLE draft models are available on the Hugging Face hub:
 | Qwen2-7B-Instruct                                                    | yuhuili/EAGLE-Qwen2-7B-Instruct          | 0.26B              |
 | Qwen2-72B-Instruct                                                   | yuhuili/EAGLE-Qwen2-72B-Instruct         | 1.05B              |
 
+## Speculating using user-provided predicted outputs
+
+Akin to the [OpenAI API](https://platform.openai.com/docs/guides/predicted-outputs),
+vLLM has started to support a user-provided speculation in the form of predicted outputs.
+
+??? code
+
+    ```python
+    from vllm import LLM, SamplingParams
+
+    prompts = [
+        "The future of AI is",
+    ]
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, predicted_outputs=" easy to learn and powerful")
+
+    llm = LLM(
+        model="meta-llama/Meta-Llama-3-8B-Instruct",
+        tensor_parallel_size=4,
+        speculative_config={
+            "num_speculative_tokens": 2,
+            "method": "predicted",
+        },
+    )
+
+    outputs = llm.generate(prompts, sampling_params)
+
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+    ```
+
+Important to note:
+
+1. The `"num_speculative_tokens"` parameter dictates the chunk-rate of the predicted outputs;
+   increasing this value can have negative performance impacts if the predicted outputs are infrequently correct.
+
+2. The predicted outputs are greedily digested, so chaining together a known and in-order (but seperated) sequence of tokens is ideal.
+
 ## Lossless guarantees of Speculative Decoding
 
 In vLLM, speculative decoding aims to enhance inference efficiency while maintaining accuracy. This section addresses the lossless guarantees of

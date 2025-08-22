@@ -404,6 +404,12 @@ class Processor:
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(
                     self.tokenizer.get_lora_tokenizer(lora_request))
+                if isinstance(params.predicted_outputs, str):
+                    params.predicted_outputs = self.tokenizer.encode(
+                        params.predicted_outputs,
+                        add_special_tokens=
+                        False  # Usually don't want special tokens
+                    )
         else:
             pooling_params = params.clone()
 

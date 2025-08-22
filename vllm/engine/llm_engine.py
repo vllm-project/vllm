@@ -674,6 +674,13 @@ class LLMEngine:
             raise ValueError(
                 "Logits processors are not supported in multi-step decoding")
 
+        if isinstance(params, SamplingParams) and isinstance(
+                params.predicted_outputs, str) and self.tokenizer is not None:
+            params.predicted_outputs = self.tokenizer.encode(
+                params.predicted_outputs,
+                add_special_tokens=False  # Usually don't want special tokens
+            )
+
         if arrival_time is None:
             arrival_time = time.time()
 

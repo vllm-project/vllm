@@ -163,6 +163,9 @@ class InputBatch:
 
         # IDs of requests which do not support spec decoding
         self.spec_decode_unsupported_reqs: set[str] = set()
+        self.predicted_outputs: list[list[int]] = [[]
+                                                   for _ in range(max_num_reqs)
+                                                   ]
 
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty((max_num_reqs, ),
@@ -320,6 +323,10 @@ class InputBatch:
             if (self.is_spec_decode
                     and is_spec_decode_unsupported(sampling_params)):
                 self.spec_decode_unsupported_reqs.add(req_id)
+            if self.is_spec_decode and sampling_params.predicted_outputs:
+                self.predicted_outputs[
+                    req_index] = sampling_params.predicted_outputs
+
             if sampling_params.sampling_type == SamplingType.GREEDY:
                 # Avoid later division by zero.
                 self.temperature_cpu[req_index] = -1.0
@@ -697,6 +704,7 @@ class InputBatch:
             all_random=self.all_random,
             top_p=None if self.no_top_p else self.top_p[:num_reqs],
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
+            predicted_outputs=self.predicted_outputs[:num_reqs],
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,

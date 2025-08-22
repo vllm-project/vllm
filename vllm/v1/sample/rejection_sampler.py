@@ -82,7 +82,8 @@ class RejectionSampler(nn.Module):
             output_token_ids (torch.Tensor):
                 A tensor containing the final output token IDs.
         '''
-        assert metadata.max_spec_len <= MAX_SPEC_LEN
+        assert metadata.max_spec_len <= MAX_SPEC_LEN, \
+            f"Spec len {metadata.max_spec_len} > max spec len {MAX_SPEC_LEN}."
         # [num_tokens, vocab_size]
         # NOTE(woosuk): `target_logits` can be updated in place inside the
         # `compute_probs` function.

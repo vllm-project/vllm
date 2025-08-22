@@ -1920,7 +1920,7 @@ class DeviceConfig:
             self.device = torch.device(self.device_type)
 
 
-SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
+SpeculativeMethod = Literal["predicted", "ngram", "eagle", "eagle3", "medusa",
                             "mlp_speculator", "draft_model", "deepseek_mtp",
                             "ernie_mtp"]
 
@@ -2089,6 +2089,8 @@ class SpeculativeConfig:
                 self.model = self.target_model_config.model
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
+            elif self.method in ("predicted", "[predicted]"):
+                self.model = "predicted"
             else:
                 raise ValueError("num_speculative_tokens was provided without "
                                  "speculative model.")
@@ -2130,6 +2132,10 @@ class SpeculativeConfig:
             # TODO: current we still need extract vocab_size from target model
             # config, in future, we may try refactor it out, and set
             # draft related config as None here.
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
+        elif self.method in ("predicted", "[predicted]"):
+            self.method = "predicted"
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
         else:
@@ -2410,7 +2416,8 @@ class SpeculativeConfig:
 
     def __repr__(self) -> str:
         method = self.method
-        model = None if method == "ngram" else self.draft_model_config.model
+        model = None if method in ["ngram", "predicted"
+                                   ] else self.draft_model_config.model
         num_spec_tokens = self.num_speculative_tokens
         return f"SpeculativeConfig({method=}, {model=}, {num_spec_tokens=})"
 

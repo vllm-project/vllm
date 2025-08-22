@@ -79,6 +79,7 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.predicted_proposer import PredictedProposer
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
@@ -237,6 +238,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config and get_pp_group().is_last_rank:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "predicted":
+                self.drafter = PredictedProposer(
+                    self.vllm_config)  # type: ignore
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device,
                                              self)  # type: ignore
@@ -2035,6 +2039,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.propose_ngram_draft_token_ids(
                 sampled_token_ids)
+        elif self.speculative_config.method == "predicted":
+            assert isinstance(self.drafter, PredictedProposer)
+            draft_token_ids = self.drafter.propose(
+                sampled_token_ids, sampling_metadata.predicted_outputs)
         elif self.speculative_config.method == "medusa":
             assert isinstance(self.drafter, MedusaProposer)
             if sample_hidden_states.shape[0] == len(sampled_token_ids):
@@ -2673,6 +2681,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             all_random=False,
             top_p=dummy_tensors(0.9),
             top_k=dummy_tensors(logits.size(1) - 1),
+            predicted_outputs=[[]],
             generators={},
             max_num_logprobs=None,
             no_penalties=True,
