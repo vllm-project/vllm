@@ -1,6 +1,4 @@
 /*
- * Adapted from
- * https://github.com/NVIDIA/TensorRT-LLM/blob/v0.21.0/cpp/tensorrt_llm/kernels/noAuxTcKernels.cu
  * Copyright (c) 2025, The vLLM team.
  * SPDX-FileCopyrightText: Copyright (c) 1993-2024 NVIDIA CORPORATION &
  * AFFILIATES. All rights reserved. SPDX-License-Identifier: Apache-2.0
@@ -630,6 +628,8 @@ __global__ void group_idx_and_topk_idx_kernel(
 #endif
 }
 
+// Adapted from
+// https://github.com/NVIDIA/TensorRT-LLM/blob/v0.21.0/cpp/tensorrt_llm/kernels/noAuxTcKernels.cu#L673
 template <typename T, typename IdxT>
 void invokeNoAuxTc(T* scores, T* group_scores, T* topk_values,
                    IdxT* topk_indices, T* scores_with_bias,
