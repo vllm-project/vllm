@@ -290,7 +290,7 @@ class EngineArgs:
     # is intended for expert use only. The API may change without
     # notice.
     distributed_executor_backend: Optional[Union[
-        DistributedExecutorBackend,
+        str, DistributedExecutorBackend,
         Type[ExecutorBase]]] = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
