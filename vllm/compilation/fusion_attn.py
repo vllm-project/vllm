@@ -112,8 +112,8 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
                                       layer_name=self.layer_name,
                                       output_scale=None,
                                       output_block_scale=None)
-            attn_out_view = RESHAPE_OP(at1[1],
-                                       [-1, self.num_heads * self.head_size])
+            attn_out_view = RESHAPE_OP(
+                at1[1], [q.shape[0], self.num_heads * self.head_size])
             at2 = auto_functionalized(self.QUANT_OP,
                                       result=output_quant,
                                       input=attn_out_view,
@@ -185,8 +185,8 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
                                       layer_name=self.layer_name,
                                       output_scale=None,
                                       output_block_scale=None)
-            attn_out_view = RESHAPE_OP(at1[1],
-                                       [-1, self.num_heads * self.head_size])
+            attn_out_view = RESHAPE_OP(
+                at1[1], [q.shape[0], self.num_heads * self.head_size])
             at2 = auto_functionalized(self.QUANT_OP,
                                       output=output_quant,
                                       input=attn_out_view,
