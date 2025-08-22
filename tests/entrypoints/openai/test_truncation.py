@@ -76,7 +76,7 @@ async def test_bigger_truncation_size(client: openai.AsyncOpenAI):
     with pytest.raises(openai.BadRequestError) as err:
         await client.post(path="embeddings", cast_to=object, body={**kwargs})
 
-    assert err.value.http_status == 400
+    assert err.value.status_code == 400
     error_details = err.value.body["error"]
     assert error_details["type"] == "BadRequestError"
     expected_message = (f"truncate_prompt_tokens value "
