@@ -37,7 +37,8 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.processing import EncDecMultiModalProcessor
-from vllm.outputs import RequestOutput, RequestOutputFactory
+from vllm.outputs import (PoolingRequestOutput, RequestOutput,
+                          RequestOutputFactory)
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
                            Sequence, SequenceGroup, SequenceGroupBase,
@@ -58,7 +59,7 @@ from vllm.worker.model_runner_base import InputProcessingError
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
-_O = TypeVar("_O", bound=RequestOutput)
+_O = TypeVar("_O", RequestOutput, PoolingRequestOutput)
 _R = TypeVar("_R", default=Any)
 
 
