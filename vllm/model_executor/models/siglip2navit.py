@@ -304,7 +304,7 @@ class Siglip2Attention(nn.Module):
                 outputs.append(output_i)
 
             attn_output = torch.cat(outputs, dim=0)
-        attn_output = self.out_proj(attn_output)
+        attn_output, _ = self.out_proj(attn_output)
         return attn_output
 
 
@@ -511,7 +511,7 @@ class Siglip2Encoder(nn.Module):
         self,
         inputs_embeds: torch.Tensor,
         grid_thws: torch.Tensor,
-    ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, ...]]]:
+    ) -> torch.Tensor:
         r"""
         Args:
             inputs_embeds (`torch.FloatTensor` of shape
