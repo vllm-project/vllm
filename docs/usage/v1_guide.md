@@ -166,7 +166,7 @@ Processed means the values after applying all processors, including temperature 
 
 ##### Prompt Logprobs with Prefix Caching
 
-Currently prompt logprobs are only supported when prefix caching is turned off via `--no-enable-prefix-caching`. In a future release, prompt logprobs will be compatible with prefix caching, but a recomputation will be triggered to recover the full prompt logprobs even upon a prefix cache hit. See details in [RFC #13414](gh-issue:13414).
+Logprobs are not cached. For a request requiring prompt logprobs, the engine will ignore the prefix cache and recompute the prefill of full prompt to generate the logprobs.
 
 #### Deprecated Features
 
