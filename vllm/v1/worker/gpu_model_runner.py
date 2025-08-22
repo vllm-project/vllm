@@ -1639,9 +1639,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                             all_gather_group=get_tp_group())
             sample_hidden_states = None
             logits = None
-        elif not self.input_batch.pooling_params:
-            sample_hidden_states = hidden_states[logits_indices]
-            logits = self.model.compute_logits(sample_hidden_states, None)
+        else:
+            if self.input_batch.pooling_params:
+                sample_hidden_states = None
+                logits = None
+            else:
+                sample_hidden_states = hidden_states[logits_indices]
+                logits = self.model.compute_logits(sample_hidden_states, None)
 
         if broadcast_pp_output:
             model_output_broadcast_data = {
