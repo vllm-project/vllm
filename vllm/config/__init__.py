@@ -546,20 +546,45 @@ class ModelConfig:
         items: list[tuple[str, Any]] = _build_items(self,
                                                     MODEL_EXCLUDE_FROM_HASH)
 
-        # Hash hf_config by content; if JSON export is unavailable, include a
-        # minimal stable subset.
+        # Hash hf_config by content using the most complete stable export.
         hf = getattr(self, "hf_config", None)
         if hf is not None:
-            try:
-                items.append(("hf_config_json", hf.to_json_string()))
-            except (AttributeError, TypeError, ValueError):
-                items.append((
-                    "hf_config_fallback",
-                    {
-                        "model_type": getattr(hf, "model_type", None),
-                        "architectures": getattr(hf, "architectures", None),
-                    },
-                ))
+            # Prefer to_dict for breadth and sorted JSON for stability.
+            to_dict = getattr(hf, "to_dict", None)
+
+            if callable(to_dict):
+                from contextlib import suppress
+                with suppress(Exception):
+                    hf_dict = to_dict()
+                    items.append((
+                        "hf_config_dict_json",
+                        json.dumps(hf_dict, sort_keys=True, default=str),
+                    ))
+
+            # Fallback to to_json_string if available.
+            if not any(k == "hf_config_dict_json" for k, _ in items):
+                from contextlib import suppress
+                with suppress(Exception):
+                    items.append((
+                        "hf_config_json",
+                        hf.to_json_string(),
+                    ))
+
+            # Last fallback: include a broader stable subset of common fields.
+            if not any(k in ("hf_config_dict_json", "hf_config_json")
+                       for k, _ in items):
+                fallback_keys = [
+                    "model_type",
+                    "architectures",
+                    "num_hidden_layers",
+                    "hidden_size",
+                    "num_attention_heads",
+                    "rope_scaling",
+                    "sliding_window",
+                    "model_max_length",
+                ]
+                fallback = {k: getattr(hf, k, None) for k in fallback_keys}
+                items.append(("hf_config_fallback", fallback))
 
         return _hash_sha256(items)
 
@@ -2495,23 +2520,14 @@ class LoRAConfig:
         Opt-out: default-include declared fields; keep a tiny exclude set;
         normalize types; keep MD5 for compatibility.
         """
-        from vllm.config.utils import canon_value as _canon
+        from vllm.config.utils import build_opt_out_items as _build_items
 
         EXCLUDE_FROM_HASH = {
             # Derived/runtime counters or toggles not affecting compiled shapes
             # (none at present, placeholder to keep policy explicit)
         }
 
-        field_names = list(self.__dataclass_fields__.keys())
-        items = []
-        for k in sorted(field_names):
-            if k in EXCLUDE_FROM_HASH:
-                continue
-            v = getattr(self, k, None)
-            try:
-                items.append((k, _canon(v)))
-            except TypeError:
-                continue
+        items = _build_items(self, EXCLUDE_FROM_HASH)
 
         hash_str = hashlib.md5(repr(tuple(items)).encode(),
                                usedforsecurity=False).hexdigest()
