@@ -359,37 +359,28 @@ class Hermes2ProToolParser(ToolParser):
             # case -- we now have the first info about arguments available from
             #   autocompleting the JSON
             elif cur_arguments and not prev_arguments:
-                # Extract the content after {"name": ..., "arguments":
-                #   from tool_call_portion as cur_arguments_json.
+                # extract the content after {"name": ..., "arguments":
+                #   directly from tool_call_portion as cur_arguments_json,
+                #   since cur_arguments may differ from the original text
+                #   due to partial JSON parsing
+                #   for example, tool_call_portion =
+                #     {"name": "search", "arguments": {"search_request": {"
+                #   but cur_arguments =
+                #     {"search_request": {}}
                 function_name = current_tool_call.get("name")
                 match = re.search(
                     r'\{"name":\s*"' +
                     re.escape(function_name) + r'"\s*,\s*"arguments":\s*(.*)',
                     tool_call_portion.strip(), re.DOTALL)
-                if match:
-                    cur_arguments_json = match.group(1)
-                else:
-                    logger.error(
-                        "Failed to extract arguments JSON from "
-                        "tool_call_portion: %s", tool_call_portion)
-                    return None
+                cur_arguments_json = match.group(1)
+
                 logger.debug("finding %s in %s", delta_text,
                              cur_arguments_json)
 
                 # get the location where previous args differ from current.
-                if cur_arguments_json[-2] in ('"', "'"):
-                    # last argument is a string,
-                    #   so remove the closing quote and brace.
-                    #   for example, cur_arguments_json = {"unit": "f"}
-                    stripped_cur_arguments_json = cur_arguments_json[:-2]
-                else:
-                    # last argument is not a string,
-                    #   so remove the closing brace only.
-                    #   for example, cur_arguments_json = {"product_id": 7}
-                    stripped_cur_arguments_json = cur_arguments_json[:-1]
-                if (delta_text not in stripped_cur_arguments_json):
+                if (delta_text not in cur_arguments_json):
                     return None
-                args_delta_start_loc = stripped_cur_arguments_json. \
+                args_delta_start_loc = cur_arguments_json. \
                                            rindex(delta_text) + \
                                            len(delta_text)
 
