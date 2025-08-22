@@ -43,17 +43,16 @@ def kernel_warmup(worker: "Worker"):
            for groups in worker.model_runner.attn_groups for group in groups):
         from vllm.config.compilation import CUDAGraphMode
         logger.info("Warming up FlashInfer attention")
-        with torch.inference_mode():
-            # Warmup with mixed batch containing both prefill and decode tokens
-            # This is to warm up both prefill and decode attention kernels
-            worker.model_runner._dummy_run(
-                num_tokens=16,
-                skip_eplb=True,
-                is_profile=True,
-                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
-                force_attention=True,
-                create_mixed_batch=True,
-            )
+        # Warmup with mixed batch containing both prefill and decode tokens
+        # This is to warm up both prefill and decode attention kernels
+        worker.model_runner._dummy_run(
+            num_tokens=16,
+            skip_eplb=True,
+            is_profile=True,
+            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+            force_attention=True,
+            create_mixed_batch=True,
+        )
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
