@@ -7,7 +7,7 @@ from typing import Any, Optional, Union
 
 import regex as re
 
-from vllm.entrypoints.chat_utils import random_tool_call_id
+from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
@@ -394,7 +394,7 @@ class MinimaxToolParser(ToolParser):
             sent_tools.append({
                 "sent_name": False,
                 "sent_arguments": "",
-                "id": random_tool_call_id(),
+                "id": make_tool_call_id(),
             })
 
         while len(tool_ids) < tool_count:
