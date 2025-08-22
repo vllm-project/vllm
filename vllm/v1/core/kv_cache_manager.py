@@ -208,8 +208,6 @@ class KVCacheManager:
         Returns:
             A list of new allocated blocks.
         """
-        if self.break_flag:
-            breakpoint()
 
         if num_new_tokens == 0:
             raise ValueError("num_new_tokens must be greater than 0")
@@ -233,15 +231,23 @@ class KVCacheManager:
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
                                num_new_computed_tokens)
+        logger.info(f"num_computed_tokens: {num_computed_tokens}")
+
         num_tokens_need_slot = min(
             num_computed_tokens + num_new_tokens + num_lookahead_tokens,
             self.max_model_len)
+
+        logger.info(f"num_tokens_need_slot: {num_tokens_need_slot}")
 
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
         )
+
+        logger.info(f"num_blocks_to_allocate: {num_blocks_to_allocate}")
+
+        logger.info("Current free blocks: %d", self.block_pool.get_num_free_blocks())
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
             # Cannot allocate new blocks
@@ -279,7 +285,7 @@ class KVCacheManager:
         return KVCacheBlocks(new_blocks)
 
 
-    def allocate_slots_chunked(
+    def allocate_slots_and_remove_unnecessary_blocks(
         self,
         request: "Request",
         num_new_tokens: int,
@@ -290,10 +296,19 @@ class KVCacheManager:
         chunk_size: int = 1024,
     ) -> Optional["KVCacheBlocks"]:
         """
-        Chunked wrapper around `allocate_slots` that:
-        1) splits `num_new_tokens` into chunks of size `chunk_size`,
-        2) preserves semantics of other args,
-        3) concatenates chunk results via `KVCacheBlocks.__add__`.
+        Original `allocate_slots` has the following behavior:
+         - Remove tokens outside sliding window first
+         - But then allocate `num_new_tokens` without removing the newly-allocated tokens outside sliding window.
+
+        This is an intentional design that works well with  vLLM w/o connector, because `num_new_tokens` will be 
+        smaller than chunked prefill size anyway.
+
+        But for vLLM w/ connector, `num_new_tokens` can be really large,
+        and thus we need an allocation logic that can remove the tokens outside
+        sliding window for new tokens.
+
+        This function achieves this by calling `allocate_slots` chunk-by-chunk, and after each
+        chunk is allocated, we immediately follow-up with a call to remove blocks outside sliding window.
 
         Behavior:
         - `num_lookahead_tokens` is only applied to the last chunk.
@@ -319,20 +334,20 @@ class KVCacheManager:
             raise ValueError("chunk_size must be greater than 0")
 
         tokens_remaining = num_new_tokens
+        tokens_allocating = 0
         is_first_chunk = True
         accumulated: Optional["KVCacheBlocks"] = None
-
-        if num_new_tokens == 60007:
-            self.break_flag = True
+        cached_tokens_in_vllm = request.num_computed_tokens + num_new_computed_tokens
 
         while tokens_remaining > 0:
             this_chunk = min(chunk_size, tokens_remaining)
             tokens_remaining -= this_chunk
+            tokens_allocating += this_chunk
 
             # Apply lookahead only to the final chunk
             this_lookahead = num_lookahead_tokens if tokens_remaining == 0 else 0
 
-            # Apply computed-only once, on the first chunk
+            # Apply computed blocks-only once, on the first chunk
             if is_first_chunk:
                 this_new_computed_tokens = num_new_computed_tokens
                 this_new_computed_blocks = new_computed_blocks
@@ -341,25 +356,31 @@ class KVCacheManager:
                 this_new_computed_tokens = 0
                 this_new_computed_blocks = None
 
+            # The semantics of `allocate_slots` is: to allocate `num_new_tokens`
+            # after current computed tokens (request.num_computed_tokens + num_new_computed_tokens)
+            # Thus, in chunked allocation, if we want to append `this_chunk` many tokens to existing allocation,
+            # we need to allocate `tokens_allocating` many tokens, where `tokens_allocating` is the sum of previous chunks plus the current chunk.
+            # This is because `allocate_slots` will not consider the non-computed tokens as already allocated (even though they actually are)
             chunk_blocks = self.allocate_slots(
                 request=request,
-                num_new_tokens=this_chunk,
+                num_new_tokens=tokens_allocating,
                 num_new_computed_tokens=this_new_computed_tokens,
                 new_computed_blocks=this_new_computed_blocks,
                 num_lookahead_tokens=this_lookahead,
                 delay_cache_blocks=delay_cache_blocks,
             )
 
+            # remove unnecessary blocks by 
+            self.coordinator.remove_skipped_blocks(request.request_id, cached_tokens_in_vllm + tokens_allocating)
+
             if chunk_blocks is None:
-                # Allocation failed mid-way; caller can decide how to handle rollback.
+                # TODO: add a rollback logic to remove the allocated blocks.
                 return None
-
-
 
             accumulated = chunk_blocks if accumulated is None else (accumulated + chunk_blocks)
 
-            print("Chunked len: ", len(accumulated.blocks[0]))
-            print("Accumulated len: ", len(chunk_blocks.blocks[0]))
+            print("Accumulated len: ", len(accumulated.blocks[0]))
+            print("Chunked len: ", len(chunk_blocks.blocks[0]))
 
         return accumulated
 

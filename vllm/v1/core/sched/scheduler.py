@@ -441,57 +441,60 @@ class Scheduler(SchedulerInterface):
                                               == 0 else
                                               self.num_lookahead_tokens)
 
-                # NOTE(Kuntai): the original code of this part is:
-                # ```
-                # new_blocks = self.kv_cache_manager.allocate_slots(
-                #     request,
-                #     num_new_tokens + num_external_computed_tokens,
-                #     num_new_local_computed_tokens,
-                #     new_computed_blocks,
-                #     num_lookahead_tokens=effective_lookahead_tokens,
-                #     delay_cache_blocks=load_kv_async,
-                # )
-                # ```
-                # However, in current implementation of hybrid memory allocator,
-                # `allocate_slots(req, extra_tokens)` has the following properties:
-                # 1. It first truncates tokens in `req` that are outside sliding window
-                # 2. But then it ALWAYS allocate `extra_tokens` for all layers without
-                # any truncating.
-                # As a result, when `num_external_computed_tokens` is too large, 
-                # it will cause allocation failure, even when it is possible to 
-                # allocate these tokens if we evict the tokens outside sliding window.
-                #
-                # To fix this, we create a new function in scheduler called 
-                # `allocate_slots_chunked` instead, which will incrementally allocate 
-                # new blocks instead.
-                new_blocks = self.kv_cache_manager.allocate_slots_chunked(
-                    request,
-                    num_new_tokens + num_external_computed_tokens,
-                    num_new_local_computed_tokens,
-                    new_computed_blocks,
-                    num_lookahead_tokens=effective_lookahead_tokens,
-                    delay_cache_blocks=load_kv_async,
-                    chunk_size=self.max_num_scheduled_tokens,
-                )
-                
-                if new_blocks is None:
-                    breakpoint()
-                    # The request cannot be scheduled.
-                    break
+                # if self.connector is not None and num_external_computed_tokens > 0:
+                if False:
+
+                    # Since external computed tokens can be very large,
+                    # We want to only allocate tokens inside the sliding window.
+                    # This is done by `allocate_slots_and_remove_unnecessary_blocks`.
+                    new_blocks = self.kv_cache_manager.allocate_slots_and_remove_unnecessary_blocks(
+                        request,
+                        num_external_computed_tokens,
+                        num_new_local_computed_tokens,
+                        new_computed_blocks,
+                        delay_cache_blocks=load_kv_async,
+                        chunk_size=self.max_num_scheduled_tokens,
+                    )
+                    if new_blocks is None:
+                        # The request cannot be scheduled.
+                        break
+
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens + num_external_computed_tokens,
+                        num_lookahead_tokens=effective_lookahead_tokens,
+                        delay_cache_blocks=load_kv_async,
+                    )
+
+                    if new_blocks is None:
+                        # The request cannot be scheduled.
+                        break
+
+                else:
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens + num_external_computed_tokens,
+                        num_new_local_computed_tokens,
+                        new_computed_blocks,
+                        num_lookahead_tokens=effective_lookahead_tokens,
+                    )
+                    if new_blocks is None:
+                        # The request cannot be scheduled.
+                        break
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
-                    try:
-                        self.connector.update_state_after_alloc(
-                            request,
-                            new_computed_blocks + new_blocks,
-                            num_external_computed_tokens,
-                        )
-                    except Exception as e:
+                    if num_external_computed_tokens > 0:
                         breakpoint()
+                    self.connector.update_state_after_alloc(
+                        request,
+                        new_computed_blocks + new_blocks,
+                        # self.kv_cache_manager.get_blocks(request.request_id),
+                        num_external_computed_tokens,
+                    )
 
                 # Request was already popped from self.waiting
                 # unless it was re-added above due to new_blocks being None.
