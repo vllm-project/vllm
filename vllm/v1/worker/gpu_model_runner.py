@@ -2294,6 +2294,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
         if create_mixed_batch:
+            assert not uniform_decode
             # Create mixed batch:
             # first half decode tokens, second half one prefill
             num_decode_tokens = num_tokens // 2
@@ -2307,6 +2308,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Note: Overriding max_query_len to be the prefill tokens
             max_query_len = num_prefill_tokens
         elif uniform_decode:
+            assert not create_mixed_batch
             num_reqs = cdiv(num_tokens, max_query_len)
             assert num_reqs <= max_num_reqs, \
                 "Do not capture num_reqs > max_num_reqs for uniform batch"
