@@ -20,8 +20,8 @@ def config(cls: ConfigT) -> ConfigT:
 
     If a `ConfigT` is used as a CLI argument itself, the `type` keyword
     argument provided by `get_kwargs` will be
-    `pydantic.TypeAdapter(ConfigT).validate_json(cli_arg)`, which treats the
-    `cli_arg` as a JSON string to be validated by `pydantic`.
+    `pydantic.TypeAdapter(ConfigT).validate_json(cli_arg)` which treats the
+    `cli_arg` as a JSON string which gets validated by `pydantic`.
 
     Config validation is performed by the tools/validate_config.py
     script, which is invoked during the pre-commit checks.
@@ -102,10 +102,11 @@ def get_declared_field_names(cfg) -> list[str]:
 
 
 def build_opt_out_items(cfg, exclude: set[str]) -> list[tuple[str, object]]:
-    """Canonical (key, value) items for opt-out hashing.
+    """Default-include (opt-out) canonical (key, value) pairs for hashing.
 
-    Includes declared fields not in `exclude`. Values are canonicalized.
-    Unsupported values are skipped.
+    - Includes declared fields not in `exclude`.
+    - Canonicalizes values for stable hashing.
+    - Skips values that cannot be canonicalized.
     """
     items: list[tuple[str, object]] = []
     for key in sorted(get_declared_field_names(cfg)):
@@ -125,16 +126,16 @@ def hash_items_sha256(items: list[tuple[str, object]]) -> str:
     return hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
 
 
-def build_opt_out_items_with_overrides(
+def opt_items_override(
     cfg,
     exclude: set[str],
     overrides: dict[str, "callable"],
 ) -> list[tuple[str, object]]:
-    """Canonical (key, value) items with per-field overrides.
+    """Opt-out items with targeted per-field overrides.
 
-    - Default: use canon_value for values.
-    - If a field has an override, call it to produce a stable value.
-    - Skip values that cannot be canonicalized.
+    - Default path uses canon_value.
+    - For keys in `overrides`, call the override to produce a stable value.
+    - Skips values that cannot be canonicalized.
     """
     items: list[tuple[str, object]] = []
     for key in sorted(get_declared_field_names(cfg)):

@@ -523,7 +523,7 @@ class ModelConfig:
         from vllm.config.utils import hash_items_sha256 as _hash_sha256
 
         # Default-include; exclude only fields that don't change the compiled
-        # graph or are unstable. See https://github.com/vllm-project/vllm/pull/23134
+        # graph or are unstable. See PR #23134 for context.
         MODEL_EXCLUDE_FROM_HASH = {
             "tokenizer",
             "hf_config",  # hash content via JSON below

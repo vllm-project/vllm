@@ -367,16 +367,14 @@ class CompilationConfig:
             "static_forward_context",
         }
 
-        from vllm.config.utils import (
-            build_opt_out_items_with_overrides as _build_items_overrides)
-        items = _build_items_overrides(self,
-                                       EXCLUDE_FROM_HASH,
-                                       overrides={
-                                           "pass_config":
-                                           (lambda v:
-                                            (v.uuid()
-                                             if v is not None else None))
-                                       })
+        from vllm.config.utils import build_opt_items_override
+        items = build_opt_items_override(
+            self,
+            EXCLUDE_FROM_HASH,
+            overrides={
+                "pass_config": lambda _: self.pass_config.uuid(),
+            },
+        )
 
         return hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
 

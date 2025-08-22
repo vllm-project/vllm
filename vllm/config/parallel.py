@@ -135,7 +135,11 @@ class ParallelConfig:
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
     ray_workers_use_nsight: bool = False
-    """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
+    """Whether to profile Ray workers with Nsight.
+
+    See Ray docs: https://docs.ray.io/en/latest/ray-observability/
+    user-guides/profiling.html#profiling-nsight-profiler
+    """
 
     ray_runtime_env: Optional[RuntimeEnv] = None
     """Ray runtime environment to pass to distributed workers."""
@@ -273,7 +277,6 @@ class ParallelConfig:
         normalize types; keep SHA-256; explicitly include
         envs.VLLM_ALL2ALL_BACKEND as before.
         """
-        from vllm.config.utils import build_opt_out_items as _build_items
 
         EXCLUDE_FROM_HASH = {
             # Derived/runtime topology, networking, or launch details
@@ -297,6 +300,7 @@ class ParallelConfig:
             "enable_multimodal_encoder_data_parallel",
         }
 
+        from vllm.config.utils import build_opt_out_items as _build_items
         items = _build_items(self, EXCLUDE_FROM_HASH)
 
         # Explicitly include backend affecting env factor as before
