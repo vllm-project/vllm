@@ -200,3 +200,21 @@ sbatch run_prefill_decode_benchmark.sh
 ```
 
 This script auto generates "--batch-size" number of prompts of the context length "--input-length" and generates "--output-length" number of additional tokens. The results are saved in a csv file in the "--data-path". While serving benchmarks are more realistic, it is easier to work and debug offline scripts. The current known issues with the offline script is that it gets stuck for MoE models when using expert parallel. A lot of the new expert parallel and torchrun scripts are experimental in vLLM. Some additional work is needed to debug the offline script. In theory, this script should be easier to use with sbatch and scale to larger number of nodes/GPUs. 
+
+
+## Editable vLLM configuration
+
+When we only need to change the python scripts and want to edit vLLM source code, use the following installation on top of the container.
+
+```bash
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+VLLM_USE_PRECOMPILED=1 uv pip install --editable .
+```
+
+For additional installation for editable vLLM read more here: https://docs.vllm.ai/en/latest/getting_started/installation/gpu.html
+
+---
+Susav Shrestha
+
+NVIDIA Summer 2025
