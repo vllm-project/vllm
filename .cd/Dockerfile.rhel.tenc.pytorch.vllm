@@ -1,7 +1,7 @@
 # Copyright (C) 2025 Habana Labs, Ltd. an Intel Company
 # SPDX-License-Identifier: Apache-2.0
 
-# Parameterize base image components for RHEL 8.6/9.2/9.4/9.6 and TencentOS 3.1
+# Parameterize base image components for RHEL 9.4/9.6 and TencentOS 3.1
 ARG DOCKER_URL=vault.habana.ai/gaudi-docker
 ARG VERSION=1.22.0
 ARG BASE_NAME=rhel8.6
@@ -19,23 +19,17 @@ ENV BASE_NAME=${BASE_NAME}
 
 ENV OMPI_MCA_btl_vader_single_copy_mechanism=none
 
-# Install required packages for RHEL 8.6/9.x and TencentOS 3.1
+# Install required packages for RHEL 9.x and TencentOS 3.1
 RUN if echo "$BASE_NAME" | grep -qi "tencentos"; then \
   yum remove -y mpitests_openmpi perftest openmpi opensm-libs || true && \
   yum update -y --exclude=openmpi --exclude=opensm-libs && \
   yum install -y gettext jq python3-pip git --allowerasing --exclude=openmpi --exclude=opensm-libs && \
   ln -sf /usr/bin/python3 /usr/bin/python ; \
-    elif echo "$BASE_NAME" | grep -q "^rhel8"; then \
-  yum module reset perl -y && \
-  yum module enable perl:5.26 -y && \
+else \
   yum update -y && \
   yum install -y gettext jq python3-pip git --allowerasing && \
   ln -sf /usr/bin/python3 /usr/bin/python ; \
-    else \
-  yum update -y && \
-  yum install -y gettext jq python3-pip git --allowerasing && \
-  ln -sf /usr/bin/python3 /usr/bin/python ; \
-    fi
+fi
 
 WORKDIR /root
 
