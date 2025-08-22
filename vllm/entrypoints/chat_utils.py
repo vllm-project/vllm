@@ -72,6 +72,11 @@ class ChatCompletionContentPartAudioParam(TypedDict, total=False):
 
     type: Required[Literal["audio_url"]]
     """The type of the content part."""
+    uuid: Optional[str]
+    """
+    User-provided UUID of a media. User must guarantee that it is properly
+    generated and unique for different medias.
+    """
 
 
 class ChatCompletionContentPartImageEmbedsParam(TypedDict, total=False):
@@ -83,6 +88,11 @@ class ChatCompletionContentPartImageEmbedsParam(TypedDict, total=False):
     """
     type: Required[Literal["image_embeds"]]
     """The type of the content part."""
+    uuid: Optional[str]
+    """
+    User-provided UUID of a media. User must guarantee that it is properly
+    generated and unique for different medias.
+    """
 
 
 class VideoURL(TypedDict, total=False):
@@ -97,6 +107,11 @@ class ChatCompletionContentPartVideoParam(TypedDict, total=False):
 
     type: Required[Literal["video_url"]]
     """The type of the content part."""
+    uuid: Optional[str]
+    """
+    User-provided UUID of a media. User must guarantee that it is properly
+    generated and unique for different medias.
+    """
 
 
 class PILImage(BaseModel):
@@ -115,7 +130,12 @@ class CustomChatCompletionContentPILImageParam(TypedDict, total=False):
         "image_pil": ImageAsset('cherry_blossom').pil_image
     }
     """
-    image_pil: Required[PILImage]
+    image_pil: Optional[PILImage]
+    uuid: Optional[str]
+    """
+    User-provided UUID of a media. User must guarantee that it is properly
+    generated and unique for different medias.
+    """
 
 
 class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
@@ -128,6 +148,11 @@ class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
     }
     """
     image_url: Required[str]
+    uuid: Optional[str]
+    """
+    User-provided UUID of a media. User must guarantee that it is properly
+    generated and unique for different medias.
+    """
 
 
 class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
@@ -150,6 +175,11 @@ class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
     }
     """
     video_url: Required[str]
+    uuid: Optional[str]
+    """
+    User-provided UUID of a media. User must guarantee that it is properly
+    generated and unique for different medias.
+    """
 
 
 class CustomThinkCompletionContentParam(TypedDict, total=False):
@@ -530,7 +560,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._model_config = model_config
         self._tokenizer = tokenizer
 
-        self._items_by_modality = defaultdict[str, list[_T]](list)
+        self._items_by_modality = defaultdict[str, list[dict[str, Any]]](list)
 
     @property
     def model_config(self) -> ModelConfig:
@@ -554,7 +584,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def mm_processor(self):
         return self.mm_registry.create_processor(self.model_config)
 
-    def add(self, modality: ModalityStr, item: _T) -> Optional[str]:
+    def add(self, modality: ModalityStr, item: _T, uuid: str) -> Optional[str]:
         """
         Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
@@ -564,7 +594,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
         self.mm_processor.validate_num_items(input_modality, num_items)
 
-        self._items_by_modality[modality].append(item)
+        self._items_by_modality[modality].append({"item": item, "uuid": uuid})
 
         return self.model_cls.get_placeholder_str(modality, num_items)
 
@@ -658,28 +688,28 @@ class BaseMultiModalContentParser(ABC):
         return dict(self._placeholder_storage)
 
     @abstractmethod
-    def parse_image(self, image_url: str) -> None:
+    def parse_image(self, image_url: str, uuid: str) -> None:
         raise NotImplementedError
 
     @abstractmethod
     def parse_image_embeds(self,
-                           image_embeds: Union[str, dict[str, str]]) -> None:
+                           image_embeds: Union[str, dict[str, str]], uuid: str) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def parse_image_pil(self, image_pil: Image.Image) -> None:
+    def parse_image_pil(self, image_pil: Image.Image, uuid: str) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def parse_audio(self, audio_url: str) -> None:
+    def parse_audio(self, audio_url: str, uuid: str) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def parse_input_audio(self, input_audio: InputAudio) -> None:
+    def parse_input_audio(self, input_audio: InputAudio, uuid: str) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def parse_video(self, video_url: str) -> None:
+    def parse_video(self, video_url: str, uuid: str) -> None:
         raise NotImplementedError
 
 
@@ -695,48 +725,48 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             allowed_local_media_path=tracker.allowed_local_media_path,
         )
 
-    def parse_image(self, image_url: str) -> None:
+    def parse_image(self, image_url: str, uuid: str) -> None:
         image = self._connector.fetch_image(image_url)
 
-        placeholder = self._tracker.add("image", image)
+        placeholder = self._tracker.add("image", image, uuid)
         self._add_placeholder("image", placeholder)
 
     def parse_image_embeds(self,
-                           image_embeds: Union[str, dict[str, str]]) -> None:
+                           image_embeds: Union[str, dict[str, str]], uuid: str) -> None:
         if isinstance(image_embeds, dict):
             embeds = {
                 k: self._connector.fetch_image_embedding(v)
                 for k, v in image_embeds.items()
             }
-            placeholder = self._tracker.add("image_embeds", embeds)
+            placeholder = self._tracker.add("image_embeds", embeds, uuid)
 
         if isinstance(image_embeds, str):
             embedding = self._connector.fetch_image_embedding(image_embeds)
-            placeholder = self._tracker.add("image_embeds", embedding)
+            placeholder = self._tracker.add("image_embeds", embedding, uuid)
 
         self._add_placeholder("image", placeholder)
 
-    def parse_image_pil(self, image_pil: Image.Image) -> None:
-        placeholder = self._tracker.add("image", image_pil)
+    def parse_image_pil(self, image_pil: Image.Image, uuid: str) -> None:
+        placeholder = self._tracker.add("image", image_pil, uuid)
         self._add_placeholder("image", placeholder)
 
-    def parse_audio(self, audio_url: str) -> None:
+    def parse_audio(self, audio_url: str, uuid: str) -> None:
         audio = self._connector.fetch_audio(audio_url)
 
-        placeholder = self._tracker.add("audio", audio)
+        placeholder = self._tracker.add("audio", audio, uuid)
         self._add_placeholder("audio", placeholder)
 
-    def parse_input_audio(self, input_audio: InputAudio) -> None:
+    def parse_input_audio(self, input_audio: InputAudio, uuid: str) -> None:
         audio_data = input_audio.get("data", "")
         audio_format = input_audio.get("format", "")
         audio_url = f"data:audio/{audio_format};base64,{audio_data}"
 
-        return self.parse_audio(audio_url)
+        return self.parse_audio(audio_url, uuid)
 
-    def parse_video(self, video_url: str) -> None:
+    def parse_video(self, video_url: str, uuid: str) -> None:
         video = self._connector.fetch_video(video_url=video_url)
 
-        placeholder = self._tracker.add("video", video)
+        placeholder = self._tracker.add("video", video, uuid)
         self._add_placeholder("video", placeholder)
 
 
@@ -754,11 +784,11 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     def parse_image(self, image_url: str) -> None:
         image_coro = self._connector.fetch_image_async(image_url)
 
-        placeholder = self._tracker.add("image", image_coro)
+        placeholder = self._tracker.add("image", image_coro, uuid)
         self._add_placeholder("image", placeholder)
 
     def parse_image_embeds(self,
-                           image_embeds: Union[str, dict[str, str]]) -> None:
+                           image_embeds: Union[str, dict[str, str]], uuid: str) -> None:
         future: asyncio.Future[Union[str, dict[str, str]]] = asyncio.Future()
 
         if isinstance(image_embeds, dict):
@@ -773,33 +803,33 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
                 fetch_image_embedding(image_embeds)
             future.set_result(embedding)
 
-        placeholder = self._tracker.add("image_embeds", future)
+        placeholder = self._tracker.add("image_embeds", future, uuid)
         self._add_placeholder("image", placeholder)
 
-    def parse_image_pil(self, image_pil: Image.Image) -> None:
+    def parse_image_pil(self, image_pil: Image.Image, uuid: str) -> None:
         future: asyncio.Future[Image.Image] = asyncio.Future()
         future.set_result(image_pil)
 
-        placeholder = self._tracker.add("image", future)
+        placeholder = self._tracker.add("image", future, uuid)
         self._add_placeholder("image", placeholder)
 
-    def parse_audio(self, audio_url: str) -> None:
+    def parse_audio(self, audio_url: str, uuid: str) -> None:
         audio_coro = self._connector.fetch_audio_async(audio_url)
 
-        placeholder = self._tracker.add("audio", audio_coro)
+        placeholder = self._tracker.add("audio", audio_coro, uuid)
         self._add_placeholder("audio", placeholder)
 
-    def parse_input_audio(self, input_audio: InputAudio) -> None:
+    def parse_input_audio(self, input_audio: InputAudio, uuid: str) -> None:
         audio_data = input_audio.get("data", "")
         audio_format = input_audio.get("format", "")
         audio_url = f"data:audio/{audio_format};base64,{audio_data}"
 
-        return self.parse_audio(audio_url)
+        return self.parse_audio(audio_url, uuid)
 
-    def parse_video(self, video_url: str) -> None:
+    def parse_video(self, video_url: str, uuid: str) -> None:
         video = self._connector.fetch_video_async(video_url=video_url)
 
-        placeholder = self._tracker.add("video", video)
+        placeholder = self._tracker.add("video", video, uuid)
         self._add_placeholder("video", placeholder)
 
 
@@ -1109,30 +1139,37 @@ def _parse_chat_message_content_part(
         else:
             return str_content
 
+    # For media items, if a user has provided one, use it. Otherwise, insert
+    # a placeholder empty uuid. 
+    uuid = str(part.get("uuid", ""))
+    logger.error(f"===abc _parse_chat_message_content_part {type(part.keys())=}")
+    logger.error(f"===abc _parse_chat_message_content_part {part.get("type")=}")
+    logger.error(f"===abc _parse_chat_message_content_part {part.get("uuid")=}")
+
     modality = None
     if part_type == "image_pil":
         image_content = cast(Image.Image, content)
-        mm_parser.parse_image_pil(image_content)
+        mm_parser.parse_image_pil(image_content, uuid)
         modality = "image"
     elif part_type in ("image_url", "input_image"):
         str_content = cast(str, content)
-        mm_parser.parse_image(str_content)
+        mm_parser.parse_image(str_content, uuid)
         modality = "image"
     elif part_type == "image_embeds":
         content = cast(Union[str, dict[str, str]], content)
-        mm_parser.parse_image_embeds(content)
+        mm_parser.parse_image_embeds(content, uuid)
         modality = "image"
     elif part_type == "audio_url":
         str_content = cast(str, content)
-        mm_parser.parse_audio(str_content)
+        mm_parser.parse_audio(str_content, uuid)
         modality = "audio"
     elif part_type == "input_audio":
         dict_content = cast(InputAudio, content)
-        mm_parser.parse_input_audio(dict_content)
+        mm_parser.parse_input_audio(dict_content, uuid)
         modality = "audio"
     elif part_type == "video_url":
         str_content = cast(str, content)
-        mm_parser.parse_video(str_content)
+        mm_parser.parse_video(str_content, uuid)
         modality = "video"
     else:
         raise NotImplementedError(f"Unknown part type: {part_type}")
