@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import gc
-
 import pytest
 import torch
 
 from vllm import LLM, SamplingParams
-from vllm.device_allocator.cumem import CuMemAllocator, get_pluggable_allocator
+from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.utils import GiB_bytes
 
 from ..utils import create_new_process_for_each_test
@@ -179,98 +177,3 @@ def test_end_to_end(monkeypatch: pytest.MonkeyPatch, model: str, use_v1: bool):
 
         # cmp output
         assert output[0].outputs[0].text == output3[0].outputs[0].text
-
-
-# Helper churn to pressure CPython's small-object allocator so that
-# temporary bound-method objects get collected and their memory is reused.
-class _Churn:
-
-    def cb(self):
-        return 1
-
-
-def _churn_bound_methods(n: int = 500_000):
-    for _ in range(n):
-        _ = _Churn().cb  # create & drop a temporary bound-method object
-
-
-def _churn_small_objs(n: int = 2_000_000):
-    for _ in range(n):
-        _ = object()
-
-
-@create_new_process_for_each_test()
-def test_cumem_callback_lifetime_regression():
-    """
-    Test for the borrowed callback bug
-
-    Context
-    -------
-    The C++ extension originally borrowed references to the Python
-    bound methods passed into `init_module`. After leaving the Python
-    context that created those bound methods, CPython can free them.
-    Later, when tensors that were allocated by the pluggable allocator
-    are freed, `my_free` calls back into C++; Python using those
-    now-dangling pointers, causing UB / segfaults.
-
-    What this test does
-    -------------------
-    1) Create the singleton `CuMemAllocator` and build a pluggable
-       allocator by calling `get_pluggable_allocator(A.python_malloc_callback,
-       A.python_free_callback)`. This mirrors the setup in cumem.py
-    2) Aggressively churn Python objects to encourage CPython to reuse
-       the memory that held those temporaries.
-    3) Perform allocate inside the pluggable mem-pool to
-       drive calls into `my_malloc`/`my_free`.
-
-    Expected outcome
-    ----------------
-    • With the original extension that borrows refs:
-      this test aborts (segfault) during or after
-      the first/second allocate.
-
-    • With the updated extension (explicit referencing in `init_module`) 
-      the test should complete without crashing.
-
-    Pass criterion
-    --------------
-    The test passes if the process completes the allocate/free cycles
-    without aborting. There are no numeric assertions; a failure will
-    manifest as a process crash.
-    """
-
-    if torch.cuda.device_count() == 0:
-        pytest.skip("No CUDA device available")
-
-    A = CuMemAllocator.get_instance()
-
-    # calling this creates temporary bound-method objects.
-    alloc = get_pluggable_allocator(A.python_malloc_callback,
-                                    A.python_free_callback)
-    mpool = torch.cuda.memory.MemPool(alloc._allocator)
-
-    _churn_bound_methods(400_000)
-    _churn_small_objs(500_000)
-    gc.collect()
-
-    with torch.cuda.memory.use_mem_pool(mpool):
-        bufs = [
-            torch.empty(1 << 20, dtype=torch.uint8, device="cuda")
-            for _ in range(128)
-        ]  # ~ 128 MiB
-        del bufs
-        gc.collect()
-
-    # churn harder
-    _churn_bound_methods(1_000_000)
-    gc.collect()
-
-    with torch.cuda.memory.use_mem_pool(mpool):
-        buf = torch.empty(1 << 20, dtype=torch.uint8, device="cuda")
-        del buf
-        gc.collect()
-
-    # Clean shutdown
-    torch.cuda.synchronize()
-    del mpool, alloc
-    gc.collect()

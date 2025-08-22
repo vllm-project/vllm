@@ -255,6 +255,10 @@ static PyObject* py_init_module(PyObject* self, PyObject* args) {
     return nullptr;
   }
 
+  // Save the Python callables
+  // This module does not handle GC of these objects, so they must be kept alive
+  // outside of this module.
+  // This module keeps a strong reference to prevent premature GC
   Py_XINCREF(malloc_callback);
   Py_XINCREF(free_callback);
 
