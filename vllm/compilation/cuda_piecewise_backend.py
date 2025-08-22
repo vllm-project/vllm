@@ -46,8 +46,6 @@ class PiecewiseBackend:
         self.vllm_backend = vllm_backend
 
         self.is_first_graph = piecewise_compile_index == 0
-
-        # Last graph in this compilation unit
         self.is_last_graph = (
             piecewise_compile_index == total_piecewise_compiles - 1)
 

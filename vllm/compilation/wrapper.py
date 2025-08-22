@@ -34,7 +34,7 @@ class TorchCompileWrapperWithCustomDispatcher:
     def __init__(self,
                  compiled_callable: Optional[Callable] = None,
                  compilation_level: int = 0,
-                 no_weak_ref_output: bool = True):
+                 no_weak_ref_output: bool = False):
 
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
