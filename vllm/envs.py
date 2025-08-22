@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
-    VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: Optional[int] = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
@@ -465,11 +464,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
     if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ else None,
 
-    # If set, vllm will force flashinfer to use tensor cores;
-    # otherwise will use heuristic based on model architecture.
-    "VLLM_FLASHINFER_FORCE_TENSOR_CORES":
-    lambda: bool(int(os.getenv("VLLM_FLASHINFER_FORCE_TENSOR_CORES", "0"))),
-
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
@@ -673,7 +667,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Note that it must be an absolute path.
     "VLLM_TORCH_PROFILER_DIR":
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
-             .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
+             .path.abspath(os.path.expanduser(os.getenv(
+        "VLLM_TORCH_PROFILER_DIR", ".")))),
 
     # Enable torch profiler to record shapes if set
     # VLLM_TORCH_PROFILER_RECORD_SHAPES=1. If not set, torch profiler will
@@ -1220,7 +1215,6 @@ def compute_hash() -> str:
         "VLLM_USE_AITER_UNIFIED_ATTENTION",
         "VLLM_ATTENTION_BACKEND",
         "VLLM_USE_FLASHINFER_SAMPLER",
-        "VLLM_FLASHINFER_FORCE_TENSOR_CORES",
         "VLLM_DISABLED_KERNELS",
         "VLLM_USE_DEEP_GEMM",
         "VLLM_USE_TRTLLM_FP4_GEMM",
