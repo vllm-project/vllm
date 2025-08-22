@@ -9,12 +9,12 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 import regex as re
-from datasets import load_dataset
 from PIL import Image
 from transformers import DonutProcessor
 
 from vllm import LLM, SamplingParams
 from vllm.inputs import ExplicitEncoderDecoderPrompt, TextPrompt, TokensPrompt
+from vllm.multimodal.utils import fetch_image
 
 
 # Copied from https://github.com/bytedance/Dolphin/utils/utils.py
@@ -233,8 +233,9 @@ if args.image_path:
         raise FileNotFoundError(f"Error: File not found at {args.image_path}")
     image = Image.open(args.image_path).convert("RGB")
 else:
-    dataset = load_dataset("hf-internal-testing/example-documents", split="test")
-    image = dataset[0]["image"]
+    image = fetch_image(
+        "https://huggingface.co/datasets/hf-internal-testing/example-documents/resolve/main/jpeg_images/0.jpg"
+    )
 
 
 prompt = "Parse the reading order of this document. "

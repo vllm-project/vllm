@@ -25,11 +25,12 @@ class ModelRequestData(NamedTuple):
 def run_donut():
     engine_args = EngineArgs(
         model="naver-clova-ix/donut-base-finetuned-docvqa",
-        max_model_len=2048,
         max_num_seqs=2,
         limit_mm_per_prompt={"image": 1},
         dtype="float16",
+        hf_overrides={"architectures": ["DonutForConditionalGeneration"]},
     )
+
     # The input image size for donut-base-finetuned-docvqa is 2560 x 1920,
     # and the patch_size is 4 x 4.
     # Therefore, the initial number of patches is:
@@ -48,10 +49,10 @@ def run_donut():
     prompts = [
         {
             "encoder_prompt": {
-                "prompt": ["$"] * 4799,
+                "prompt": "".join(["$"] * 4799),
                 "multi_modal_data": {
                     "image": fetch_image(
-                        "https://huggingface.co/datasets/hf-internal-testing/example-documents/resolve/main/images/sf-districts.png"
+                        "https://huggingface.co/datasets/hf-internal-testing/example-documents/resolve/main/jpeg_images/0.jpg"
                     )  # noqa: E501
                 },
             },
