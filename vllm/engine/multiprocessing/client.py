@@ -450,7 +450,7 @@ class MQLLMEngineClient(EngineClient):
     def dead_error(self) -> BaseException:
         return ENGINE_DEAD_ERROR(self._errored_with)
 
-    def generate(
+    async def generate(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
@@ -482,7 +482,7 @@ class MQLLMEngineClient(EngineClient):
             self._process_request(prompt, sampling_params, request_id,
                                   lora_request, trace_headers, priority))
 
-    def encode(
+    async def encode(
         self,
         prompt: PromptType,
         pooling_params: PoolingParams,
@@ -490,6 +490,7 @@ class MQLLMEngineClient(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         raise NotImplementedError(
             "Pooling models are not supported in vLLM V0")

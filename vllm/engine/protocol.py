@@ -47,7 +47,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    def generate(
+    async def generate(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
@@ -216,7 +216,7 @@ class EngineClient(ABC):
         yield beam_search_output
 
     @abstractmethod
-    def encode(
+    async def encode(
         self,
         prompt: PromptType,
         pooling_params: PoolingParams,
