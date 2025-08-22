@@ -1313,7 +1313,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def apply_grammar_bitmask(
         self,
         scheduler_output: "SchedulerOutput",
-        bitmask: Optional[GrammarBitmask],
+        bitmask: Optional["GrammarBitmask"],
         logits: torch.Tensor,
     ):
         if bitmask is None:
