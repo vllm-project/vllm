@@ -6,6 +6,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import envs
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
@@ -113,6 +114,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.topk_indices_dtype = None
         self.moe = moe
         self.use_marlin = self._should_use_marlin()
+        self.max_captute_size = get_current_vllm_config(
+        ).compilation_config.max_capture_size
 
         if current_platform.is_device_capability(100) and not has_flashinfer():
             logger.warning_once(
@@ -551,7 +554,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 1 if renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
                 # TODO: use the maximum number in the cudagraph_batch_sizes
-                tune_max_num_tokens=8192,
+                tune_max_num_tokens=self.max_captute_size,
             )[0]
             return trtllm_gen_output
         else:
