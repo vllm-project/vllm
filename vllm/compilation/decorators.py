@@ -86,7 +86,7 @@ def support_torch_compile(
     *,
     dynamic_arg_dims: Optional[dict[str, Union[int, list[int]]]] = None,
     enable_if: Optional[Callable[[VllmConfig], bool]] = None,
-    no_weak_ref_output: bool = True,
+    no_weak_ref_output: bool = False,
 ) -> Union[Callable[[_T], _T], _T]:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -212,7 +212,7 @@ def _support_torch_compile(
     cls: _T,
     dynamic_arg_dims: dict[str, Union[int, list[int]]],
     enable_if: Optional[Callable[[VllmConfig], bool]] = None,
-    no_weak_ref_output: bool = True,
+    no_weak_ref_output: bool = False,
 ) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.

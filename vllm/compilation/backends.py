@@ -430,7 +430,7 @@ class VllmBackend:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        no_weak_ref_output: bool = True,
+        no_weak_ref_output: bool = False,
         prefix: str = "",
     ):
 
