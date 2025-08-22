@@ -403,6 +403,15 @@ class ResponsesRequest(OpenAIBaseModel):
         return data
 
 
+class PredictionRequest(BaseModel):
+    type: Literal["content"] = Field(
+        description=
+        "The type of prediction. Currently only 'content' is supported.")
+    content: str = Field(
+        description=
+        "The predicted content that the model is expected to generate.")
+
+
 class ChatCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/chat/create
@@ -555,6 +564,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "If specified, will override the default whitespace pattern "
             "for guided json decoding."),
     )
+    prediction: Optional[PredictionRequest] = Field(
+        default=None,
+        description=
+        "Predicted outputs can improve model response latency for cases where "
+        "minimal changes are needed to a larger body of text. When provided, "
+        "the model uses this as a hint for what the output should be.")
     priority: int = Field(
         default=0,
         description=(
@@ -697,6 +712,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             whitespace_pattern=self.guided_whitespace_pattern,
             structural_tag=self.structural_tag,
         )
+        predicted_outputs = None
+        if self.prediction is not None:
+            predicted_outputs = self.prediction.content
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -732,6 +750,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words= self.bad_words,
             allowed_token_ids=self.allowed_token_ids,
+            predicted_outputs=predicted_outputs,
             extra_args=extra_args or None,
         )
 

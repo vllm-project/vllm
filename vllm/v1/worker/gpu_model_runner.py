@@ -77,6 +77,7 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.predicted_proposer import PredictedProposer
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
@@ -187,6 +188,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config and get_pp_group().is_last_rank:
             if self.speculative_config.method == "ngram":
                 self.drafter = NgramProposer(self.vllm_config)
+            elif self.speculative_config.method == "predicted":
+                self.drafter = PredictedProposer(
+                    self.vllm_config)  # type: ignore
             elif self.speculative_config.use_eagle():
                 self.drafter = EagleProposer(self.vllm_config, self.device,
                                              self)  # type: ignore
@@ -1706,7 +1710,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
         req_ids = self.input_batch.req_ids
+        predicted_token_ids = []
+
+        def remove_prefix_match(X, Y, K=0):
+            if not X or not Y:
+                return Y
+            for skip in range(min(K + 1, len(Y))):
+                match_len = sum(1 for _ in itertools.takewhile(
+                    lambda pair: pair[0] == pair[1], zip(X, Y[skip:])))
+                if match_len > 0:
+                    return Y[skip + match_len:]
+            return Y
+
         for req_idx, sampled_ids in enumerate(valid_sampled_token_ids):
+            req_id = req_ids[req_idx]
+            req_state = self.requests[req_id]
+            if req_state.sampling_params is not None and \
+                req_state.sampling_params.predicted_outputs is not None:
+                predicted_outputs = req_state.sampling_params.predicted_outputs
+                predicted_outputs = remove_prefix_match(sampled_ids,
+                                                        predicted_outputs,
+                                                        K=1)
+                req_state.sampling_params.predicted_outputs = predicted_outputs
+                assert not isinstance(predicted_outputs, str)
+                predicted_token_ids.append(predicted_outputs)
+            else:
+                predicted_token_ids.append([])
             if not sampled_ids:
                 continue
 
@@ -1721,8 +1750,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                            start_idx:end_idx] = sampled_ids
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
-            req_id = req_ids[req_idx]
-            req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
         if self.speculative_config:
@@ -1730,6 +1757,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self._draft_token_ids = self.propose_draft_token_ids(
                 scheduler_output,
                 valid_sampled_token_ids,
+                predicted_token_ids,
                 sampling_metadata,
                 hidden_states,
                 sample_hidden_states,
@@ -1766,6 +1794,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         sampled_token_ids: list[list[int]],
+        predicted_token_ids: list[list[int]],
         sampling_metadata: SamplingMetadata,
         hidden_states: torch.Tensor,
         sample_hidden_states: torch.Tensor,
@@ -1778,6 +1807,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.propose_ngram_draft_token_ids(
                 sampled_token_ids)
+        elif self.speculative_config.method == "predicted":
+            assert isinstance(self.drafter, PredictedProposer)
+            draft_token_ids = self.drafter.propose(sampled_token_ids,
+                                                   predicted_token_ids)
         elif self.speculative_config.method == "medusa":
             assert isinstance(self.drafter, MedusaProposer)
             if sample_hidden_states.shape[0] == len(sampled_token_ids):
