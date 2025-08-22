@@ -507,42 +507,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
             )
-
             self.requests[req_id] = req_state
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
-                image_grid_thw = []
-                video_grid_thw = []
-                second_per_grid_ts = []
-                audio_feature_lengths = []
-                use_audio_in_video = False
-                for mm_item in req_state.mm_kwargs:
-                    mm_input = mm_item.get_data()
-                    if (t := mm_input.get("image_grid_thw")) is not None:
-                        image_grid_thw.append(t.tolist())
-                    if (t := mm_input.get("video_grid_thw")) is not None:
-                        video_grid_thw.append(t.tolist())
-                    if (t := mm_input.get("second_per_grid_ts")) is not None:
-                        second_per_grid_ts.append(t)
-                    if (t :=
-                            mm_input.get("audio_feature_lengths")) is not None:
-                        audio_feature_lengths.append(t)
-                    if mm_input.get("use_audio_in_video") is True:
-                        use_audio_in_video = True
-
-                hf_config = self.model_config.hf_config
-
-                req_state.mrope_positions, req_state.mrope_position_delta = \
-                    MRotaryEmbedding.get_input_positions_tensor(
-                        req_state.prompt_token_ids,
-                        hf_config=hf_config,
-                        image_grid_thw=image_grid_thw,
-                        video_grid_thw=video_grid_thw,
-                        second_per_grid_ts=second_per_grid_ts,
-                        audio_feature_lengths=audio_feature_lengths,
-                        use_audio_in_video=use_audio_in_video,
-                    )
+                self._init_mrope_positions(req_state)
 
             reqs_to_add.append(req_state)
 
@@ -638,6 +607,36 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self._may_reorder_batch(scheduler_output)
         # Refresh batch metadata with any pending updates.
         self.input_batch.refresh_metadata()
+
+    def _init_mrope_positions(self, req_state: CachedRequestState):
+        image_grid_thw = []
+        video_grid_thw = []
+        second_per_grid_ts = []
+        audio_feature_lengths = []
+        use_audio_in_video = False
+        for mm_item in req_state.mm_kwargs:
+            mm_input = mm_item.get_data()
+            if (t := mm_input.get("image_grid_thw")) is not None:
+                image_grid_thw.append(t.tolist())
+            if (t := mm_input.get("video_grid_thw")) is not None:
+                video_grid_thw.append(t.tolist())
+            if (t := mm_input.get("second_per_grid_ts")) is not None:
+                second_per_grid_ts.append(t)
+            if (t := mm_input.get("audio_feature_lengths")) is not None:
+                audio_feature_lengths.append(t)
+            if mm_input.get("use_audio_in_video") is True:
+                use_audio_in_video = True
+
+        req_state.mrope_positions, req_state.mrope_position_delta = \
+            MRotaryEmbedding.get_input_positions_tensor(
+                req_state.prompt_token_ids,
+                hf_config=self.model_config.hf_config,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
+                audio_feature_lengths=audio_feature_lengths,
+                use_audio_in_video=use_audio_in_video,
+            )
 
     def _extract_mm_kwargs(
         self,
