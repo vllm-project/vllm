@@ -157,8 +157,6 @@ struct BitonicSort<32, ascending, T, idxT, is_stable> {
                         (reverse != is_second);
           }
         } else {
-          // is_better = (*val_arr != other) && is_better_than(*val_arr, other,
-          // (reverse == is_second));
           is_better = (*val_arr != other &&
                        (*val_arr > other) != (reverse != is_second));
         }
@@ -199,8 +197,6 @@ struct BitonicMerge<32, ascending, reverse, T, idxT, is_stable> {
                       (reverse != is_second);  // for max
         }
       } else {
-        // is_better = (val != other) && (is_better_than(val, other, (reverse !=
-        // is_second)));
         is_better =
             (val != other && ((val > other) == (ascending != is_second)));
       }
@@ -628,8 +624,6 @@ __global__ void group_idx_and_topk_idx_kernel(
     }
     // Note: when if_proceed_next_topk==false, choose the first 8 experts as the
     // default result.
-    // @TODO: check if this default strategy is acceptable. Might need to leave
-    // it as nan array.
   }
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
   asm volatile("griddepcontrol.launch_dependents;");
