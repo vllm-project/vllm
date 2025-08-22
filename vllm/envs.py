@@ -158,6 +158,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
+    VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
@@ -1104,6 +1105,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, use the TRTLLM attention backend in flashinfer.
     "VLLM_USE_TRTLLM_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
+
+    # If set, it means we pre-downloaded cubin files and flashinfer will
+    # read the cubin files directly.
+    "VLLM_HAS_FLASHINFER_CUBIN":
+    lambda: os.getenv("VLLM_HAS_FLASHINFER_CUBIN", False),
 
     # If set to 1, force the use of TRTLLM FP4 GEMM backend in flashinfer.
     # Otherwise, uses the first available of: flashinfer cutlass GEMM,
