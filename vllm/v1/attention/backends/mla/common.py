@@ -584,7 +584,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
-        max_seq_len = common_attn_metadata.seq_lens_cpu.max().item()
+        max_seq_len = common_attn_metadata.max_seq_len
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
