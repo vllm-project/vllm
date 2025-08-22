@@ -517,9 +517,6 @@ The following example shows how to use Pipeline parallelism with vLLM on HPU:
 vllm serve <model_path> --device hpu --tensor-parallel-size 8 --pipeline_parallel_size 2 --distributed-executor-backend ray
 ```
 
-> [!NOTE]
-> Currently, pipeline parallelism on Lazy mode requires the `PT_HPUGRAPH_DISABLE_TENSOR_CACHE=0` flag.
-
 # Multi-node Support
 
 vLLM works with a multi-node environment setup via Ray. To run models on multiple nodes, follow the procedure below.
