@@ -752,7 +752,8 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
             else:
                 if "final_logits_bias" in name:
                     continue
-                if self.config.tie_word_embeddings and "embed_tokens" in name:
+                if self.config.tie_word_embeddings and ("embed_tokens" in name
+                                                        or "lm_head" in name):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
