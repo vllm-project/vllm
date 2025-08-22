@@ -494,6 +494,8 @@ def unified_attention_with_output(
     value: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
+    output_scale: Optional[torch.Tensor] = None,
+    output_block_scale: Optional[torch.Tensor] = None,
 ) -> None:
     output_scale = None
     wait_for_kv_layer_from_connector(layer_name)
@@ -510,7 +512,8 @@ def unified_attention_with_output(
                       kv_cache,
                       attn_metadata,
                       output=output,
-                      output_scale=output_scale)
+                      output_scale=output_scale,
+                      output_block_scale=output_block_scale)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
@@ -522,6 +525,7 @@ def unified_attention_with_output_fake(
     output: torch.Tensor,
     layer_name: str,
     output_scale: Optional[torch.Tensor] = None,
+    output_block_scale: Optional[torch.Tensor] = None,
 ) -> None:
     return
 
@@ -529,7 +533,7 @@ def unified_attention_with_output_fake(
 direct_register_custom_op(
     op_name="unified_attention_with_output",
     op_func=unified_attention_with_output,
-    mutates_args=["output"],
+    mutates_args=["output", "output_block_scale"],
     fake_impl=unified_attention_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
 )
