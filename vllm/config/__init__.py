@@ -514,26 +514,54 @@ class ModelConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.model)
-        factors.append(self.dtype)
-        factors.append(self.quantization)
-        factors.append(self.revision)
-        factors.append(self.code_revision)
-        factors.append(self.max_model_len)
-        factors.append(self.max_logprobs)
-        factors.append(self.disable_sliding_window)
-        factors.append(self.trust_remote_code)
-        factors.append(self.generation_config)
-        factors.append(self.model_impl)
-        factors.append(self.override_generation_config)
-        factors.append(self.rope_scaling)
-        factors.append(self.rope_theta)
-        # hf_config can control how the model looks!
-        factors.append(self.hf_config.to_json_string())
-        str_factors = str(factors)
-        assert_hashable(str_factors)
-        return hashlib.sha256(str(factors).encode()).hexdigest()
+        # Opt-out: default-include declared fields so new options aren't missed;
+        # keep a tiny exclude list; normalize types for stable hashes.
+        from typing import Any
+
+        # Shared helpers for canonicalization and field enumeration
+        from vllm.config.utils import build_opt_out_items as _build_items
+        from vllm.config.utils import hash_items_sha256 as _hash_sha256
+
+        # Default-include; exclude only fields that don't change the compiled
+        # graph or are unstable. See RFC #16501.
+        MODEL_EXCLUDE_FROM_HASH = {
+            "tokenizer",
+            "hf_config",  # hash content via JSON below
+            "hf_text_config",
+            "encoder_config",
+            "hf_image_processor_config",
+            "pooler_config",
+            "multimodal_config",
+            "hf_overrides",
+            # Internals / metadata
+            "_model_info",
+            "_architecture",
+            "seed",
+            "served_model_name",
+            "hf_token",
+            "hf_config_path",
+        }
+
+        # Build base items from declared fields using the shared utility
+        items: list[tuple[str, Any]] = _build_items(self,
+                                                    MODEL_EXCLUDE_FROM_HASH)
+
+        # Hash hf_config by content; if JSON export is unavailable, include a
+        # minimal stable subset.
+        hf = getattr(self, "hf_config", None)
+        if hf is not None:
+            try:
+                items.append(("hf_config_json", hf.to_json_string()))
+            except (AttributeError, TypeError, ValueError):
+                items.append((
+                    "hf_config_fallback",
+                    {
+                        "model_type": getattr(hf, "model_type", None),
+                        "architectures": getattr(hf, "architectures", None),
+                    },
+                ))
+
+        return _hash_sha256(items)
 
     def __post_init__(self) -> None:
         # Set the default seed to 0 in V1.
@@ -2462,25 +2490,30 @@ class LoRAConfig:
 
     def compute_hash(self) -> str:
         """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+        Hash LoRA settings that influence compiled tensor shapes/ops.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        Opt-out: default-include declared fields; keep a tiny exclude set;
+        normalize types; keep MD5 for compatibility.
         """
-        factors: list[Any] = []
-        factors.append(self.max_lora_rank)
-        factors.append(self.max_loras)
-        factors.append(self.fully_sharded_loras)
-        factors.append(self.lora_dtype)
-        factors.append(self.lora_extra_vocab_size)
-        factors.append(self.lora_vocab_padding_size)
-        factors.append(self.bias_enabled)
-        hash_str = hashlib.md5(str(factors).encode(),
+        from vllm.config.utils import canon_value as _canon
+
+        EXCLUDE_FROM_HASH = {
+            # Derived/runtime counters or toggles not affecting compiled shapes
+            # (none at present, placeholder to keep policy explicit)
+        }
+
+        field_names = list(self.__dataclass_fields__.keys())
+        items = []
+        for k in sorted(field_names):
+            if k in EXCLUDE_FROM_HASH:
+                continue
+            v = getattr(self, k, None)
+            try:
+                items.append((k, _canon(v)))
+            except TypeError:
+                continue
+
+        hash_str = hashlib.md5(repr(tuple(items)).encode(),
                                usedforsecurity=False).hexdigest()
         return hash_str
 

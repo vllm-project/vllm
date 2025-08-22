@@ -131,12 +131,42 @@ class CacheConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.cache_dtype)
-        factors.append(self.mamba_cache_dtype)
-        factors.append(self.mamba_ssm_cache_dtype)
-        # `cpu_offload_gb` does not use `torch.compile` yet.
-        hash_str = hashlib.md5(str(factors).encode(),
+        # Opt-out: default-include declared fields; keep a tiny exclude list;
+        # normalize types for deterministic hashing; keep MD5 for compatibility.
+        from vllm.config.utils import canon_value as _canon
+
+        EXCLUDE_FROM_HASH = {
+            # Runtime/derived knobs that don't affect compiled graph shape
+            "block_size",
+            "gpu_memory_utilization",
+            "swap_space",
+            "is_attention_free",
+            "num_gpu_blocks_override",
+            "enable_prefix_caching",
+            "prefix_caching_hash_algo",
+            "cpu_offload_gb",
+            "calculate_kv_scales",
+            "cpu_kvcache_space_bytes",
+            "mamba_page_size_padded",
+            # Post-init/derived counters
+            "num_gpu_blocks",
+            "num_cpu_blocks",
+            # WIP feature toggle not impacting compiled graph shape
+            "kv_sharing_fast_prefill",
+        }
+
+        field_names = list(self.__dataclass_fields__.keys())
+        items = []
+        for k in sorted(field_names):
+            if k in EXCLUDE_FROM_HASH:
+                continue
+            v = getattr(self, k, None)
+            try:
+                items.append((k, _canon(v)))
+            except TypeError:
+                continue
+
+        hash_str = hashlib.md5(repr(tuple(items)).encode(),
                                usedforsecurity=False).hexdigest()
         return hash_str
 

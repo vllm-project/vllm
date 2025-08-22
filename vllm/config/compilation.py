@@ -336,8 +336,6 @@ class CompilationConfig:
         "vllm.unified_attention",
         "vllm.unified_attention_with_output",
         "vllm.mamba_mixer2",
-        "vllm.mamba_mixer",
-        "vllm.short_conv",
     ]
 
     def compute_hash(self) -> str:
@@ -352,16 +350,43 @@ class CompilationConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.level)
-        factors.append(self.backend)
-        factors.append(self.custom_ops)
-        factors.append(self.splitting_ops)
-        factors.append(self.use_inductor)
-        factors.append(self.inductor_compile_config)
-        factors.append(self.inductor_passes)
-        factors.append(self.pass_config.uuid())
-        return hashlib.sha256(str(factors).encode()).hexdigest()
+        # Opt-out: default-include declared fields; keep a tiny exclude set;
+        # normalize types; keep SHA-256. For nested opaque configs, include a
+        # stable identifier (e.g., pass_config.uuid()) instead of object id.
+        from vllm.config.utils import canon_value as _canon
+
+        EXCLUDE_FROM_HASH = {
+            # Paths/dirs and runtime/metrics that don’t affect compiled graph
+            "debug_dump_path",
+            "cache_dir",
+            "local_cache_dir",
+            "bs_to_padded_graph_size",
+            "enabled_custom_ops",
+            "disabled_custom_ops",
+            "traced_files",
+            "compilation_time",
+            "static_forward_context",
+        }
+
+        field_names = list(self.__dataclass_fields__.keys())
+        items = []
+        for k in sorted(field_names):
+            if k in EXCLUDE_FROM_HASH:
+                continue
+            v = getattr(self, k, None)
+            # Use stable identity for pass_config
+            if k == "pass_config":
+                try:
+                    items.append((k, self.pass_config.uuid()))
+                except Exception:
+                    continue
+                continue
+            try:
+                items.append((k, _canon(v)))
+            except TypeError:
+                continue
+
+        return hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
 
     def __repr__(self) -> str:
         exclude = {

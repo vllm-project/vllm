@@ -483,8 +483,7 @@ class VllmBackend:
             # graph.
 
             factors = []
-            # 0. factors come from the env, for example, The values of
-            # VLLM_PP_LAYER_PARTITION will affects the computation graph.
+            # RFC #16501: include env hash (opt-out, default-include)
             env_hash = envs.compute_hash()
             factors.append(env_hash)
 
