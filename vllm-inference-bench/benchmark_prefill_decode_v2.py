@@ -7,14 +7,15 @@ This version uses a different strategy to ensure we properly measure:
 - Prefill: Time to process input and generate first token  
 - Decode: Time to generate remaining tokens
 
-Usage: torchrun --nproc-per-node=2 vllm-inference-bench/benchmark_prefill_decode_v2.py --tensor-parallel-size 1 --pipeline-parallel-size 2 --batch-size 4 --input-length 512 --output-length 128
+Usage: torchrun --nproc-per-node=8 benchmark_prefill_decode_v2.py --tensor-parallel-size 8 --pipeline-parallel-size 1 --batch-size 4 --input-length 512 --output-length 128
 Output CSV includes: total decode time, average decode time per step, and decode throughput
 
+TODO: check implementation on MoE with expert parallel. 
 
 
 Example usages: 
 
-
+torchrun --nproc-per-node=8 benchmark_prefill_decode_v2.py --model meta-meta-llama/Llama-3.1-8B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 1 --batch-size 4 --input-length 512 --output-length 128
 
 """
 
@@ -379,10 +380,10 @@ def main():
         timing_difference = separated_total_ms - metrics['baseline_total_time_ms']
         timing_ratio = separated_total_ms / metrics['baseline_total_time_ms'] if metrics['baseline_total_time_ms'] > 0 else 0
         
-        print(f"Timing validation:")
-        print(f"  Baseline: {metrics['baseline_total_time_ms']:.2f} ms")
-        print(f"  Separated (prefill + decode): {separated_total_ms:.2f} ms")
-        print(f"  Difference: {timing_difference:.2f} ms ({timing_ratio:.2f}x)")
+        # print(f"Timing validation:")
+        # print(f"  Baseline: {metrics['baseline_total_time_ms']:.2f} ms")
+        # print(f"  Separated (prefill + decode): {separated_total_ms:.2f} ms")
+        # print(f"  Difference: {timing_difference:.2f} ms ({timing_ratio:.2f}x)")
         
         # Write to CSV
         write_results_to_csv([result], output_file)

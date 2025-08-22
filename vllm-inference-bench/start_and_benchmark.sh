@@ -10,10 +10,10 @@ export XDG_CACHE_HOME="/lustre/fsw/portfolios/hw/users/sshrestha/.cache"
 # Configuration
 # MODEL="meta-llama/Llama-3.1-8B-Instruct"
 MODEL="meta-llama/Llama-4-Scout-17B-16E-Instruct"
-TENSOR_PARALLEL_SIZE=1
-DATA_PARALLEL_SIZE=8
+TENSOR_PARALLEL_SIZE=8
+DATA_PARALLEL_SIZE=1
 SERVER_PORT=8000
-BENCHMARK_WAIT_TIME=30  # seconds to wait for server to start
+BENCHMARK_WAIT_TIME=100  # seconds to wait for server to start
 
 # Colors for output
 RED='\033[0;31m'
@@ -34,57 +34,66 @@ echo -e "${YELLOW}Starting vLLM server...${NC}"
 #   --tensor-parallel-size $TENSOR_PARALLEL_SIZE \
 #   --port $SERVER_PORT &
 
-VLLM_ALL2ALL_BACKEND=deepep_low_latency VLLM_USE_DEEP_GEMM=1 vllm serve $MODEL --trust-remote-code --tensor-parallel-size=$TENSOR_PARALLEL_SIZE --data-parallel-size=$DATA_PARALLEL_SIZE --enable-expert-parallel --port $SERVER_PORT --max-model-len 16384 --gpu_memory_utilization=0.9 &
+# VLLM_ALL2ALL_BACKEND=deepep_low_latency VLLM_USE_DEEP_GEMM=1 vllm serve $MODEL --trust-remote-code --tensor-parallel-size=$TENSOR_PARALLEL_SIZE --data-parallel-size=$DATA_PARALLEL_SIZE --enable-expert-parallel \
+#             --port $SERVER_PORT --max-model-len 16384 --gpu_memory_utilization=0.9 &
+
+VLLM_ALL2ALL_BACKEND=pplx VLLM_USE_DEEP_GEMM=1 vllm serve $MODEL --trust-remote-code --tensor-parallel-size=$TENSOR_PARALLEL_SIZE --data-parallel-size=$DATA_PARALLEL_SIZE --enable-expert-parallel \
+            --port $SERVER_PORT --max-model-len 16384 --gpu_memory_utilization=0.9 --api-server-count=8 &
 
 SERVER_PID=$!
 echo "Server started with PID: $SERVER_PID"
 
 # Function to cleanup server on script exit
-cleanup() {
-    echo -e "\n${YELLOW}Cleaning up...${NC}"
-    if kill -0 $SERVER_PID 2>/dev/null; then
-        echo "Stopping vLLM server (PID: $SERVER_PID)"
-        kill $SERVER_PID
-        wait $SERVER_PID 2>/dev/null
-    fi
-    echo -e "${GREEN}Cleanup complete${NC}"
-}
+# cleanup() {
+#     echo -e "\n${YELLOW}Cleaning up...${NC}"
+#     if kill -0 $SERVER_PID 2>/dev/null; then
+#         echo "Stopping vLLM server (PID: $SERVER_PID)"
+#         kill $SERVER_PID
+#         wait $SERVER_PID 2>/dev/null
+#     fi
+#     echo -e "${GREEN}Cleanup complete${NC}"
+# }
 
-# Set trap to cleanup on script exit
-trap cleanup EXIT INT TERM
+# # Set trap to cleanup on script exit
+# trap cleanup EXIT INT TERM
 
 # Wait for server to start
-echo -e "${YELLOW}Waiting ${BENCHMARK_WAIT_TIME} seconds for server to start...${NC}"
-sleep $BENCHMARK_WAIT_TIME
 
-# Check if server is running
-if ! kill -0 $SERVER_PID 2>/dev/null; then
-    echo -e "${RED}ERROR: vLLM server failed to start or crashed${NC}"
-    exit 1
-fi
+# echo -e "${YELLOW}Waiting ${BENCHMARK_WAIT_TIME} seconds for server to start...${NC}"
+# sleep $BENCHMARK_WAIT_TIME
 
-# Test if server is responding
-echo -e "${YELLOW}Testing server connectivity...${NC}"
-if curl -s http://localhost:$SERVER_PORT/health > /dev/null; then
-    echo -e "${GREEN}Server is responding${NC}"
-else
-    echo -e "${YELLOW}Server health check failed, but continuing with benchmark...${NC}"
-fi
+# # Check if server is running
+# if ! kill -0 $SERVER_PID 2>/dev/null; then
+#     echo -e "${RED}ERROR: vLLM server failed to start or crashed${NC}"
+#     exit 1
+# fi
 
-echo
+# # Test if server is responding
+# echo -e "${YELLOW}Testing server connectivity...${NC}"
+# if curl -s http://localhost:$SERVER_PORT/health > /dev/null; then
+#     echo -e "${GREEN}Server is responding${NC}"
+# else
+#     echo -e "${YELLOW}Server health check failed, but continuing with benchmark...${NC}"
+# fi
 
-# Run benchmark
-echo -e "${YELLOW}Starting benchmark...${NC}"
-vllm bench serve \
-  --model $MODEL \
-  --dataset-name random \
-  --random-input-len 8000 \
-  --random-output-len 1000 \
-  --request-rate 10000 \
-  --num-prompts 16 \
-  --ignore-eos \
-  --base-url http://localhost:$SERVER_PORT
+# echo
 
-echo -e "${GREEN}Benchmark completed${NC}"
+# # Run benchmark
+# echo -e "${YELLOW}Starting benchmark...${NC}"
+# vllm bench serve \
+#   --model $MODEL \
+#   --dataset-name random \
+#   --random-input-len 8000 \
+#   --random-output-len 1000 \
+#   --request-rate 10000 \
+#   --num-prompts 16 \
+#   --ignore-eos \
+#   --base-url http://localhost:$SERVER_PORT \
+#   --save-result \
+#   --append-result \
+#   --result-dir /home/sshrestha/workspace/vllm-distributed/vllm-inference-bench/benchmark_results
+
+
+# echo -e "${GREEN}Benchmark completed${NC}"
 
 # Server will be automatically stopped by the cleanup function

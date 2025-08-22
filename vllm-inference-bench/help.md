@@ -41,3 +41,18 @@ VLLM_ALL2ALL_BACKEND=deepep_low_latency VLLM_USE_DEEP_GEMM=1 vllm serve meta-lla
 
 
 meta-llama/Llama-4-Scout-17B-16E-Instruct
+
+
+vllm bench serve \
+  --model meta-llama/Llama-4-Scout-17B-16E-Instruct \
+  --dataset-name random \
+  --random-input-len 8000 \
+  --random-output-len 1000 \
+  --request-rate 10000 \
+  --num-prompts 16 \
+  --ignore-eos \
+  --base-url http://localhost:8000 \
+  --save-result \
+  --append-result \
+  --result-dir /home/sshrestha/workspace/vllm-distributed/vllm-inference-bench/benchmark_results \
+  --result-filename llama-4-scout_tp_8.json
