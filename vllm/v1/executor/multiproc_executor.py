@@ -8,7 +8,7 @@ import threading
 import time
 import traceback
 import weakref
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
@@ -115,12 +115,11 @@ class MultiprocExecutor(Executor):
 
         # For pipeline parallel, we use a thread pool for asynchronous
         # execute_model.
-        if self.max_concurrent_batches > 1:
-            # Note: must use only 1 IO thread to keep dequeue sequence
-            # from the response queue
-            # _async_aggregate_workers_output also assumes a single IO thread
-            self.io_thread_pool = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="mp_exec_io")
+        # Note: must use only 1 IO thread to keep dequeue sequence
+        # from the response queue
+        # _async_aggregate_workers_output also assumes a single IO thread
+        self.io_thread_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="mp_exec_io")
 
         self.output_rank = self._get_output_rank()
         self.has_connector = self.vllm_config.kv_transfer_config is not None
@@ -162,26 +161,39 @@ class MultiprocExecutor(Executor):
         else:
             self.failure_callback = callback
 
-    def execute_model(
-        self,
-        scheduler_output,
-    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
-        non_block = self.max_concurrent_batches > 1
+    def prepare_inputs(self, scheduler_output) -> None:
+        self.collective_rpc(
+            "prepare_inputs",
+            args=(scheduler_output, ),
+            non_block=True,
+            skip_response=True,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+        )
 
+    def execute_model(self) -> None:
+        self.collective_rpc(
+            "execute_model",
+            non_block=True,
+            skip_response=True,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+        )
+
+    def sample(self, grammar_bitmask) -> ModelRunnerOutput:
+        non_block = self.max_concurrent_batches > 1
         if not self.has_connector:
             # get output only from a single worker (output_rank)
             (output, ) = self.collective_rpc(
-                "execute_model",
-                args=(scheduler_output, ),
+                "sample",
+                args=(grammar_bitmask, ),
                 unique_reply_rank=self.output_rank,
-                non_block=non_block,
+                non_block=False,
                 timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS)
             return output
 
         # get output from all workers
         outputs = self.collective_rpc(
-            "execute_model",
-            args=(scheduler_output, ),
+            "sample",
+            args=(grammar_bitmask, ),
             non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS)
 
@@ -203,6 +215,7 @@ class MultiprocExecutor(Executor):
                        args: tuple = (),
                        kwargs: Optional[dict] = None,
                        non_block: bool = False,
+                       skip_response: bool = False,
                        unique_reply_rank: Optional[int] = None) -> list[Any]:
         if self.is_failed:
             raise RuntimeError("Executor failed.")
@@ -219,6 +232,15 @@ class MultiprocExecutor(Executor):
             else:
                 send_method = cloudpickle.dumps(
                     method, protocol=pickle.HIGHEST_PROTOCOL)
+
+            if skip_response:
+                if unique_reply_rank is not None:
+                    raise ValueError(
+                        "unique_reply_rank must be None "
+                        f"when skip_response is True. got {unique_reply_rank}")
+                self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, -1))
+                return []
+
             self.rpc_broadcast_mq.enqueue(
                 (send_method, args, kwargs, unique_reply_rank))
 
@@ -309,8 +331,6 @@ class MultiprocExecutor(Executor):
 
     @property
     def max_concurrent_batches(self) -> int:
-        if self.scheduler_config.async_scheduling:
-            return 2
         return self.parallel_config.pipeline_parallel_size
 
     def _get_output_rank(self) -> int:

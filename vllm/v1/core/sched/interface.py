@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Optional, Union
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.output import GrammarBitmask, SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.metrics.stats import SchedulerStats
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -39,6 +39,14 @@ class SchedulerInterface(ABC):
             A SchedulerOutput object containing information about the scheduled
             requests.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_grammar_bitmask(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> Optional["GrammarBitmask"]:
+        """Get the grammar bitmask for the scheduled requests."""
         raise NotImplementedError
 
     @abstractmethod

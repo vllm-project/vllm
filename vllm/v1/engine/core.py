@@ -286,12 +286,12 @@ class EngineCore:
         if not self.scheduler.has_requests():
             return {}, False
         scheduler_output = self.scheduler.schedule()
-        model_output = self.execute_model_with_error_logging(
-            self.model_executor.execute_model,  # type: ignore
-            scheduler_output)
+        self.model_executor.prepare_inputs(scheduler_output)
+        self.model_executor.execute_model()
+        bitmask = self.scheduler.get_grammar_bitmask(scheduler_output)
+        model_output = self.model_executor.sample(bitmask)
         engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output)  # type: ignore
-
+            scheduler_output, model_output)
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
 
@@ -327,7 +327,10 @@ class EngineCore:
         if not self.batch_queue.full():
             scheduler_output = self.scheduler.schedule()
             if scheduler_output.total_num_scheduled_tokens > 0:
-                future = self.model_executor.execute_model(scheduler_output)
+                self.model_executor.prepare_inputs(scheduler_output)
+                self.model_executor.execute_model()
+                bitmask = self.scheduler.get_grammar_bitmask(scheduler_output)
+                future = self.model_executor.sample(bitmask)
                 self.batch_queue.put_nowait(
                     (future, scheduler_output))  # type: ignore
 
@@ -352,6 +355,32 @@ class EngineCore:
                 scheduler_output, model_output))
 
         return engine_core_outputs, scheduled_batch
+
+    def step_async(
+            self) -> tuple[Optional[dict[int, EngineCoreOutputs]], bool]:
+        model_output = None
+        engine_core_outputs = None
+        bitmask = None
+
+        scheduler_output = self.scheduler.schedule()
+        is_scheduled = scheduler_output.total_num_scheduled_tokens > 0
+        if is_scheduled:
+            self.model_executor.prepare_inputs(scheduler_output)
+            if self.inflight_batch:
+                model_output = self.model_executor.sample(self.prev_bitmask)
+            self.model_executor.execute_model()
+            bitmask = self.scheduler.get_grammar_bitmask(scheduler_output)
+        elif self.inflight_batch:
+            model_output = self.model_executor.sample(self.prev_bitmask)
+
+        if model_output is not None:
+            engine_core_outputs = self.scheduler.update_from_output(
+                self.prev_scheduler_output, model_output)
+
+        self.inflight_batch = is_scheduled
+        self.prev_scheduler_output = scheduler_output
+        self.prev_bitmask = bitmask
+        return engine_core_outputs, is_scheduled
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
@@ -529,8 +558,14 @@ class EngineCoreProc(EngineCore):
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
 
-        self.step_fn = (self.step if self.batch_queue is None else
-                        self.step_with_batch_queue)
+        if self.batch_queue is None:
+            if self.vllm_config.scheduler_config.async_scheduling:
+                self.step_fn = self.step_async
+                self.inflight_batch = False
+            else:
+                self.step_fn = self.step
+        else:
+            self.step_fn = self.step_with_batch_queue
 
     @contextmanager
     def _perform_handshakes(

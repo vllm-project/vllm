@@ -38,7 +38,7 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.output import GrammarBitmask, SchedulerOutput
 
 
 class Worker(WorkerBase):
@@ -349,19 +349,23 @@ class Worker(WorkerBase):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
 
+    def prepare_inputs(self, scheduler_output: "SchedulerOutput") -> None:
+        self.model_runner.prepare_inputs(scheduler_output)
+
     @torch.inference_mode()
-    def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> Optional[ModelRunnerOutput]:
+    def execute_model(self) -> None:
         intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
+        self.model_runner.execute_model(intermediate_tensors)
 
-        output = self.model_runner.execute_model(scheduler_output,
-                                                 intermediate_tensors)
+    def sample(
+        self,
+        grammar_bitmask: Optional["GrammarBitmask"],
+    ) -> Optional[ModelRunnerOutput]:
+        output = self.model_runner.sample(grammar_bitmask)
 
         parallel_config = self.vllm_config.parallel_config
         if parallel_config.distributed_executor_backend != "external_launcher" \

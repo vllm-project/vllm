@@ -147,11 +147,15 @@ class SchedulerOutput:
     # Used to free the encoder cache.
     free_encoder_input_ids: list[tuple[str, int]]
 
+    # KV Cache Connector metadata.
+    kv_connector_metadata: Optional[KVConnectorMetadata] = None
+
+
+@dataclass
+class GrammarBitmask:
+
     # Dict of request ids to their index within the batch
     # for filling the next token bitmask
     structured_output_request_ids: dict[str, int]
     # the bitmask for the whole batch
     grammar_bitmask: Optional[npt.NDArray[np.int32]]
-
-    # KV Cache Connector metadata.
-    kv_connector_metadata: Optional[KVConnectorMetadata] = None

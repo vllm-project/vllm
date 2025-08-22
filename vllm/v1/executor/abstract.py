@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from concurrent.futures import Future
-from typing import Callable, Optional, Union
+from typing import Callable, Optional
 
 import torch
 import torch.distributed as dist
@@ -80,12 +79,14 @@ class Executor(ExecutorBase):
         output = self.collective_rpc("get_kv_cache_spec")
         return output
 
-    def execute_model(
-        self,
-        scheduler_output,
-    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
-        output = self.collective_rpc("execute_model",
-                                     args=(scheduler_output, ))
+    def prepare_inputs(self, scheduler_output) -> None:
+        self.collective_rpc("prepare_inputs", args=(scheduler_output, ))
+
+    def execute_model(self) -> None:
+        self.collective_rpc("execute_model")
+
+    def sample(self, grammar_bitmask) -> ModelRunnerOutput:
+        output = self.collective_rpc("sample", args=(grammar_bitmask, ))
         return output[0]
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
