@@ -336,7 +336,8 @@ class Scheduler(SchedulerInterface):
                 # for FSM compilation.
                 if request.status == RequestStatus.WAITING_FOR_FSM:
                     structured_output_req = request.structured_output_request
-                    if structured_output_req and structured_output_req.grammar:
+                    if structured_output_req and \
+                            structured_output_req.is_grammar_ready:
                         request.status = RequestStatus.WAITING
                     else:
                         self.waiting.pop_request()
@@ -757,7 +758,9 @@ class Scheduler(SchedulerInterface):
         if not structured_output_request_ids:
             bitmask = None
         else:
-            bitmask = self.structured_output_manager.grammar_bitmask(
+            # Submit async grammar bitmask computation, return the placeholder
+            # The actual result will be retrieved later in gpu_model_runner
+            bitmask = self.structured_output_manager.submit_grammar_bitmask(
                 self.requests,
                 structured_output_request_ids,
                 scheduled_spec_decode_tokens,
@@ -775,6 +778,7 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
+        structured_list = []
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
@@ -848,11 +852,7 @@ class Scheduler(SchedulerInterface):
 
             if new_token_ids and self.structured_output_manager.should_advance(
                     request):
-                # NOTE: structured_output_request
-                # should not be None if use_structured_output, we have
-                # check above, so safe to ignore type warning
-                request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
-                    req_id, new_token_ids)
+                structured_list.append((req_id, new_token_ids))
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
@@ -887,6 +887,9 @@ class Scheduler(SchedulerInterface):
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
+
+        self.structured_output_manager.submit_batch_accept_tokens(
+            structured_list)
 
         # KV Connector: update state for finished KV Transfers.
         if model_runner_output.kv_connector_output:
@@ -966,6 +969,8 @@ class Scheduler(SchedulerInterface):
         self,
         draft_token_ids: DraftTokenIds,
     ) -> None:
+        spec_structured_dict = {}
+
         for req_id, spec_token_ids in zip(
                 draft_token_ids.req_ids,
                 draft_token_ids.draft_token_ids,
@@ -980,11 +985,20 @@ class Scheduler(SchedulerInterface):
                 # NOTE(woosuk): request.spec_token_ids should be updated.
                 request.spec_token_ids.clear()
             elif self.structured_output_manager.should_advance(request):
-                metadata = request.structured_output_request
-                request.spec_token_ids = metadata.grammar.validate_tokens(  # type: ignore[union-attr]
-                    spec_token_ids)
+                spec_structured_dict[req_id] = spec_token_ids
             else:
                 request.spec_token_ids = spec_token_ids
+
+        # Batch validate tokens for structured output requests
+        spec_structured_dict = (
+            self.structured_output_manager.submit_batch_validate_tokens(
+                spec_structured_dict))
+
+        # Update requests with validated tokens
+        for req_id in spec_structured_dict:
+            request = self.requests.get(req_id)
+            if request is not None:
+                request.spec_token_ids = spec_structured_dict[req_id]
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""

@@ -61,6 +61,7 @@ from .utils import (MultiModalBudget, bind_kv_cache,
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.structured_output import GrammarBitmaskPlaceholder
 
 logger = init_logger(__name__)
 
@@ -1772,8 +1773,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def prepare_structured_decoding_input(
         self, logits: torch.Tensor, scheduler_output: "SchedulerOutput"
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        grammar_bitmask = scheduler_output.grammar_bitmask
-        assert grammar_bitmask is not None
+        grammar_bitmask_placeholder: GrammarBitmaskPlaceholder = \
+            scheduler_output.grammar_bitmask
+        grammar_bitmask: np.ndarray = grammar_bitmask_placeholder.result()
+
         num_reqs, _ = logits.shape
 
         # Reset pre-allocated tensors

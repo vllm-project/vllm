@@ -6,9 +6,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
+from vllm.v1.structured_output import GrammarBitmaskPlaceholder
+
 if TYPE_CHECKING:
-    import numpy as np
-    import numpy.typing as npt
 
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorMetadata)
@@ -151,7 +151,7 @@ class SchedulerOutput:
     # for filling the next token bitmask
     structured_output_request_ids: dict[str, int]
     # the bitmask for the whole batch
-    grammar_bitmask: Optional[npt.NDArray[np.int32]]
+    grammar_bitmask: GrammarBitmaskPlaceholder
 
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
