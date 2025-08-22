@@ -5,7 +5,7 @@ import weakref
 
 import pytest
 
-from vllm import LLM, RequestOutput, SamplingParams
+from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_NAME = "distilbert/distilgpt2"
@@ -41,48 +41,11 @@ def llm():
               gpu_memory_utilization=0.10,
               enforce_eager=True)
 
-    with llm.deprecate_legacy_api():
-        yield weakref.proxy(llm)
+    yield weakref.proxy(llm)
 
-        del llm
+    del llm
 
     cleanup_dist_env_and_memory()
-
-
-def assert_outputs_equal(o1: list[RequestOutput], o2: list[RequestOutput]):
-    assert [o.outputs for o in o1] == [o.outputs for o in o2]
-
-
-@pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize('prompt_token_ids', TOKEN_IDS)
-def test_v1_v2_api_consistency_single_prompt_tokens(llm: LLM,
-                                                    prompt_token_ids):
-    sampling_params = SamplingParams(temperature=0.0, top_p=1.0)
-
-    with pytest.warns(DeprecationWarning, match="'prompt_token_ids'"):
-        v1_output = llm.generate(prompt_token_ids=prompt_token_ids,
-                                 sampling_params=sampling_params)
-
-    v2_output = llm.generate({"prompt_token_ids": prompt_token_ids},
-                             sampling_params=sampling_params)
-    assert_outputs_equal(v1_output, v2_output)
-
-
-@pytest.mark.skip_global_cleanup
-def test_v1_v2_api_consistency_multi_prompt_tokens(llm: LLM):
-    sampling_params = SamplingParams(temperature=0.0, top_p=1.0)
-
-    with pytest.warns(DeprecationWarning, match="'prompt_token_ids'"):
-        v1_output = llm.generate(prompt_token_ids=TOKEN_IDS,
-                                 sampling_params=sampling_params)
-
-    v2_output = llm.generate(
-        [{
-            "prompt_token_ids": p
-        } for p in TOKEN_IDS],
-        sampling_params=sampling_params,
-    )
-    assert_outputs_equal(v1_output, v2_output)
 
 
 @pytest.mark.skip_global_cleanup

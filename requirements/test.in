@@ -32,7 +32,8 @@ num2words # required for smolvlm test
 open_clip_torch==2.32.0 # Required for nemotron_vl test
 opencv-python-headless >= 4.11.0 # required for video test
 datamodel_code_generator # required for minicpm3 test
-lm-eval[api]==0.4.8 # required for model evaluation test
+# TODO: Use lm-eval[api]==0.4.10 once released
+lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d # required for model evaluation test
 mteb[bm25s]>=1.38.11, <2 # required for mteb test
 transformers==4.55.2
 tokenizers==0.21.1

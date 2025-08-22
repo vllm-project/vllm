@@ -46,5 +46,5 @@ def test_lm_head(
         vllm_model.apply_model(check_model)
 
         print(
-            vllm_model.generate_greedy(prompts=["Hello my name is"],
+            vllm_model.generate_greedy(["Hello my name is"],
                                        max_tokens=10)[0][1])

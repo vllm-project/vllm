@@ -48,10 +48,9 @@ def llm(request, monkeypatch_module):
               max_num_seqs=128,
               enforce_eager=True)
 
-    with llm.deprecate_legacy_api():
-        yield weakref.proxy(llm)
+    yield weakref.proxy(llm)
 
-        del llm
+    del llm
 
     cleanup_dist_env_and_memory()
 
