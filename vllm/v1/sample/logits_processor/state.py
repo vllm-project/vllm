@@ -104,7 +104,7 @@ class BatchUpdateBuilder:
         return None
 
     def reset(self) -> bool:
-        """Returns True if there were andy changes to the batch."""
+        """Returns True if there were any changes to the batch."""
         self._is_removed_sorted = False
         self._removed.clear()
         self.moved.clear()
