@@ -297,7 +297,6 @@ class ParallelConfig:
             "worker_cls",
             "sd_worker_cls",
             "worker_extension_cls",
-            "enable_multimodal_encoder_data_parallel",
         }
 
         from vllm.config.utils import build_opt_out_items as _build_items

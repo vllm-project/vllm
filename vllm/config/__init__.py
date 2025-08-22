@@ -570,21 +570,19 @@ class ModelConfig:
                         hf.to_json_string(),
                     ))
 
-            # Last fallback: include a broader stable subset of common fields.
+            # Last fallback: minimal, stable discriminator to avoid collisions
+            # without over-fragmenting cache keys.
             if not any(k in ("hf_config_dict_json", "hf_config_json")
                        for k, _ in items):
-                fallback_keys = [
-                    "model_type",
-                    "architectures",
-                    "num_hidden_layers",
-                    "hidden_size",
-                    "num_attention_heads",
-                    "rope_scaling",
-                    "sliding_window",
-                    "model_max_length",
-                ]
-                fallback = {k: getattr(hf, k, None) for k in fallback_keys}
-                items.append(("hf_config_fallback", fallback))
+                minimal = {
+                    "_class":
+                    f"{hf.__class__.__module__}.{hf.__class__.__name__}",
+                    "model_type": getattr(hf, "model_type", None),
+                }
+                items.append((
+                    "hf_config_minimal_json",
+                    json.dumps(minimal, sort_keys=True, default=str),
+                ))
 
         return _hash_sha256(items)
 

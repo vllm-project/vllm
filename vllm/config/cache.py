@@ -58,8 +58,11 @@ class CacheConfig:
     """Whether the model is attention-free. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
     num_gpu_blocks_override: Optional[int] = None
-    """Number of GPU blocks to use. This overrides the profiled `num_gpu_blocks`
-    if specified. Does nothing if `None`. Used for testing preemption."""
+    """Number of GPU blocks to use.
+
+    Overrides the profiled `num_gpu_blocks` if specified. Does nothing if
+    `None`. Used for testing preemption.
+    """
     sliding_window: Optional[int] = None
     """Sliding window size for the KV cache. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
@@ -99,9 +102,11 @@ class CacheConfig:
     ssm state). If set to 'auto', the data type will be inferred from the model
     config."""
     mamba_ssm_cache_dtype: MambaDType = "auto"
-    """The data type to use for the Mamba cache (ssm state only, conv state will
-    still be controlled by mamba_cache_dtype). If set to 'auto', the data type
-    for the ssm state will be determined by mamba_cache_dtype."""
+    """Data type to use for the Mamba cache (SSM state only).
+
+    The conv state follows `mamba_cache_dtype`. If set to "auto", the SSM
+    cache dtype will be determined by `mamba_cache_dtype`.
+    """
 
     # Will be set after profiling.
     num_gpu_blocks: Optional[int] = field(default=None, init=False)
@@ -110,13 +115,12 @@ class CacheConfig:
     """The number of blocks to allocate for CPU memory."""
 
     kv_sharing_fast_prefill: bool = False
-    """This feature is work in progress and no prefill optimization takes place
-    with this flag enabled currently.
+    """Enable experimental KV sharing prefill metadata.
 
-    In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
-    some layers can skip tokens corresponding to prefill. This flag enables
-    attention metadata for eligible layers to be overriden with metadata
-    necessary for implementating this optimization in some models (e.g. Gemma3n)
+    In some KV sharing setups (e.g. YOCO: https://arxiv.org/abs/2405.05254),
+    layers can skip tokens corresponding to prefill. This flag enables
+    attention metadata overrides needed for this optimization in supported
+    models (e.g. Gemma3n).
     """
 
     def compute_hash(self) -> str:

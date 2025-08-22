@@ -60,7 +60,7 @@ def canon_value(x):
 
     # Torch dtype without hard dependency
     try:
-        import torch  # noqa: WPS433 (local import by design)
+        import torch
         if isinstance(x, torch.dtype):
             return str(x)
     except Exception:
@@ -79,6 +79,12 @@ def canon_value(x):
         return tuple(canon_value(v) for v in x)
 
     # Unsupported type
+    try:
+        import logging
+        logging.getLogger(__name__).debug("canon_value: unsupported type '%s'",
+                                          type(x).__name__)
+    except Exception:
+        pass
     raise TypeError
 
 
@@ -107,6 +113,9 @@ def build_opt_out_items(cfg, exclude: set[str]) -> list[tuple[str, object]]:
     - Includes declared fields not in `exclude`.
     - Skips non-canonicalizable values.
     """
+    import logging
+    from contextlib import suppress
+    logger = logging.getLogger(__name__)
     items: list[tuple[str, object]] = []
     for key in sorted(get_declared_field_names(cfg)):
         if key in exclude:
@@ -115,6 +124,10 @@ def build_opt_out_items(cfg, exclude: set[str]) -> list[tuple[str, object]]:
         try:
             items.append((key, canon_value(value)))
         except TypeError:
+            # Log once per key to surface potential under-hashing without
+            # spamming logs. The value will be skipped from the hash.
+            with suppress(Exception):
+                logger.debug("Hash skip: unsupported type for key '%s'", key)
             continue
     return items
 
@@ -136,6 +149,9 @@ def build_opt_items_override(
     - For keys in `overrides`, call the override to produce a stable value.
     - Skips values that cannot be canonicalized.
     """
+    import logging
+    from contextlib import suppress
+    logger = logging.getLogger(__name__)
     items: list[tuple[str, object]] = []
     for key in sorted(get_declared_field_names(cfg)):
         if key in exclude:
@@ -150,5 +166,7 @@ def build_opt_items_override(
         try:
             items.append((key, canon_value(value)))
         except TypeError:
+            with suppress(Exception):
+                logger.debug("Hash skip: unsupported type for key '%s'", key)
             continue
     return items

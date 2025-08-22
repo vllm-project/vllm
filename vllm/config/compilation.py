@@ -360,8 +360,6 @@ class CompilationConfig:
             "cache_dir",
             "local_cache_dir",
             "bs_to_padded_graph_size",
-            "enabled_custom_ops",
-            "disabled_custom_ops",
             "traced_files",
             "compilation_time",
             "static_forward_context",
