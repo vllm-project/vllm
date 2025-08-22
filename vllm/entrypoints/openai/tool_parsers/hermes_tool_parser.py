@@ -400,8 +400,20 @@ class Hermes2ProToolParser(ToolParser):
 
             # last case -- we have an update to existing arguments.
             elif cur_arguments and prev_arguments:
-                if isinstance(delta_text, str) and len(delta_text.rstrip(
-                )) >= 1 and delta_text.rstrip()[-1] == '}':
+                # judge whether the tool_call_portion is a complete JSON
+                try:
+                    json.loads(tool_call_portion)
+                    is_complete_json = True
+                except Exception:
+                    is_complete_json = False
+
+                # if the delta_text ends with a '}' and tool_call_portion is a
+                #   complete JSON, then the last '}' does not belong to the
+                #   arguments, so we should trim it off
+                if isinstance(delta_text, str) \
+                    and len(delta_text.rstrip()) >= 1 \
+                    and delta_text.rstrip()[-1] == '}' \
+                    and is_complete_json:
                     delta_text = delta_text.rstrip()[:-1]
 
                 logger.debug("got diff %s", delta_text)
