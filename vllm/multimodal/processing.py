@@ -722,7 +722,7 @@ def _find_matches(
                         continue
 
                     mm_matches[(modality, item_idx)] = match, update_idx
-                    break  # Get the first valid match per item
+                    break  # Get only the first valid match per item
 
     # Prioritize earlier matches
     matches_to_apply = sorted(mm_matches.items(), key=lambda item: item[1][0])
