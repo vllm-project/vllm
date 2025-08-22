@@ -109,7 +109,7 @@ if current_platform.is_rocm():
     )
 
 
-def dispatch_cuda_rmsnorm_func(
+def dispatch_rmsnorm_func(
         add_residual: bool,
         dtype: torch.dtype) -> Union[RMSNormCallback, RMSNormWithAddCallback]:
     use_aiter = is_rocm_aiter_rmsnorm_enabled() and dtype in [
@@ -203,7 +203,7 @@ class RMSNorm(CustomOp):
             return self.forward_native(x, residual)
 
         add_residual = residual is not None
-        norm_func = dispatch_cuda_rmsnorm_func(add_residual, self.dtype)
+        norm_func = dispatch_rmsnorm_func(add_residual, self.dtype)
 
         if add_residual:
             return norm_func(x, residual, self.weight.data,
