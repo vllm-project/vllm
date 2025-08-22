@@ -27,7 +27,7 @@ from typing import Optional, Union
 
 import torch
 from torch import nn
-from transformers import SeedOssConfig
+from transformers import PretrainedConfig as SeedOssConfig
 
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
