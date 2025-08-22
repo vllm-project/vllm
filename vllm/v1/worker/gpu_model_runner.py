@@ -23,6 +23,7 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.compilation.ubatch_wrapper import UBatchWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config, update_config)
@@ -1371,6 +1372,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # get raw model out of the cudagraph wrapper.
         if isinstance(self.model, CUDAGraphWrapper):
             return self.model.unwrap()
+        elif isinstance(self.model, UBatchWrapper):
+            return self.model.unwrap()
         return self.model
 
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
@@ -2143,20 +2146,36 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         #                          skip_cuda_graphs=skip_cuda_graphs):
         #     self.maybe_setup_kv_connector(scheduler_output)
         kv_connector_output = None
-        model_output = self._run_model(
-            attn_metadata=attn_metadata,
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-            model_kwargs=model_kwargs,
-            num_scheduled_tokens=num_input_tokens,
-            scheduler_output=scheduler_output,
-            ubatch_slices=ubatch_slices,
-            num_tokens_across_dp=num_tokens_after_padding,
-            batch_descriptor=batch_descriptor,
-            cudagraph_runtime_mode=cudagraph_runtime_mode
-        )
+        if ubatch_slices is not None:
+            num_input_tokens = num_input_tokens // 2
+        with set_forward_context(attn_metadata,
+                                    vllm_config=self.vllm_config,
+                                    num_tokens=num_input_tokens or 1,
+                                    num_tokens_across_dp=num_tokens_after_padding,
+                                    batch_descriptor=batch_descriptor,
+                                    cudagraph_runtime_mode=cudagraph_runtime_mode,
+                                    ubatch_slices=ubatch_slices):
+            model_output = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **model_kwargs
+            )
+        # model_output = self._run_model(
+        #     attn_metadata=attn_metadata,
+        #     input_ids=input_ids,
+        #     positions=positions,
+        #     intermediate_tensors=intermediate_tensors,
+        #     inputs_embeds=inputs_embeds,
+        #     model_kwargs=model_kwargs,
+        #     num_scheduled_tokens=num_input_tokens,
+        #     scheduler_output=scheduler_output,
+        #     ubatch_slices=ubatch_slices,
+        #     num_tokens_across_dp=num_tokens_after_padding,
+        #     batch_descriptor=batch_descriptor,
+        #     cudagraph_runtime_mode=cudagraph_runtime_mode
+        # )
         # self.maybe_wait_for_kv_save()
         # finished_sending, finished_recving = (
         #     self.get_finished_kv_transfers(scheduler_output))
@@ -2589,6 +2608,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.model = CUDAGraphWrapper(self.model,
                                           self.vllm_config,
                                           runtime_mode=CUDAGraphMode.FULL)
+        elif self.parallel_config.enable_microbatching:
+            self.model = UBatchWrapper(self.model, self.vllm_config, self.device)
 
     def reload_weights(self) -> None:
         assert getattr(self, "model", None) is not None, \
