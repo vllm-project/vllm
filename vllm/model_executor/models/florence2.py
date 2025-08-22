@@ -681,6 +681,8 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
         self.lm_head = BartParallelLMHead(self.vocab_size,
                                           config.d_model,
                                           embed_scale=embed_scale)
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.shared.weight
 
         self.logits_processor = LogitsProcessor(self.vocab_size,
                                                 config.vocab_size)
