@@ -128,16 +128,23 @@ class Attention(nn.Module):
         self._q_scale = torch.tensor(1.0, dtype=torch.float32)
         self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
 
-        # We also keep the float32 versions of k/v_scale for attention
-        # backends that don't support tensors (Flashinfer)
+        # We also keep q/k/v_scale on host (cpu) memory for attention
+        # backends that require the scales to be on host instead of on device.
+        # e.g. Flashinfer
+        self._q_scale_float = 1.0
         self._k_scale_float = 1.0
         self._v_scale_float = 1.0
+
+        # The output scale on host memory. This should be the input scale of
+        # the quant op after this attention layer.
+        self._o_scale_float: Optional[float] = None
 
         self.use_mla = use_mla
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
+        self.has_sink = extra_impl_args.get("sinks") is not None
 
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
@@ -165,7 +172,8 @@ class Attention(nn.Module):
                                                  kv_cache_dtype,
                                                  block_size,
                                                  is_attention_free,
-                                                 use_mla=use_mla)
+                                                 use_mla=use_mla,
+                                                 has_sink=self.has_sink)
         else:
             self.attn_backend = attn_backend
 
@@ -289,6 +297,7 @@ class Attention(nn.Module):
         self._q_scale.copy_(torch.abs(query).max() / self.q_range)
         self._k_scale.copy_(torch.abs(key).max() / self.k_range)
         self._v_scale.copy_(torch.abs(value).max() / self.v_range)
+        self._q_scale_float = self._q_scale.item()
         self._k_scale_float = self._k_scale.item()
         self._v_scale_float = self._v_scale.item()
         # We only calculate the scales once
@@ -305,6 +314,15 @@ class Attention(nn.Module):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if hasattr(self.impl, "process_weights_after_loading"):
             self.impl.process_weights_after_loading(act_dtype)
+
+        # FlashInfer requires attention sinks to be float32
+        if (self.backend == _Backend.FLASHINFER_VLLM_V1
+                and hasattr(self.impl, 'sinks')):
+            from vllm.v1.attention.backends.flashinfer import FlashInferImpl
+            assert isinstance(self.impl, FlashInferImpl)
+            if (self.impl.sinks is not None
+                    and self.impl.sinks.dtype != torch.float32):
+                self.impl.sinks = self.impl.sinks.to(torch.float32)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend

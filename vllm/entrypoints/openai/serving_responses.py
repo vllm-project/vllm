@@ -4,7 +4,7 @@
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
@@ -16,8 +16,7 @@ from fastapi import Request
 from openai import BaseModel
 # yapf conflicts with isort for this block
 # yapf: disable
-from openai.types.responses import (ResponseContentPartDoneEvent,
-                                    ResponseCreatedEvent,
+from openai.types.responses import (ResponseCreatedEvent,
                                     ResponseFunctionToolCall,
                                     ResponseInProgressEvent,
                                     ResponseOutputItem,
@@ -26,6 +25,8 @@ from openai.types.responses import (ResponseContentPartDoneEvent,
                                     ResponseReasoningItem,
                                     ResponseReasoningTextDeltaEvent,
                                     ResponseReasoningTextDoneEvent)
+from openai.types.responses.response_output_text import (Logprob,
+                                                         LogprobTopLogprob)
 # yapf: enable
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent)
@@ -54,12 +55,14 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.tool_server import ToolServer
+from vllm.entrypoints.tool_server import MCPToolServer, ToolServer
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
+from vllm.sequence import Logprob as SampleLogprob
+from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
@@ -202,6 +205,12 @@ class OpenAIServingResponses(OpenAIServing):
             # (i.e., their request's `store=True` just because it's the default
             # value).
             request.store = False
+        if self.use_harmony and request.is_include_output_logprobs():
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="logprobs are not supported with gpt-oss models",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
 
         # Handle the previous response ID.
         prev_response_id = request.previous_response_id
@@ -237,6 +246,15 @@ class OpenAIServingResponses(OpenAIServing):
             request_id=request.request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
+
+        if self.tool_server is not None and isinstance(
+                self.tool_server, MCPToolServer
+        ) and (request.background or request.stream) and request.tools and any(
+                tool.type in ["web_search_preview", "code_interpreter"]
+                for tool in request.tools):
+            return self.create_error_response(
+                "MCP tool server is not supported in background mode and "
+                "streaming mode")
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[ConversationContext, None]] = []
@@ -400,6 +418,11 @@ class OpenAIServingResponses(OpenAIServing):
             request, prev_response)
         prompt_token_ids = render_for_completion(messages)
         engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
+
+        # Add cache_salt if provided in the request
+        if request.cache_salt is not None:
+            engine_prompt["cache_salt"] = request.cache_salt
+
         return messages, [prompt_token_ids], [engine_prompt]
 
     async def responses_full_generator(
@@ -478,6 +501,51 @@ class OpenAIServingResponses(OpenAIServing):
                     self.response_store[response.id] = response
         return response
 
+    def _topk_logprobs(self, logprobs: dict[int,
+                                            SampleLogprob], top_logprobs: int,
+                       tokenizer: AnyTokenizer) -> list[LogprobTopLogprob]:
+        """Returns the top-k logprobs from the logprobs dictionary."""
+        out = []
+        for i, (token_id, _logprob) in enumerate(logprobs.items()):
+            if i >= top_logprobs:
+                break
+            text = _logprob.decoded_token if _logprob.decoded_token \
+                is not None else tokenizer.decode([token_id])
+            out.append(
+                LogprobTopLogprob(
+                    token=text,
+                    logprob=max(_logprob.logprob, -9999.0),
+                    bytes=list(text.encode("utf-8", errors="replace")),
+                ))
+        return out
+
+    def _create_response_logprobs(
+            self,
+            token_ids: Sequence[int],
+            logprobs: Optional[SampleLogprobs],
+            tokenizer: AnyTokenizer,
+            top_logprobs: Optional[int] = None) -> list[Logprob]:
+        assert logprobs is not None, "logprobs must be provided"
+        assert len(token_ids) == len(logprobs), (
+            "token_ids and logprobs.token_ids must have the same length")
+        out = []
+        for i, token_id in enumerate(token_ids):
+            logprob = logprobs[i]
+            token_logprob = logprob[token_id]
+            text = token_logprob.decoded_token if token_logprob.decoded_token \
+                is not None else tokenizer.decode([token_id])
+            out.append(
+                Logprob(
+                    token=text,
+                    logprob=max(token_logprob.logprob, -9999.0),
+                    bytes=list(text.encode("utf-8", errors="replace")),
+                    top_logprobs=self._topk_logprobs(logprob,
+                                                     top_logprobs=top_logprobs,
+                                                     tokenizer=tokenizer)
+                    if top_logprobs else [],
+                ))
+        return out
+
     def _make_response_output_items(
         self,
         request: ResponsesRequest,
@@ -534,7 +602,12 @@ class OpenAIServingResponses(OpenAIServing):
                 text=content,
                 annotations=[],  # TODO
                 type="output_text",
-                logprobs=None,  # TODO
+                logprobs=self._create_response_logprobs(
+                    token_ids=final_output.token_ids,
+                    logprobs=final_output.logprobs,
+                    tokenizer=tokenizer,
+                    top_logprobs=request.top_logprobs,
+                ) if request.is_include_output_logprobs() else None,
             )
             message = ResponseOutputMessage(
                 id=f"msg_{random_uuid()}",
@@ -844,9 +917,13 @@ class OpenAIServingResponses(OpenAIServing):
                             type="reasoning",
                             content=[
                                 ResponseReasoningTextContent(
-                                    text=previous_item.content[0].text),
+                                    text=previous_item.content[0].text,
+                                    type="reasoning_text",
+                                ),
                             ],
                             status="completed",
+                            id=current_item_id,
+                            summary=[],
                         )
                         yield _send_event(
                             ResponseReasoningTextDoneEvent(
@@ -856,15 +933,6 @@ class OpenAIServingResponses(OpenAIServing):
                                 output_index=current_output_index,
                                 content_index=current_content_index,
                                 text=previous_item.content[0].text,
-                            ))
-                        yield _send_event(
-                            ResponseContentPartDoneEvent(
-                                type="response.content_part.done",
-                                item_id=current_item_id,
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                content_index=current_content_index,
-                                part=reasoning_item,
                             ))
                         yield _send_event(
                             ResponseOutputItemDoneEvent(

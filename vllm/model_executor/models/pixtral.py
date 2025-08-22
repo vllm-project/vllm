@@ -33,13 +33,14 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, MultiModalHashes,
+                                        BaseProcessingInfo,
+                                        MultiModalProcessingInfo,
                                         PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
@@ -273,7 +274,7 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
@@ -307,24 +308,16 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        *,
-        return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
-        (
-            prompt_ids,
-            mm_kwargs,
-            mm_hashes,
-            _,
-        ) = super()._cached_apply_hf_processor(
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+        prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            return_mm_hashes=return_mm_hashes,
         )
 
         # NOTE: The tokens are already inserted by the chat template
-        return prompt_ids, mm_kwargs, mm_hashes, True
+        return prompt_ids, mm_info, True
 
 
 @MULTIMODAL_REGISTRY.register_processor(PixtralMultiModalProcessor,

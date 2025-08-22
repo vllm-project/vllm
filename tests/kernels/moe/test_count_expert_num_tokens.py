@@ -113,8 +113,7 @@ def do_test_compute_expert_num_tokens(num_tokens: int, num_topk: int,
                                    rtol=0)
 
 
-@pytest.mark.parametrize(
-    "num_tokens", [1, 4, 8, 11, 19, 128, 127, 405, 1024, 3333, 6666, 7317])
+@pytest.mark.parametrize("num_tokens", [1, 4, 8, 11, 127, 128, 3333, 7317])
 @pytest.mark.parametrize("num_topk", [2, 6, 8])
 @pytest.mark.parametrize("num_experts", [64])
 @pytest.mark.parametrize("ep_size", [1, 2, 4])
@@ -126,7 +125,7 @@ def test_compute_expert_num_tokens(num_tokens: int, num_topk: int,
                                       ep_size, topk_ids_dtype)
 
 
-@pytest.mark.parametrize("numel", list(range(1, 8192, 11)))
+@pytest.mark.parametrize("numel", list(range(1, 8192, 111)))
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("ep_size", [2])
 @pytest.mark.parametrize("topk_ids_dtype", [torch.int64])

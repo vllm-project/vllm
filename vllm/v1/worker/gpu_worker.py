@@ -28,7 +28,8 @@ from vllm.tasks import SupportedTask
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
+                             ModelRunnerOutput)
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
@@ -310,6 +311,7 @@ class Worker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
+
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
 
@@ -321,16 +323,11 @@ class Worker(WorkerBase):
         if get_pp_group().is_last_rank:
             max_num_reqs = min(self.scheduler_config.max_num_seqs,
                                self.scheduler_config.max_num_batched_tokens)
-            # activate building attn_metadata for this dummy run to avoid
-            # potential illegal memory access for full cudagraph relay.
-            attn_cudagraph = self.compilation_config.full_cuda_graph and\
-                not self.model_config.enforce_eager
 
             # We skip EPLB here since we don't want to record dummy metrics
             hidden_states, last_hidden_states = \
                 self.model_runner._dummy_run(
                     num_tokens=max_num_reqs,
-                    capture_attn_cudagraph=attn_cudagraph,
                     skip_eplb=True,
                 )
             if self.model_runner.is_pooling_model:
@@ -340,8 +337,7 @@ class Worker(WorkerBase):
                     hidden_states=last_hidden_states)
 
         # Warmup kernels used during model execution
-        kernel_warmup(self.get_model(),
-                      max_tokens=self.scheduler_config.max_num_batched_tokens)
+        kernel_warmup(self)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
@@ -390,6 +386,9 @@ class Worker(WorkerBase):
 
         assert isinstance(output, ModelRunnerOutput)
         return output
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        return self.model_runner.take_draft_token_ids()
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
@@ -516,7 +515,7 @@ class Worker(WorkerBase):
             assert self.model_runner.eplb_state is not None
             new_physical_experts = \
                 self.model_runner.eplb_state.physical_to_logical_map.shape[1]
-            parallel_config.num_redundant_experts = (
+            parallel_config.eplb_config.num_redundant_experts = (
                 new_physical_experts -
                 self.model_runner.eplb_state.logical_replica_count.shape[1])
             global_expert_load = None
@@ -532,7 +531,7 @@ class Worker(WorkerBase):
             assert self.model_runner.eplb_state is not None
             global_expert_load = self.model_runner.eplb_state.rearrange(
                 self.model_runner.model, execute_shuffle=False)
-            parallel_config.num_redundant_experts = (
+            parallel_config.eplb_config.num_redundant_experts = (
                 new_physical_experts - global_expert_load.shape[1])
         prepare_communication_buffer_for_model(self.model_runner.model)
         self.model_runner.model.update_physical_experts_metadata(
