@@ -949,11 +949,11 @@ def grouped_topk(
     num_expert_group: int = 0,
     topk_group: int = 0,
     scoring_func: str = "softmax",
-    e_score_correction_bias: Optional[torch.Tensor] = None,
     routed_scaling_factor: float = 1.0,
-    enable_fused: bool = True,
+    e_score_correction_bias: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if current_platform.is_cuda() and enable_fused and \
+    if envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK and \
+            current_platform.is_cuda() and \
             num_expert_group <= 32 and topk <= 32 and \
             e_score_correction_bias is not None:
         return fused_grouped_topk(
