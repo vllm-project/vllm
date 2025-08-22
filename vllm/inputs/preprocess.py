@@ -344,7 +344,7 @@ class InputPreprocessor:
                 lora_request=lora_request,
             )
         else:
-            inputs = token_inputs(prompt_token_ids=prompt_token_ids, )
+            inputs = token_inputs(prompt_token_ids=prompt_token_ids)
 
         if cache_salt := parsed_content.get("cache_salt"):
             inputs["cache_salt"] = cache_salt
