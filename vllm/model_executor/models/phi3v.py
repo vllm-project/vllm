@@ -32,7 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 # yapf conflicts with isort for this block
@@ -318,17 +318,6 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
 
 class Phi3VProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_processor(
-        self,
-        *,
-        num_crops: Optional[int] = None,
-        **kwargs: object,
-    ) -> ProcessorMixin:
-        if num_crops is not None:
-            kwargs["num_crops"] = num_crops
-
-        return self.ctx.get_hf_processor(**kwargs)
-
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None}
 
@@ -421,7 +410,7 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_tokens: list[str] = hf_processor.img_tokens  # type: ignore

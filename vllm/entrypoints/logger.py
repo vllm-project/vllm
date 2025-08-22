@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
 from typing import Optional, Union
 
 import torch
@@ -16,8 +17,6 @@ logger = init_logger(__name__)
 class RequestLogger:
 
     def __init__(self, *, max_log_len: Optional[int]) -> None:
-        super().__init__()
-
         self.max_log_len = max_log_len
 
     def log_inputs(
@@ -45,3 +44,36 @@ class RequestLogger:
             "lora_request: %s.", request_id, prompt, params, prompt_token_ids,
             prompt_embeds.shape if prompt_embeds is not None else None,
             lora_request)
+
+    def log_outputs(
+        self,
+        request_id: str,
+        outputs: str,
+        output_token_ids: Optional[Sequence[int]],
+        finish_reason: Optional[str] = None,
+        is_streaming: bool = False,
+        delta: bool = False,
+    ) -> None:
+        max_log_len = self.max_log_len
+        if max_log_len is not None:
+            if outputs is not None:
+                outputs = outputs[:max_log_len]
+
+            if output_token_ids is not None:
+                # Convert to list and apply truncation
+                output_token_ids = list(output_token_ids)[:max_log_len]
+
+        stream_info = ""
+        if is_streaming:
+            stream_info = (" (streaming delta)"
+                           if delta else " (streaming complete)")
+
+        logger.info(
+            "Generated response %s%s: output: %r, "
+            "output_token_ids: %s, finish_reason: %s",
+            request_id,
+            stream_info,
+            outputs,
+            output_token_ids,
+            finish_reason,
+        )

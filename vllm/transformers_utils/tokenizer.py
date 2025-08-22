@@ -7,7 +7,6 @@ import os
 import warnings
 from functools import lru_cache
 from pathlib import Path
-from types import MethodType
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import huggingface_hub
@@ -50,11 +49,12 @@ def decode_tokens(
     `skip_special_tokens=None` means to use the backend's default
     settings.
     """
+    decode_method = getattr(tokenizer, "_decode", tokenizer.decode)
     if skip_special_tokens is not None:
-        return tokenizer.decode(token_ids,
-                                skip_special_tokens=skip_special_tokens)
+        return decode_method(token_ids,
+                             skip_special_tokens=skip_special_tokens)
 
-    return tokenizer.decode(token_ids)
+    return decode_method(token_ids)
 
 
 def encode_tokens(
@@ -141,26 +141,6 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
 
     cached_tokenizer.__class__ = CachedTokenizer
     return cached_tokenizer
-
-
-def patch_padding_side(tokenizer: PreTrainedTokenizer) -> None:
-    """Patch _pad method to accept `padding_side` for older tokenizers."""
-    orig_pad = tokenizer._pad
-
-    def _pad(
-        self: PreTrainedTokenizer,
-        *args,
-        padding_side: Optional[str] = None,
-        **kwargs,
-    ):
-        if padding_side is not None and padding_side != self.padding_side:
-            msg = ("`padding_side` argument is not supported by "
-                   f"{type(tokenizer).__name__} and will be ignored.")
-            warnings.warn(msg, stacklevel=2)
-
-        return orig_pad(*args, **kwargs)
-
-    tokenizer._pad = MethodType(_pad, tokenizer)
 
 
 def get_tokenizer(
@@ -270,12 +250,6 @@ def get_tokenizer(
             }
             tokenizer.add_special_tokens(special_tokens_map)
 
-        # NOTE: We can remove this after https://github.com/THUDM/ChatGLM3/issues/1324
-        if type(tokenizer).__name__ in ("ChatGLMTokenizer",
-                                        "ChatGLM4Tokenizer"):
-            assert isinstance(tokenizer, PreTrainedTokenizer)
-            patch_padding_side(tokenizer)
-
         if not isinstance(tokenizer, PreTrainedTokenizerFast):
             logger.warning(
                 "Using a slow tokenizer. This might cause a significant "
@@ -295,7 +269,7 @@ def cached_tokenizer_from_config(
     return cached_get_tokenizer(
         model_config.tokenizer,
         tokenizer_mode=model_config.tokenizer_mode,
-        tokenizer_revision=model_config.tokenizer_revision,
+        revision=model_config.tokenizer_revision,
         trust_remote_code=model_config.trust_remote_code,
         **kwargs,
     )

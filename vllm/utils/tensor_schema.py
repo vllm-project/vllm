@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Annotated, Any, Union, get_args, get_origin, get_type_hints
+from typing import (Annotated, Any, Optional, Union, get_args, get_origin,
+                    get_type_hints)
 
 import torch
 
@@ -11,9 +12,13 @@ logger = init_logger(__name__)
 
 class TensorShape:
 
-    def __init__(self,
-                 *dims: Union[int, str],
-                 dynamic_dims: set[str, ...] = None) -> None:
+    def __init__(
+        self,
+        *dims: Union[int, str],
+        dynamic_dims: Optional[set[str]] = None,
+    ) -> None:
+        super().__init__()
+
         self.dims = dims
         self.dynamic_dims = dynamic_dims if dynamic_dims else set()
 
@@ -44,11 +49,15 @@ class TensorShape:
 
 class TensorSchema:
 
-    def __init__(self,
-                 *,
-                 validate: bool = True,
-                 resolve_bindings: dict[str, int] = None,
-                 **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        validate: bool = True,
+        resolve_bindings: Optional[dict[str, int]] = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__()
+
         self._resolve_bindings = resolve_bindings if resolve_bindings else {}
 
         for key, value in kwargs.items():
@@ -57,13 +66,19 @@ class TensorSchema:
         if validate:
             self.validate()
 
-    def __getitem__(self, item) -> Any:
-        return getattr(self, item)
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
 
-    def _match_shape_with_dynamic(self, actual: tuple[int, ...],
-                                  reference: tuple[int, ...],
-                                  expected_shape: tuple[Union[int, str], ...],
-                                  dynamic_dims: set[str, ...]) -> bool:
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def _match_shape_with_dynamic(
+        self,
+        actual: tuple[int, ...],
+        reference: tuple[int, ...],
+        expected_shape: tuple[Union[int, str], ...],
+        dynamic_dims: set[str],
+    ) -> bool:
         if len(actual) != len(reference) or len(actual) > len(expected_shape):
             return False
 
@@ -81,14 +96,13 @@ class TensorSchema:
         return True
 
     def _validate_nested_tensors(
-            self, value: Union[list[torch.Tensor, ...],
-                               tuple[torch.Tensor, ...]], field_name: str,
-            expected_shape: tuple[Union[int, str], ...],
-            dynamic_dims: set[str, ...]) -> tuple[int, ...]:
+        self,
+        value: Union[list[torch.Tensor], tuple[torch.Tensor, ...]],
+        field_name: str,
+        expected_shape: tuple[Union[int, str], ...],
+        dynamic_dims: set[str],
+    ) -> tuple[int, ...]:
         """Validate a list/tuple of tensors and return the actual shape."""
-        if not value:
-            raise ValueError(f"{field_name} is an empty list")
-
         # Ensure all tensors in the list have the same
         # shape, besides dynamic dimensions
         first = value[0]
@@ -110,13 +124,16 @@ class TensorSchema:
         # shape = (len(list), *tensor.shape)
         return (len(value), ) + first.shape
 
-    def _validate_tensor_shape_expected(self, actual_shape: tuple[int, ...],
-                                        expected_shape: tuple[Union[int, str],
-                                                              ...],
-                                        field_name: str, shape_env: dict[str,
-                                                                         int],
-                                        dynamic_dims: set[str, ...]) -> None:
+    def _validate_tensor_shape_expected(
+        self,
+        actual_shape: tuple[int, ...],
+        expected_shape: tuple[Union[int, str], ...],
+        field_name: str,
+        shape_env: dict[str, int],
+        dynamic_dims: set[str],
+    ) -> None:
         """Validate that the actual tensor shape matches the expected shape."""
+
         if len(actual_shape) != len(expected_shape):
             raise ValueError(f"{field_name} has rank {len(actual_shape)} "
                              f"but expected {len(expected_shape)}")
@@ -160,12 +177,11 @@ class TensorSchema:
                     # Skip validation when Union contains None
                     if type(None) in args:
                         continue
-                # If not optional, raise error
+                # Otherwise field is required, raise error
                 raise ValueError(f"Required field '{field_name}' is missing")
 
             # Field exists, proceed with validation
             value = getattr(self, field_name)
-
             if get_origin(field_type) is not None:
                 args = get_args(field_type)
 
@@ -173,13 +189,23 @@ class TensorSchema:
                     if isinstance(arg, TensorShape):
                         expected_shape = arg.resolve(**self._resolve_bindings)
                         if isinstance(value, (list, tuple)):
-                            actual_shape = self._validate_nested_tensors(
-                                value, field_name, expected_shape,
-                                arg.dynamic_dims)
+                            # list/tuple of Tensors → shape = (len(value), ...)
+                            if value and isinstance(value[0], torch.Tensor):
+                                actual_shape = self._validate_nested_tensors(
+                                    value, field_name, expected_shape,
+                                    arg.dynamic_dims)
+                            elif value:
+                                # list/tuple of scalars → shape = (len(value),)
+                                actual_shape = (len(value), )
+                            else:
+                                raise ValueError(
+                                    f"{field_name} is an empty list")
 
+                        # Tensor → shape = tensor.shape
                         elif isinstance(value, torch.Tensor):
                             actual_shape = value.shape
 
+                        # Otherwise, it's an unsupported type
                         else:
                             type_names = []
                             for arg in args:

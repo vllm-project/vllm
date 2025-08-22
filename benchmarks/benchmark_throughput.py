@@ -15,6 +15,7 @@ import torch
 import uvloop
 from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, PreTrainedTokenizerBase
+from typing_extensions import deprecated
 
 from benchmark_dataset import (
     AIMODataset,
@@ -382,6 +383,10 @@ def get_requests(args, tokenizer):
     return dataset_cls(**common_kwargs).sample(**sample_kwargs)
 
 
+@deprecated(
+    "benchmark_throughput.py is deprecated and will be removed in a "
+    "future version. Please use 'vllm bench throughput' instead.",
+)
 def main(args: argparse.Namespace):
     if args.seed is None:
         args.seed = 0
@@ -592,8 +597,8 @@ def validate_args(args):
     # https://github.com/vllm-project/vllm/issues/16222
     if args.data_parallel_size > 1:
         raise ValueError(
-            "Data parallel is not supported in offline benchmark, \
-            please use benchmark serving instead"
+            "Data parallel is not supported in offline benchmark, "
+            "please use benchmark serving instead"
         )
 
 
