@@ -203,6 +203,14 @@ class MambaSpec(KVCacheSpec):
         return self.page_size_bytes
 
 
+@dataclass(frozen=True)
+class EncoderOnlyAttentionSpec(AttentionSpec):
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        # Encoder-only layers do not need KV cache
+        return 0
+
+
 @dataclass
 class KVCacheTensor:
     """

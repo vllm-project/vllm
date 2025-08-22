@@ -204,6 +204,7 @@ def initialize_kv_cache_for_kv_sharing(
     kv_caches: dict[str, torch.Tensor],
     # Optional for now to avoid breaking TPU
     attn_groups: Optional[list[list[AttentionGroup]]] = None,
+    runner_only_attn_layers: Optional[set[str]] = None,
 ) -> None:
     """
     Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
@@ -249,6 +250,9 @@ def initialize_kv_cache_for_kv_sharing(
             attn_group_idx = layer_to_attn_group_idx[target_layer_name][1]
             attn_groups[kv_cache_group_idx][attn_group_idx].layer_names.append(
                 layer_name)
+
+        if runner_only_attn_layers is not None:
+            runner_only_attn_layers.add(layer_name)
 
 
 def bind_kv_cache(

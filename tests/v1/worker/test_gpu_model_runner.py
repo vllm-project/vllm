@@ -680,6 +680,7 @@ def test_init_kv_cache_with_kv_sharing_valid():
         kv_cache_spec[layer_0].page_size_bytes
 
     runner.initialize_kv_cache(kv_cache_config)
+    kv_cache_config_after_init = runner.kv_cache_config
 
     layer_0_kv = vllm_ctx[layer_0].kv_cache[0]
     layer_1_kv = vllm_ctx[layer_1].kv_cache[0]
@@ -687,10 +688,12 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert id(layer_1_kv) == id(layer_0_kv)
 
     # check layer 1 added to kv cache group's layer names
-    assert len(kv_cache_config.kv_cache_groups) == 1
-    assert len(kv_cache_config.kv_cache_groups[0].layer_names) == 2
-    assert kv_cache_config.kv_cache_groups[0].layer_names[0] == layer_0
-    assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
+    assert len(kv_cache_config_after_init.kv_cache_groups) == 1
+    assert len(kv_cache_config_after_init.kv_cache_groups[0].layer_names) == 2
+    assert kv_cache_config_after_init.kv_cache_groups[0].layer_names[
+        0] == layer_0
+    assert kv_cache_config_after_init.kv_cache_groups[0].layer_names[
+        1] == layer_1
 
 
 def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
