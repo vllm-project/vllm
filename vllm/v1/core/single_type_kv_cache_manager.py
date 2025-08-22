@@ -98,6 +98,8 @@ class SingleTypeKVCacheManager(ABC):
             assert len(req_blocks) == 0
             req_blocks.extend(new_computed_blocks)
             self.num_cached_block[request_id] = len(new_computed_blocks)
+
+            self.block_pool.touch(new_computed_blocks)
         else:
             # A running request. Should not have new computed blocks.
             assert len(new_computed_blocks) == 0

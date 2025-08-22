@@ -227,6 +227,10 @@ class KVCacheManager:
             raise ValueError("num_new_tokens must be greater than 0")
 
         if new_computed_blocks is not None:
+            if not self.enable_caching:
+                assert not any(new_computed_blocks.blocks), (
+                    "Computed blocks should be empty when "
+                    "prefix caching is disabled")
             new_computed_block_list = new_computed_blocks.blocks
         else:
             new_computed_block_list = tuple(
@@ -258,14 +262,6 @@ class KVCacheManager:
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
             # Cannot allocate new blocks
             return None
-
-        # Touch the computed blocks to make sure they won't be evicted.
-        if self.enable_caching:
-            self.block_pool.touch(new_computed_block_list)
-        else:
-            assert not any(new_computed_block_list), (
-                "Computed blocks should be empty when "
-                "prefix caching is disabled")
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
