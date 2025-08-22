@@ -196,7 +196,8 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
-        level=CompilationLevel.PIECEWISE, custom_ops=["+rms_norm"]))
+        level=CompilationLevel.PIECEWISE,
+        custom_ops=["+rms_norm", "+quant_fp8"]))
     vllm_config.compilation_config.pass_config = PassConfig(
         enable_fi_allreduce_fusion=True, enable_noop=False)
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
