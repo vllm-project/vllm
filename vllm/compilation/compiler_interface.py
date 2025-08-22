@@ -199,7 +199,10 @@ class InductorStandaloneAdaptor(CompilerInterface):
         set_inductor_config(current_config, compile_range)
 
         if isinstance(compile_range, tuple):
-            dynamic_shapes = "from_example_inputs"
+            if compile_range[0] == compile_range[1]:
+                dynamic_shapes = "from_example_inputs"
+            else:
+                dynamic_shapes = "from_graph"
         else:
             dynamic_shapes = "from_tracing_context"
 

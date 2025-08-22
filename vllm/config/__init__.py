@@ -3870,6 +3870,9 @@ class VllmConfig:
         # The upper bound of the compile ranges is the max_num_batched_tokens
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         if max_num_batched_tokens is not None:
+            # We add 1 because the bounds checks in the compiler are exclusive
+            # and we want to include the max_num_batched_tokens
+            # in the compile range
             computed_compile_ranges_split_points.append(
                 max_num_batched_tokens + 1)
 
@@ -3880,6 +3883,8 @@ class VllmConfig:
                 tp_size, _DEFAULT_FI_ALLREDUCE_MAX_INPUT_SIZE)
             max_token_num = max_size // (self.model_config.get_hidden_size() *
                                          self.model_config.dtype.itemsize)
+            # We add 1 because the bounds checks in the compiler are exclusive
+            # and we want to include the max_token_num in the compile range
             computed_compile_ranges_split_points.append(max_token_num + 1)
 
         if compilation_config.compile_ranges_split_points is not None:
