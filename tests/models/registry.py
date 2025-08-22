@@ -547,7 +547,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         speculative_model="morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
         tokenizer="meta-llama/Llama-4-Scout-17B-16E-Instruct"),  # noqa: E501
-    "EagleQwen2ForCausalLMEagle": _HfExamplesInfo("Qwen/QwQ-32B",
+    "Qwen2ForCausalLMEagle": _HfExamplesInfo("Qwen/QwQ-32B",
                                              trust_remote_code=True,
                                              speculative_model="reinforce20001/QwQ-32B-Eagle",
                                              tokenizer="Qwen/QwQ-32B"),
