@@ -585,7 +585,6 @@ class Siglip2Encoder(nn.Module):
             hidden_states = block(hidden_states, cu_seqlens_tmp,
                                   position_embeddings)
 
-        # tokens = self.post_trunk_norm(tokens)
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
         hidden_states = hidden_states[reverse_indices, :].reshape(seq_len, -1)
@@ -671,11 +670,6 @@ class Siglip2NavitModel(torch.nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
-            # post_layernorm is optional in SiglipVisionModel
-            if (name.startswith("trunk.post_trunk_norm")
-                    and self.trunk.post_trunk_norm is None):
-                continue
-
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
