@@ -24,7 +24,6 @@ from typing import Annotated, Any, Callable, Optional
 import prometheus_client
 import pydantic
 import regex as re
-import uvloop
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -1985,4 +1984,29 @@ if __name__ == "__main__":
     args = parser.parse_args()
     validate_parsed_serve_args(args)
 
-    uvloop.run(run_server(args))
+    import os
+
+    # Only enable uvloop on non-Windows platforms unless explicitly disabled.
+    # Setting env var VLLM_NO_UVLOOP=1 will skip trying to import/install uvloop.
+    # We avoid importing uvloop at module import time to prevent ModuleNotFoundError
+    # on platforms where uvloop is unavailable (for example, Windows).
+    if os.name != "nt" and not os.environ.get("VLLM_NO_UVLOOP"):
+        try:
+            import uvloop  # type: ignore
+
+            # Install uvloop as the event loop policy and use its runner.
+            uvloop.install()
+
+            def _run(coro):
+                # uvloop exposes a run function with the same semantics as
+                # asyncio.run, so call it directly.
+                return uvloop.run(coro)
+
+        except Exception:
+            # uvloop is optional; fall back to the default asyncio.run.
+            _run = asyncio.run
+    else:
+        _run = asyncio.run
+
+    # Run the server coroutine using the selected runner.
+    _run(run_server(args))
