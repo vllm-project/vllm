@@ -1068,13 +1068,13 @@ class Ernie4_5VLMultiModalProcessor(
                     mask = grid_thw[:, 0] > 1
                     processor_output["video_grid_thw"] = grid_thw[mask]
                     processor_output["image_grid_thw"] = grid_thw[~mask]
-                    video_patch_num = processor_output["video_grid_thw"].prod(dim=1).sum()
-                    image_patch_num = processor_output["image_grid_thw"].prod(dim=1).sum()
-                    processor_output['pixel_values'] = pixel_values_all[:image_patch_num]
-                    processor_output['pixel_values_videos'] = pixel_values_all[image_patch_num:]
+                    image_patch_num = processor_output["image_grid_thw"].prod(
+                        dim=1).sum()
+                    processor_output[
+                        'pixel_values'] = pixel_values_all[:image_patch_num]
+                    processor_output['pixel_values_videos'] = pixel_values_all[
+                        image_patch_num:]
                     del processor_output['images']
-                    
-                    
 
         return processor_output
 

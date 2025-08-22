@@ -191,9 +191,9 @@ class Ernie4_5_VLMoeMoE(nn.Module):
         text_moe_layer_start_index = moe_layer_start_index[0]
         vision_moe_layer_start_index = moe_layer_start_index[1]
         moe_layer_end_index = config.moe_layer_end_index
-        moe_layer_end_index = getattr(config, "moe_layer_end_index",
-                                [config.num_hidden_layers - 1,
-                                config.num_hidden_layers - 1])
+        moe_layer_end_index = getattr(
+            config, "moe_layer_end_index",
+            [config.num_hidden_layers - 1, config.num_hidden_layers - 1])
         text_moe_layer_end_index = moe_layer_end_index[0]
         vision_moe_layer_end_index = moe_layer_end_index[1]
 
@@ -366,9 +366,9 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
         # MoE
         moe_layer_start_index = config.moe_layer_start_index
         min_moe_layer_start_index = min(moe_layer_start_index)
-        moe_layer_end_index = getattr(config, "moe_layer_end_index",
-                                      [config.num_hidden_layers - 1,
-                                       config.num_hidden_layers - 1])
+        moe_layer_end_index = getattr(
+            config, "moe_layer_end_index",
+            [config.num_hidden_layers - 1, config.num_hidden_layers - 1])
         max_moe_layer_end_index = max(moe_layer_end_index)
         assert min_moe_layer_start_index <= max_moe_layer_end_index
         moe_num_experts = config.moe_num_experts
