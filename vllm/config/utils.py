@@ -32,15 +32,33 @@ def config(cls: ConfigT) -> ConfigT:
 # Canonicalize common value types used in config hashing.
 # Keeps imports light at module load; heavier bits are imported inside.
 def canon_value(x):
+    """Return a stable, JSON-serializable canonical form for hashing.
+
+    Fast path primitives first, then special types (Enum, callable, torch dtype
+    and Path), then generic containers (Mapping/Set/Sequence) with recursion.
+    """
     import enum
     import pathlib
+    from collections.abc import Mapping, Sequence, Set
 
+    # Fast path
     if x is None or isinstance(x, (bool, int, float, str)):
         return x
+
+    # Enums by value
     if isinstance(x, enum.Enum):
         return x.value
 
-    # Handle torch dtypes without incurring import cost
+    # Callable by qualified name
+    try:
+        if callable(x):
+            module = getattr(x, "__module__", "")
+            qual = getattr(x, "__qualname__", repr(x))
+            return f"{module}.{qual}" if module else qual
+    except Exception:
+        pass
+
+    # Torch dtype without hard dependency
     try:
         import torch  # noqa: WPS433 (local import by design)
         if isinstance(x, torch.dtype):
@@ -48,23 +66,19 @@ def canon_value(x):
     except Exception:
         pass
 
-    # Treat callables by qualified name for stability
-    try:
-        if callable(x):
-            module = getattr(x, "__module__", "")
-            qual = getattr(x, "__qualname__", str(x))
-            return f"{module}.{qual}" if module else qual
-    except Exception:
-        pass
-
+    # Paths
     if isinstance(x, pathlib.Path):
         return str(x)
-    if isinstance(x, dict):
+
+    # Containers (generic)
+    if isinstance(x, Mapping):
         return tuple(sorted((str(k), canon_value(v)) for k, v in x.items()))
-    if isinstance(x, set):
+    if isinstance(x, Set):
         return tuple(sorted(repr(canon_value(v)) for v in x))
-    if isinstance(x, (list, tuple)):
+    if isinstance(x, Sequence) and not isinstance(x, (str, bytes, bytearray)):
         return tuple(canon_value(v) for v in x)
+
+    # Unsupported type
     raise TypeError
 
 

@@ -523,7 +523,7 @@ class ModelConfig:
         from vllm.config.utils import hash_items_sha256 as _hash_sha256
 
         # Default-include; exclude only fields that don't change the compiled
-        # graph or are unstable. See RFC #16501.
+        # graph or are unstable. See https://github.com/vllm-project/vllm/pull/23134
         MODEL_EXCLUDE_FROM_HASH = {
             "tokenizer",
             "hf_config",  # hash content via JSON below
@@ -546,7 +546,7 @@ class ModelConfig:
         items: list[tuple[str, Any]] = _build_items(self,
                                                     MODEL_EXCLUDE_FROM_HASH)
 
-        # Hash hf_config by content using the most complete stable export.
+        # Hash hf_config; fallback to stable subset
         hf = getattr(self, "hf_config", None)
         if hf is not None:
             # Prefer to_dict for breadth and sorted JSON for stability.
@@ -2515,8 +2515,6 @@ class LoRAConfig:
 
     def compute_hash(self) -> str:
         """
-        Hash LoRA settings that influence compiled tensor shapes/ops.
-
         Opt-out: default-include declared fields; keep a tiny exclude set;
         normalize types; keep MD5 for compatibility.
         """
