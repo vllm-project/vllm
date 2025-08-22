@@ -661,14 +661,18 @@ class OpenAIServingChat(OpenAIServing):
 
                     if self.use_harmony:
                         harmony_parser = harmony_parsers[i]
+
+                        cumulative_delta = ""
                         for token_id in output.token_ids:
                             harmony_parser.process(token_id)
+                            cumulative_delta += harmony_parser.last_content_delta or ""
+
                         # FIXME(woosuk): Support function calling
                         is_final = harmony_parser.current_channel == "final"
                         if not (request.include_reasoning or is_final):
                             # Skip the reasoning content.
                             continue
-                        delta_text = harmony_parser.last_content_delta or ""
+                        delta_text = cumulative_delta
                     else:
                         delta_text = output.text
 
