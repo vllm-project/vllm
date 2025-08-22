@@ -20,7 +20,7 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape)
+    QuantKey, kFp8StaticTensorSym)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -529,11 +529,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                                   head_dim).reshape(tokens, n_kv_heads * n_rep,
                                                     head_dim))
 
-    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
-                                     group_shape: GroupShape):
+    def fused_output_quant_supported(self, quant_key: QuantKey):
         if self.use_triton_flash_attn:
-            return dtype == current_platform.fp8_dtype(
-            ) and static and group_shape == GroupShape.PER_TENSOR
+            return quant_key == kFp8StaticTensorSym
 
         # Only supported in the Triton backend
         return False
@@ -548,6 +546,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         attn_metadata: ROCmFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -605,6 +604,11 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "fused output quantization only supported for Triton"
                 " implementation in ROCMFlashAttentionImpl for now")
+
+        if output_block_scale is not None:
+            raise NotImplementedError(
+                "fused nvfp4 output quantization is not supported"
+                " for ROCMFlashAttentionImpl")
 
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
