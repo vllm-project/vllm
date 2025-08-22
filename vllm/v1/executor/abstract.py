@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable, Optional
+from concurrent.futures import Future
+from typing import Callable, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -85,7 +86,12 @@ class Executor(ExecutorBase):
     def execute_model(self) -> None:
         self.collective_rpc("execute_model")
 
-    def sample(self, grammar_bitmask) -> ModelRunnerOutput:
+    def sample(
+        self,
+        grammar_bitmask,
+        non_block: bool = True,
+    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
+        del non_block
         output = self.collective_rpc("sample", args=(grammar_bitmask, ))
         return output[0]
 

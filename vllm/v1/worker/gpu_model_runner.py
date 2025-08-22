@@ -1513,7 +1513,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self._sample_scheduler_output = scheduler_output
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            return
+            return None
 
         # Prepare the decoder inputs.
         (attn_metadata, logits_indices, spec_decode_metadata,
@@ -1665,6 +1665,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self._sample_hidden_states = sample_hidden_states
         self._logits = logits
         self._kv_connector_output = kv_connector_output
+        return None
 
     def sample(
         self,

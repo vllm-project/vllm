@@ -8,7 +8,7 @@ import threading
 import time
 import traceback
 import weakref
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
@@ -178,15 +178,18 @@ class MultiprocExecutor(Executor):
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
         )
 
-    def sample(self, grammar_bitmask) -> ModelRunnerOutput:
-        non_block = self.max_concurrent_batches > 1
+    def sample(
+        self,
+        grammar_bitmask,
+        non_block: bool = True,
+    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
         if not self.has_connector:
             # get output only from a single worker (output_rank)
             (output, ) = self.collective_rpc(
                 "sample",
                 args=(grammar_bitmask, ),
                 unique_reply_rank=self.output_rank,
-                non_block=False,
+                non_block=non_block,
                 timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS)
             return output
 

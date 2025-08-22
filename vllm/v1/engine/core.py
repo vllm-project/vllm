@@ -289,9 +289,9 @@ class EngineCore:
         self.model_executor.prepare_inputs(scheduler_output)
         self.model_executor.execute_model()
         bitmask = self.scheduler.get_grammar_bitmask(scheduler_output)
-        model_output = self.model_executor.sample(bitmask)
+        model_output = self.model_executor.sample(bitmask, non_block=False)
         engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output)
+            scheduler_output, model_output)  # type: ignore
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
 
@@ -375,7 +375,7 @@ class EngineCore:
 
         if model_output is not None:
             engine_core_outputs = self.scheduler.update_from_output(
-                self.prev_scheduler_output, model_output)
+                self.prev_scheduler_output, model_output.result())
 
         self.inflight_batch = is_scheduled
         self.prev_scheduler_output = scheduler_output
