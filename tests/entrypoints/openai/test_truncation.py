@@ -76,14 +76,14 @@ async def test_bigger_truncation_size(client: openai.AsyncOpenAI):
     with pytest.raises(openai.BadRequestError) as err:
         await client.post(path="embeddings", cast_to=object, body={**kwargs})
 
-    assert str(err.value) == f"""openai.BadRequestError: 
-                Error code: 400 - {{'object': 'error', 
-                'message': 'truncate_prompt_tokens value 
-                ({truncation_size}) 
-                is greater than max_model_len ({max_model_len}). 
-                Please, select a smaller truncation size.', 
-                'type': 'BadRequestError', 
-                'param': None, 'code': 400}}"""
+    assert err.value.http_status == 400
+    error_details = err.value.body["error"]
+    assert error_details["type"] == "BadRequestError"
+    expected_message = (f"truncate_prompt_tokens value "
+                        f"({truncation_size}) "
+                        f"is greater than max_model_len ({max_model_len}). "
+                        f"Please, select a smaller truncation size.")
+    assert error_details["message"] == expected_message
 
 
 @pytest.mark.asyncio
