@@ -359,9 +359,20 @@ class Hermes2ProToolParser(ToolParser):
             # case -- we now have the first info about arguments available from
             #   autocompleting the JSON
             elif cur_arguments and not prev_arguments:
-
-                cur_arguments_json = json.dumps(cur_arguments,
-                                                ensure_ascii=False)
+                # Extract the content after {"name": ..., "arguments":
+                #   from tool_call_portion as cur_arguments_json.
+                function_name = current_tool_call.get("name")
+                match = re.search(
+                    r'\{"name":\s*"' +
+                    re.escape(function_name) + r'"\s*,\s*"arguments":\s*(.*)',
+                    tool_call_portion.strip(), re.DOTALL)
+                if match:
+                    cur_arguments_json = match.group(1)
+                else:
+                    logger.error(
+                        "Failed to extract arguments JSON from "
+                        "tool_call_portion: %s", tool_call_portion)
+                    return None
                 logger.debug("finding %s in %s", delta_text,
                              cur_arguments_json)
 
