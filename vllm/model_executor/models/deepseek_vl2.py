@@ -21,11 +21,12 @@ from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.models.transformers import replace_linear_class
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, MultiModalHashes,
+                                        BaseProcessingInfo,
+                                        MultiModalProcessingInfo,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
@@ -51,13 +52,14 @@ class DeepseekVL2ImagePixelInputs(TensorSchema):
     """
     Dimensions:
         - bn: Batch size * number of images
+        - p: Number of patches
         - c: Number of channels (3)
         - h: Height of each image
         - w: Width of each image
     """
     type: Literal["pixel_values"]
     data: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                    TensorShape("bn", 3, "h", "w")]
+                    TensorShape("bn", "p", 3, "h", "w", dynamic_dims={"p"})]
     images_spatial_crop: Annotated[torch.Tensor, TensorShape("bn", 2)]
 
 
@@ -214,25 +216,25 @@ class DeepseekVL2MultiModalProcessor(
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if mm_data:
-            processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
-                dict(prompt=prompt, **mm_data),
-                dict(**mm_kwargs, **tok_kwargs),
-            )
-            pixel_values = processed_outputs["pixel_values"]
-            # split pixel values into patches corresponding to each image
-            images_spatial_crop = processed_outputs["images_spatial_crop"]
-            patches_per_image = [
-                x.prod().item() + 1 for x in images_spatial_crop
-            ]
-            pixel_values = pixel_values.split(patches_per_image)
-            processed_outputs["pixel_values"] = pixel_values
-        else:
+        if not mm_data:
             tokenizer = self.info.get_tokenizer()
-            processed_outputs = tokenizer(prompt,
-                                          add_special_tokens=True,
-                                          return_tensors="pt")
+            return tokenizer(prompt,
+                             add_special_tokens=True,
+                             return_tensors="pt")
+
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
+
+        pixel_values = processed_outputs["pixel_values"]
+        # split pixel values into patches corresponding to each image
+        images_spatial_crop = processed_outputs["images_spatial_crop"]
+        patches_per_image = [x.prod().item() + 1 for x in images_spatial_crop]
+        pixel_values = pixel_values.split(patches_per_image)
+        processed_outputs["pixel_values"] = pixel_values
 
         return processed_outputs
 
@@ -251,7 +253,7 @@ class DeepseekVL2MultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
@@ -288,9 +290,7 @@ class DeepseekVL2MultiModalProcessor(
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        *,
-        return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         # The processor logic is different for len(images) <= 2 vs > 2
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
@@ -301,7 +301,6 @@ class DeepseekVL2MultiModalProcessor(
                 mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
                 tokenization_kwargs=tokenization_kwargs,
-                return_mm_hashes=return_mm_hashes,
             )
 
         return super()._cached_apply_hf_processor(
@@ -309,7 +308,6 @@ class DeepseekVL2MultiModalProcessor(
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            return_mm_hashes=return_mm_hashes,
         )
 
 

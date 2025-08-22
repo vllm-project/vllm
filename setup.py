@@ -60,7 +60,8 @@ MAIN_CUDA_VERSION = "12.8"
 
 
 def is_sccache_available() -> bool:
-    return which("sccache") is not None
+    return which("sccache") is not None and \
+        not bool(int(os.getenv("VLLM_DISABLE_SCCACHE", "0")))
 
 
 def is_ccache_available() -> bool:
@@ -282,6 +283,18 @@ class cmake_build_ext(build_ext):
             self.copy_file(file, dst_file)
 
 
+class precompiled_build_ext(build_ext):
+    """Disables extension building when using precompiled binaries."""
+
+    def run(self) -> None:
+        assert _is_cuda(
+        ), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
+
+    def build_extensions(self) -> None:
+        print("Skipping build_ext: using precompiled extensions.")
+        return
+
+
 class precompiled_wheel_utils:
     """Extracts libraries and other files from an existing wheel."""
 
@@ -399,9 +412,6 @@ def _no_device() -> bool:
 
 
 def _is_cuda() -> bool:
-    # Allow forced CUDA in Docker/precompiled builds, even without torch.cuda
-    if envs.VLLM_USE_PRECOMPILED and envs.VLLM_DOCKER_BUILD_CONTEXT:
-        return True
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
             and not (_is_neuron() or _is_tpu()))
@@ -633,16 +643,25 @@ if envs.VLLM_USE_PRECOMPILED:
     if wheel_location is not None:
         wheel_url = wheel_location
     else:
+        import platform
+        arch = platform.machine()
+        if arch == "x86_64":
+            wheel_tag = "manylinux1_x86_64"
+        elif arch == "aarch64":
+            wheel_tag = "manylinux2014_aarch64"
+        else:
+            raise ValueError(f"Unsupported architecture: {arch}")
         base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
-        wheel_url = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+        wheel_url = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
+        nightly_wheel_url = f"https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
         from urllib.request import urlopen
         try:
             with urlopen(wheel_url) as resp:
                 if resp.status != 200:
-                    wheel_url = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+                    wheel_url = nightly_wheel_url
         except Exception as e:
             print(f"[warn] Falling back to nightly wheel: {e}")
-            wheel_url = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+            wheel_url = nightly_wheel_url
 
     patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
         wheel_url)
@@ -652,11 +671,13 @@ if envs.VLLM_USE_PRECOMPILED:
 if _no_device():
     ext_modules = []
 
-if not ext_modules or envs.VLLM_USE_PRECOMPILED:
-    # Disable build_ext when using precompiled wheel
+if not ext_modules:
     cmdclass = {}
 else:
-    cmdclass = {"build_ext": cmake_build_ext}
+    cmdclass = {
+        "build_ext":
+        precompiled_build_ext if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
+    }
 
 setup(
     # static metadata should rather go in pyproject.toml
@@ -671,7 +692,9 @@ setup(
         ["runai-model-streamer >= 0.13.3", "runai-model-streamer-s3", "boto3"],
         "audio": ["librosa", "soundfile",
                   "mistral_common[audio]"],  # Required for audio processing
-        "video": []  # Kept for backwards compatibility
+        "video": [],  # Kept for backwards compatibility
+        # FlashInfer should be updated together with the Dockerfile
+        "flashinfer": ["flashinfer-python==0.2.12"],
     },
     cmdclass=cmdclass,
     package_data=package_data,

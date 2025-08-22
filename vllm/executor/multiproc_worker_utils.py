@@ -3,31 +3,26 @@
 
 import asyncio
 import os
-import sys
 import threading
 import uuid
 from dataclasses import dataclass
 from multiprocessing import Queue
 from multiprocessing.connection import wait
 from multiprocessing.process import BaseProcess
-from typing import (Any, Callable, Dict, Generic, List, Optional, TextIO,
-                    TypeVar, Union)
+from typing import Any, Callable, Dict, Generic, List, Optional, TypeVar, Union
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import _maybe_force_spawn, get_mp_context, run_method
+from vllm.utils import (_maybe_force_spawn, decorate_logs, get_mp_context,
+                        run_method)
 
 logger = init_logger(__name__)
 
 T = TypeVar('T')
 
 _TERMINATE = "TERMINATE"  # sentinel
-
-# ANSI color codes
-CYAN = '\033[1;36m'
-RESET = '\033[0;0m'
 
 JOIN_TIMEOUT_S = 2
 
@@ -213,9 +208,7 @@ def _run_worker_process(
 
     # Add process-specific prefix to stdout and stderr
     process_name = get_mp_context().current_process().name
-    pid = os.getpid()
-    _add_prefix(sys.stdout, process_name, pid)
-    _add_prefix(sys.stderr, process_name, pid)
+    decorate_logs(process_name)
 
     # Initialize worker
     worker = worker_factory(vllm_config, rank)
@@ -258,33 +251,6 @@ def _run_worker_process(
             tunable.write_file()
 
     logger.info("Worker exiting")
-
-
-def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
-    """Prepend each output line with process-specific prefix"""
-
-    prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "
-    file_write = file.write
-
-    def write_with_prefix(s: str):
-        if not s:
-            return
-        if file.start_new_line:  # type: ignore[attr-defined]
-            file_write(prefix)
-        idx = 0
-        while (next_idx := s.find('\n', idx)) != -1:
-            next_idx += 1
-            file_write(s[idx:next_idx])
-            if next_idx == len(s):
-                file.start_new_line = True  # type: ignore[attr-defined]
-                return
-            file_write(prefix)
-            idx = next_idx
-        file_write(s[idx:])
-        file.start_new_line = False  # type: ignore[attr-defined]
-
-    file.start_new_line = True  # type: ignore[attr-defined]
-    file.write = write_with_prefix  # type: ignore[method-assign]
 
 
 def set_multiprocessing_worker_envs(parallel_config):

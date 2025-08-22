@@ -56,7 +56,8 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
-                                    MultiModalFieldConfig, MultiModalKwargs)
+                                    MultiModalFieldConfig,
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseProcessingInfo,
@@ -167,10 +168,9 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        return_mm_hashes: bool = False,
     ) -> MultiModalEncDecInputs:
         mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
-                                  tokenization_kwargs, return_mm_hashes)
+                                  tokenization_kwargs)
 
         image_token_id = self.info.get_hf_config().image_token_index
         # Check that the number of image tokens in the decoder prompt matches
@@ -217,7 +217,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
             # Set encoder prompt length based on the number of tiles.
             # This tells the block manager to allocate correct number
             # of slots for encoder tokens.
-            num_tiles = mm_inputs["mm_kwargs"]["num_tiles"]
+            num_tiles = mm_inputs["mm_kwargs"].get_data()["num_tiles"]
             decode_tiles = num_tiles[num_encode_images:num_images].sum().item()
             num_tokens = decode_tiles * token_per_chunk
             mm_inputs["encoder_prompt_token_ids"] = [image_token_id
@@ -302,7 +302,7 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         token_per_chunk = self.info.get_token_per_chunk_from_config()
         image_token_id = self.info.get_hf_config().image_token_index
