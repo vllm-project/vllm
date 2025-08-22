@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 import ray
+import torch
 
 from vllm import LLM
 from vllm.config import KVTransferConfig
@@ -22,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     NixlConnectorWorker)
 from vllm.forward_context import ForwardContext
 from vllm.sampling_params import SamplingParams
+from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
 from .utils import create_request, create_scheduler, create_vllm_config
 
@@ -98,7 +100,6 @@ class FakeNixlWrapper:
 
     def set_cycles_before_xfer_done(self, cycles: int):
         """Set the number of cycles before a transfer is considered done."""
-        self._cycles_before_xfer_done = cycles
 
 
 @contextlib.contextmanager
@@ -562,3 +563,86 @@ def _run_abort_timeout_test(llm_kwargs: dict, timeout: int):
                      sampling_params)
     # Request-0 times out and is cleared!
     assert '0' not in req_to_blocks
+
+
+def test_register_kv_caches(dist_init):
+    """
+    Test that register_kv_caches() properly calls nixl_wrapper methods with
+    correct data.
+    
+    This test verifies:
+    1. nixl_wrapper.get_reg_descs() is called with caches_data containing
+       tensor metadata
+    2. nixl_wrapper.get_xfer_descs() is called with blocks_data containing
+       block layout info
+    """
+
+    vllm_config = create_vllm_config()
+
+    # Create test kv cache tensors using proper backend shape
+    kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(num_blocks=2,
+                                                              block_size=16,
+                                                              num_kv_heads=4,
+                                                              head_size=64)
+    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    kv_caches = {
+        "layer0": shared_tensor,
+        "layer1": unique_tensor,
+        "layer2": shared_tensor,
+    }
+
+    # Store tensor info for validation
+    expected_tensor_size = shared_tensor[0].element_size(
+    ) * shared_tensor[0].numel()
+    expected_base_addrs = [
+        shared_tensor[0].data_ptr(), shared_tensor[1].data_ptr(),
+        unique_tensor[0].data_ptr(), unique_tensor[1].data_ptr()
+    ]
+
+    with patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.NixlWrapper") as mock_nixl_wrapper, \
+         patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.threading.Event"), \
+         patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.threading.Thread"):  # noqa: E501
+
+        # Create connector
+        connector = NixlConnector(vllm_config, KVConnectorRole.WORKER)
+        connector.connector_worker = FakeNixlConnectorWorker(
+            vllm_config, connector.engine_id, hand_shake_latency=0)
+
+        # Get the mock instance
+        mock_wrapper_instance = mock_nixl_wrapper.return_value
+        connector.connector_worker.nixl_wrapper = mock_wrapper_instance
+
+        # Execute register_kv_caches
+        connector.register_kv_caches(kv_caches)
+
+        # Verify get_reg_descs was called with caches_data
+        assert mock_wrapper_instance.get_reg_descs.called
+        caches_data, _ = mock_wrapper_instance.get_reg_descs.call_args[0]
+        assert len(caches_data) == 4
+
+        for i, cache_entry in enumerate(caches_data):
+            base_addr, size, _tp_rank, _ = cache_entry
+            assert size == expected_tensor_size, \
+                f"Entry {i}: Expected tensor size {expected_tensor_size}, " \
+                f"got {size}"
+            assert base_addr == expected_base_addrs[i], \
+                f"Entry {i}: Expected base address {expected_base_addrs[i]}, " \
+                f"got {base_addr}"
+
+        # Verify get_xfer_descs was called with blocks_data
+        assert mock_wrapper_instance.get_xfer_descs.called
+        blocks_data, _ = mock_wrapper_instance.get_xfer_descs.call_args[0]
+
+        # Validate blocks_data structure and size
+        expected_blocks_count = 8
+        assert len(blocks_data) == expected_blocks_count, \
+            f"Expected {expected_blocks_count} blocks, " \
+            f"got {len(blocks_data)}"
+
+        expected_block_len = expected_tensor_size // 2
+        for i, block_entry in enumerate(blocks_data):
+            block_start_addr, block_len, tp_rank = block_entry
+            assert block_len == expected_block_len, \
+                f"Block entry {i}: Expected block len {expected_block_len}, " \
+                f"got {block_len}"
