@@ -196,9 +196,15 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
 
-    if not any(
-            hasattr(model_cls, f"_parse_and_validate_{m}_input")
-            for m in ["image", "video", "audio"]):
+    inputs_parse_methods = []
+    for attr_name in dir(model_cls):
+        attr = getattr(model_cls, attr_name)
+        if hasattr(attr, "__annotations__"):
+            return_type = attr.__annotations__.get("return", None)
+            if return_type is not None and "Input" in str(return_type):
+                inputs_parse_methods.append(attr_name)
+
+    if not any(inputs_parse_methods):
         pytest.skip(f"{model_arch} does not support tensor schema validation.")
 
     ctx = InputProcessingContext(
@@ -215,8 +221,7 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
     processor = factories.build_processor(ctx, cache=None)
 
     with initialize_dummy_model(model_cls, model_config) as model:
-        for modality, _, mm_kwargs in create_batched_mm_kwargs(
+        for _, _, mm_kwargs in create_batched_mm_kwargs(
                 model_config, processor):
-            method_name = f"_parse_and_validate_{modality}_input"
-            if hasattr(model, method_name):
+            for method_name in inputs_parse_methods:
                 getattr(model, method_name)(**mm_kwargs)
