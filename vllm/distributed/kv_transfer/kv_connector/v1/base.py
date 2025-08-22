@@ -131,8 +131,8 @@ class KVConnectorBase_V1(ABC):
         Initialize with the KV caches. Useful for pre-registering the
         KV Caches in the KVConnector (e.g. for NIXL).
 
-        Args: kv_caches:
-            dictionary of layer names, kv cache
+        Args: 
+            kv_caches: dictionary of layer names, kv cache
         """
         return
 
