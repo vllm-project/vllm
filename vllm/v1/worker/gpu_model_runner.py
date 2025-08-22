@@ -1870,7 +1870,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # input_ids can be None for multimodal models.
                 target_token_ids = self.input_ids[:num_scheduled_tokens]
                 # TODO(woosuk): Support M-RoPE.
-                target_positions = self.positions[:num_scheduled_tokens]
+                # M-RoPE
+                if self.uses_mrope:
+                    target_positions = \
+                        self.mrope_positions[:, :num_scheduled_tokens]
+                else:
+                    target_positions = self.positions[:num_scheduled_tokens]
                 if self.use_aux_hidden_state_outputs:
                     target_hidden_states = torch.cat(
                         [h[:num_scheduled_tokens] for h in aux_hidden_states],
@@ -1892,7 +1897,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 target_token_ids = self.input_ids[token_indices]
                 # TODO(woosuk): Support M-RoPE.
-                target_positions = self.positions[token_indices]
+                # M-RoPE
+                if self.uses_mrope:
+                    target_positions = \
+                        self.mrope_positions[:, token_indices]
+                else:
+                    target_positions = self.positions[token_indices]
                 if self.use_aux_hidden_state_outputs:
                     target_hidden_states = torch.cat(
                         [h[token_indices] for h in aux_hidden_states], dim=-1)
