@@ -334,7 +334,8 @@ def test_streaming_subcases(param_dict):
         previous_token_ids=previous_token_ids,
         current_token_ids=current_token_ids,
         delta_token_ids=delta_token_ids,
-        request=ChatCompletionRequest(model="test-model"))
+        request=ChatCompletionRequest(model="test-model"),
+    )
     # Streaming currently expects at least one of reasoning content / content,
     # so the response should return None in that case.
     if param_dict["reasoning_content"] is None and param_dict["content"] is None:

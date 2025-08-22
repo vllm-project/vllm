@@ -17,7 +17,6 @@ logger = init_logger(__name__)
 
 @ReasoningParserManager.register_module("deepseek_v31")
 class DeepSeekV31ReasoningParser(DeepSeekR1ReasoningParser):
-
     def extract_reasoning_content_streaming(
         self,
         previous_text: str,
@@ -28,8 +27,10 @@ class DeepSeekV31ReasoningParser(DeepSeekR1ReasoningParser):
         delta_token_ids: Sequence[int],
         request: Union[ChatCompletionRequest, ResponsesRequest],
     ) -> Union[DeltaMessage, None]:
-        if request.chat_template_kwargs is not None and \
-           request.chat_template_kwargs.get("thinking", False):
+        if (
+            request.chat_template_kwargs is not None
+            and request.chat_template_kwargs.get("thinking", False) is True
+        ):
             return super().extract_reasoning_content_streaming(
                 previous_text,
                 current_text,
@@ -45,8 +46,10 @@ class DeepSeekV31ReasoningParser(DeepSeekR1ReasoningParser):
     def extract_reasoning_content(
         self, model_output: str, request: Union[ChatCompletionRequest, ResponsesRequest]
     ) -> tuple[Optional[str], Optional[str]]:
-        if request.chat_template_kwargs is not None and \
-           request.chat_template_kwargs.get("thinking", False):
+        if (
+            request.chat_template_kwargs is not None
+            and request.chat_template_kwargs.get("thinking", False) is True
+        ):
             return super().extract_reasoning_content(model_output, request)
 
         return None, model_output
