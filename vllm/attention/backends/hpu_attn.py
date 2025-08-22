@@ -454,6 +454,12 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                                       "is not implemented for "
                                       "HPUAttentionImpl")
 
+        # TODO: Currently, there is limitation of SLIDE_RIGHT value
+        # with accuracy issue. Will remove this once it's fixed.
+        if self.sliding_window is not None:
+            self.sliding_window_right = int(
+                os.environ.get('VLLM_FUSEDSDPA_SLIDE_RIGHT', '0'))
+
     def _maybe_init_alibi_biases(
         self,
         max_seq_len,
@@ -570,18 +576,26 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                     attn_bias = attn_metadata.window_attn_bias
 
                 if attn_metadata.use_window_sdpa:
+                    # TODO: Currently when sliding_window FusedSDPA is used,
+                    # the order of graphs for kvcache index copy and sdpa are
+                    # mixed up, causing the perf issue. Split the graph here.
+                    import habana_frameworks.torch as htorch
+                    htorch.core.mark_step()
+
                     attn_bias = attn_metadata.attn_bias
-                    window_size = (self.sliding_window,
-                                   attn_metadata.sliding_window_right)
+                    window_size = (self.sliding_window, 0 if attn_bias is None
+                                   else self.sliding_window_right)
                     common_args['window_size'] = window_size
                     # TODO: Currently HPU doesn't support GQA for FusedSDPA
                     # with causal + window, so repeat KV so QKV are all the
                     # same shape.
-                    if query_shape != kv_shape:
+                    if query_shape != kv_shape and attn_bias is None:
                         repeat_kv = self.num_heads // self.num_kv_heads
                         key = key.repeat_interleave(repeat_kv, dim=1)
                         value = value.repeat_interleave(repeat_kv, dim=1)
                         kv_shape = query_shape
+                else:
+                    window_size = (-1, -1)
 
             out = ops.prompt_attention(
                 impl=self.prefill_impl,
@@ -597,16 +611,17 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
             output = out.reshape(batch_size, seq_len, hidden_size)
         else:
             # Decoding run.
-            if not self.sliding_window:
-                block_list = attn_metadata.block_list
-                block_groups = attn_metadata.block_groups
-                block_mapping = attn_metadata.block_mapping
-                attn_bias = attn_metadata.attn_bias
-            else:
+            if self.sliding_window and \
+               attn_metadata.window_block_list is not None:
                 block_list = attn_metadata.window_block_list
                 block_groups = attn_metadata.window_block_groups
                 block_mapping = attn_metadata.window_block_mapping
                 attn_bias = attn_metadata.window_attn_bias
+            else:
+                block_list = attn_metadata.block_list
+                block_groups = attn_metadata.block_groups
+                block_mapping = attn_metadata.block_mapping
+                attn_bias = attn_metadata.attn_bias
 
             self.position_bias = None
             alibi_blocks = getattr(attn_metadata, 'alibi_blocks', None)

@@ -45,8 +45,6 @@ logger = init_logger(__name__)
 is_hpu = current_platform.is_hpu()
 is_lazy = os.environ.get('PT_HPU_LAZY_MODE', '0') == '1' if is_hpu else False
 
-is_hpu = current_platform.is_hpu()
-
 
 class Gemma3ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
@@ -271,6 +269,11 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
             mm_data,
             mm_kwargs,
         )
+        if "pixel_values" in processed_outputs:
+            # Cast pixel values to model dtype already here,
+            # so we need to transfer less data to the GPU
+            processed_outputs["pixel_values"] = processed_outputs[
+                "pixel_values"].to(self.info.ctx.model_config.dtype)
 
         # HF processor pops the `num_crops` kwarg, which is needed by vLLM
         if (images := mm_data.get("images")) is not None:
@@ -571,7 +574,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             pixel_values,
         )
 
-        if is_hpu and len(self.graphed_multimodal_buckets) > 1:
+        if is_hpu:
             batch_breakdown = greedy_plan(pixel_values.shape[0], \
                     self.vision_buckets.multimodal_buckets)
             start_idx = 0
@@ -586,7 +589,8 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
                             [self.multi_modal_projector(
                                 batch_sliced_image_features,
                                 bypass_hpu_graphs=i
-                                not in self.graphed_multimodal_buckets)]
+                                not in self.graphed_multimodal_buckets
+                                and len(self.graphed_multimodal_buckets) > 0)]
                 else:
                     image_embeds_multibatches += \
                             [self.multi_modal_projector( \
@@ -647,7 +651,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
-            if vision_embeddings is not None:
+            if (vision_embeddings is not None) and len(vision_embeddings) != 0:
                 kwargs = self.prepare_attn_masks(
                     input_ids,
                     positions,
@@ -682,19 +686,18 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         img_col = img_pos.unsqueeze(1).unsqueeze(2)  # [B,1,1,S]
 
         img_pos_cum = torch.cumsum(img_pos, 1)
-        img_causal = torch.arange(seq_len, device=device).unsqueeze(0) \
+        img_causal_h = torch.arange(seq_len, device=device)
+        img_causal = img_causal_h.unsqueeze(0) \
             - img_pos_cum + (img_pos_cum // img_tokens + 1) * img_tokens + 1
         img_causal = torch.cat((img_causal[:, :1] - 1, img_causal[:, :-1]), 1) \
             .clamp_(0, seq_len - 1) \
             .unsqueeze(1).unsqueeze(3)                          # [B,1,S,1]
-        ind = torch.arange(seq_len, device=device).view(1, 1, 1,
-                                                        -1)  # [1,1,1,S]
+        ind = img_causal_h.view(1, 1, 1, -1)  # [1,1,1,S]
 
         # positions we must *unmask*  (row img  ∧  col img
         # ∧  col < img_causal)
         allow = img_row & img_col & (ind < img_causal)
         mask_bool &= ~allow  # flip to False
-
         # 4)   final bfp16/32 version
         out = torch.zeros_like(mask_bool, dtype=mask_dtype) \
             .masked_fill(mask_bool, float("-inf"))
