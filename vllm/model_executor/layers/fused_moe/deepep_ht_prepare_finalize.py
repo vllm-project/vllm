@@ -147,6 +147,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # DeepEP's topk_ids output refers to the local experts directly. Offset
         # the topk_ids to move it back to the global experts space so it aligns
         # with existing vLLM interfaces.
+        assert expert_topk_ids is not None
         expert_topk_ids = torch.where(
             expert_topk_ids == -1,
             num_experts - 1 if self.rank_expert_offset == 0 else 0,
