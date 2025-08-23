@@ -62,8 +62,8 @@ def test_lookahead_greedy_equality(baseline_llm_generator, test_llm_generator,
     Lookahead scheduling is not expected to modify the output, as it simply
     allocates empty slots ahead of the known token ids in a sliding fashion.
 
-    This test varies the block size so that the lookahead size is less than and greater
-    than the block size.
+    This test varies the block size so that the lookahead size is less than and
+    greater than the block size.
     """
     output_len = 128
     temperature = 0.0

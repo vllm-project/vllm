@@ -42,4 +42,4 @@ def test_num_computed_tokens_update():
                 print("✓ Test passed: Request processed successfully")
                 return
 
-    assert False, "Request should have finished"
+    raise AssertionError("Request should have finished")
