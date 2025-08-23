@@ -33,7 +33,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from .idefics2_vision_model import (Idefics2VisionAttention,
                                     Idefics2VisionEmbeddings,
                                     Idefics2VisionMLP)
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, default_pooling_type
 from .siglip import SiglipEncoderInfo
 from .utils import WeightsMapper
 
@@ -431,6 +431,7 @@ class SiglipTextTower(nn.Module):
     info=SiglipSo400mProcessingInfo,
     dummy_inputs=SiglipSo400mDummyInputsBuilder,
 )
+@default_pooling_type("ALL")
 class SiglipSo400mModel(nn.Module, SupportsMultiModal):
     is_pooling_model = True
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={

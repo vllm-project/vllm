@@ -81,6 +81,7 @@ def run_e5_v(query: Query) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         image=image,
+        pooling_task="embed",
     )
 
 
@@ -115,6 +116,7 @@ def run_vlm2vec(query: Query) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         image=image,
+        pooling_task="embed",
     )
 
 
@@ -154,20 +156,23 @@ def run_siglip_so400m(query: Query) -> ModelRequestData:
     else:
         raise ValueError(f"Unsupported modality for siglip: {query['modality']}")
 
+    req_query = None
+    req_docs = None
+
     engine_args = EngineArgs(
         model="HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit",
         tokenizer="google/siglip-base-patch16-224",
         trust_remote_code=True,
-        max_model_len=64,
         runner="pooling",
-        enable_chunked_prefill=False,
         limit_mm_per_prompt={"image": 1},
     )
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
         image=image,
-        pooling_task="embed",
+        query=req_query,
+        documents=req_docs,
+        pooling_task="encode",
     )
 
 
