@@ -49,12 +49,11 @@ def decode_tokens(
     `skip_special_tokens=None` means to use the backend's default
     settings.
     """
-    decode_method = getattr(tokenizer, "_decode", tokenizer.decode)
     if skip_special_tokens is not None:
-        return decode_method(token_ids,
-                             skip_special_tokens=skip_special_tokens)
+        return tokenizer.decode(token_ids,
+                                skip_special_tokens=skip_special_tokens)
 
-    return decode_method(token_ids)
+    return tokenizer.decode(token_ids)
 
 
 def encode_tokens(
