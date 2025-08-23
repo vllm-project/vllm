@@ -829,7 +829,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logits_indices[-1].item())
             if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
                     and num_logits <= self.cudagraph_batch_sizes[-1]):
-                # Use piecewise CUDA graphs.
+                # Use CUDA graphs.
                 # Add padding to the batch size.
                 num_logits_padded = self.vllm_config.pad_for_cudagraph(
                     num_logits)
@@ -2066,16 +2066,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             "Cannot reload weights before model is loaded."
         model_loader = get_model_loader(self.load_config)
         logger.info("Reloading weights inplace...")
-        model = self.get_model()
-        model_loader.load_weights(model, model_config=self.model_config)
+        model_loader.load_weights(self.get_model(),
+                                  model_config=self.model_config)
 
     def save_tensorized_model(
         self,
         tensorizer_config: "TensorizerConfig",
     ) -> None:
-        model = self.get_model()
         TensorizerLoader.save_model(
-            model,
+            self.get_model(),
             tensorizer_config=tensorizer_config,
             model_config=self.model_config,
         )

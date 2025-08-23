@@ -256,7 +256,7 @@ class CompilationConfig:
     
     FULL_AND_PIECEWISE mode: Capture full cudagraph for decode batches and
     piecewise cudagraph for prefill and mixed prefill-decode batches.
-    This is like the most performant mode for most models.
+    This is generally the most performant mode for most models.
 
     Currently, the cudagraph mode is only used for the v1 engine.
     Note that the cudagraph logic is generally orthogonal to the 
@@ -278,7 +278,8 @@ class CompilationConfig:
     Note that this is orthogonal to the cudagraph capture logic
     outside of compilation.
     Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode instead.
+    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=PIECEWISE
+    instead.
     """
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
@@ -303,7 +304,8 @@ class CompilationConfig:
     flag cannot be used together with splitting_ops. This may provide
     performance benefits for smaller models.
     Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode instead.
+    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=FULL
+    instead.
     """
 
     pass_config: PassConfig = field(default_factory=PassConfig)

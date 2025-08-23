@@ -3721,6 +3721,12 @@ class VllmConfig:
                     "when cudagraph_mode piecewise cudagraphs is used, "\
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
 
+            # final migrate the deprecated flags
+            self.compilation_config.use_cudagraph = self.compilation_config.\
+                cudagraph_mode!= CUDAGraphMode.NONE
+            self.compilation_config.full_cuda_graph = self.compilation_config.\
+                cudagraph_mode.has_full_cudagraphs()
+
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
