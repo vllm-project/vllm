@@ -401,6 +401,9 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                     self._state[index] = self._init_state_entry(
                         prompt_tok_ids, thinking_token_budget)
                     self._state[index]["output_tok_ids"] = output_tok_ids
+                else:
+                    # Remove state if no thinking budget
+                    self._state.pop(index, None)
 
             for index in batch_update.removed:
                 self._state.pop(index, {})
@@ -432,11 +435,17 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                 self.force_token_ids[i] = \
                         self.think_end_token_ids[state["end_count"]]
 
-        current_mask = self.mask[:batch_size]
-        if current_mask.any():
-            logits[current_mask] = -float("inf")
-            logits[current_mask,
-                   self.force_token_ids[:batch_size][current_mask]] = 0.0
+        # Check in CPU first not to sync with GPU
+        has_active_thinking = any(
+            state.get("in_end", False) for state in self._state.values())
+
+        if has_active_thinking:
+            current_mask = self.mask[:batch_size]
+            active_indices = current_mask.nonzero(as_tuple=False).view(-1)
+            if len(active_indices) > 0:
+                force_tokens = self.force_token_ids[active_indices]
+                # Apply a large value for the end thinking token id index
+                logits[active_indices, force_tokens] = 1e9
 
         return logits
 
