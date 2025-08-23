@@ -256,13 +256,11 @@ set(VLLM_EXT_SRC
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
+  set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
-  # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
   set(CUTLASS_REVISION "v4.2.0" CACHE STRING "CUTLASS revision to use")
 
-  # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
-  if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
+  if(DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
     set(VLLM_CUTLASS_SRC_DIR $ENV{VLLM_CUTLASS_SRC_DIR})
   endif()
 
@@ -270,23 +268,56 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     if(NOT IS_ABSOLUTE VLLM_CUTLASS_SRC_DIR)
       get_filename_component(VLLM_CUTLASS_SRC_DIR "${VLLM_CUTLASS_SRC_DIR}" ABSOLUTE)
     endif()
-    message(STATUS "The VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
+    message(STATUS "VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
     FetchContent_Declare(cutlass SOURCE_DIR ${VLLM_CUTLASS_SRC_DIR})
   else()
-    FetchContent_Declare(
-        cutlass
-        GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        # Please keep this in sync with CUTLASS_REVISION line above.
-        GIT_TAG ${CUTLASS_REVISION}
-        GIT_PROGRESS TRUE
+    # --- Resolve CUTLASS revision with a fallback to main if the requested tag doesn't exist ---
+    set(_cutlass_repo "https://github.com/nvidia/cutlass.git")
+    set(_requested_tag "${CUTLASS_REVISION}")
+    set(_fallback_branch "main")
 
-        # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
-        # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
-        # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
-        GIT_SHALLOW TRUE
+    find_program(GIT_EXECUTABLE git REQUIRED)
+
+    # Default to shallow clone; disable it if a commit SHA is requested (better robustness)
+    set(_use_shallow TRUE)
+    if(_requested_tag MATCHES "^[0-9a-fA-F]{7,40}$")
+      set(_use_shallow FALSE)
+    endif()
+
+    # Check if the requested tag exists in the remote
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" ls-remote --tags "${_cutlass_repo}" "refs/tags/${_requested_tag}"
+      RESULT_VARIABLE _tag_res
+      OUTPUT_VARIABLE _tag_out
+      ERROR_VARIABLE _tag_err
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+
+    if(_tag_res EQUAL 0 AND _tag_out)
+      # Tag found
+      set(CUTLASS_EFFECTIVE_REV "${_requested_tag}")
+      message(STATUS "CUTLASS: using tag ${CUTLASS_EFFECTIVE_REV}")
+    else()
+      # Tag not found -> use the fallback branch (latest commit on that branch)
+      set(CUTLASS_EFFECTIVE_REV "${_fallback_branch}")
+      # For branches, shallow cloning is fine
+      set(_use_shallow TRUE)
+      message(WARNING "CUTLASS: tag '${_requested_tag}' not found in remote. "
+                      "Falling back to the latest on '${_fallback_branch}'.")
+    endif()
+
+    # Fetch CUTLASS with the resolved revision
+    FetchContent_Declare(
+      cutlass
+      GIT_REPOSITORY https://github.com/nvidia/cutlass.git
+      GIT_TAG ${CUTLASS_EFFECTIVE_REV}
+      GIT_PROGRESS TRUE
+      GIT_SHALLOW ${_use_shallow}
     )
   endif()
+
   FetchContent_MakeAvailable(cutlass)
+endif()
 
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/awq/gemm_kernels.cu"
