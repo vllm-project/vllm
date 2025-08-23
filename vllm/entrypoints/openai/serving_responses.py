@@ -1009,8 +1009,12 @@ class OpenAIServingResponses(OpenAIServing):
                             delta=ctx.parser.last_content_delta,
                             sequence_number=-1,
                         ))
+                # built-in tools will be triggered on the analysis channel
+                # However, occasionally built-in tools will
+                # still be output to commentary.
                 elif (ctx.parser.current_channel == "commentary"
-                      and ctx.parser.current_recipient == "python"):
+                      or ctx.parser.current_channel == "analysis"
+                      ) and ctx.parser.current_recipient == "python":
                     if not sent_output_item_added:
                         sent_output_item_added = True
                         yield _send_event(
@@ -1023,9 +1027,9 @@ class OpenAIServingResponses(OpenAIServing):
                                 ResponseCodeInterpreterToolCallParam(
                                     type="code_interpreter_call",
                                     id=current_item_id,
-                                    code="",
+                                    code=None,
                                     container_id="auto",
-                                    outputs=[],
+                                    outputs=None,
                                     status="in_progress",
                                 ),
                             ))
