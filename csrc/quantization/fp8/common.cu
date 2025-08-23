@@ -117,7 +117,7 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
   using BlockReduce = cub::BlockReduce<float, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
   const float block_max =
-      BlockReduce(tmp).Reduce((absmax_val, cuda::maximum<>{}, blockDim.x);
+      BlockReduce(tmp).Reduce(absmax_val, cuda::maximum<>{}, blockDim.x);
 
   __shared__ float token_scale;
   if (tid == 0) {
