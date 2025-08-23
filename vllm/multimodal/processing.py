@@ -12,7 +12,7 @@ from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
 
 import regex as re
 import torch
-from typing_extensions import Self, assert_never
+from typing_extensions import assert_never
 
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
@@ -135,7 +135,7 @@ instead of a function if it does not depend on the input.
 class PromptUpdateDetails(Generic[_S]):
     """Details about the token sequence or text that are part of the update."""
 
-    full: Union[_S, "_BoundPromptContent"]
+    full: _S
     """The full content."""
 
     is_embed: Optional[Callable[["_BoundPromptSequence"], torch.Tensor]] = None
@@ -180,8 +180,12 @@ class PromptUpdateDetails(Generic[_S]):
             is_embed=lambda f: torch.tensor(f.token_ids) == embed_token_id,
         )
 
+    def bind(self, tokenizer: AnyTokenizer) -> "_BoundPromptContent":
+        bound_full = _BoundPromptSequence.from_seq(tokenizer, self.full)
+        return _BoundPromptContent(full=bound_full, is_embed=self.is_embed)
 
-PromptUpdateInfo = Union[PromptSeq, PromptUpdateDetails, "_BoundPromptContent"]
+
+PromptUpdateInfo = Union[PromptSeq, PromptUpdateDetails]
 """
 The token sequence or text that are part of the update.
 
@@ -240,10 +244,10 @@ class PromptUpdate(ABC):
         if callable(target):
             target = target(item_idx)
 
-        if isinstance(target, PromptIndex):
-            return target
+        if not isinstance(target, PromptIndex):
+            target = _BoundPromptSequence.from_seq(tokenizer, target)
 
-        return _BoundPromptSequence.from_seq(tokenizer, target)
+        return target
 
     def _resolve_content(
         self,
@@ -257,11 +261,7 @@ class PromptUpdate(ABC):
         if not isinstance(content, PromptUpdateDetails):
             content = PromptUpdateDetails.from_seq(content)
 
-        bound_full = _BoundPromptSequence.from_seq(tokenizer, content.full)
-        bound_content = _BoundPromptContent(full=bound_full,
-                                            is_embed=content.is_embed)
-
-        return bound_content
+        return content.bind(tokenizer)
 
     def resolve(
         self,
@@ -280,10 +280,6 @@ class PromptUpdate(ABC):
             target=self._resolve_target(tokenizer, item_idx),
             content=self._resolve_content(tokenizer, item_idx),
         )
-
-    @abstractmethod
-    def with_content(self, content: PromptUpdateContent) -> Self:
-        raise NotImplementedError
 
 
 @dataclass
@@ -353,9 +349,6 @@ class PromptInsertion(PromptUpdate):
     @property
     def mode(self) -> UpdateMode:
         return UpdateMode.INSERT
-
-    def with_content(self, content: PromptUpdateContent) -> Self:
-        return replace(self, insertion=content)
 
 
 @dataclass
@@ -430,9 +423,6 @@ class PromptReplacement(PromptUpdate):
     @property
     def mode(self) -> UpdateMode:
         return UpdateMode.REPLACE
-
-    def with_content(self, content: PromptUpdateContent) -> Self:
-        return replace(self, replacement=content)
 
 
 @lru_cache(maxsize=2048)
@@ -617,11 +607,22 @@ class ResolvedPromptUpdate:
 
         return self.iter_token_matches(prompt, tokenizer, start_idx=start_idx)
 
-    def with_content(self, content: PromptUpdateContent) -> Self:
-        return replace(
-            self,
-            _origin=self._origin.with_content(content),
-        )
+    def with_target(self, target: UpdateTarget):
+        tokenizer = self.content.full.tokenizer
+        target_ = target
+
+        if not isinstance(target_, PromptIndex):
+            target_ = _BoundPromptSequence.from_seq(tokenizer, target_)
+
+        return replace(self, target=target_)
+
+    def with_content(self, content: PromptUpdateInfo):
+        tokenizer = self.content.full.tokenizer
+
+        if not isinstance(content, PromptUpdateDetails):
+            content = PromptUpdateDetails.from_seq(content)
+
+        return replace(self, content=content.bind(tokenizer))
 
 
 class _TokenMatch(NamedTuple):
@@ -1446,17 +1447,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return self._to_mm_items(mm_missing_data)
 
-    def _resolve_prompt_update_content(
+    def _recompute_cached_prompt_update(
         self,
-        missing_prompt_update: ResolvedPromptUpdate,
-        missing_item_idx: int,
-    ) -> PromptUpdateContent:
+        cached_update: ResolvedPromptUpdate,
+        new_item_idx: int,
+    ) -> ResolvedPromptUpdate:
         """
-        Override this if the content needs to be further resolved later, e.g.,
-        because the replacement text depends on the index of the item in the
-        real input instead of that of the uncached input..
+        Override this if other attributes of `ResolvedPromptUpdate`
+        also need to be recomputed after retrieving from the cache.
         """
-        return missing_prompt_update.get_content(missing_item_idx)
+        return replace(cached_update, item_idx=new_item_idx)
 
     def _merge_mm_kwargs(
         self,
@@ -1476,68 +1476,36 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         merged_kwargs = defaultdict[str,
                                     list[Optional[MultiModalKwargsItem]]](list)
-        merged_prompt_updates = defaultdict[str,
-                                            list[ResolvedPromptUpdate]](list)
+        merged_prompt_updates = defaultdict[
+            str, list[Sequence[ResolvedPromptUpdate]]](list)
         for modality, hashes in mm_hashes.items():
             missing_kwargs = mm_missing_kwargs.get(modality, [])
             missing_prompt_updates = mm_missing_prompt_updates.get(
                 modality, [])
-
-            # Usually, the prompt content is expressed as a function
-            # `(item_idx: int) -> PromptUpdateInfo`.
-            # To avoid keeping the scope of that function in memory
-            # (which may include `out_mm_kwargs`),
-            # we resolve the prompt content early by calling
-            # `_resolve_prompt_update_content` and replacing the old prompt
-            # content with the indexer of `resolved_contents`.
-            resolved_contents_per_item = list[list[_BoundPromptContent]]()
 
             for item_idx, item_hash in enumerate(hashes):
                 item: MultiModalProcessorCacheInItem
                 if not mm_is_cached[modality][item_idx]:
                     missing_next_idx = mm_missing_next_idx[modality]
                     kwargs = missing_kwargs[missing_next_idx]
-                    prompt_updates = [
-                        missing_prompt_update.with_content(
-                            self._resolve_prompt_update_content(
-                                missing_prompt_update,
-                                missing_next_idx,
-                            ))
-                        for missing_prompt_update in missing_prompt_updates
-                    ]
+                    updates = missing_prompt_updates[missing_next_idx]
+
                     mm_missing_next_idx[modality] += 1
 
-                    item = kwargs, prompt_updates
+                    item = kwargs, updates
                 else:
                     item = None
 
-                new_kwargs, new_prompt_updates = cache.get_and_update_item(
-                    item, item_hash)
+                kwargs, updates = cache.get_and_update_item(item, item_hash)
 
-                assert len(new_prompt_updates) == len(
-                    missing_prompt_updates), (
-                        "The number of prompt update definitions must not "
-                        "depend on multi-modal input in order for "
-                        "caching to remain valid.")
-
-                merged_kwargs[modality].append(new_kwargs)
-                resolved_contents_per_item.append([
-                    update.get_content(item_idx)
-                    for update in new_prompt_updates
+                merged_kwargs[modality].append(kwargs)
+                merged_prompt_updates[modality].append([
+                    self._recompute_cached_prompt_update(update, item_idx)
+                    for update in updates
                 ])
 
-            # Transpose dimensions from `(num_items, num_updates)`
-            # to `(num_updates, num_items)`
-            resolved_contents_per_update = zip(*resolved_contents_per_item)
-
-            merged_prompt_updates[modality] = [
-                prompt_update.with_content(resolved_contents.__getitem__)
-                for prompt_update, resolved_contents in zip(
-                    missing_prompt_updates, resolved_contents_per_update)
-            ]
-
         mm_kwargs = MultiModalKwargsItems(merged_kwargs)
-        mm_prompt_updates = MultiModalPromptUpdates(merged_prompt_updates)
+        mm_prompt_updates = dict(merged_prompt_updates)
 
         return mm_kwargs, mm_prompt_updates
 

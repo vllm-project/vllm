@@ -31,15 +31,13 @@ class MultiModalProcessorCacheItem:
 
     Args:
         item: The processed tensor data corresponding to a multi-modal item.
-        prompt_updates: The prompt updates that are potentially applicable to
-            that item, even if the item is later in a different position inside
-            `items[modality]`.
+        prompt_updates: The prompt updates corresponding to `item`.
     """
 
     def __init__(
         self,
         item: MultiModalKwargsItem,
-        prompt_updates: "Sequence[ResolvedPromptUpdate]",
+        prompt_updates: Sequence["ResolvedPromptUpdate"],
     ) -> None:
         super().__init__()
 
@@ -56,12 +54,9 @@ class MultiModalProcessorCacheItemMetadata:
             Since P1 already stores the tensor data, we only store its size
             metadata in P0 to reduce memory usage. The size metadata is still
             needed to keep the same cache eviction policy as P0.
-        prompt_updates: The prompt updates that are potentially applicable to
-            that item, even if the item is later in a different position inside
-            `items[modality]`.
-            This needs to stay on P0 because for some models, the processor
-            cannot regenerate the prompt update if the processed tensor data
-            is not available.
+        prompt_updates: The prompt updates corresponding to `item`.
+            This needs to stay on P0 because for some models, they are
+            dependent on the processed tensor data (cached on P1).
     """
 
     def __init__(

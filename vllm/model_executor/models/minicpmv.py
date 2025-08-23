@@ -58,8 +58,7 @@ from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
                                    VideoItem, VideoProcessorItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate, PromptUpdateContent,
-                                        PromptUpdateDetails,
+                                        PromptUpdate, PromptUpdateDetails,
                                         ResolvedPromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
@@ -692,41 +691,6 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
     ) -> bool:
         return False
 
-    def _resolve_prompt_update_content(
-        self,
-        missing_prompt_update: ResolvedPromptUpdate,
-        missing_item_idx: int,
-    ) -> PromptUpdateContent:
-        if missing_prompt_update.modality != "image":
-            return super()._resolve_prompt_update_content(
-                missing_prompt_update,
-                missing_item_idx,
-            )
-
-        image_processor = self.info.get_image_processor()
-        version = self.info.get_model_version()
-
-        text = missing_prompt_update.get_content(missing_item_idx).full.text
-
-        if version == (2, 0) or version == (2, 5):
-            im_start = image_processor.im_start_token
-            im_end = image_processor.im_end_token
-        else:
-            im_start = image_processor.im_id_start
-            im_end = image_processor.im_id_end
-
-        def get_image_replacement(item_idx: int):
-            return PromptUpdateDetails.select_text(
-                text.replace(
-                    f"{im_start}{missing_item_idx}{im_end}",
-                    f"{im_start}{item_idx}{im_end}",
-                    1,
-                ),
-                "<unk>",
-            )
-
-        return get_image_replacement
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -780,6 +744,42 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                               replacement=get_replacement[modality])
             for modality, pattern in placeholders
         ]
+
+    def _recompute_cached_prompt_update(
+        self,
+        cached_update: ResolvedPromptUpdate,
+        new_item_idx: int,
+    ) -> ResolvedPromptUpdate:
+        new_update = super()._recompute_cached_prompt_update(
+            cached_update,
+            new_item_idx,
+        )
+
+        if cached_update.modality == "image":
+            image_processor = self.info.get_image_processor()
+            version = self.info.get_model_version()
+
+            text = cached_update.content.full.text
+            prev_item_idx = cached_update.item_idx
+
+            if version == (2, 0) or version == (2, 5):
+                im_start = image_processor.im_start_token
+                im_end = image_processor.im_end_token
+            else:
+                im_start = image_processor.im_id_start
+                im_end = image_processor.im_id_end
+
+            new_update = new_update.with_content(
+                PromptUpdateDetails.select_text(
+                    text.replace(
+                        f"{im_start}{prev_item_idx}{im_end}",
+                        f"{im_start}{new_item_idx}{im_end}",
+                        1,
+                    ),
+                    "<unk>",
+                ))
+
+        return new_update
 
     def _get_mm_fields_config(
         self,
