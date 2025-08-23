@@ -118,7 +118,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def _receiver(
         self,
-        event: Optional[deep_ep.EventOverlap],
+        event: deep_ep.EventOverlap,
         has_scales: bool,
         token_data: Union[tuple[torch.Tensor, torch.Tensor], torch.Tensor],
         expert_topk_ids: Optional[torch.Tensor],
