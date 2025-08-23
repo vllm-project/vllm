@@ -6,8 +6,8 @@ import functools
 from abc import abstractmethod
 from collections.abc import Hashable
 from dataclasses import dataclass, fields, make_dataclass
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Generic, Optional,
-                    Protocol, TypeVar)
+from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Optional, Protocol,
+                    TypeVar)
 
 import numpy as np
 import torch
@@ -613,29 +613,6 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
     return common_attn_metadata
 
 
-def subclass_attention_metadata_builder(
-    name_prefix: str,
-    builder_cls: type[AttentionMetadataBuilder[M]],
-    build: Callable[
-        [AttentionMetadataBuilder[M], int, CommonAttentionMetadata, bool],
-        AttentionMetadata,
-    ],
-) -> type[AttentionMetadataBuilder[M]]:
-    """
-    Return a new subclass of `builder_cls` whose .build(...) method
-    is monkey patched to a custom build function.
-    """
-    name: str = name_prefix + builder_cls.__name__  # type: ignore
-
-    Wrapped = type(
-        name,
-        (builder_cls, ),  # inherit from the original
-        {
-            "build": build,
-        })
-    return Wrapped  # type: ignore
-
-
 def subclass_attention_backend(
         name_prefix: str, attention_backend_cls: type[AttentionBackend],
         builder_cls: type[AttentionMetadataBuilder[M]]
@@ -826,35 +803,29 @@ def create_kv_sharing_fast_prefill_attn_metadata_subclass(
     return attn_metadata_i
 
 
-@functools.lru_cache
 def create_fast_prefill_custom_backend(
     prefix: str,
     underlying_attn_backend: AttentionBackend,
 ) -> type[AttentionBackend]:
 
-    def build(self,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> AttentionMetadata:
-        new_common_attn_metadata =\
-        make_kv_sharing_fast_prefill_common_attn_metadata(common_attn_metadata)
-        metadata = super(self.__class__,
-                         self).build(common_prefix_len,
-                                     new_common_attn_metadata, fast_build)
-        return create_kv_sharing_fast_prefill_attn_metadata_subclass(
-            metadata, common_attn_metadata)
+    underlying_builder = underlying_attn_backend.get_builder_cls()
 
-    # Dynamically create a new attention backend that wraps the
-    # underlying attention backend but applies
-    # `build_preproces_fn` before calling `build(...)`
-    builder_cls = subclass_attention_metadata_builder(
-        name_prefix=prefix,
-        builder_cls=underlying_attn_backend.get_builder_cls(),
-        build=build,
-    )
+    class FastPrefillAttentionBuilder(underlying_builder):  # type: ignore
+
+        def build(self,
+                  common_prefix_len: int,
+                  common_attn_metadata: CommonAttentionMetadata,
+                  fast_build: bool = False) -> AttentionMetadata:
+            new_common_attn_metadata =\
+            make_kv_sharing_fast_prefill_common_attn_metadata(common_attn_metadata)
+            metadata = super().build(common_prefix_len,
+                                     new_common_attn_metadata, fast_build)
+            return create_kv_sharing_fast_prefill_attn_metadata_subclass(
+                metadata, common_attn_metadata)
+
     attn_backend = subclass_attention_backend(
         name_prefix=prefix,
         attention_backend_cls=underlying_attn_backend,
-        builder_cls=builder_cls)
+        builder_cls=FastPrefillAttentionBuilder)
 
     return attn_backend

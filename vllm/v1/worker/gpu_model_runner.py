@@ -2953,9 +2953,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for kv_cache_spec, group in self._kv_cache_spec_attn_group_iterator():
             attn_backend = group.backend
             for layer_name in group.layer_names:
-                if (
-                    layer_name in self.runner_only_attn_layers
-                ):
+                if layer_name in self.runner_only_attn_layers:
                     continue
                 raw_tensor = kv_cache_raw_tensors[layer_name]
                 assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
@@ -3063,26 +3061,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         kv_caches = self._reshape_kv_cache_tensors(kv_cache_config,
                                                    kv_cache_raw_tensors)
 
-        # Setup `kv_cache_config` and `kv_caches` for models
-        # with cross-layer KV sharing
-        if self.shared_kv_cache_layers:
-            initialize_kv_cache_for_kv_sharing(
-                self.shared_kv_cache_layers,
-                kv_cache_config.kv_cache_groups,
-                kv_caches,
-                self.attn_groups,
-                self.runner_only_attn_layers,
-            )
-            attn_layers = get_layers_from_vllm_config(self.vllm_config,
-                                                      Attention)
-            # Iterate in reversed order and add layers that re-use KV cache
-            # e.g. in YOCO-like KV sharing setups (e.g. Gemma3n)
-            for layer_name in reversed(attn_layers):
-                if layer_name in self.shared_kv_cache_layers:
-                    self.kv_sharing_fast_prefill_eligible_layers.add(
-                        layer_name)
-                else:
-                    break
+        # Set up cross-layer KV cache sharing
+        for layer_name, target_layer_name in self.shared_kv_cache_layers.items(
+        ):
+            logger.debug("%s reuses KV cache of %s", layer_name,
+                         target_layer_name)
+            kv_caches[layer_name] = kv_caches[target_layer_name]
 
         bind_kv_cache(kv_caches,
                       self.compilation_config.static_forward_context,
@@ -3102,6 +3086,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         add_kv_sharing_layers_to_kv_cache_groups(
             self.shared_kv_cache_layers,
             kv_cache_config.kv_cache_groups,
+            self.runner_only_attn_layers,
         )
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:

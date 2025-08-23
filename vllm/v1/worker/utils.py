@@ -206,9 +206,6 @@ def gather_mm_placeholders(
 def add_kv_sharing_layers_to_kv_cache_groups(
     shared_kv_cache_layers: dict[str, str],
     kv_cache_groups: list[KVCacheGroupSpec],
-    kv_caches: dict[str, torch.Tensor],
-    # Optional for now to avoid breaking TPU
-    attn_groups: Optional[list[list[AttentionGroup]]] = None,
     runner_only_attn_layers: Optional[set[str]] = None,
 ) -> None:
     """
