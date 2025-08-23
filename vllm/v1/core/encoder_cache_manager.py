@@ -125,7 +125,7 @@ class EncoderCacheManager:
             return True
         if num_tokens > self.num_freeable_slots:
             return False
-        
+
         # NOTE: Eviction takes place here, but physical memory is not freed
         # until model runner is notified by the scheduler output.
         while num_tokens > self.num_free_slots:
