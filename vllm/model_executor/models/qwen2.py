@@ -357,10 +357,13 @@ class Qwen2Model(nn.Module):
             residual = intermediate_tensors["residual"]
 
         aux_hidden_states = []
-        for idx, layer in enumerate(
-                self.layers[self.start_layer:self.end_layer]):
+        # NOTE(Ronald1995): extract layers to avoid __getattr__ attribute
+        # look-up in the loop.
+        layers = self.layers
+        for idx in range(self.start_layer, self.end_layer):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
+            layer = layers[idx]
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
