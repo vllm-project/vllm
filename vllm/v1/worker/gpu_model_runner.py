@@ -343,7 +343,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.is_pooling_model,
                 self.vllm_config.model_config.logits_processors),
             is_pooling_model=self.is_pooling_model,
-            reasoning_config=self.vllm_config.reasoning_config,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -3882,7 +3881,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_speculative_tokens=(
                     self.vllm_config.speculative_config.num_speculative_tokens
                     if self.vllm_config.speculative_config else 0),
-                reasoning_config=self.vllm_config.reasoning_config,
             )
 
     def _allocate_kv_cache_tensors(
