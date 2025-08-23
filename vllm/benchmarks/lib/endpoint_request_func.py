@@ -9,7 +9,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 import aiohttp
 from tqdm.asyncio import tqdm
@@ -28,9 +28,10 @@ class RequestFuncInput:
     model_name: Optional[str] = None
     logprobs: Optional[int] = None
     extra_body: Optional[dict] = None
-    multi_modal_content: Optional[dict | list[dict]] = None
+    multi_modal_content: Optional[Union[dict, list[dict]]] = None
     ignore_eos: bool = False
     language: Optional[str] = None
+    request_id: Optional[str] = None
 
 
 @dataclass
@@ -87,6 +88,8 @@ async def async_request_openai_completions(
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
     }
+    if request_func_input.request_id:
+        headers["x-request-id"] = request_func_input.request_id
 
     output = RequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
@@ -210,6 +213,8 @@ async def async_request_openai_chat_completions(
         "Content-Type": "application/json",
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
     }
+    if request_func_input.request_id:
+        headers["x-request-id"] = request_func_input.request_id
 
     output = RequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
@@ -311,6 +316,8 @@ async def async_request_openai_audio(
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
     }
+    if request_func_input.request_id:
+        headers["x-request-id"] = request_func_input.request_id
 
     # Send audio file
     def to_bytes(y, sr):

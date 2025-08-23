@@ -3,6 +3,7 @@
 """A GPU worker class."""
 import gc
 import os
+from contextlib import nullcontext
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
@@ -77,7 +78,8 @@ class Worker(LocalOrDistributedWorkerBase):
                         "eagle",
                         "deepseek_mtp",
                         "glm4_moe_mtp",
-                        "mimo_mtp")) \
+                        "mimo_mtp",
+                        "ernie_mtp")) \
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
@@ -205,7 +207,6 @@ class Worker(LocalOrDistributedWorkerBase):
                 "used for one instance per process.")
             context = allocator.use_memory_pool(tag="weights")
         else:
-            from contextlib import nullcontext
             context = nullcontext()
         with context:
             self.model_runner.load_model()
@@ -329,7 +330,6 @@ class Worker(LocalOrDistributedWorkerBase):
             allocator = CuMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
         else:
-            from contextlib import nullcontext
             context = nullcontext()
         with context:
             self._init_cache_engine()

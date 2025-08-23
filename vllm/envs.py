@@ -42,7 +42,6 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
-    VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: Optional[int] = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
@@ -159,8 +158,10 @@ if TYPE_CHECKING:
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
+    VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
+    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
 
 
@@ -465,11 +466,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
     if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ else None,
 
-    # If set, vllm will force flashinfer to use tensor cores;
-    # otherwise will use heuristic based on model architecture.
-    "VLLM_FLASHINFER_FORCE_TENSOR_CORES":
-    lambda: bool(int(os.getenv("VLLM_FLASHINFER_FORCE_TENSOR_CORES", "0"))),
-
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
@@ -667,11 +663,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_RESOLVER_CACHE_DIR":
     lambda: os.getenv("VLLM_LORA_RESOLVER_CACHE_DIR", None),
 
-    # Enables torch profiler if set. Path to the directory where torch profiler
-    # traces are saved. Note that it must be an absolute path.
+    # Enables torch profiler if set.
+    # Both AsyncLLM's CPU traces as well as workers'
+    # traces (CPU & GPU) will be saved under this directory.
+    # Note that it must be an absolute path.
     "VLLM_TORCH_PROFILER_DIR":
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
-             .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
+             .path.abspath(os.path.expanduser(os.getenv(
+        "VLLM_TORCH_PROFILER_DIR", ".")))),
 
     # Enable torch profiler to record shapes if set
     # VLLM_TORCH_PROFILER_RECORD_SHAPES=1. If not set, torch profiler will
@@ -1108,6 +1107,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRTLLM_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
 
+    # If set, it means we pre-downloaded cubin files and flashinfer will
+    # read the cubin files directly.
+    "VLLM_HAS_FLASHINFER_CUBIN":
+    lambda: os.getenv("VLLM_HAS_FLASHINFER_CUBIN", False),
+
     # If set to 1, force the use of TRTLLM FP4 GEMM backend in flashinfer.
     # Otherwise, uses the first available of: flashinfer cutlass GEMM,
     # vllm cutlass GEMM, marlin GEMM.
@@ -1152,6 +1156,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #    never removed from memory until the server terminates.
     "VLLM_ENABLE_RESPONSES_API_STORE":
     lambda: bool(int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))),
+
+    # Whether to use pytorch symmetric memory for allreduce
+    "VLLM_ALLREDUCE_USE_SYMM_MEM":
+    lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))),
 
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER":
@@ -1218,7 +1226,6 @@ def compute_hash() -> str:
         "VLLM_USE_AITER_UNIFIED_ATTENTION",
         "VLLM_ATTENTION_BACKEND",
         "VLLM_USE_FLASHINFER_SAMPLER",
-        "VLLM_FLASHINFER_FORCE_TENSOR_CORES",
         "VLLM_DISABLED_KERNELS",
         "VLLM_USE_DEEP_GEMM",
         "VLLM_USE_TRTLLM_FP4_GEMM",
