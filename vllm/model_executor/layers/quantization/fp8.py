@@ -10,7 +10,6 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -50,6 +49,11 @@ from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_moe
+
+if current_platform.is_xpu():
+    from vllm._ipex_ops import ipex_ops as ops
+else:
+    from vllm import _custom_ops as ops
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
