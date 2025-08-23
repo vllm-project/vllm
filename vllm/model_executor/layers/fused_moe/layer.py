@@ -1604,6 +1604,7 @@ class FusedMoE(CustomOp):
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
                 fused_output = self.forward_impl(hidden_states, router_logits)
+                assert not isinstance(fused_output, tuple)
             else:
                 fused_output = torch.ops.vllm.moe_forward(
                     hidden_states, router_logits, self.layer_name)
