@@ -33,8 +33,7 @@ if TYPE_CHECKING:
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
-    from .cache import (BaseMultiModalProcessorCache,
-                        MultiModalProcessorCacheInItem)
+    from .cache import BaseMultiModalProcessorCache
     from .profiling import BaseDummyInputsBuilder
 
 logger = init_logger(__name__)
@@ -244,10 +243,10 @@ class PromptUpdate(ABC):
         if callable(target):
             target = target(item_idx)
 
-        if not isinstance(target, PromptIndex):
-            target = _BoundPromptSequence.from_seq(tokenizer, target)
+        if isinstance(target, PromptIndex):
+            return target
 
-        return target
+        return _BoundPromptSequence.from_seq(tokenizer, target)
 
     def _resolve_content(
         self,
@@ -609,12 +608,14 @@ class ResolvedPromptUpdate:
 
     def with_target(self, target: UpdateTarget):
         tokenizer = self.content.full.tokenizer
-        target_ = target
 
-        if not isinstance(target_, PromptIndex):
-            target_ = _BoundPromptSequence.from_seq(tokenizer, target_)
+        if isinstance(target, PromptIndex):
+            return replace(self, target=target)
 
-        return replace(self, target=target_)
+        return replace(
+            self,
+            target=_BoundPromptSequence.from_seq(tokenizer, target),
+        )
 
     def with_content(self, content: PromptUpdateInfo):
         tokenizer = self.content.full.tokenizer
@@ -1484,7 +1485,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 modality, [])
 
             for item_idx, item_hash in enumerate(hashes):
-                item: MultiModalProcessorCacheInItem
+                kwargs: Optional[MultiModalKwargsItem]
                 if not mm_is_cached[modality][item_idx]:
                     missing_next_idx = mm_missing_next_idx[modality]
                     kwargs = missing_kwargs[missing_next_idx]
