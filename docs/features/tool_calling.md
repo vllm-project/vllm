@@ -288,7 +288,7 @@ Flags: `--tool-call-parser deepseek_v3 --chat-template {see_above}`
 
 Supported models:
 
-* `deepseek-ai/DeepSeek-V3.1`
+* `deepseek-ai/DeepSeek-V3.1`  (use with <gh-file:examples/tool_chat_template_deepseekv31.jinja>)
 
 Flags: `--tool-call-parser deepseek_v31 --chat-template examples/tool_chat_template_deepseekv31.jinja`
 
