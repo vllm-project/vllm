@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=registry-sc-harbor.amd.com/framework/compute-rocm-dkms-component-baas-rel:25_ubuntu22.04_py3.10_pytorch_rocm7.1_internal_testing_125803b7
+ARG BASE_IMAGE=registry-sc-harbor.amd.com/framework/compute-rocm-dkms-component-baas-rel:25_ubuntu22.04_py3.10_pytorch_rocm7.1_internal_testing_0ea0592f
 # ARG HIPBLASLT_BRANCH="aa0bda7b"
 # ARG HIPBLAS_COMMON_BRANCH="9b80ba8e"
 # ARG LEGACY_HIPBLASLT_OPTION=
@@ -67,11 +67,11 @@ ARG TRITON_BRANCH
 ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
 RUN cd triton \
-    && git checkout ${TRITON_BRANCH} \
-    && python3 setup.py bdist_wheel --dist-dir=python/dist
+    && git checkout ${TRITON_BRANCH}
+#    && python3 setup.py bdist_wheel --dist-dir=python/dist
 RUN pip install build && cd triton/python/triton_kernels \
-    && python3 -m build --wheel && cp dist/*.whl /app/triton/python/dist
-RUN mkdir -p /app/install && cp /app/triton/python/dist/*.whl /app/install
+    && python3 -m build --wheel && cp dist/triton*.whl /app/triton/python/dist
+RUN mkdir -p /app/install && cp /app/triton/python/dist/triton*.whl /app/install
 
 FROM base AS build_amdsmi
 RUN cd /opt/rocm/share/amd_smi \
@@ -123,8 +123,8 @@ FROM base AS debs
 RUN mkdir /app/debs
 # RUN --mount=type=bind,from=build_hipblaslt,src=/app/install/,target=/install \
 #     cp /install/*.deb /app/debs
-RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    cp /install/*.whl /app/debs
+#RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+#    cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
@@ -138,8 +138,8 @@ FROM base AS final
 #     && perl -p -i -e 's/, hipblas-common-dev \([^)]*?\), /, /g' /var/lib/dpkg/status \
 #     && perl -p -i -e 's/, hipblaslt-dev \([^)]*?\), /, /g' /var/lib/dpkg/status \
 #     && perl -p -i -e 's/, hipblaslt \([^)]*?\), /, /g' /var/lib/dpkg/status
-RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-    pip install /install/*.whl
+#RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+#    pip install /install/*.whl
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     pip install /install/*.whl
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
