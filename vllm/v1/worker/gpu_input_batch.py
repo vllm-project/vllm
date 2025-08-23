@@ -9,7 +9,6 @@ import numpy as np
 import torch
 from typing_extensions import deprecated
 
-from vllm.config import ReasoningConfig
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (MultiModalKwargsItem,
                                     MultiModalKwargsItems, PlaceholderRange)
@@ -83,7 +82,6 @@ class InputBatch:
         logitsprocs: Optional[LogitsProcessors] = None,
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
-        reasoning_config: ReasoningConfig = None,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
