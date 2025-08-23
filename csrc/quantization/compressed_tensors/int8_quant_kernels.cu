@@ -13,6 +13,7 @@
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
   #include <cub/util_type.cuh>
+  #include <cuda/functional>
 #else
   #include <hipcub/hipcub.hpp>
   #include <hipcub/util_type.hpp>
@@ -173,7 +174,7 @@ __global__ void dynamic_scaled_int8_quant_kernel(
       });
   using BlockReduce = cub::BlockReduce<float, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
-  float block_max = BlockReduce(tmp).Reduce(thread_max, cub::Max{}, blockDim.x);
+  float block_max = BlockReduce(tmp).Reduce(thread_max, cuda::maximum<>{}, blockDim.x);
   __shared__ float absmax;
   if (tid == 0) {
     absmax = block_max;
