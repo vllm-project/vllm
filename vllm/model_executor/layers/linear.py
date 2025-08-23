@@ -366,7 +366,7 @@ class ReplicatedLinear(LinearBase):
         return output, output_bias
 
     def extra_repr(self) -> str:
-        s = f"in_features={self.input_size}"
+        s = f"input_features={self.input_size}"
         s += f", output_features={self.output_size}"
         s += f", bias={self.bias is not None}"
         return s
@@ -594,7 +594,7 @@ class ColumnParallelLinear(LinearBase):
         return output, output_bias
 
     def extra_repr(self) -> str:
-        s = f"in_features={self.input_size}"
+        s = f"input_features={self.input_size}"
         s += f", output_features={self.output_size_per_partition}"
         s += f", bias={self.bias is not None}"
         s += f", tp_size={get_tensor_model_parallel_world_size()}"
