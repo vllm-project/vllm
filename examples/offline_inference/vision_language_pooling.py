@@ -53,6 +53,7 @@ class ModelRequestData(NamedTuple):
     image: Optional[Image] = None
     query: Optional[str] = None
     documents: Optional[ScoreMultiModalParam] = None
+    pooling_task: Optional[str] = None
 
 
 def run_e5_v(query: Query) -> ModelRequestData:
@@ -166,6 +167,7 @@ def run_siglip_so400m(query: Query) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         image=image,
+        pooling_task="embed",
     )
 
 
@@ -241,7 +243,7 @@ def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
                 multi_modal_data=mm_data or None,
             )
         ],
-        pooling_task="encode",
+        pooling_task=req_data.pooling_task,
     )
 
     print("-" * 50)
