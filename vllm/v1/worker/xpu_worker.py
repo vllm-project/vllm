@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from typing import Optional
 
 import torch
 import torch.distributed
@@ -12,7 +11,6 @@ from vllm.distributed import get_world_group
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
-from vllm.utils import GiB_bytes
 from vllm.v1.worker.gpu_worker import (Worker,
                                        init_worker_distributed_environment)
 from vllm.v1.worker.xpu_model_runner import XPUModelRunner
@@ -36,10 +34,6 @@ class XPUWorker(Worker):
         device_config = self.device_config
         assert device_config.device_type == "xpu"
         assert current_platform.is_xpu()
-
-        # State for sleep/wakeup functionality
-        self._model_on_cpu = False
-        self._saved_kv_cache_config = None
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
@@ -183,98 +177,3 @@ class XPUWorker(Worker):
         # Construct the model runner
         self.model_runner = XPUModelRunner(  # type: ignore
             self.vllm_config, self.device)
-
-    def load_model(self) -> None:
-        self.model_runner.load_model()
-
-    def initialize_from_config(self, kv_cache_config) -> None:
-        """Allocate GPU KV cache with the specified kv_cache_config."""
-        self.model_runner.initialize_kv_cache(kv_cache_config)
-
-    def sleep(self, level: int = 1) -> None:
-        """Put the worker into sleep mode to reduce memory usage.
-        
-        Unlike GPU workers that use custom memory allocators, XPU workers
-        use a simpler approach of moving model to CPU and clearing KV cache.
-        
-        Args:
-            level (int): Sleep level (kept for interface compatibility, 
-                        always performs level 1 operations)
-        """
-        if self._model_on_cpu:
-            logger.warning("Worker is already in sleep mode")
-            return
-            
-        free_bytes_before_sleep, total_bytes = self.xpu_get_mem_info()
-        logger.warning(
-            "Entering sleep mode: free bytes before sleep: %.2f GiB, "
-            "total bytes: %.2f GiB",
-            free_bytes_before_sleep / GiB_bytes,
-            total_bytes / GiB_bytes)
-        # Move model to CPU (if model is loaded)
-        if hasattr(self.model_runner, 'model') and self.model_runner.model is not None:
-            logger.info("Moving model to CPU for sleep mode")
-            self.model_runner.model.to("cpu")
-        else:
-            logger.info("Model not loaded yet, skipping model move to CPU")
-
-        # Clear KV cache
-        if hasattr(self.model_runner, 'kv_caches'):
-            logger.info("Clearing KV cache for sleep mode")
-            self._saved_kv_cache_config = getattr(self.model_runner, 'kv_cache_config', None)
-            # Clear KV cache tensors
-            if hasattr(self.model_runner, 'kv_caches'):
-                del self.model_runner.kv_caches
-                for layer_name in self.compilation_config.static_forward_context.keys():
-                    self.compilation_config.static_forward_context[layer_name].kv_cache = None
-                self.model_runner.kv_caches = []
-        
-        # Clear XPU cache
-        torch.xpu.empty_cache()
-        free_bytes_after_sleep, _ = self.xpu_get_mem_info()
-        logger.warning(
-            "Free bytes after sleep: %.2f GiB, total bytes: %.2f GiB",
-            free_bytes_after_sleep / GiB_bytes, total_bytes / GiB_bytes)
-
-        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
-        used_bytes = total_bytes - free_bytes_after_sleep
-        
-        self._model_on_cpu = True
-        
-        logger.warning(
-            "Sleep mode freed %.2f GiB memory, "
-            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
-            used_bytes / GiB_bytes)
-
-    def wake_up(self, tags: Optional[list[str]] = None) -> None:
-        """Wake up the worker from sleep mode.
-        
-        Moves the model back to XPU and optionally reinitializes KV cache.
-        
-        Args:
-            tags: Optional list of tags (kept for interface compatibility)
-        """
-        if tags is None:
-            tags = ["weights", "kv_cache"]
-        if "weights" in tags:
-            if not self._model_on_cpu:
-                logger.warning("Worker is not in sleep mode")
-                return
-            
-            logger.info("Waking up worker: moving model back to XPU")
-        
-            # Move model back to XPU (if model is loaded)
-            if hasattr(self.model_runner, 'model') and self.model_runner.model is not None:
-                self.model_runner.model.to(self.device)
-            else:
-                logger.info("Model not loaded yet, skipping model move to XPU")
-            self._model_on_cpu = False
-
-        if "kv_cache" in tags:
-            # If KV cache was cleared, it will need to be reinitialized
-            # by the engine when needed
-            if self._saved_kv_cache_config is not None:
-                self.model_runner.initialize_kv_cache_tensors(self._saved_kv_cache_config)
-            
-            self._saved_kv_cache_config = None
-            logger.info("Worker wake up completed")

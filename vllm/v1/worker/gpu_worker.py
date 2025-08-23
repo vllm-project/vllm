@@ -40,6 +40,11 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
 
+if current_platform.is_cuda_alike():
+    from vllm.device_allocator.cumem import CuMemAllocator as MemAllocator
+else:
+    from vllm.device_allocator.xpumem import XpuMemAllocator as MemAllocator
+
 
 class Worker(WorkerBase):
 
@@ -95,7 +100,13 @@ class Worker(WorkerBase):
             self.profiler = None
 
     def sleep(self, level: int = 1) -> None:
-        from vllm.device_allocator.cumem import CuMemAllocator
+        allocator = MemAllocator.get_instance()
+        if current_platform.is_xpu():
+            allocator.sleep(
+                offload_tags=("weights", ) if level == 1 else tuple(),
+                level=level,
+                model_runner=self.model_runner)
+            return
 
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
 
@@ -107,7 +118,6 @@ class Worker(WorkerBase):
                 for name, buffer in model.named_buffers()
             }
 
-        allocator = CuMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
         free_bytes_after_sleep, total = torch.cuda.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
@@ -119,9 +129,10 @@ class Worker(WorkerBase):
             used_bytes / GiB_bytes)
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
-        from vllm.device_allocator.cumem import CuMemAllocator
-
-        allocator = CuMemAllocator.get_instance()
+        allocator = MemAllocator.get_instance()
+        if current_platform.is_xpu():
+            allocator.wake_up(tags, model_runner=self.model_runner)
+            return
         allocator.wake_up(tags)
 
         # Restore the buffers after level 2 sleep
@@ -134,10 +145,10 @@ class Worker(WorkerBase):
 
     def _maybe_get_memory_pool_context(self,
                                        tag: str) -> AbstractContextManager:
+        if current_platform.is_xpu():
+            return nullcontext()
         if self.vllm_config.model_config.enable_sleep_mode:
-            from vllm.device_allocator.cumem import CuMemAllocator
-
-            allocator = CuMemAllocator.get_instance()
+            allocator = MemAllocator.get_instance()
             if tag == "weights":
                 assert allocator.get_current_usage() == 0, (
                     "Sleep mode can only be "
@@ -285,10 +296,9 @@ class Worker(WorkerBase):
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
 
-        if self.vllm_config.model_config.enable_sleep_mode:
-            from vllm.device_allocator.cumem import CuMemAllocator
-
-            allocator = CuMemAllocator.get_instance()
+        if self.vllm_config.model_config.enable_sleep_mode and \
+            not current_platform.is_xpu():
+            allocator = MemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
         else:
             context = nullcontext()
