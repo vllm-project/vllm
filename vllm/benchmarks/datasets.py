@@ -70,7 +70,7 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: Union[str, Any]
+    prompt: Union[str, list[str], Any]
     prompt_len: int
     expected_output_len: int
     multi_modal_data: Optional[
@@ -385,6 +385,7 @@ class RandomDataset(BenchmarkDataset):
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         request_id_prefix: str = "",
+        batchsize: int = 1,
         **kwargs,
     ) -> list[SampleRequest]:
         # Enforce range_ratio < 1
@@ -443,7 +444,23 @@ class RandomDataset(BenchmarkDataset):
                     prompt_len=total_input_len,
                     expected_output_len=int(output_lens[i]),
                     request_id=request_id_prefix + str(i),
-                ))
+                )
+            )
+        # only embeddings benchmark supports batching prompts
+        if batchsize > 1:
+            batch_requests = []
+            # Create batched requests
+            for i in range(0, num_requests, batchsize):
+                batch = requests[i : i + batchsize]
+                batch_requests.append(
+                    SampleRequest(
+                        prompt=[req.prompt for req in batch],
+                        prompt_len=sum(req.prompt_len for req in batch),
+                        expected_output_len=0,
+                        request_id=request_id_prefix + str(i // batchsize),
+                    )
+                )
+            requests = batch_requests
         return requests
 
 
@@ -646,6 +663,12 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
               "context length sampled from [input_len * (1 - range_ratio), "
               "input_len * (1 + range_ratio)]."),
     )
+    random_group.add_argument(
+        "--random-batch-size",
+        type=int,
+        default=1,
+        help="Batch size for random sampling.",
+    )
 
     hf_group = parser.add_argument_group("hf dataset options")
     hf_group.add_argument("--hf-subset",
@@ -797,22 +820,24 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
     else:
         # For datasets that follow a similar structure, use a mapping.
         dataset_mapping = {
-            "sharegpt":
-            lambda: ShareGPTDataset(random_seed=args.seed,
-                                    dataset_path=args.dataset_path).sample(
-                                        tokenizer=tokenizer,
-                                        num_requests=args.num_prompts,
-                                        output_len=args.sharegpt_output_len,
-                                        request_id_prefix=args.request_id_prefix,
-                                    ),
-            "burstgpt":
-            lambda: BurstGPTDataset(random_seed=args.seed,
-                                    dataset_path=args.dataset_path).
-            sample(tokenizer=tokenizer, num_requests=args.num_prompts, 
-                   request_id_prefix=args.request_id_prefix,),
-            "random":
-            lambda: RandomDataset(random_seed=args.seed,
-                                  dataset_path=args.dataset_path).sample(
+            "sharegpt": lambda: ShareGPTDataset(
+                random_seed=args.seed, dataset_path=args.dataset_path
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                output_len=args.sharegpt_output_len,
+                request_id_prefix=args.request_id_prefix,
+            ),
+            "burstgpt": lambda: BurstGPTDataset(
+                random_seed=args.seed, dataset_path=args.dataset_path
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                request_id_prefix=args.request_id_prefix,
+            ),
+            "random": lambda: RandomDataset(
+                random_seed=args.seed, dataset_path=args.dataset_path
+            ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 prefix_len=args.random_prefix_len,
@@ -820,9 +845,9 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 output_len=args.random_output_len,
                 range_ratio=args.random_range_ratio,
                 request_id_prefix=args.request_id_prefix,
+                batchsize=args.random_batch_size,
             ),
-            "prefix_repetition":
-            lambda: PrefixRepetitionRandomDataset(
+            "prefix_repetition": lambda: PrefixRepetitionRandomDataset(
                 random_seed=args.seed, dataset_path=args.dataset_path
             ).sample(
                 tokenizer=tokenizer,
