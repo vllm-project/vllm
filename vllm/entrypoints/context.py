@@ -92,10 +92,12 @@ class HarmonyContext(ConversationContext):
     def _update_num_reasoning_tokens(self, token_ids: Sequence[int]):
         # Count tokens that are part of reasoning content (analysis channel
         # or tool-directed messages like python/browser calls)
-        if self.parser.current_channel == "analysis" or (
-                self.parser.current_recipient is not None and
-            (self.parser.current_recipient.startswith("python")
-             or self.parser.current_recipient.startswith("browser."))):
+        is_analysis = self.parser.current_channel == "analysis"
+        is_tool_call = (
+            self.parser.current_recipient is not None and
+            (self.parser.current_recipient.startswith("python") or
+             self.parser.current_recipient.startswith("browser.")))
+        if is_analysis or is_tool_call:
             self.num_reasoning_tokens += len(token_ids)
 
     def append_output(self, output) -> None:
