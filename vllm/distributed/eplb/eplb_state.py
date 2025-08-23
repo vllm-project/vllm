@@ -54,17 +54,18 @@ class EPLBProcess:
     rearrangement processes
     """
 
-    def __init__(self, target_func: Callable, max_steps: int = 30):
+    def __init__(self, target_func: Callable, num_wait_worker_iterations: int):
         """
         Initialize asynchronous process manager
 
         Args:
             target_func: Target function to execute in asynchronous process
                 (e.g., rebalance_experts)
-            max_steps: Maximum number of steps to wait
+            num_wait_worker_iterations: Number of steps to wait before
+                checking results
         """
         self.target_func = target_func
-        self.max_steps = max_steps
+        self._num_wait_worker_iterations = num_wait_worker_iterations
 
         # Process management related
         self._process: Optional[mp.Process] = None
@@ -170,7 +171,7 @@ class EPLBProcess:
         if not self._process or not self._result_queue:
             return True
 
-        return (self._step_counter >= self.max_steps
+        return (self._step_counter >= self._num_wait_worker_iterations
                 or not self._process.is_alive()
                 or not self._result_queue.empty())
 
@@ -329,6 +330,11 @@ class EplbState:
     """
     Interval for expert rearrangement steps.
     This is a constant and is taken from the config.
+    """
+
+    num_wait_worker_iterations: int = 0
+    """
+    Number of iterations to wait before applying a redistribution plan
     """
 
     _async_processor: Optional[EPLBProcess] = None
@@ -503,12 +509,15 @@ class EplbState:
             expert_load_window_size=expert_load_window_size,
             expert_rearrangement_step=expert_rearrangement_step,
             expert_rearrangement_step_interval=eplb_step_interval,
+            num_wait_worker_iterations=parallel_config.eplb_config.
+            num_wait_worker_iterations,
         )
 
     def __post_init__(self):
         # Initialize asynchronous process manager
-        self._async_processor = EPLBProcess(target_func=rebalance_experts,
-                                            max_steps=30)
+        self._async_processor = EPLBProcess(
+            target_func=rebalance_experts,
+            num_wait_worker_iterations=self.num_wait_worker_iterations)
 
     def step(self,
              model: MixtureOfExperts,
@@ -709,6 +718,11 @@ class EplbState:
                 "Async processor is not initialized, cannot start process")
             return
 
+        if self._async_processor.is_running:
+            logger.info(
+                "EPLB async process is already running, skipping new launch")
+            return
+
         try:
             success = self._async_processor.start(
                 args=input_args, post_process_args=post_process_args)
@@ -717,8 +731,10 @@ class EplbState:
             success = False
 
         if success:
-            logger.info("rebalance_experts has started in async process, "
-                        "will check results after maximum 30 steps")
+            logger.info(
+                "rebalance_experts has started in async process, "
+                "will check results after maximum %s steps",
+                str(self.num_wait_worker_iterations))
         else:
             logger.error("Failed to start async rebalance process")
 
