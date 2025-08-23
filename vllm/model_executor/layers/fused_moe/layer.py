@@ -181,7 +181,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             handle = all2all_manager.get_handle(all_to_all_args)
 
             # Note: We may want to use FP8 dispatch just to reduce
-            # data movement
+            # data movement.
             use_fp8_dispatch = (
                 quant_config.quant_dtype == current_platform.fp8_dtype()
                 and quant_config.block_shape == DEEPEP_QUANT_BLOCK_SHAPE)
