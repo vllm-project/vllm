@@ -16,6 +16,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from threading import Thread
 from typing import Any, Callable, Optional, Union, cast
+import queue
 
 import cloudpickle
 
@@ -403,6 +404,12 @@ class WorkerProc:
         # Initializes a message queue for sending the model output
         self.worker_response_mq = MessageQueue(1, 1)
 
+        # queue size and threadpool size are set to 2 to coincide with
+        # the max_concurrent_batches of the executor when enable async scheduling.
+        self.exe_queue = queue.Queue(2)
+        self.exe_thread_pool = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="execute_model")
+
         # Initialize device and loads weights
         self.worker.init_device()
         self.worker.load_model()
@@ -586,6 +593,12 @@ class WorkerProc:
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
+        async_execute_model = self.worker.vllm_config.scheduler_config.async_execute_model
+        events = {
+            "d2h_copy_event": threading.Event(),
+            "update_sampled_tokens_event": threading.Event()
+        }
+        exe_count = 0
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue()
 
@@ -594,7 +607,19 @@ class WorkerProc:
                     func = getattr(self.worker, method)
                 elif isinstance(method, bytes):
                     func = partial(cloudpickle.loads(method), self.worker)
-                output = func(*args, **kwargs)
+
+                if async_execute_model and func.__name__ == "execute_model":
+                    args = (*args, exe_count, events)
+                    output = self.execute_model_with_queue(
+                        func,
+                        *args,
+                        **kwargs,
+                    )
+                    exe_count += 1
+                    if not output:
+                        continue
+                else:
+                    output = func(*args, **kwargs)
             except Exception as e:
                 # Notes have been introduced in python 3.11
                 if hasattr(e, "add_note"):
@@ -610,3 +635,14 @@ class WorkerProc:
             if output_rank is None or self.rank == output_rank:
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.SUCCESS, output))
+
+    def execute_model_with_queue(self, func, *args, **kwargs):
+        """Execute model with a queue for async execution."""
+        output = None
+        if not self.exe_queue.full():
+            output_future = self.exe_thread_pool.submit(func, *args, **kwargs)
+            self.exe_queue.put_nowait(output_future)
+        if self.exe_queue.full():
+            output = self.exe_queue.get().result()
+            self.exe_queue.task_done()
+        return output

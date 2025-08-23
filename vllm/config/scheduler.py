@@ -159,6 +159,12 @@ class SchedulerConfig:
     structured outputs, speculative decoding, and pipeline parallelism.
     """
 
+    async_execute_model: bool = False
+    """EXPERIMENTAL: If set to True, perform async model execution.
+    This may help reduce the CPU overheads, leading to better latency
+    and throughput. Moreover, this rely on async scheduling.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -246,6 +252,10 @@ class SchedulerConfig:
         if self.async_scheduling:
             self.scheduler_cls = (
                 "vllm.v1.core.sched.async_scheduler.AsyncScheduler")
+
+        if self.async_execute_model:
+            assert self.async_scheduling, (
+                "async_execute_model requires async_scheduling to be True.")
 
     @model_validator(mode='after')
     def _verify_args(self) -> Self:

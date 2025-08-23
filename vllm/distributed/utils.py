@@ -38,8 +38,15 @@ USE_SCHED_YIELD = ((sys.version_info[:3] >= (3, 11, 1))
                        and sys.version_info[2] >= 8))
 
 
-def sched_yield():
-    if USE_SCHED_YIELD:
+def sched_yield(sleep_time: Optional[float] = None):
+    # when we set more than one threads in Worker Process,
+    # os.sched_yield() and time.sleep(0) both set the thread to ready state,
+    # but the cpu may reschedule it immediately,
+    # so we add a small sleep time to make sure the thread is set to blocked state,
+    # and the cpu can schedule other threads.
+    if sleep_time is not None:
+        time.sleep(sleep_time)
+    elif USE_SCHED_YIELD:
         os.sched_yield()
     else:
         time.sleep(0)

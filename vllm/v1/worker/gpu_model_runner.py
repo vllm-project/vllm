@@ -348,6 +348,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Cached outputs.
         self._draft_token_ids: Optional[Union[list[list[int]],
                                               torch.Tensor]] = None
+        self.async_execute_model = self.vllm_config.scheduler_config.async_execute_model
 
     def _init_model_kwargs(self, num_tokens: int):
         model_kwargs = dict[str, Any]()
@@ -746,14 +747,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
 
-        # NOTE(woosuk): We use torch.index_select instead of np.take here
-        # because torch.index_select is much faster than np.take for large
-        # tensors.
-        torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
-                           0,
-                           torch.from_numpy(token_indices),
-                           out=self.input_ids_cpu[:total_num_scheduled_tokens])
-
         self.input_batch.block_table.compute_slot_mapping(
             req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(
@@ -777,9 +770,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         seq_lens = self.seq_lens[:num_reqs]
         max_seq_len = self.seq_lens_np[:num_reqs].max().item()
 
-        # Copy the tensors to the GPU.
-        self.input_ids[:total_num_scheduled_tokens].copy_(
-            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
@@ -944,9 +934,42 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
-        return (attn_metadata, logits_indices, spec_decode_metadata,
-                num_scheduled_tokens, spec_decode_common_attn_metadata,
-                max_num_scheduled_tokens)
+        return (
+            attn_metadata,
+            logits_indices,
+            spec_decode_metadata,
+            num_scheduled_tokens,
+            spec_decode_common_attn_metadata,
+            max_num_scheduled_tokens,
+            token_indices,
+        )
+
+    def _update_token_ids(
+        self,
+        scheduler_output: "SchedulerOutput",
+        token_indices: np.ndarray,
+    ) -> None:
+        """Update the token IDs in the input batch with the new token indices.
+
+        Args:
+            scheduler_output: The scheduler output containing the new token IDs.
+            token_indices: The indices of the tokens to be updated.
+        """
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        # NOTE(woosuk): We use torch.index_select instead of np.take here
+        # because torch.index_select is much faster than np.take for large
+        # tensors.
+        torch.index_select(
+            self.input_batch.token_ids_cpu_tensor.flatten(),
+            0,
+            torch.from_numpy(token_indices),
+            out=self.input_ids_cpu[:total_num_scheduled_tokens],
+        )
+        # Copy the tensors to the GPU.
+        self.input_ids[:total_num_scheduled_tokens].copy_(
+            self.input_ids_cpu[:total_num_scheduled_tokens],
+            non_blocking=True,
+        )
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1511,7 +1534,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        exe_count: int = 0,
+        events: Optional[dict] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
+        if self.async_execute_model:
+            assert events is not None, \
+                "Events must be provided for async execution."
+            d2h_copy_event = events["d2h_copy_event"]
+            update_sampled_tokens_event = events["update_sampled_tokens_event"]
+            # when last execute_model is in execution,
+            # we need to wait for the d2h copy to start,
+            # then asynchronously execute update_states and prepare_inputs of this step
+            # during d2h copy of last step.
+            if exe_count > 0:
+                d2h_copy_event.wait()
+                d2h_copy_event.clear()
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group():
@@ -1522,9 +1559,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                 self.vllm_config)
 
         # Prepare the decoder inputs.
-        (attn_metadata, logits_indices, spec_decode_metadata,
-         num_scheduled_tokens_np, spec_decode_common_attn_metadata,
-         max_query_len) = (self._prepare_inputs(scheduler_output))
+        (
+            attn_metadata,
+            logits_indices,
+            spec_decode_metadata,
+            num_scheduled_tokens_np,
+            spec_decode_common_attn_metadata,
+            max_query_len,
+            token_indices,
+        ) = (self._prepare_inputs(scheduler_output))
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -1558,31 +1601,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mm_embeds = []
 
         if self.supports_mm_inputs and get_pp_group().is_first_rank:
-            # NOTE(woosuk): To unify token ids and soft tokens (vision
-            # embeddings), we always use embeddings (rather than token ids)
-            # as input to the multimodal model, even when the input is text.
-            inputs_embeds_scheduled = self.model.get_input_embeddings(
-                input_ids=self.input_ids[:num_scheduled_tokens],
-                multimodal_embeddings=mm_embeds or None,
-            )
-
-            # TODO(woosuk): Avoid the copy. Optimize.
-            self.inputs_embeds[:num_scheduled_tokens].copy_(
-                inputs_embeds_scheduled)
-
-            input_ids = None
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
             model_kwargs = {
                 **self._init_model_kwargs(num_scheduled_tokens),
                 **self._extract_mm_kwargs(scheduler_output),
             }
         else:
-            # For text-only models, we use token ids as input.
-            # While it is possible to use embeddings as input just like the
-            # multimodal models, it is not desirable for performance since
-            # then the embedding layer is not included in the CUDA graph.
-            input_ids = self.input_ids[:num_input_tokens]
-            inputs_embeds = None
             model_kwargs = self._init_model_kwargs(num_input_tokens)
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_input_tokens]
@@ -1602,6 +1625,36 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         cudagraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(batch_descriptor)
 
+        if self.async_execute_model and exe_count > 0:
+            # the operation of token ids(input ids) rely on the last execute_model step,
+            # so we need to wait for the token ids update of the last step to finish.
+            update_sampled_tokens_event.wait()
+            update_sampled_tokens_event.clear()
+        # these are operations of token ids(input ids).
+        if self.supports_mm_inputs and get_pp_group().is_first_rank:
+            # NOTE(woosuk): To unify token ids and soft tokens (vision
+            # embeddings), we always use embeddings (rather than token ids)
+            # as input to the multimodal model, even when the input is text.
+            inputs_embeds_scheduled = self.model.get_input_embeddings(
+                input_ids=self.input_ids[:num_scheduled_tokens],
+                multimodal_embeddings=mm_embeds or None,
+            )
+
+            # TODO(woosuk): Avoid the copy. Optimize.
+            self.inputs_embeds[:num_scheduled_tokens].copy_(
+                inputs_embeds_scheduled)
+
+            input_ids = None
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+
+        else:
+            # For text-only models, we use token ids as input.
+            # While it is possible to use embeddings as input just like the
+            # multimodal models, it is not desirable for performance since
+            # then the embedding layer is not included in the CUDA graph.
+            input_ids = self.input_ids[:num_input_tokens]
+            inputs_embeds = None
+        self._update_token_ids(scheduler_output, token_indices)
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(
@@ -1733,13 +1786,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Get the valid generated tokens.
         sampled_token_ids = sampler_output.sampled_token_ids
         max_gen_len = sampled_token_ids.shape[-1]
+        sample_token_ids_cpu = sampled_token_ids.to(device="cpu",
+                                                    non_blocking=True)
+        if self.async_execute_model:
+            # start to copy sampled token ids to cpu, it will block the cpu,
+            # so notify another thread to do cpu works like update_states and prepare_inputs
+            d2h_copy_event.set()
+        torch.cuda.synchronize()
         if max_gen_len == 1:
             # No spec decode tokens.
-            valid_sampled_token_ids = sampled_token_ids.tolist()
+            valid_sampled_token_ids = sample_token_ids_cpu.tolist()
         else:
             # Includes spec decode tokens.
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
-                sampled_token_ids,
+                sample_token_ids_cpu,
                 self.input_batch.vocab_size,
             )
         # Mask out the sampled tokens that should not be sampled.
@@ -1770,6 +1830,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_id = req_ids[req_idx]
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
+        if self.async_execute_model:
+            # token ids in input_batch has been updated, so we can notify
+            # the waiting execute_model to continue.
+            update_sampled_tokens_event.set()
 
         if self.speculative_config:
             assert spec_decode_common_attn_metadata is not None

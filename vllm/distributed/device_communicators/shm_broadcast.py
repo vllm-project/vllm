@@ -33,8 +33,8 @@ class SpinTimer:
     def record_activity(self):
         pass
 
-    def spin(self):
-        sched_yield()
+    def spin(self, sleep_time: Optional[float] = None):
+        sched_yield(sleep_time)
 
 
 class SpinSleepTimer(SpinTimer):
@@ -370,7 +370,11 @@ class MessageQueue:
             assert recv == b"READY"
 
     @contextmanager
-    def acquire_write(self, timeout: Optional[float] = None):
+    def acquire_write(
+        self,
+        timeout: Optional[float] = None,
+        sleep_time: Optional[float] = None,
+    ):
         assert self._is_writer, "Only writers can acquire write"
         start_time = time.monotonic()
         n_warning = 1
@@ -385,7 +389,7 @@ class MessageQueue:
                     # we need to wait until it is read by all readers
 
                     # Release the processor to other threads
-                    sched_yield()
+                    sched_yield(sleep_time)
 
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
@@ -428,9 +432,12 @@ class MessageQueue:
                 break
 
     @contextmanager
-    def acquire_read(self,
-                     timeout: Optional[float] = None,
-                     cancel: Optional[Event] = None):
+    def acquire_read(
+        self,
+        timeout: Optional[float] = None,
+        cancel: Optional[Event] = None,
+        sleep_time: Optional[float] = None,
+    ):
         assert self._is_local_reader, "Only readers can acquire read"
         start_time = time.monotonic()
         n_warning = 1
@@ -448,7 +455,7 @@ class MessageQueue:
                     # we need to wait until it is written
 
                     # Release the processor to other threads
-                    self._read_spin_timer.spin()
+                    self._read_spin_timer.spin(sleep_time)
 
                     # if we wait for a long time, log a message
                     if (time.monotonic() - start_time
@@ -483,28 +490,36 @@ class MessageQueue:
                 self._read_spin_timer.record_activity()
                 break
 
-    def enqueue(self, obj, timeout: Optional[float] = None):
+    def enqueue(
+        self,
+        obj,
+        timeout: Optional[float] = None,
+        sleep_time: Optional[float] = None,
+    ):
         """ Write to message queue with optional timeout (in seconds) """
         assert self._is_writer, "Only writers can enqueue"
         serialized_obj = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
         if self.n_local_reader > 0:
             if len(serialized_obj) >= self.buffer.max_chunk_bytes:
-                with self.acquire_write(timeout) as buf:
+                with self.acquire_write(timeout, sleep_time) as buf:
                     buf[0] = 1  # overflow
                 self.local_socket.send(serialized_obj)
             else:
-                with self.acquire_write(timeout) as buf:
+                with self.acquire_write(timeout, sleep_time) as buf:
                     buf[0] = 0  # not overflow
                     buf[1:len(serialized_obj) + 1] = serialized_obj
         if self.n_remote_reader > 0:
             self.remote_socket.send(serialized_obj)
 
-    def dequeue(self,
-                timeout: Optional[float] = None,
-                cancel: Optional[Event] = None):
+    def dequeue(
+        self,
+        timeout: Optional[float] = None,
+        cancel: Optional[Event] = None,
+        sleep_time: Optional[float] = None,
+    ) -> Any:
         """ Read from message queue with optional timeout (in seconds) """
         if self._is_local_reader:
-            with self.acquire_read(timeout, cancel) as buf:
+            with self.acquire_read(timeout, cancel, sleep_time) as buf:
                 overflow = buf[0] == 1
                 if not overflow:
                     # no need to know the size of serialized object

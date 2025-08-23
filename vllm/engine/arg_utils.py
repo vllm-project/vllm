@@ -445,6 +445,8 @@ class EngineArgs:
 
     async_scheduling: bool = SchedulerConfig.async_scheduling
 
+    async_execute_model: bool = SchedulerConfig.async_execute_model
+
     kv_sharing_fast_prefill: bool = \
         CacheConfig.kv_sharing_fast_prefill
 
@@ -864,6 +866,9 @@ class EngineArgs:
         scheduler_group.add_argument("--async-scheduling",
                                      **scheduler_kwargs["async_scheduling"])
 
+        scheduler_group.add_argument("--async-execute-model",
+                                     **scheduler_kwargs["async_execute_model"])
+
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
         vllm_group = parser.add_argument_group(
@@ -1253,6 +1258,12 @@ class EngineArgs:
             if self.pipeline_parallel_size > 1:
                 raise ValueError("Async scheduling is not supported with "
                                  "pipeline-parallel-size > 1.")
+
+        if self.async_execute_model:
+            # TODO(Ronald1995): Support async execute model with ray.
+            if self.distributed_executor_backend != "mp":
+                raise ValueError("Async execute model is only supported with "
+                                 "mp-based distributed executor backend.")
 
             # Currently, async scheduling does not support speculative decoding.
             # TODO(woosuk): Support it.

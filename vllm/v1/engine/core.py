@@ -155,6 +155,7 @@ class EngineCore:
 
             self.request_block_hasher = get_request_block_hasher(
                 block_size, caching_hash_fn)
+        self.async_execute_model = self.vllm_config.scheduler_config.async_execute_model
 
     def _initialize_kv_caches(
             self, vllm_config: VllmConfig) -> tuple[int, int, KVCacheConfig]:
@@ -341,6 +342,13 @@ class EngineCore:
         # but peeking the first element in a queue is not thread-safe,
         # so we need more work.
         if not scheduled_batch and not self.batch_queue.empty():
+            # when enable async_execute_model, we should not block to get
+            # future restult when total_num_scheduled_tokens equals to 0.
+            # cause in this case, it wont's send execute_model task to workers.
+            if (self.async_execute_model
+                    and scheduler_output.total_num_scheduled_tokens == 0):
+                return engine_core_outputs, scheduled_batch
+
             future, scheduler_output = self.batch_queue.get_nowait()
 
             # Blocking until the first result is available.
