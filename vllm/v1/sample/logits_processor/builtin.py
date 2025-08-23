@@ -293,7 +293,11 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         last_end = self._find_last_sequence_index(prompt_tok_ids,
                                                   self.think_end_token_ids)
         in_think = last_start > last_end
-        think_count = len(prompt_tok_ids) - (last_start + 1) if in_think else 0
+        if in_think:
+            think_count = len(prompt_tok_ids) - (
+                last_start + len(self.think_start_token_ids))
+        else:
+            think_count = 0
 
         return {
             "in_think": in_think,  # Currently in thinking mode
@@ -340,7 +344,18 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             recent_tokens, self.think_end_token_ids)
 
         # Update state based on recent sequences
-        if recent_start_pos >= 0:
+        if recent_start_pos >= 0 and recent_end_pos >= 0:
+            if recent_start_pos > recent_end_pos:
+                # Case: ...<end>...<start>...
+                absolute_start_pos = check_start_idx + recent_start_pos
+                state["in_think"] = True
+                state["think_count"] = current_length - (absolute_start_pos +
+                                                         start_len)
+            else:
+                # Case: ...<start>...<end>...
+                state["in_think"] = False
+                state["think_count"] = 0
+        elif recent_start_pos >= 0:
             # Found think start in recent tokens
             absolute_start_pos = check_start_idx + recent_start_pos
             state["in_think"] = True
