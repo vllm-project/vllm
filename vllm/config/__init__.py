@@ -1119,9 +1119,20 @@ class ModelConfig:
     def _verify_quantization(self) -> None:
         supported_quantization = me_quant.QUANTIZATION_METHODS
         optimized_quantization_methods = [
-            "fp8", "modelopt", "gptq_marlin_24", "gptq_marlin", "awq_marlin",
-            "fbgemm_fp8", "compressed-tensors", "experts_int8", "quark",
-            "modelopt_fp4", "bitblas", "gptq_bitblas", "inc"
+            "fp8",
+            "modelopt",
+            "gptq_marlin_24",
+            "gptq_marlin",
+            "awq_marlin",
+            "fbgemm_fp8",
+            "compressed-tensors",
+            "experts_int8",
+            "quark",
+            "modelopt_fp4",
+            "bitblas",
+            "gptq_bitblas",
+            "inc",
+            "petit_nvfp4",
         ]
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods,
@@ -1153,6 +1164,7 @@ class ModelConfig:
                 "moe_wna16",
                 "modelopt",
                 "modelopt_fp4",
+                "petit_nvfp4",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
