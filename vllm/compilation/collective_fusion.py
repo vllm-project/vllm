@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
+from .inductor_pass import enable_fake_mode
 from .vllm_inductor_pass import VllmInductorPass
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -349,6 +350,7 @@ class AllGatherCutlassScaledMMPattern(BasePattern):
 
 class AsyncTPPass(VllmInductorPass):
 
+    @enable_fake_mode
     def __init__(self, config: VllmConfig):
         super().__init__(config)
 
@@ -1068,6 +1070,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
 
 class AllReduceFusionPass(VllmInductorPass):
 
+    @enable_fake_mode
     def __init__(self, config: VllmConfig):
         super().__init__(config)
         self.disabled = True
