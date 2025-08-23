@@ -824,9 +824,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
                     processor=hf_processor,
                 )
 
-            image_tokens = [_IMAGE_PLACEHOLDER_TOKEN_ID] * num_image_tokens
-
-            return image_tokens
+            return [_IMAGE_PLACEHOLDER_TOKEN_ID] * num_image_tokens
 
         def get_audio_replacement_phi4mm(item_idx: int):
             audios = mm_items.get_items("audio", AudioProcessorItems)
@@ -837,27 +835,17 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             audio_embed_size = self.info._compute_audio_embed_size(
                 audio_frames)
 
-            audio_tokens = [_AUDIO_PLACEHOLDER_TOKEN_ID] * audio_embed_size
-
-            return audio_tokens
-
-        if self.cache is None:
-            num_images = mm_items.get_count("image", strict=False)
-            num_audios = mm_items.get_count("audio", strict=False)
-        else:
-            mm_limits = self.info.get_supported_mm_limits()
-            num_images = mm_limits.get("image", 0)
-            num_audios = mm_limits.get("audio", 0)
+            return [_AUDIO_PLACEHOLDER_TOKEN_ID] * audio_embed_size
 
         return [
             PromptReplacement(
                 modality="image",
-                target=tuple(image_tokens[:num_images]),
+                target=image_tokens.__getitem__,
                 replacement=get_image_replacement_phi4mm,
             ),
             PromptReplacement(
                 modality="audio",
-                target=tuple(audio_tokens[:num_audios]),
+                target=audio_tokens.__getitem__,
                 replacement=get_audio_replacement_phi4mm,
             ),
         ]

@@ -57,10 +57,10 @@ from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
                                    MultiModalDataItems, MultiModalDataParser,
                                    VideoItem, VideoProcessorItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, BoundPromptUpdate,
-                                        PromptReplacement, PromptUpdate,
-                                        PromptUpdateContent,
-                                        PromptUpdateDetails)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate, PromptUpdateContent,
+                                        PromptUpdateDetails,
+                                        ResolvedPromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -694,7 +694,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
     def _resolve_prompt_update_content(
         self,
-        missing_prompt_update: BoundPromptUpdate,
+        missing_prompt_update: ResolvedPromptUpdate,
         missing_item_idx: int,
     ) -> PromptUpdateContent:
         if missing_prompt_update.modality != "image":

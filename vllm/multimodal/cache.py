@@ -19,7 +19,7 @@ from .inputs import (MultiModalFieldElem, MultiModalKwargs,
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
 
-    from .processing import BoundPromptUpdate
+    from .processing import ResolvedPromptUpdate
     from .registry import MultiModalRegistry
 
 logger = init_logger(__name__)
@@ -39,7 +39,7 @@ class MultiModalProcessorCacheItem:
     def __init__(
         self,
         item: MultiModalKwargsItem,
-        prompt_updates: "Sequence[BoundPromptUpdate]",
+        prompt_updates: "Sequence[ResolvedPromptUpdate]",
     ) -> None:
         super().__init__()
 
@@ -67,7 +67,7 @@ class MultiModalProcessorCacheItemMetadata:
     def __init__(
         self,
         item: MultiModalKwargsItem,
-        prompt_updates: Sequence["BoundPromptUpdate"],
+        prompt_updates: Sequence["ResolvedPromptUpdate"],
     ) -> None:
         super().__init__()
 
@@ -233,11 +233,11 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
 
 
 MultiModalProcessorCacheInItem: TypeAlias = \
-    Optional[tuple[MultiModalKwargsItem, Sequence["BoundPromptUpdate"]]]
+    Optional[tuple[MultiModalKwargsItem, Sequence["ResolvedPromptUpdate"]]]
 
 
 MultiModalProcessorCacheOutItem: TypeAlias = \
-    tuple[Optional[MultiModalKwargsItem], Sequence["BoundPromptUpdate"]]
+    tuple[Optional[MultiModalKwargsItem], Sequence["ResolvedPromptUpdate"]]
 
 
 class BaseMultiModalProcessorCache(
