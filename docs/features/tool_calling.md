@@ -284,6 +284,14 @@ Supported models:
 
 Flags: `--tool-call-parser deepseek_v3 --chat-template {see_above}`
 
+### DeepSeek-V3.1 Models (`deepseek_v31`)
+
+Supported models:
+
+* `deepseek-ai/DeepSeek-V3.1` (use with <gh-file:examples/tool_chat_template_deepseekv31.jinja>)
+
+Flags: `--tool-call-parser deepseek_v31 --chat-template {see_above}`
+
 ### Kimi-K2 Models (`kimi_k2`)
 
 Supported models:
