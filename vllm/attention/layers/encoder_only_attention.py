@@ -5,13 +5,13 @@ from copy import copy
 from typing import Optional
 
 import torch
-from transformers import CacheConfig
 
 from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
+from vllm.config import CacheConfig
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               subclass_attention_backend)
 
