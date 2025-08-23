@@ -695,6 +695,8 @@ setup(
         "video": [],  # Kept for backwards compatibility
         # FlashInfer should be updated together with the Dockerfile
         "flashinfer": ["flashinfer-python==0.2.12"],
+        # Optional deps for AMD FP4 quantization support
+        "petit-kernel": ["petit-kernel"],
     },
     cmdclass=cmdclass,
     package_data=package_data,
