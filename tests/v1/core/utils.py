@@ -145,7 +145,9 @@ def create_requests(
             mm_kwargs = [mm_item] * len(mm_position)
             # Dummy hash for each mm item should be unique
             # since encoder cache tracks entries by hash
-            mm_hashes = ["hash" + str(i) + "_" + str(j) for j in range(len(mm_position))]
+            mm_hashes = [
+                "hash" + str(i) + "_" + str(j) for j in range(len(mm_position))
+            ]
         else:
             mm_position = None
             mm_kwargs = None

@@ -143,7 +143,7 @@ class SchedulerOutput:
     # steps. This is used to notify the workers about the finished requests
     # so that they can free the cached states for those requests.
     finished_req_ids: set[str]
-    # list of mm_hash strings associated with the encoder outputs to be 
+    # list of mm_hash strings associated with the encoder outputs to be
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
