@@ -69,7 +69,6 @@ class CommonAttentionMetadata:
 
     logits_indices_padded: Optional[torch.Tensor] = None
     num_logits_indices: Optional[int] = None
-    prompt_logprobs: Optional[bool] = None
 
     causal: bool = True
 
@@ -837,25 +836,13 @@ def create_fast_prefill_custom_backend(
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> AttentionMetadata:
-        # Either not set (None) or prompt_logprobs is False
-        if not common_attn_metadata.prompt_logprobs:
-            # Fast prefill path
-            new_common_attn_metadata =\
-            make_kv_sharing_fast_prefill_common_attn_metadata(common_attn_metadata)
-            metadata = super(self.__class__,
-                             self).build(common_prefix_len,
-                                         new_common_attn_metadata, fast_build)
-            return create_kv_sharing_fast_prefill_attn_metadata_subclass(
-                metadata, common_attn_metadata)
-
-        # Default path:
-        # Either --kv-sharing-fast-prefill is not set or at least one request
-        # in the current scheduling round requests logprobs for prompt tokens
-        # which is not compatible with fast prefill
+        new_common_attn_metadata =\
+        make_kv_sharing_fast_prefill_common_attn_metadata(common_attn_metadata)
         metadata = super(self.__class__,
-                         self).build(common_prefix_len, common_attn_metadata,
-                                     fast_build)
-        return metadata
+                         self).build(common_prefix_len,
+                                     new_common_attn_metadata, fast_build)
+        return create_kv_sharing_fast_prefill_attn_metadata_subclass(
+            metadata, common_attn_metadata)
 
     # Dynamically create a new attention backend that wraps the
     # underlying attention backend but applies

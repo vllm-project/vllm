@@ -335,6 +335,11 @@ class AsyncLLM(EngineClient):
         returning the RequestOutput back to the caller.
         """
 
+        if (self.vllm_config.cache_config.kv_sharing_fast_prefill
+                and sampling_params.prompt_logprobs):
+            raise ValueError(
+                "Fast prefill produces incorrect logprobs for prompt tokens")
+
         try:
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us

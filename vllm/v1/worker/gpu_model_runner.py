@@ -815,14 +815,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs])
         spec_decode_common_attn_metadata = None
 
-        if (self.cache_config.kv_sharing_fast_prefill
-                and self.input_batch.num_prompt_logprobs):
-            logger.warning(
-                "Encountered at least one request with prompt_logprobs set "
-                "with --kv-sharing-fast-prefill enabled. Fast prefill doesn't "
-                "produce correct logits for prompt tokens, so fast prefill will"
-                " be disabled for this iteration.")
-
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
@@ -870,7 +862,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 slot_mapping=slot_mapping,
                 logits_indices_padded=logits_indices_padded,
                 num_logits_indices=logits_indices.size(0),
-                prompt_logprobs=len(self.input_batch.num_prompt_logprobs) > 0,
                 causal=True,
             )
 
