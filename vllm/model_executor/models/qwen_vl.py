@@ -69,7 +69,7 @@ class QwenImageEmbeddingInputs(TensorSchema):
     Dimensions:
         - bn: Batch size * number of images
         - ifs: Image feature size (256)
-        - hs: Hidden sizef
+        - hs: Hidden size
     
     `hidden_size` must match the hidden size of the language model backbone
     and is stored in the visual config of the model if we have one.
