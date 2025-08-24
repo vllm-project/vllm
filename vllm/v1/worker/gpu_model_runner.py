@@ -254,9 +254,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.seq_lens = torch.zeros(self.max_num_reqs,
                                     dtype=torch.int32,
                                     device=self.device)
-        self.slot_mapping = torch.zeros(self.max_num_tokens,
-                                        dtype=torch.int64,
-                                        device=self.device)
 
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
