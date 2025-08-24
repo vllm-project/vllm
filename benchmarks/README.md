@@ -728,10 +728,7 @@ python benchmarks/benchmark_serving.py \
   --endpoint /v1/chat/completion
 ```
 
-
 ### Synthetic Random Images (random-mm)
-
-
 
 Generate synthetic image inputs alongside random text prompts to stress-test vision models without external datasets.
 
