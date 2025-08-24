@@ -84,8 +84,7 @@ class Llama4ImagePatchInputs(TensorSchema):
     flattened just like `flat_data`.
     """
 
-    aspect_ratios: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                             TensorShape("batch_size", 2)]
+    aspect_ratios: Annotated[torch.Tensor, TensorShape("batch_size", 2)]
     """
     A list of aspect ratios corresponding to the number of tiles
     in each dimension that each image in the batch corresponds to.
@@ -631,7 +630,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
                 for (r_h, r_w) in aspect_ratios
             ]
 
-            processed_outputs["aspect_ratios"] = aspect_ratios
+            processed_outputs["aspect_ratios"] = torch.tensor(aspect_ratios)
             processed_outputs["patches_per_image"] = torch.tensor(
                 patches_per_image)
 
@@ -778,12 +777,7 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         # TODO: confirm handling for variable lengths
         flat_pixel_values = flatten_bn(pixel_values, concat=True)
         patches_per_image = flatten_bn(kwargs.pop("patches_per_image"))
-
-        aspect_ratios = kwargs.pop("aspect_ratios", None)
-        if aspect_ratios is not None and not isinstance(
-                aspect_ratios, torch.Tensor):
-            aspect_ratios = torch.tensor(aspect_ratios,
-                                         device=flat_pixel_values.device)
+        aspect_ratios = kwargs.pop("aspect_ratios")
 
         return Llama4ImagePatchInputs(
             type="pixel_values",
