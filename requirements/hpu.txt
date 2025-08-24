@@ -2,6 +2,7 @@
 -r common.txt
 
 # Dependencies for HPU code
+pybase64
 accelerate
 ray
 triton==3.1.0

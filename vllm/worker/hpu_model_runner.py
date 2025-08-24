@@ -1841,7 +1841,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             enable_kv_scales_calculation=False,
             input_positions=input_positions,
         )
-        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list,
+                                                    pin_memory=True)
         multi_modal_kwargs = MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                         device=self.device)
 

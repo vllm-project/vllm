@@ -5,6 +5,7 @@ import base64
 from io import BytesIO
 from pathlib import Path
 
+import pybase64
 import torch
 from PIL import Image
 
@@ -55,7 +56,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
         return convert_image_mode(image, self.image_mode)
 
     def load_base64(self, media_type: str, data: str) -> Image.Image:
-        return self.load_bytes(base64.b64decode(data))
+        return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> Image.Image:
         image = Image.open(filepath)
@@ -75,7 +76,7 @@ class ImageMediaIO(MediaIO[Image.Image]):
             image.save(buffer, image_format)
             data = buffer.getvalue()
 
-        return base64.b64encode(data).decode('utf-8')
+        return pybase64.b64encode(data).decode('utf-8')
 
 
 class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
@@ -88,7 +89,7 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
         return torch.load(buffer, weights_only=True)
 
     def load_base64(self, media_type: str, data: str) -> torch.Tensor:
-        return self.load_bytes(base64.b64decode(data))
+        return self.load_bytes(pybase64.b64decode(data, validate=True))
 
     def load_file(self, filepath: Path) -> torch.Tensor:
         return torch.load(filepath, weights_only=True)
