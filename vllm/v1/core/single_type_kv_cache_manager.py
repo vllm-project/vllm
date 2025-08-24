@@ -126,7 +126,8 @@ class SingleTypeKVCacheManager(ABC):
             req_blocks.extend(new_blocks)
             return new_blocks
 
-    def cache_blocks(self, request: Request, num_tokens: int) -> None:
+    def cache_blocks(self, request: Request, num_tokens: int,
+                     cache_block_threshold: None) -> None:
         """
         Cache the blocks for the request.
 
@@ -137,6 +138,12 @@ class SingleTypeKVCacheManager(ABC):
         """
         num_cached_blocks = self.num_cached_block[request.request_id]
         num_full_blocks = num_tokens // self.block_size
+        if cache_block_threshold:
+            num_full_blocks = min(
+                abs(cache_block_threshold - num_cached_blocks -
+                    num_full_blocks), num_full_blocks)
+        if num_full_blocks <= 0:
+            return
 
         self.block_pool.cache_full_blocks(
             request=request,

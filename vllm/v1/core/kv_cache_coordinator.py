@@ -41,6 +41,14 @@ class KVCacheCoordinator(ABC):
                 kv_cache_group_id=i,
             ) for i, kv_cache_group in enumerate(
                 self.kv_cache_config.kv_cache_groups))
+        if self.enable_caching:
+            self.cache_histograms_step = self.max_model_len / 16
+            self.cache_histograms_array = [[0 for _ in range(3)]
+                                           for _ in range(16)]
+            self.cache_histograms_count = 0
+            self.cache_histograms_count_max = 4096
+            self.cache_histograms_array_index = 0
+            self.cache_block_threshold = None
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
@@ -107,7 +115,8 @@ class KVCacheCoordinator(ABC):
                 (including tokens that are already cached).
         """
         for manager in self.single_type_managers:
-            manager.cache_blocks(request, num_computed_tokens)
+            manager.cache_blocks(request, num_computed_tokens,
+                                 self.cache_block_threshold)
 
     def free(self, request_id: str) -> None:
         """
@@ -169,6 +178,38 @@ class KVCacheCoordinator(ABC):
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         pass
+
+    def cal_cache_histograms(self, hit_cache_blocks: int):
+        """Count the number of cache blocks hit by requests, 
+        and update the cache block threshold after reaching the statistical 
+        threshold."""
+        if self.enable_caching and hit_cache_blocks > 0:
+
+            hit_column = hit_cache_blocks / self.cache_histograms_step
+            self.cache_histograms_array[
+                self.cache_histograms_array_index][hit_column] += 1
+            self.cache_histograms_count += 1
+            if self.cache_histograms_count > self.cache_histograms_count_max:
+
+                histogram_sum = []
+                histogram_sums = 0
+                for i in range(16):
+                    histogram_sum.append(self.cache_histograms_array[0][i] +
+                                         self.cache_histograms_array[1][i] +
+                                         self.cache_histograms_array[2][i])
+                    histogram_sums += histogram_sum[i]
+
+                targetPercentile = histogram_sum * 0.99
+                for i in range(15, -1, -1):
+                    histogram_sums -= histogram_sum[i]
+                    if histogram_sums < targetPercentile:
+                        self.cache_block_threshold = histogram_sum[
+                            i] + self.cache_histograms_step
+                        break
+                array_index = (self.cache_histograms_array_index + 1) % 3
+                self.cache_histograms_array[array_index] = [0] * 16
+                self.cache_histograms_array_index = array_index
+                self.cache_histograms_count_max = 0
 
 
 class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
