@@ -79,4 +79,7 @@ mkdocs.yaml @hmellor
 /vllm/attention/ops/chunked_prefill_paged_decode.py @tdoublep
 /vllm/attention/ops/triton_unified_attention.py @tdoublep
 
-
+# ROCm related
+/docker/Dockerfile.rocm @gshtras @hongxiayang
+/docker/Dockerfile.rocm_base @gshtras @hongxiayang
+/vllm/v1/attention/backends/rocm_aiter_fa.py @gshtras @hongxiayang @fsx950223
