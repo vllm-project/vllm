@@ -3,6 +3,7 @@
 import multiprocessing
 import os
 import pickle
+import queue
 import signal
 import threading
 import time
@@ -18,6 +19,7 @@ from threading import Thread
 from typing import Any, Callable, Optional, Union, cast
 
 import cloudpickle
+import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -586,6 +588,53 @@ class WorkerProc:
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
+
+        def process_output(output: Any, worker_response_mq: MessageQueue,
+                           copy_stream: torch.cuda.Stream):
+            if isinstance(output, ModelRunnerOutput) and isinstance(
+                    output.sampled_token_ids, tuple):
+                # sampled_token_ids is a tuple of (Tensor, list[int])
+                # where the second element is the list of invalid req indices
+                tensor, invalid_req_indices = output.sampled_token_ids
+                tensor = cast(torch.Tensor, tensor)
+                # torch.cuda.synchronize()
+                default_stream = torch.cuda.current_stream()
+                with torch.cuda.stream(copy_stream):
+                    copy_stream.wait_stream(default_stream)
+                    sampled_token_ids_list = tensor.to('cpu',
+                                                       non_blocking=True)
+                copy_stream.synchronize()
+                sampled_token_ids_list = sampled_token_ids_list.tolist()
+                for i in invalid_req_indices:
+                    sampled_token_ids_list[i].clear()
+                # print(sampled_token_ids_list)
+                output.sampled_token_ids = sampled_token_ids_list
+                # print("Enqueueing SUCCESS message to worker_response_mq", output.sampled_token_ids)
+                worker_response_mq.enqueue(
+                    (WorkerProc.ResponseStatus.SUCCESS, output))
+            else:
+                # print("Enqueueing native SUCCESS message to worker_response_mq", output)
+                worker_response_mq.enqueue(
+                    (WorkerProc.ResponseStatus.SUCCESS, output))
+            return
+
+        def _output_processor_loop(input_queue: queue.Queue,
+                                   worker_response_mq: MessageQueue,
+                                   copy_stream: torch.cuda.Stream):
+            while True:
+                output = input_queue.get()
+                process_output(output, worker_response_mq, copy_stream)
+
+        output_queue: queue.Queue = queue.Queue()
+        copy_stream_ = torch.cuda.Stream()
+        output_processor_thread = Thread(target=_output_processor_loop,
+                                         args=(output_queue,
+                                               self.worker_response_mq,
+                                               copy_stream_),
+                                         daemon=True,
+                                         name="WorkerOutputProcessor")
+        output_processor_thread.start()
+
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue()
 
@@ -603,10 +652,19 @@ class WorkerProc:
                 # exception might not be serializable, so we convert it to
                 # string, only for logging purpose.
                 if output_rank is None or self.rank == output_rank:
+                    print("Enqueueing FAILURE message to worker_response_mq")
+                    print(traceback.format_exc())
+                    print(str(e))
                     self.worker_response_mq.enqueue(
                         (WorkerProc.ResponseStatus.FAILURE, str(e)))
                 continue
 
             if output_rank is None or self.rank == output_rank:
-                self.worker_response_mq.enqueue(
-                    (WorkerProc.ResponseStatus.SUCCESS, output))
+                output_queue.put(output)
+                # if current_thread is not None:
+                #     current_thread.join()
+                # current_thread = Thread(target=process_output,
+                #                 args=(output, self.worker_response_mq, copy_stream),
+                #                 daemon=True)
+                # current_thread.start()
+                # process_output(output, self.worker_response_mq, copy_stream)

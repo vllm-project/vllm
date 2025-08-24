@@ -775,8 +775,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         max_seq_len = self.seq_lens_np[:num_reqs].max().item()
 
         # Copy the tensors to the GPU.
-        self.input_ids[:total_num_scheduled_tokens].copy_(
-            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        input_ids_list = self.input_ids_cpu[:
+                                            total_num_scheduled_tokens].tolist(
+                                            )
+        if 400_000 in input_ids_list:
+            self.input_ids[:total_num_scheduled_tokens].copy_(
+                self.prev_output_token_ids.squeeze(0), non_blocking=True)
+        else:
+            self.input_ids[:total_num_scheduled_tokens].copy_(
+                self.input_ids_cpu[:total_num_scheduled_tokens],
+                non_blocking=True)
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
@@ -1717,31 +1725,38 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
-        logprobs_tensors = sampler_output.logprobs_tensors
-        logprobs_lists = logprobs_tensors.tolists() \
-            if logprobs_tensors is not None else None
+        # logprobs_tensors = sampler_output.logprobs_tensors
+        # logprobs_lists = logprobs_tensors.tolists() \
+        #     if logprobs_tensors is not None else None
 
         # Compute prompt logprobs if needed.
-        prompt_logprobs_dict = self._get_prompt_logprobs_dict(
-            hidden_states[:num_scheduled_tokens],
-            scheduler_output.num_scheduled_tokens,
-        )
+        # prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+        #     hidden_states[:num_scheduled_tokens],
+        #     scheduler_output.num_scheduled_tokens,
+        # )
+
+        sampled_token_ids_tensor = sampler_output.sampled_token_ids
+        invalid_req_indices = list(discard_sampled_tokens_req_indices)
+        assert sampled_token_ids_tensor.shape[-1] == 1
+        num_sampled_tokens = sampled_token_ids_tensor.shape[0]
+
+        # valid_sampled_token_ids = sampled_token_ids_tensor.tolist()
 
         # Get the valid generated tokens.
-        sampled_token_ids = sampler_output.sampled_token_ids
-        max_gen_len = sampled_token_ids.shape[-1]
-        if max_gen_len == 1:
-            # No spec decode tokens.
-            valid_sampled_token_ids = sampled_token_ids.tolist()
-        else:
-            # Includes spec decode tokens.
-            valid_sampled_token_ids = self.rejection_sampler.parse_output(
-                sampled_token_ids,
-                self.input_batch.vocab_size,
-            )
+        # sampled_token_ids = sampler_output.sampled_token_ids
+        # max_gen_len = sampled_token_ids.shape[-1]
+        # if max_gen_len == 1:
+        #     # No spec decode tokens.
+        #     valid_sampled_token_ids = sampled_token_ids.tolist()
+        # else:
+        #     # Includes spec decode tokens.
+        #     valid_sampled_token_ids = self.rejection_sampler.parse_output(
+        #         sampled_token_ids,
+        #         self.input_batch.vocab_size,
+        #     )
         # Mask out the sampled tokens that should not be sampled.
-        for i in discard_sampled_tokens_req_indices:
-            valid_sampled_token_ids[i].clear()
+        # for i in discard_sampled_tokens_req_indices:
+        #     valid_sampled_token_ids[i].clear()
 
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
@@ -1749,50 +1764,52 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
         req_ids = self.input_batch.req_ids
-        for req_idx, sampled_ids in enumerate(valid_sampled_token_ids):
-            if not sampled_ids:
+        for req_idx in range(num_sampled_tokens):
+            # sampled_ids = valid_sampled_token_ids[req_idx]
+            if req_idx in discard_sampled_tokens_req_indices:
                 continue
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-            end_idx = start_idx + len(sampled_ids)
+            end_idx = start_idx + 1
             assert end_idx <= self.max_model_len, (
                 "Sampled token IDs exceed the max model length. "
                 f"Total number of tokens: {end_idx} > max_model_len: "
                 f"{self.max_model_len}")
 
             self.input_batch.token_ids_cpu[req_idx,
-                                           start_idx:end_idx] = sampled_ids
+                                           start_idx:end_idx] = [400_000] * 1
+            self.prev_output_token_ids = sampled_token_ids_tensor
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
             req_id = req_ids[req_idx]
             req_state = self.requests[req_id]
-            req_state.output_token_ids.extend(sampled_ids)
-
-        if self.speculative_config:
-            assert spec_decode_common_attn_metadata is not None
-            self._draft_token_ids = self.propose_draft_token_ids(
-                scheduler_output,
-                valid_sampled_token_ids,
-                sampling_metadata,
-                hidden_states,
-                sample_hidden_states,
-                aux_hidden_states,
-                spec_decode_metadata,
-                spec_decode_common_attn_metadata,
-            )
-
-        self.eplb_step()
+            req_state.output_token_ids.extend([400_000])
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids=valid_sampled_token_ids,
-            logprobs=logprobs_lists,
-            prompt_logprobs_dict=prompt_logprobs_dict,
+            sampled_token_ids=(sampled_token_ids_tensor, invalid_req_indices),
+            logprobs=None,
+            prompt_logprobs_dict={},
             pooler_output=[],
             kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
         )
+
+        # if self.speculative_config:
+        #     assert spec_decode_common_attn_metadata is not None
+        #     self._draft_token_ids = self.propose_draft_token_ids(
+        #         scheduler_output,
+        #         valid_sampled_token_ids,
+        #         sampling_metadata,
+        #         hidden_states,
+        #         sample_hidden_states,
+        #         aux_hidden_states,
+        #         spec_decode_metadata,
+        #         spec_decode_common_attn_metadata,
+        #     )
+
+        # self.eplb_step()
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         if self._draft_token_ids is None:
