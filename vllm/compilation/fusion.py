@@ -47,8 +47,10 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
     torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
     kFp8DynamicTokenSym:
     torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
-    kNvfp4Quant: torch.ops._C.scaled_fp4_quant.default,  # noqa: E501
 }
+if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
+    QUANT_OPS[
+        kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
 
 
 class FusedRMSQuantKey(NamedTuple):
