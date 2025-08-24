@@ -122,7 +122,7 @@ class Qwen2_5_VLImageEmbeddingInputs(TensorSchema):
     type: Literal["image_embeds"]
 
     image_embeds: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor,
         TensorShape("nf", "hs"),
     ]
 
@@ -183,7 +183,7 @@ class Qwen2_5_VLVideoEmbeddingInputs(TensorSchema):
     type: Literal["video_embeds"]
 
     video_embeds: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor,
         TensorShape("nf", "hs"),
     ]
 
