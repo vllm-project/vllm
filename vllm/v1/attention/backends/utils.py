@@ -5,8 +5,7 @@ import enum
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, make_dataclass
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Generic, Optional,
-                    TypeVar)
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
 
 import numpy as np
 import torch
@@ -58,6 +57,8 @@ class CommonAttentionMetadata:
     """Total number of tokens in batch"""
     max_query_len: int
     """Longest query in batch"""
+    max_seq_len: int
+    """Longest context length in batch"""
 
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
@@ -107,6 +108,7 @@ def _make_metadata_with_slice(
 
     seq_lens = attn_metadata.seq_lens[request_slice]
     seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
+    max_seq_len = int(seq_lens_cpu.max())
     num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[
         request_slice]
 
@@ -128,6 +130,7 @@ def _make_metadata_with_slice(
         num_reqs=num_requests,
         num_actual_tokens=num_actual_tokens,
         max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
     )
@@ -520,6 +523,7 @@ def make_local_attention_virtual_batches(
 
     query_start_loc_cpu = torch.from_numpy(cu_seqlens_q_local)
     seq_lens_cpu = torch.from_numpy(seqlens_k_local)
+    max_seq_len = int(seq_lens_cpu.max())
 
     return CommonAttentionMetadata(
         query_start_loc_cpu=query_start_loc_cpu,
@@ -531,39 +535,11 @@ def make_local_attention_virtual_batches(
         num_reqs=len(seq_lens_cpu),
         num_actual_tokens=common_attn_metadata.num_actual_tokens,
         max_query_len=seqlens_q_local.max(),
+        max_seq_len=max_seq_len,
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
     )
-
-
-def subclass_attention_metadata_builder(
-    name_prefix: str,
-    builder_cls: type[AttentionMetadataBuilder[M]],
-    build_preprocess_fn: Callable[[CommonAttentionMetadata],
-                                  CommonAttentionMetadata],
-) -> type[AttentionMetadataBuilder[M]]:
-    """
-    Return a new subclass of `builder_cls` whose .build(...) method
-    first calls build_preprocess_fn(common_attn_metadata) on the metadata.
-    """
-    name: str = name_prefix + builder_cls.__name__  # type: ignore
-
-    def build(self,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False):
-        return builder_cls.build(self, common_prefix_len,
-                                 build_preprocess_fn(common_attn_metadata),
-                                 fast_build)
-
-    Wrapped = type(
-        name,
-        (builder_cls, ),  # inherit from the original
-        {
-            "build": build,
-        })
-    return Wrapped  # type: ignore
 
 
 def subclass_attention_backend(
