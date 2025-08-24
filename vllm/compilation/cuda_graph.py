@@ -82,7 +82,8 @@ class CUDAGraphWrapper:
         # need to initialize a CUDAGraphWrapper.
         assert self.runtime_mode != CUDAGraphMode.NONE
         if self.graph_pool is None:
-            self.graph_pool = current_platform.get_global_graph_pool()
+            self.graph_pool = current_platform.get_global_graph_pool(
+                vllm_config.model_config.enable_sleep_mode)
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
