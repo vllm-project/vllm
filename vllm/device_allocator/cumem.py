@@ -152,7 +152,7 @@ class CuMemAllocator:
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
         self.allocator_and_pools: dict[str, Any] = {}
-        # Creating a strong reference to the two callbacks here to prevent
+        # Creating strong references to the two callbacks here to prevent
         # these ephemeral bound-method objects being garbbage collected.
         # Without this, `my_free` may call GC-ed callbacks causing failure.
         # See discussions in https://github.com/vllm-project/vllm/pull/22724
