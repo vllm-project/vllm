@@ -22,14 +22,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import cache
 from io import BytesIO
-from typing import Any, Callable, Optional, Union
+from typing import Any, Callable, Optional, Union, List
 
 import numpy as np
 import pandas as pd
 from datasets import load_dataset
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
-
+import benchmark_utils
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
@@ -92,9 +92,15 @@ class BenchmarkDataset(ABC):
         This method is used for chat models that expect a specific conversation
         format.
         """
+        images = benchmark_utils.image_per_prompt
         content = [{"text": prompt, "type": "text"}]
         if mm_content is not None:
-            content.append(mm_content)
+            if images > 1:
+                for i in range(images):
+                    content.append(mm_content)
+            else:
+                content.append(mm_content)
+
         return [{"role": "user", "content": content}]
 
     def load_data(self) -> None:
@@ -740,6 +746,7 @@ class ConversationDataset(HuggingFaceDataset):
         num_requests: int,
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
+        input_len: Optional[int] = None,
         **kwargs,
     ) -> list:
         # Filter examples with at least 2 conversations
@@ -754,6 +761,13 @@ class ConversationDataset(HuggingFaceDataset):
             prompt, completion = conv[0]["value"], conv[1]["value"]
 
             prompt_ids = tokenizer(prompt).input_ids
+            if input_len is not None and input_len > 0:
+                if len(prompt_ids) > input_len:
+                    prompt_ids = prompt_ids[:input_len]
+                elif len(prompt_ids) < input_len:
+                    tokens = (prompt_ids * (input_len // len(prompt_ids) + 1))[:input_len]
+                    prompt =  tokenizer.decode(tokens)
+                    prompt_ids = tokenizer(prompt).input_ids
             completion_ids = tokenizer(completion).input_ids
             prompt_len = len(prompt_ids)
             completion_len = len(completion_ids)
@@ -815,6 +829,7 @@ class VisionArenaDataset(HuggingFaceDataset):
             prompt = parser_fn(item)
             mm_content = process_image(item["images"][0])
             prompt_len = len(tokenizer(prompt).input_ids)
+            
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
@@ -1163,5 +1178,86 @@ class ASRDataset(HuggingFaceDataset):
                 " what Whisper supports.",
                 skipped,
             )
+        self.maybe_oversample_requests(sampled_requests, num_requests)
+        return sampled_requests
+# -----------------------------------------------------------------------------
+# MuirBenchDataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class MuirBenchDataset(HuggingFaceDataset):
+    """
+    MUIRBENCH Dataset.
+    https://huggingface.co/datasets/MUIRBENCH/MUIRBENCH
+    """
+
+    DEFAULT_OUTPUT_LEN = 128
+    SUPPORTED_DATASET_PATHS = {
+        "MUIRBENCH/MUIRBENCH": lambda x: x["question"],
+    }
+    IS_MULTIMODAL = True
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: Optional[int] = None,
+        enable_multimodal_chat: bool = False,
+        input_len: Optional[int] = None,
+        **kwargs,
+   ) -> List[SampleRequest]:
+        output_len = output_len or self.DEFAULT_OUTPUT_LEN
+        sampled_requests: List[SampleRequest] = []
+
+        for item in self.data:
+            if len(sampled_requests) >= num_requests:
+                break
+            prompt = self.SUPPORTED_DATASET_PATHS[self.dataset_path](item)
+            original_prompt = prompt
+
+            input_ids = tokenizer(original_prompt, add_special_tokens=False).input_ids
+
+            if input_len and input_len > 0:
+                if len(input_ids) >= input_len:
+                    final_ids = input_ids[:input_len]
+                else:
+                    pad_str = " hi"
+                    pad_id = tokenizer(pad_str, add_special_tokens=False).input_ids[0]
+                    padding = [pad_id] * (input_len - len(input_ids))
+                    final_ids = input_ids + padding
+
+                prompt = tokenizer.decode(final_ids, skip_special_tokens=False)
+                prompt_len = len(final_ids)
+            else:
+                prompt_len = len(input_ids)
+
+            original_images = item["image_list"]
+            final_images = original_images
+
+            target_image_count = benchmark_utils.image_per_prompt
+            if target_image_count > 0:
+                if not original_images:
+                    final_images = []
+                else:
+                    looped_images = list(original_images)
+                    while len(looped_images) < target_image_count:
+                        looped_images.extend(original_images)
+
+                    final_images = looped_images[:target_image_count]
+
+            mm_content = [process_image(img) for img in final_images]
+
+            if enable_multimodal_chat:
+                prompt = self.apply_multimodal_chat_transformation(prompt, mm_content)
+
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
+                )
+            )
+
         self.maybe_oversample_requests(sampled_requests, num_requests)
         return sampled_requests

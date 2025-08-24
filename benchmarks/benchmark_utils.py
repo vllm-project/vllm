@@ -7,7 +7,7 @@ import math
 import os
 from typing import Any
 
-
+image_per_prompt = 0
 def convert_to_pytorch_benchmark_format(
     args: argparse.Namespace, metrics: dict[str, list], extra_info: dict[str, Any]
 ) -> list:

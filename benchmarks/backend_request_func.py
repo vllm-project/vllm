@@ -362,22 +362,37 @@ async def async_request_openai_chat_completions(
     async with aiohttp.ClientSession(
         trust_env=True, timeout=AIOHTTP_TIMEOUT
     ) as session:
-        content = [{"type": "text", "text": request_func_input.prompt}]
-        if request_func_input.multi_modal_content:
-            content.append(request_func_input.multi_modal_content)
+        prompt_text = request_func_input.prompt
+        mm_content = request_func_input.multi_modal_content
+
+        content_list = [{"type": "text", "text": prompt_text}]
+
+        # Check if image exist
+        if mm_content:
+            if isinstance(mm_content, list):
+                # Multi Images exist. Extend the list with all images.
+                content_list.extend(mm_content)
+            elif isinstance(mm_content, dict):
+                # Only single-image case. Append the one image.
+                content_list.append(mm_content)
+            else:
+                raise TypeError(
+                    "multi_modal_content must be a list or a dict, but got "
+                    f"{type(mm_content).__name__}"
+                )
+
+            messages = [{"role": "user", "content": content_list}]
+        else:
+            # text-only
+            messages = [{"role": "user", "content": prompt_text}]
+
         payload = {
             "model": request_func_input.model_name
             if request_func_input.model_name
             else request_func_input.model,
-            "messages": [
-                {"role": "user", "content": content},
-            ],
+            "messages": messages,
             "temperature": 0.0,
             "max_completion_tokens": request_func_input.output_len,
-            "stream": True,
-            "stream_options": {
-                "include_usage": True,
-            },
         }
         if request_func_input.ignore_eos:
             payload["ignore_eos"] = request_func_input.ignore_eos
@@ -400,6 +415,22 @@ async def async_request_openai_chat_completions(
                 url=api_url, json=payload, headers=headers
             ) as response:
                 if response.status == 200:
+                    # handles non streaming response, full
+                    if not payload.get("stream", False):
+                        full = await response.json()
+                        msg = full["choices"][0]["message"]
+                        output.generated_text = msg.get("content", "")
+                        print(f">> output: {output.generated_text}")
+                        usage = full.get("usage", {})
+                        output.output_tokens = usage.get("completion_tokens", 0)
+                        # no streaming metrics in this mode
+                        output.ttft = 0.0
+                        output.latency = time.perf_counter() - st
+                        output.success = True
+                        if pbar:
+                            pbar.update(1)
+                        return output
+
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:

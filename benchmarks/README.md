@@ -387,3 +387,70 @@ python3 vllm/benchmarks/benchmark_throughput.py \
   --enable-lora \
   --lora-path yard1/llama-2-7b-sql-lora-test
   ```
+### Benchmark with Multiple Images per Text Prompt for multi-modal
+
+## Offline
+To test with multiple images per text prompt, you have to set `--limit-mm-per-prompt`.
+You have to make sure the model supports multiple and the number of images. Example command:
+
+```bash
+python3 benchmark_throughput.py \
+--model llava-hf/llava-1.5-7b-hf \
+--backend vllm-chat \
+--dataset-name hf \
+--dataset-path lmarena-ai/vision-arena-bench-v0.1 \
+--hf-split train \  
+--hf-subset "chart2text(cauldron)" \  
+--num-prompts 10 \
+--limit-mm-per-prompt image=2
+```bash
+
+## Online
+
+Server 1x 4b sample cmd:
+```bash
+VLLM_SKIP_WARMUP=1 PT_HPU_LAZY_MODE=1 python3 -m vllm.entrypoints.openai.api_server \
+  --host localhost \
+  --port 12345 --block-size 128 \
+  --model /root/software/data/pytorch/huggingface/hub/models--google--gemma-3-27b-it/snapshots/005ad3404e59d6023443cb575daa05336842228a/  \
+   --device hpu --dtype bfloat16 --tensor-parallel-size 1 --trust-remote-code \
+   --max-model-len 8192 --max-num-seqs 25 --max-num-batched-tokens 8192 \
+   --use-padding-aware-scheduling --use-v2-block-manager \
+   --distributed_executor_backend ray --gpu_memory_utilization 0.95 \
+   --limit-mm-per-prompt image=6 2>&1 | tee log_server.txt
+```bash
+
+Client 1x 4b sample cmd:
+```bash
+python3 benchmark_serving.py \
+  --backend openai-chat   --endpoint /chat/completions    --base-url http://127.0.0.1:12345/v1 \
+  --model  /root/software/data/pytorch/huggingface/hub/models--google--gemma-3-27b-it/snapshots/005ad3404e59d6023443cb575daa05336842228a/ \
+  --percentile-metrics ttft,tpot,itl,e2el \
+  --num-prompt 30 \
+  --port 12345  --dataset-path MUIRBENCH/MUIRBENCH   \
+  --dataset-name hf    \
+  --hf-output-len 300  \
+  --input-len 1024   --max-concurrency 25    \
+  --limit-mm-per-prompt image=6 2>&1 | tee client.log
+```bash
+
+Server 8x 27b sample cmd:
+```bash
+export PT_HPUGRAPH_DISABLE_TENSOR_CACHE=false
+export VLLM_EXPONENTIAL_BUCKETING=False
+export PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+export EXPERIMENTAL_WEIGHT_SHARING=0
+export FUSER_ENABLE_LOW_UTILIZATION=true
+export ENABLE_FUSION_BEFORE_NORM=true
+export VLLM_USE_V1=0
+export  VLLM_SKIP_WARMUP=1
+export PT_HPU_LAZY_MODE=1
+ VLLM_MULTIMODAL_BUCKETS=1,4,6,8 python3 -m vllm.entrypoints.openai.api_server --host localhost --port 12345 --block-size 128 --model /root/software/data/pytorch/huggingface/hub/models--google--gemma-3-27b-it/snapshots/005ad3404e59d6023443cb575daa05336842228a/ --device hpu --dtype bfloat16 --tensor-parallel-size 8 --trust-remote-code --max-model-len 10240 --max-num-seqs 64 --max-num-batched-tokens 10240 --distributed_executor_backend ray --gpu_memory_utilization 0.7 --limit-mm-per-prompt image=10 --split_qkv 2>&1 | tee log_server_bucket6.txt
+ ```bash
+
+ Client 8x 27b sample cmd:
+```bash
+python3 benchmark_serving.py      --backend openai-chat   --endpoint /chat/completions    --base-url http://127.0.0.1:12345/v1    --model  /root/software/data/pytorch/huggingface/hub/models--google--gemma-3-27b-it/snapshots/005ad3404e59d6023443cb575daa05336842228a/      --percentile-metrics ttft,tpot,itl,e2el  --num-prompt 100       --port 12345  --dataset-path MUIRBENCH/MUIRBENCH      --dataset-name hf         --hf-output-len 300 --input-len 7698   --max-concurrency 25    --limit-mm-per-prompt image=6 --ignore-eos 2>&1 | tee client_b6.log
+```bash
+
+
