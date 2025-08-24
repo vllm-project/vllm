@@ -33,13 +33,12 @@ from vllm.logger import init_logger
 from vllm.utils import cdiv, next_power_of_2
 
 # Import original Pallas components
-from .pallas import (
-    PallasAttentionBackend, PallasMetadata,
-    TPU_HEAD_SIZE_ALIGNMENT, TPU_STR_DTYPE_TO_TORCH_DTYPE,
-    write_to_kv_cache
-)
+from .pallas import (PallasAttentionBackend, PallasMetadata,
+                     TPU_HEAD_SIZE_ALIGNMENT, TPU_STR_DTYPE_TO_TORCH_DTYPE,
+                     write_to_kv_cache)
 
 logger = init_logger(__name__)
+
 
 @dataclass
 class TPUConfig:
@@ -55,62 +54,60 @@ class TPUConfig:
     optimal_block_kv: int
     memory_pipeline_stages: int
 
+
 class TPUArchitectureDetector:
     """
     Detects TPU version and provides optimization configuration.
     Falls back gracefully when running on CPU/GPU for development.
     """
-    
+
     # Known TPU configurations based on public documentation
     TPU_CONFIGS = {
-        6: TPUConfig(
-            version=6,
-            name="TPU v6e (Trillium)",
-            mxu_size=256,
-            memory_bandwidth_gbps=3584,
-            ici_bandwidth_gbps=3584,
-            sparse_cores=2,
-            head_size_multiple=256,
-            optimal_block_q=512,
-            optimal_block_kv=1024,
-            memory_pipeline_stages=4
-        ),
-        5: TPUConfig(
-            version=5,
-            name="TPU v5e",
-            mxu_size=128,
-            memory_bandwidth_gbps=1600,
-            ici_bandwidth_gbps=1600,
-            sparse_cores=4,
-            head_size_multiple=128,
-            optimal_block_q=256,
-            optimal_block_kv=512,
-            memory_pipeline_stages=2
-        ),
-        4: TPUConfig(
-            version=4,
-            name="TPU v4",
-            mxu_size=128,
-            memory_bandwidth_gbps=1200,
-            ici_bandwidth_gbps=1200,
-            sparse_cores=0,
-            head_size_multiple=128,
-            optimal_block_q=256,
-            optimal_block_kv=512,
-            memory_pipeline_stages=2
-        )
+        6:
+        TPUConfig(version=6,
+                  name="TPU v6e (Trillium)",
+                  mxu_size=256,
+                  memory_bandwidth_gbps=3584,
+                  ici_bandwidth_gbps=3584,
+                  sparse_cores=2,
+                  head_size_multiple=256,
+                  optimal_block_q=512,
+                  optimal_block_kv=1024,
+                  memory_pipeline_stages=4),
+        5:
+        TPUConfig(version=5,
+                  name="TPU v5e",
+                  mxu_size=128,
+                  memory_bandwidth_gbps=1600,
+                  ici_bandwidth_gbps=1600,
+                  sparse_cores=4,
+                  head_size_multiple=128,
+                  optimal_block_q=256,
+                  optimal_block_kv=512,
+                  memory_pipeline_stages=2),
+        4:
+        TPUConfig(version=4,
+                  name="TPU v4",
+                  mxu_size=128,
+                  memory_bandwidth_gbps=1200,
+                  ici_bandwidth_gbps=1200,
+                  sparse_cores=0,
+                  head_size_multiple=128,
+                  optimal_block_q=256,
+                  optimal_block_kv=512,
+                  memory_pipeline_stages=2)
     }
-    
+
     def __init__(self):
         self.tpu_version = self._detect_tpu_version()
         self.config = self._get_config()
         self.is_simulated = self.tpu_version == -1
-        
+
         if self.is_simulated:
             logger.warning("Running in simulation mode - no TPU detected")
         else:
             logger.info(f"Detected {self.config.name}")
-    
+
     def _detect_tpu_version(self) -> int:
         """Detect TPU version from environment"""
         # Method 1: PyTorch XLA
@@ -121,7 +118,7 @@ class TPUArchitectureDetector:
             return version
         except (ImportError, AttributeError):
             pass
-        
+
         # Method 2: JAX
         try:
             import jax
@@ -137,16 +134,16 @@ class TPUArchitectureDetector:
                     return 4
         except (ImportError, AttributeError, IndexError):
             pass
-        
+
         # Method 3: Environment variable (for testing)
         env_version = os.environ.get('TPU_VERSION', None)
         if env_version:
             logger.info(f"Using TPU v{env_version} from environment")
             return int(env_version)
-        
+
         # No TPU detected - simulation mode
         return -1
-    
+
     def _get_config(self) -> TPUConfig:
         """Get configuration for detected TPU version"""
         if self.tpu_version in self.TPU_CONFIGS:
@@ -159,17 +156,18 @@ class TPUArchitectureDetector:
             # Unknown version - use v5 as safe default
             logger.warning(f"Unknown TPU v{self.tpu_version}, using v5 config")
             return self.TPU_CONFIGS[5]
-    
+
     def optimize_head_dimension(self, head_dim: int) -> int:
         """Optimize head dimension for MXU alignment"""
         multiple = self.config.head_size_multiple
         optimized = ((head_dim + multiple - 1) // multiple) * multiple
-        
+
         if optimized != head_dim:
-            logger.info(f"Optimizing head dimension: {head_dim} -> {optimized}")
-        
+            logger.info(
+                f"Optimizing head dimension: {head_dim} -> {optimized}")
+
         return optimized
-    
+
     def get_attention_config(self, seq_len: int) -> Dict[str, Any]:
         """Get optimized attention configuration"""
         return {
@@ -180,8 +178,10 @@ class TPUArchitectureDetector:
             "is_v6_optimized": self.config.version >= 6
         }
 
+
 # Global detector instance
 tpu_detector = TPUArchitectureDetector()
+
 
 class TPUv6AdaptiveAttentionBackend(PallasAttentionBackend):
     """
@@ -228,6 +228,7 @@ class TPUv6AdaptiveAttentionBackend(PallasAttentionBackend):
             # Use original logic for v5e and earlier
             return super().get_page_size(vllm_config)
 
+
 class TPUv6AdaptiveAttentionBackendImpl(AttentionImpl):
     """
     TPU v6e adaptive attention implementation with architecture-specific optimizations.
@@ -246,7 +247,7 @@ class TPUv6AdaptiveAttentionBackendImpl(AttentionImpl):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[int] = None,
     ) -> None:
-        
+
         # Store original parameters
         self.num_heads = num_heads
         self.original_head_size = head_size
@@ -258,7 +259,8 @@ class TPUv6AdaptiveAttentionBackendImpl(AttentionImpl):
 
         # Optimize head size for TPU architecture
         self.head_size = tpu_detector.optimize_head_dimension(head_size)
-        self.attention_config = tpu_detector.get_attention_config(4096)  # Default seq len
+        self.attention_config = tpu_detector.get_attention_config(
+            4096)  # Default seq len
 
         # Performance tracking
         self.call_count = 0
@@ -282,9 +284,15 @@ class TPUv6AdaptiveAttentionBackendImpl(AttentionImpl):
         # Log optimization information
         logger.info(f"Initialized TPU v6e Adaptive Attention Backend")
         logger.info(f"  Architecture: {tpu_detector.config.name}")
-        logger.info(f"  Head size optimization: {self.original_head_size} -> {self.head_size}")
-        logger.info(f"  MXU target: {tpu_detector.config.mxu_size}x{tpu_detector.config.mxu_size}")
-        logger.info(f"  Memory pipeline: {self.attention_config['memory_pipeline_stages']} stages")
+        logger.info(
+            f"  Head size optimization: {self.original_head_size} -> {self.head_size}"
+        )
+        logger.info(
+            f"  MXU target: {tpu_detector.config.mxu_size}x{tpu_detector.config.mxu_size}"
+        )
+        logger.info(
+            f"  Memory pipeline: {self.attention_config['memory_pipeline_stages']} stages"
+        )
 
     def forward(
         self,
@@ -299,10 +307,10 @@ class TPUv6AdaptiveAttentionBackendImpl(AttentionImpl):
         output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with TPU v6e optimizations."""
-        
+
         import time
         start_time = time.perf_counter()
-        
+
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
@@ -318,7 +326,7 @@ class TPUv6AdaptiveAttentionBackendImpl(AttentionImpl):
         query = query.view(num_tokens, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
-        
+
         # TPU v6e adaptive padding with architecture-specific alignment
         alignment = tpu_detector.config.head_size_multiple
         if self.head_size % alignment != 0:
@@ -353,8 +361,10 @@ class TPUv6AdaptiveAttentionBackendImpl(AttentionImpl):
         # TPU v6e optimized attention with architecture-adaptive parameters
         if tpu_detector.config.version >= 6:
             # Use v6e optimizations - larger blocks and memory pipeline depth
-            num_kv_pages_per_block = min(4, max(1, self.attention_config["block_kv"] // 128))
-            num_queries_per_block = min(8, max(1, self.attention_config["block_q"] // 64))
+            num_kv_pages_per_block = min(
+                4, max(1, self.attention_config["block_kv"] // 128))
+            num_queries_per_block = min(
+                8, max(1, self.attention_config["block_q"] // 64))
             # Increased vmem limit for v6e's larger memory bandwidth
             vmem_limit_bytes = min(1024 * 1024, 768 * 1024)  # 768KB for v6e
         else:
@@ -394,24 +404,34 @@ class TPUv6AdaptiveAttentionBackendImpl(AttentionImpl):
         if self.call_count % 100 == 0:
             avg_time = self.total_optimization_time / self.call_count * 1000
             logger.info(f"TPU v6e Adaptive: {self.call_count} calls, "
-                       f"avg time: {avg_time:.2f}ms, "
-                       f"architecture: {tpu_detector.config.name}")
+                        f"avg time: {avg_time:.2f}ms, "
+                        f"architecture: {tpu_detector.config.name}")
 
         return output.reshape(num_tokens, hidden_size)
 
     def get_performance_report(self) -> Dict[str, Any]:
         """Generate performance report for monitoring"""
         return {
-            "backend": "TPUv6AdaptiveAttentionBackend",
-            "architecture": tpu_detector.config.name,
-            "tpu_version": tpu_detector.config.version,
-            "calls": self.call_count,
-            "mxu_size": f"{tpu_detector.config.mxu_size}x{tpu_detector.config.mxu_size}",
-            "head_size_optimization": f"{self.original_head_size} -> {self.head_size}",
-            "memory_pipeline_stages": self.attention_config["memory_pipeline_stages"],
-            "is_v6_optimized": self.attention_config["is_v6_optimized"],
-            "average_call_time_ms": (self.total_optimization_time / max(1, self.call_count)) * 1000,
-            "optimizations_applied": self._get_applied_optimizations()
+            "backend":
+            "TPUv6AdaptiveAttentionBackend",
+            "architecture":
+            tpu_detector.config.name,
+            "tpu_version":
+            tpu_detector.config.version,
+            "calls":
+            self.call_count,
+            "mxu_size":
+            f"{tpu_detector.config.mxu_size}x{tpu_detector.config.mxu_size}",
+            "head_size_optimization":
+            f"{self.original_head_size} -> {self.head_size}",
+            "memory_pipeline_stages":
+            self.attention_config["memory_pipeline_stages"],
+            "is_v6_optimized":
+            self.attention_config["is_v6_optimized"],
+            "average_call_time_ms":
+            (self.total_optimization_time / max(1, self.call_count)) * 1000,
+            "optimizations_applied":
+            self._get_applied_optimizations()
         }
 
     def _get_applied_optimizations(self) -> list[str]:
@@ -419,22 +439,20 @@ class TPUv6AdaptiveAttentionBackendImpl(AttentionImpl):
         optimizations = []
         if tpu_detector.config.version >= 6:
             optimizations.extend([
-                "mxu_256x256_alignment",
-                "4_stage_memory_pipeline",
-                "enhanced_vmem_limits",
-                "optimized_block_sizing"
+                "mxu_256x256_alignment", "4_stage_memory_pipeline",
+                "enhanced_vmem_limits", "optimized_block_sizing"
             ])
         else:
             optimizations.extend([
-                "mxu_128x128_alignment", 
-                "2_stage_memory_pipeline",
+                "mxu_128x128_alignment", "2_stage_memory_pipeline",
                 "standard_block_sizing"
             ])
-        
+
         if self.head_size != self.original_head_size:
             optimizations.append("head_dimension_padding")
-            
+
         return optimizations
+
 
 # Factory function for easy integration
 def create_tpu_v6_adaptive_backend(*args, **kwargs):
