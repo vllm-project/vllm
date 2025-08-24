@@ -638,7 +638,7 @@ class Phi4MMImagePixelInputs(TensorSchema):
 
     image_sizes: Annotated[
         torch.Tensor,
-        TensorShape("bn", 2), # (height, width)
+        TensorShape("bn", 2),  # (height, width)
     ]
 
     num_img_tokens: Annotated[
