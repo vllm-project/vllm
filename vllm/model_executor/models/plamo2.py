@@ -6,7 +6,7 @@ from typing import Optional
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig, PreTrainedModel
+from transformers import PretrainedConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
@@ -70,20 +70,6 @@ class Plamo2Config(PretrainedConfig):  # type: ignore
     intermediate_size: int
     # Tokenizer
     vocab_size: int
-
-
-class Plamo2PreTrainedModel(PreTrainedModel):  # type: ignore
-
-    def _init_weights(self, module: torch.nn.Module) -> None:
-        std = 0.02
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
 
 
 def is_mamba(config: Plamo2Config, i: int) -> bool:
@@ -588,7 +574,7 @@ class Plamo2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class Plamo2Decoder(torch.nn.Module):
+class Plamo2Decoder(nn.Module):
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -631,10 +617,10 @@ class Plamo2Decoder(torch.nn.Module):
         return hidden_states, residual
 
 
-class Plamo2Model(Plamo2PreTrainedModel):
+class Plamo2Model(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config.model_config.hf_config)
+        super().__init__()
 
         config = vllm_config.model_config.hf_config
 
@@ -654,7 +640,6 @@ class Plamo2Model(Plamo2PreTrainedModel):
                 ["hidden_states", "residual"], config.hidden_size))
         self.layers = Plamo2Decoder(vllm_config, prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_init()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -700,8 +685,8 @@ class Plamo2Model(Plamo2PreTrainedModel):
         return hidden_states
 
 
-class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, SupportsPP,
-                        IsHybrid, SupportsV0Only):
+class Plamo2ForCausalLM(nn.Module, HasInnerState, SupportsPP, IsHybrid,
+                        SupportsV0Only):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -711,12 +696,13 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, SupportsPP,
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        super().__init__()
+
         config = vllm_config.model_config.hf_config
         scheduler_config = vllm_config.scheduler_config
         assert not vllm_config.cache_config.enable_prefix_caching, \
             "PLaMo2 currently does not support prefix caching"
 
-        super().__init__(config)
         self.config = config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -750,8 +736,6 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, SupportsPP,
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-        # Initialize weights and apply final processing
-        self.post_init()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
