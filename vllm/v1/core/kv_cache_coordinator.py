@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 
+from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -42,7 +43,8 @@ class KVCacheCoordinator(ABC):
             ) for i, kv_cache_group in enumerate(
                 self.kv_cache_config.kv_cache_groups))
         if self.enable_caching:
-            self.cache_histograms_step = self.max_model_len // 16
+            self.cache_histograms_step = cdiv(self.kv_cache_config.num_blocks,
+                                              16)
             self.cache_histograms_array = [[0 for _ in range(3)]
                                            for _ in range(16)]
             self.cache_histograms_count = 0
