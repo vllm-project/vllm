@@ -455,8 +455,7 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(
                 **self.compilation_config)
         if isinstance(self.eplb_config, dict):
-            self.eplb_config = EPLBConfig.from_cli(json.dumps(
-                self.eplb_config))
+            self.eplb_config = EPLBConfig(**self.eplb_config)
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
