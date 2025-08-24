@@ -154,7 +154,6 @@ class CuMemAllocator:
         self.allocator_and_pools: dict[str, Any] = {}
         # Creating strong references to the two callbacks here to prevent
         # these ephemeral bound-method objects being garbbage collected.
-        # Without this, `my_free` may call GC-ed callbacks causing failure.
         # See discussions in https://github.com/vllm-project/vllm/pull/22724
         self.python_malloc_callback = self._python_malloc_callback
         self.python_free_callback = self._python_free_callback
