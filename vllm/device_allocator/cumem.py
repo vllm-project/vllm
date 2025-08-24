@@ -152,6 +152,8 @@ class CuMemAllocator:
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
         self.allocator_and_pools: dict[str, Any] = {}
+        self.python_malloc_callback_ref = self.python_malloc_callback
+        self.python_free_callback_ref = self.python_free_callback
 
     def python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """
@@ -212,9 +214,9 @@ class CuMemAllocator:
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
         """
         Wake up the allocator from sleep mode.
-        All data that is previously offloaded will be loaded back to GPU 
+        All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory.
-        
+
         :param tags: The tags of the memory allocation that will be loaded
             back to GPU memory. If None, all memory allocation will be loaded
             back to GPU memory.
@@ -249,8 +251,9 @@ class CuMemAllocator:
 
         old_tag = self.current_tag
         self.current_tag = tag
-        with use_memory_pool_with_allocator(self.python_malloc_callback,
-                                            self.python_free_callback) as data:
+        with use_memory_pool_with_allocator(
+                self.python_malloc_callback_ref,
+                self.python_free_callback_ref) as data:
             # start to hit another PyTorch bug in PyTorch 2.6,
             # possibly because of gc-related issue w.r.t. the allocator and
             # the memory pool.
