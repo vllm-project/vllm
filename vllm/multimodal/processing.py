@@ -983,7 +983,7 @@ class BaseProcessingInfo:
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
 
-MultiModalHashes = dict[str, list[str]]
+MultiModalHashes = dict[str, list[Optional[str]]]
 """
 A collection of hashes with a similar structure as
 [`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems].
