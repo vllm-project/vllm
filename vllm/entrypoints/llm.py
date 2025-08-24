@@ -809,7 +809,6 @@ class LLM:
 
             if mm_data is not None:
                 prompt["multi_modal_data"] = mm_data
-            # UUID-based multi_modal_ids support removed
 
             if mm_processor_kwargs is not None:
                 prompt["mm_processor_kwargs"] = mm_processor_kwargs
