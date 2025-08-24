@@ -182,16 +182,18 @@ class KVCacheCoordinator(ABC):
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         pass
 
-    def cal_cache_histograms(self, hit_cache_blocks: int):
+    def cal_cache_histograms(self,
+                             hit_cache_blocks: tuple[list[KVCacheBlock],
+                                                     ...] = None):
         """Count the number of cache blocks hit by requests, 
         and update the cache block threshold after reaching the statistical 
         threshold."""
-        if self.enable_caching and hit_cache_blocks > 0:
-
-            hit_column = hit_cache_blocks // self.cache_histograms_step
-            self.cache_histograms_array[
-                self.cache_histograms_array_index][hit_column] += 1
-            self.cache_histograms_count += 1
+        if self.enable_caching and hit_cache_blocks is not None:
+            for hit_item in hit_cache_blocks:
+                hit_column = len(hit_item) // self.cache_histograms_step
+                self.cache_histograms_array[
+                    self.cache_histograms_array_index][hit_column] += 1
+                self.cache_histograms_count += 1
             if self.cache_histograms_count > \
                 self.cache_histograms_count_threshold:
 
