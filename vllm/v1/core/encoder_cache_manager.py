@@ -99,8 +99,10 @@ class EncoderCacheManager:
         self.cached[mm_hash].add(request.request_id)
         return True
 
-    def can_allocate(self, request: Request, input_id: int) -> bool:
-        """Check if there's sufficient cache space for a multimodal input.
+    def try_allocate(self, request: Request, input_id: int,
+                     encoder_budget: int) -> bool:
+        """Check if there's sufficient cache space for a multimodal input. 
+        If there is, return True and update EncoderCacheManager state.
 
         If there is not enough free space in `num_free_slots` but there is
         enough reclaimable space in `num_freeable_slots`, entries will be
@@ -119,13 +121,27 @@ class EncoderCacheManager:
             True if there's enough capacity to hold the encoder output for this
             input (possibly after reclaiming `freeable` entries); otherwise
             False.
+
+        Note: This method does not allocate physical memory for the encoder 
+        output but only the state of EncoderCacheManager.
         """
         num_tokens = request.get_num_encoder_tokens(input_id)
+
+        # Not enough compute budget
+        if num_tokens > encoder_budget:
+            return False
+
+        # Enough free slots
         if num_tokens <= self.num_free_slots:
+            self.num_free_slots -= num_tokens
+            self.num_freeable_slots -= num_tokens
             return True
+
+        # Not enough reclaimable slots
         if num_tokens > self.num_freeable_slots:
             return False
 
+        # Not enough free slots but enough reclaimable slots
         # NOTE: Eviction takes place here, but physical memory is not freed
         # until model runner is notified by the scheduler output.
         while num_tokens > self.num_free_slots:
@@ -133,6 +149,8 @@ class EncoderCacheManager:
             del self.cached[mm_hash]
             self.freed.append(mm_hash)
             self.num_free_slots += num_free_token
+        self.num_free_slots -= num_tokens
+        self.num_freeable_slots -= num_tokens
         return True
 
     def allocate(self, request: Request, input_id: int) -> None:
@@ -143,23 +161,19 @@ class EncoderCacheManager:
         the model runner; this method updates the manager's bookkeeping.
 
         Note:
-            This method assumes can_allocate() returned True for the same input
-            and will decrease both `num_free_slots` and `num_freeable_slots`
-            by the number of encoder tokens for the input.
+            This method assumes try_allocate() returned True for the same input.
         """
+        # Encoder cache space budget should be already updated for the
+        # multimodal input and non-negative after try_allocate() is called.
+        assert self.num_free_slots >= 0
+        assert self.num_freeable_slots >= 0
+
         mm_hash = request.mm_hashes[input_id]
         request_id = request.request_id
-        num_encoder_tokens = request.get_num_encoder_tokens(input_id)
         if mm_hash not in self.cached:
             self.cached[mm_hash] = set()
 
         self.cached[mm_hash].add(request_id)
-
-        # Encoder cache space is guaranteed to be enough for the input.
-        assert self.num_free_slots >= num_encoder_tokens
-        assert self.num_freeable_slots >= num_encoder_tokens
-        self.num_free_slots -= num_encoder_tokens
-        self.num_freeable_slots -= num_encoder_tokens
 
     def get_cached_input_ids(self, request: Request) -> set[int]:
         """Get all cached multimodal input IDs for a request.
