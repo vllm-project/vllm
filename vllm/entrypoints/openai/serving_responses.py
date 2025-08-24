@@ -1069,7 +1069,48 @@ class OpenAIServingResponses(OpenAIServing):
                             delta=ctx.parser.last_content_delta,
                             sequence_number=-1,
                         ))
-
+                # built-in tools will be triggered on the analysis channel
+                # However, occasionally built-in tools will
+                # still be output to commentary.
+                elif (ctx.parser.current_channel == "commentary"
+                      or ctx.parser.current_channel == "analysis"
+                      ) and ctx.parser.current_recipient == "python":
+                    if not sent_output_item_added:
+                        sent_output_item_added = True
+                        yield _send_event(
+                            openai_responses_types.
+                            ResponseOutputItemAddedEvent(
+                                type="response.output_item.added",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item=openai_responses_types.
+                                ResponseCodeInterpreterToolCallParam(
+                                    type="code_interpreter_call",
+                                    id=current_item_id,
+                                    code=None,
+                                    container_id="auto",
+                                    outputs=None,
+                                    status="in_progress",
+                                ),
+                            ))
+                        yield _send_event(
+                            openai_responses_types.
+                            ResponseCodeInterpreterCallInProgressEvent(
+                                type=
+                                "response.code_interpreter_call.in_progress",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                            ))
+                    yield _send_event(
+                        openai_responses_types.
+                        ResponseCodeInterpreterCallCodeDeltaEvent(
+                            type="response.code_interpreter_call_code.delta",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item_id=current_item_id,
+                            delta=ctx.parser.last_content_delta,
+                        ))
             if ctx.is_assistant_action_turn() and len(ctx.parser.messages) > 0:
                 previous_item = ctx.parser.messages[-1]
                 if (self.tool_server is not None
@@ -1166,37 +1207,14 @@ class OpenAIServingResponses(OpenAIServing):
                         and previous_item.recipient is not None
                         and previous_item.recipient.startswith("python")):
                     yield _send_event(
-                        openai_responses_types.ResponseOutputItemAddedEvent(
-                            type="response.output_item.added",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item=openai_responses_types.
-                            ResponseCodeInterpreterToolCallParam(
-                                type="code_interpreter_call",
-                                id=current_item_id,
-                                code="",
-                                container_id="auto",
-                                outputs=[],
-                                status="in_progress",
-                            ),
-                        ))
-                    yield _send_event(
-                        openai_responses_types.
-                        ResponseCodeInterpreterCallInProgressEvent(
-                            type="response.code_interpreter_call.in_progress",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                        ))
-                    # TODO: do we need to add delta event here?
-                    yield _send_event(
                         openai_responses_types.
                         ResponseCodeInterpreterCallCodeDoneEvent(
                             type="response.code_interpreter_call_code.done",
                             sequence_number=-1,
                             output_index=current_output_index,
                             item_id=current_item_id,
-                            code=previous_item.content[0].text))
+                            code=previous_item.content[0].text,
+                        ))
                     yield _send_event(
                         openai_responses_types.
                         ResponseCodeInterpreterCallInterpretingEvent(
