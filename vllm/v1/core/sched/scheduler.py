@@ -263,6 +263,9 @@ class Scheduler(SchedulerInterface):
                     if preempted_req == request:
                         # No more request to preempt.
                         can_schedule = False
+                        # Add this because do real encoder cache allocation
+                        # in _try_schedule_encoder_inputs
+                        self.encoder_cache_manager.free(request)
                         break
                 else:
                     # The request can be scheduled.
