@@ -23,7 +23,7 @@
 # limitations under the License.
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -47,6 +47,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
@@ -54,13 +55,23 @@ from .utils import (AutoWeightsLoader, init_vllm_registered_model,
 
 
 # # === Audio Inputs === #
-class Qwen2AudioFeatureInputs(TypedDict):
-    type: Literal["audio_features"]
-    input_features: torch.Tensor
-    """Shape: `(num_audios, num_mel_bins, 3000)`"""
+class Qwen2AudioInputs(TensorSchema):
+    """
+    Dimensions:
+        - na: Number of audios
+        - nmb: Number of mel bins
+    """
 
-    feature_attention_mask: torch.Tensor
-    """Shape: `(num_audios, 3000)`"""
+    input_features: Annotated[
+        torch.Tensor,
+        TensorShape("na", "nmb", 3000),
+    ]
+
+
+    feature_attention_mask: Annotated[
+        torch.Tensor,
+        TensorShape("na", 3000),
+    ]
 
 
 class Qwen2AudioEmbeddingInputs(TypedDict):
