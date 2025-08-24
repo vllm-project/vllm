@@ -1843,9 +1843,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.use_mxfp4_w4a4 = use_mxfp4_w4a4
 
         self.quantizer = MoEInputQuantizer(
-            not self.quant_config.is_per_tensor,
-            self.quant_config.quant_dtype,
-            self.quant_config.block_shape,
+            per_act_token_quant=not self.quant_config.is_per_tensor,
+            quant_dtype=self.quant_config.quant_dtype,
+            block_shape=self.quant_config.block_shape,
         )
 
     @property
