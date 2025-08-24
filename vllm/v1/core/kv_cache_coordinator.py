@@ -46,7 +46,10 @@ class KVCacheCoordinator(ABC):
             self.cache_histograms_array = [[0 for _ in range(3)]
                                            for _ in range(16)]
             self.cache_histograms_count = 0
-            self.cache_histograms_count_max = 4096
+            self.cache_histograms_count_min = 2 << 10
+            self.cache_histograms_count_max = 2 << 16
+            self.cache_histograms_count_threshold = \
+            self.cache_histograms_count_min
             self.cache_histograms_array_index = 0
             self.cache_block_threshold = None
 
@@ -189,7 +192,8 @@ class KVCacheCoordinator(ABC):
             self.cache_histograms_array[
                 self.cache_histograms_array_index][hit_column] += 1
             self.cache_histograms_count += 1
-            if self.cache_histograms_count > self.cache_histograms_count_max:
+            if self.cache_histograms_count > \
+                self.cache_histograms_count_threshold:
 
                 histogram_sum = []
                 histogram_sums = 0
@@ -200,6 +204,7 @@ class KVCacheCoordinator(ABC):
                     histogram_sums += histogram_sum[i]
 
                 targetPercentile = histogram_sum * 0.99
+                pre_block_threshold = self.cache_block_threshold
                 for i in range(15, -1, -1):
                     histogram_sums -= histogram_sum[i]
                     if histogram_sums < targetPercentile:
@@ -209,7 +214,15 @@ class KVCacheCoordinator(ABC):
                 array_index = (self.cache_histograms_array_index + 1) % 3
                 self.cache_histograms_array[array_index] = [0] * 16
                 self.cache_histograms_array_index = array_index
-                self.cache_histograms_count_max = 0
+                self.cache_histograms_count = 0
+                if pre_block_threshold == self.cache_block_threshold:
+                    self.cache_histograms_count_threshold = min(
+                        self.cache_histograms_count_threshold << 2,
+                        self.cache_histograms_count_max)
+                else:
+                    self.cache_histograms_count_threshold = max(
+                        self.cache_histograms_count_threshold >> 2,
+                        self.cache_histograms_count_min)
 
 
 class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
