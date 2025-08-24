@@ -8,8 +8,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+from vllm.model_executor.layers.fused_moe.utils import MoEInputQuantizer
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
 
@@ -30,6 +29,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.use_dp = use_dp
         self.a1_gscale = a1_gscale
         self.local_tokens = None
+        self.quantizer = MoEInputQuantizer()
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -67,7 +67,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
 
-        a1q, a1q_scale = moe_kernel_quantize_input(
+        a1q, a1q_scale = self.quantizer(
             a1,
             self.a1_gscale,
             quant_config.quant_dtype,

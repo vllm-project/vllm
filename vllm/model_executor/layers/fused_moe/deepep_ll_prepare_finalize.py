@@ -10,7 +10,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input, normalize_batched_scales_shape)
+    MoEInputQuantizer, normalize_batched_scales_shape)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -42,11 +42,16 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     # specific hidden sizes.
     SUPPORTED_HIDDEN_SIZES = [2048, 2560, 4096, 5120, 6144, 7168]
 
-    def __init__(self,
-                 buffer: deep_ep.Buffer,
-                 max_tokens_per_rank: int,
-                 num_dispatchers: int,
-                 use_fp8_dispatch: bool = False):
+    def __init__(
+        self,
+        buffer: deep_ep.Buffer,
+        max_tokens_per_rank: int,
+        num_dispatchers: int,
+        use_fp8_dispatch: bool = False,
+        quant_dtype: Optional[torch.dtype] = None,
+        per_act_token_quant: bool = False,
+        block_shape: Optional[list[int]] = None,
+    ) -> None:
         super().__init__()
 
         self.buffer = buffer
@@ -57,6 +62,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # combine function.
         self.handle = None
         self.num_dispatchers_ = num_dispatchers
+
+        self.quantizer = MoEInputQuantizer(
+            per_act_token_quant=per_act_token_quant,
+            quant_dtype=quant_dtype,
+            block_shape=block_shape,
+        )
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -99,9 +110,13 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # TODO (varun): Optimization - Use a batched version of quant
         x = x.view((-1, hidden_dim))
-        x, x_scales = moe_kernel_quantize_input(x, a1_scale, quant_dtype,
-                                                per_act_token_quant,
-                                                block_shape)
+        x, x_scales = self.quantizer(
+            x,
+            a1_scale,
+            quant_dtype,
+            per_act_token_quant,
+            block_shape,
+        )
         x = x.view((num_experts, -1, hidden_dim))
 
         if quant_dtype is not None:

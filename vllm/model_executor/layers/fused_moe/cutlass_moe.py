@@ -15,7 +15,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate, TopKWeightAndReduceNoOP)
-from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
+from vllm.model_executor.layers.fused_moe.utils import (MoEInputQuantizer,
                                                         _resize_cache)
 from vllm.scalar_type import scalar_types
 
@@ -927,10 +927,10 @@ def run_cutlass_block_scaled_fused_experts(
 
     topk = topk_ids.size(1)
 
-    a_q, a1_scale = _fp8_quantize(a,
-                                  A_scale=None,
-                                  per_act_token=False,
-                                  block_shape=[128, 128])
+    a_q, a1_scale = MoEInputQuantizer._fp8_quantize(a,
+                                                    A_scale=None,
+                                                    per_act_token=False,
+                                                    block_shape=[128, 128])
     device = a_q.device
 
     expert_offsets = torch.empty((num_experts + 1, ),
@@ -977,10 +977,11 @@ def run_cutlass_block_scaled_fused_experts(
     intermediate = torch.empty((m * topk, n), dtype=out_dtype, device=device)
     torch.ops._C.silu_and_mul(intermediate, c1)
 
-    intermediate_q, a2_scale = _fp8_quantize(intermediate,
-                                             A_scale=None,
-                                             per_act_token=False,
-                                             block_shape=[128, 128])
+    intermediate_q, a2_scale = MoEInputQuantizer._fp8_quantize(
+        intermediate,
+        A_scale=None,
+        per_act_token=False,
+        block_shape=[128, 128])
 
     ops.cutlass_blockwise_scaled_grouped_mm(
         c2,

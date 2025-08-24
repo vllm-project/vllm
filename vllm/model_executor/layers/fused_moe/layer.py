@@ -148,6 +148,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 max_num_tokens=moe.max_num_tokens,
                 num_local_experts=moe.num_local_experts,
                 num_dispatchers=num_dispatchers,
+                quant_dtype=moe.quant_dtype,
+                per_act_token_quant=moe.per_act_token_quant,
+                block_shape=moe.block_shape,
             )
         elif moe.use_deepep_ht_kernels:
             assert moe.dp_size == all2all_manager.dp_world_size
@@ -160,6 +163,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 dp_size=all2all_manager.dp_world_size,
                 rank_expert_offset=all2all_manager.rank *
                 moe.num_local_experts,
+                quant_dtype=moe.quant_dtype,
+                per_act_token_quant=moe.per_act_token_quant,
+                block_shape=moe.block_shape,
             )
 
         elif moe.use_deepep_ll_kernels:
@@ -185,6 +191,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 max_tokens_per_rank=moe.max_num_tokens,
                 num_dispatchers=all2all_manager.world_size,
                 use_fp8_dispatch=use_fp8_dispatch,
+                quant_dtype=moe.quant_dtype,
+                per_act_token_quant=moe.per_act_token_quant,
+                block_shape=moe.block_shape,
             )
 
         return prepare_finalize

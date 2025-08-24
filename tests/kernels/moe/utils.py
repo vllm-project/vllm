@@ -13,8 +13,7 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize, BatchedTritonExperts, NaiveBatchedExperts)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel)
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+from vllm.model_executor.layers.fused_moe.utils import MoEInputQuantizer
 from vllm.utils import round_up
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
@@ -157,9 +156,10 @@ def make_quantized_test_activations(
                 or quant_dtype == torch.int8), "only fp8/int8 supported"
         a_q = torch.zeros_like(a, dtype=quant_dtype)
         a_scale_l = [None] * E
+        quantizer = MoEInputQuantizer()
         for e in range(E):
-            a_q[e], a_scale_l[e] = moe_kernel_quantize_input(
-                a[e], None, quant_dtype, per_act_token_quant, block_shape)
+            a_q[e], a_scale_l[e] = quantizer(a[e], None, quant_dtype,
+                                             per_act_token_quant, block_shape)
         a_scale = torch.stack(a_scale_l)
 
         if not per_act_token_quant and block_shape is None:

@@ -249,6 +249,9 @@ def create_pplx_prepare_finalize(
         max_num_tokens=max_num_tokens,
         num_local_experts=num_local_experts,
         num_dispatchers=world_size // dp_size,
+        quant_dtype=quant_dtype,
+        per_act_token_quant=per_act_token_quant,
+        block_shape=block_shape,
     )
 
     return prepare_finalize, ata
