@@ -474,6 +474,30 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         return torch.empty_like(b_q_weight,
                                 memory_format=torch.contiguous_format)
 
+    @register_fake("_C::cutlass_w4a8_mm")
+    def cutlass_w4a8_mm_fake(
+            a: torch.Tensor,
+            # b_q Should be the tensor returned by cutlass_encode_and_reorder_int4b
+            b_q: torch.Tensor,
+            b_group_scales: torch.Tensor,
+            b_group_size: int,
+            b_channel_scales: torch.Tensor,
+            a_token_scales: torch.Tensor,
+            out_type: Optional[torch.dtype] = None,
+            maybe_schedule: Optional[str] = None) -> torch.Tensor:
+        m = a.size(0)
+        n = b_q.size(1)
+        out_dtype = out_type if out_type is not None else torch.bfloat16
+        return torch.empty((m, n), device=a.device, dtype=out_dtype)
+
+    @register_fake("_C::cutlass_pack_scale_fp8")
+    def cutlass_pack_scale_fp8_fake(scales: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(scales, memory_format=torch.contiguous_format)
+
+    @register_fake("_C::cutlass_encode_and_reorder_int4b")
+    def cutlass_encode_and_reorder_int4b_fake(b: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(b, memory_format=torch.contiguous_format)
+
 
 if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
 
@@ -1030,6 +1054,30 @@ def machete_prepack_B(
         group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
     return torch.ops._C.machete_prepack_B(b_q_weight, a_type, b_type.id,
                                           group_scales_type)
+
+
+# CUTLASS W4A8
+def cutlass_w4a8_mm(
+        a: torch.Tensor,
+        # b_q Should be the tensor returned by cutlass_encode_and_reorder_int4b
+        b_q: torch.Tensor,
+        b_group_scales: torch.Tensor,
+        b_group_size: int,
+        b_channel_scales: torch.Tensor,
+        a_token_scales: torch.Tensor,
+        out_type: Optional[torch.dtype] = None,
+        maybe_schedule: Optional[str] = None) -> torch.Tensor:
+    return torch.ops._C.cutlass_w4a8_mm(a, b_q, b_group_scales, b_group_size,
+                                        b_channel_scales, a_token_scales,
+                                        out_type, maybe_schedule)
+
+
+def cutlass_pack_scale_fp8(scales: torch.Tensor) -> torch.Tensor:
+    return torch.ops._C.cutlass_pack_scale_fp8(scales)
+
+
+def cutlass_encode_and_reorder_int4b(b: torch.Tensor) -> torch.Tensor:
+    return torch.ops._C.cutlass_encode_and_reorder_int4b(b)
 
 
 if hasattr(torch.ops._C, "permute_cols"):
