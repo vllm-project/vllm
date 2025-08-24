@@ -42,7 +42,7 @@ class KVCacheCoordinator(ABC):
             ) for i, kv_cache_group in enumerate(
                 self.kv_cache_config.kv_cache_groups))
         if self.enable_caching:
-            self.cache_histograms_step = self.max_model_len / 16
+            self.cache_histograms_step = self.max_model_len // 16
             self.cache_histograms_array = [[0 for _ in range(3)]
                                            for _ in range(16)]
             self.cache_histograms_count = 0
@@ -188,7 +188,7 @@ class KVCacheCoordinator(ABC):
         threshold."""
         if self.enable_caching and hit_cache_blocks > 0:
 
-            hit_column = hit_cache_blocks / self.cache_histograms_step
+            hit_column = hit_cache_blocks // self.cache_histograms_step
             self.cache_histograms_array[
                 self.cache_histograms_array_index][hit_column] += 1
             self.cache_histograms_count += 1
