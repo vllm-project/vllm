@@ -119,7 +119,7 @@ class TPUArchitectureDetector:
             version = torch_xla.tpu.version()
             logger.info(f"Detected TPU v{version} via torch_xla")
             return version
-        except:
+        except (ImportError, AttributeError):
             pass
         
         # Method 2: JAX
@@ -135,7 +135,7 @@ class TPUArchitectureDetector:
                     return 5
                 elif 'v4' in device_str:
                     return 4
-        except:
+        except (ImportError, AttributeError, IndexError):
             pass
         
         # Method 3: Environment variable (for testing)
