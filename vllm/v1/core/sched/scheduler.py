@@ -784,7 +784,8 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
-        for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
+        for req_index, req_id in enumerate(model_runner_output.req_ids):
+            num_tokens_scheduled = num_scheduled_tokens[req_id]
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
             if request is None:
@@ -793,7 +794,6 @@ class Scheduler(SchedulerInterface):
                 # in pipeline parallelism).
                 continue
 
-            req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = sampled_token_ids[
                 req_index] if sampled_token_ids else []
 

@@ -148,13 +148,8 @@ def test_schedule_partial_requests():
     # The third request is also scheduled partially.
     # The <img> tokens are not scheduled because of the encoder budget.
     assert output.num_scheduled_tokens[requests[2].request_id] == 100
-    req_to_index = {
-        request.request_id: i
-        for i, request in enumerate(requests)
-    }
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id for request in requests],
-        req_id_to_index=req_to_index,
         # Only the first request has a sampled token id because
         # the rest requests are still being prefilled.
         sampled_token_ids=[[0], [], []],
@@ -200,13 +195,8 @@ def test_no_mm_input_chunking():
     # We want to only see the 400 text tokens at the start scheduled
     assert output.num_scheduled_tokens[requests[0].request_id] == 400
 
-    req_to_index = {
-        request.request_id: i
-        for i, request in enumerate(requests)
-    }
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id for request in requests],
-        req_id_to_index=req_to_index,
         sampled_token_ids=[[] for _ in range(len(requests))],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -263,13 +253,8 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     assert output.num_scheduled_tokens[requests[1].request_id] == 400
     # The third request is also scheduled partially - 1024 - 400 - 400 = 224.
     assert output.num_scheduled_tokens[requests[2].request_id] == 224
-    req_to_index = {
-        request.request_id: i
-        for i, request in enumerate(requests)
-    }
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id for request in requests],
-        req_id_to_index=req_to_index,
         sampled_token_ids=[[] for _ in range(len(requests))],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -293,7 +278,6 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     # All the remaining tokens in the third request are processed.
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id for request in requests],
-        req_id_to_index=req_to_index,
         sampled_token_ids=[[0], [0]] + [[] for _ in range(len(requests) - 2)],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -344,10 +328,6 @@ def test_stop_via_update_from_output():
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
-        req_id_to_index={
-            req.request_id: i
-            for i, req in enumerate(requests)
-        },
         sampled_token_ids=[[EOS_TOKEN_ID],
                            [10,
                             11]],  # First request hits EOS, second continues
@@ -398,10 +378,6 @@ def test_stop_via_update_from_output():
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
-        req_id_to_index={
-            req.request_id: i
-            for i, req in enumerate(requests)
-        },
         sampled_token_ids=[[10, 42, 12],
                            [13, 14]],  # First request hits stop token
         logprobs=None,
@@ -450,10 +426,6 @@ def test_stop_via_update_from_output():
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
-        req_id_to_index={
-            req.request_id: i
-            for i, req in enumerate(requests)
-        },
         sampled_token_ids=[[10, 11, 12],
                            [13]],  # First request exceeds max_tokens
         logprobs=None,
@@ -496,11 +468,11 @@ def test_stop_via_update_from_output():
 
     model_output = ModelRunnerOutput(
         req_ids=[requests[0].request_id],
-        req_id_to_index={requests[0].request_id: 0},
         sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
         logprobs=None,
         prompt_logprobs_dict={},
-        pooler_output=[])
+        pooler_output=[],
+    )
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -544,7 +516,6 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
     # Model output of the first request.
     model_runner_output = ModelRunnerOutput(
         req_ids=[requests[0].request_id],
-        req_id_to_index={requests[0].request_id: 0},
         sampled_token_ids=[[0]],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -561,7 +532,6 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
     # Model output of the second request.
     model_runner_output = ModelRunnerOutput(
         req_ids=[requests[1].request_id],
-        req_id_to_index={requests[1].request_id: 0},
         sampled_token_ids=[[0]],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -596,7 +566,6 @@ def test_preempt_during_execution():
     # Get the output of the first request.
     model_runner_output0 = ModelRunnerOutput(
         req_ids=[requests[0].request_id],
-        req_id_to_index={requests[0].request_id: 0},
         sampled_token_ids=[[0]],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -613,7 +582,6 @@ def test_preempt_during_execution():
 
     model_runner_output1 = ModelRunnerOutput(
         req_ids=[requests[1].request_id],
-        req_id_to_index={requests[1].request_id: 0},
         sampled_token_ids=[[42]],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -651,11 +619,9 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     scheduler = create_scheduler(num_speculative_tokens=num_spec_tokens)
     requests = create_requests(num_requests=len(spec_tokens), num_tokens=1)
     req_ids = []
-    req_to_index = {}
     for i, request in enumerate(requests):
         scheduler.add_request(request)
         req_ids.append(request.request_id)
-        req_to_index[request.request_id] = i
 
     # Schedule a decode, which will also draft speculative tokens
     output = scheduler.schedule()
@@ -668,7 +634,6 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
 
     model_runner_output = ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_to_index,
         sampled_token_ids=[[0] for _ in range(len(requests))],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -709,7 +674,6 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
 
     model_runner_output = ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_to_index,
         sampled_token_ids=output_tokens,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -829,15 +793,12 @@ def test_kv_connector_basic():
                                max_tokens=MAX_TOKENS,
                                block_size=BLOCK_SIZE)
     req_ids = []
-    req_to_index = {}
     for i, request in enumerate(requests):
         scheduler.add_request(request)
         req_ids.append(request.request_id)
-        req_to_index[request.request_id] = i
 
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_to_index,
         sampled_token_ids=[[1000]] * len(req_ids),
         logprobs=None,
         prompt_logprobs_dict={},
@@ -875,15 +836,12 @@ def test_kv_connector_basic():
                                max_tokens=MAX_TOKENS,
                                block_size=BLOCK_SIZE)
     req_ids = []
-    req_to_index = {}
     for i, request in enumerate(requests):
         scheduler.add_request(request)
         req_ids.append(request.request_id)
-        req_to_index[request.request_id] = i
 
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_to_index,
         sampled_token_ids=[[1000]] * len(req_ids),
         logprobs=None,
         prompt_logprobs_dict={},
@@ -942,15 +900,12 @@ def test_kv_connector_unable_to_allocate():
                                max_tokens=MAX_TOKENS,
                                block_size=BLOCK_SIZE)
     req_ids = []
-    req_to_index = {}
     for i, request in enumerate(requests):
         scheduler.add_request(request)
         req_ids.append(request.request_id)
-        req_to_index[request.request_id] = i
 
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_to_index,
         sampled_token_ids=[[1000]] * len(req_ids),
         logprobs=None,
         prompt_logprobs_dict={},
@@ -1023,15 +978,12 @@ def test_kv_connector_handles_preemption():
                                max_tokens=MAX_TOKENS,
                                block_size=BLOCK_SIZE)
     req_ids = []
-    req_to_index = {}
     for i, request in enumerate(requests):
         scheduler.add_request(request)
         req_ids.append(request.request_id)
-        req_to_index[request.request_id] = i
 
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
         req_ids=req_ids,
-        req_id_to_index=req_to_index,
         sampled_token_ids=[[1000]] * len(req_ids),
         logprobs=None,
         prompt_logprobs_dict={},
@@ -1121,10 +1073,6 @@ def test_kv_connector_handles_preemption():
 def make_output(scheduler: Scheduler):
     return ModelRunnerOutput(
         req_ids=[req.request_id for req in scheduler.running],
-        req_id_to_index={
-            req.request_id: i
-            for i, req in enumerate(scheduler.running)
-        },
         sampled_token_ids=[[1000]] * len(scheduler.running),
         logprobs=None,
         prompt_logprobs_dict={},
@@ -1446,10 +1394,6 @@ def test_priority_scheduling_preemption():
     # Simulate model execution to move requests to running state
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in low_priority_requests],
-        req_id_to_index={
-            req.request_id: i
-            for i, req in enumerate(low_priority_requests)
-        },
         sampled_token_ids=[[100] for _ in low_priority_requests],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -1518,10 +1462,6 @@ def test_priority_scheduling_no_preemption_when_space_available():
     output = scheduler.schedule()
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in low_priority_requests],
-        req_id_to_index={
-            req.request_id: i
-            for i, req in enumerate(low_priority_requests)
-        },
         sampled_token_ids=[[100] for _ in low_priority_requests],
         logprobs=None,
         prompt_logprobs_dict={},
@@ -1762,7 +1702,6 @@ def test_priority_scheduling_heap_property():
             # Simulate completion to make room for next request
             model_output = ModelRunnerOutput(
                 req_ids=[req.req_id],
-                req_id_to_index={req.req_id: 0},
                 sampled_token_ids=[[100]],
                 logprobs=None,
                 prompt_logprobs_dict={},
