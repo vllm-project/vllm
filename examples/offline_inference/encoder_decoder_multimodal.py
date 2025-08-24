@@ -163,10 +163,10 @@ def run_whisper():
 
 
 model_example_map = {
+    "donut": run_donut,
     "florence2": run_florence2,
     "mllama": run_mllama,
     "whisper": run_whisper,
-    "donut": run_donut,
 }
 
 

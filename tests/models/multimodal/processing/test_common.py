@@ -160,13 +160,13 @@ def _test_processing_correctness(
 # incorrect token ids. So we need use `add_special_tokens=False` here
 # to leave bos_token to be added by the processor.
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
+    "donut": False,
     "mllama": False,
     "ovis": False,
     "ovis2_5": False,
     "paligemma": False,
     "ultravox": False,
     "whisper": False,
-    "donut": False,
 }
 
 _IGNORE_MM_KEYS = {
@@ -271,6 +271,7 @@ def _test_processing_correctness_one(
     "facebook/chameleon-7b",
     "CohereLabs/command-a-vision-07-2025",
     "deepseek-ai/deepseek-vl2-tiny",
+    "naver-clova-ix/donut-base-finetuned-docvqa",
     "microsoft/Florence-2-base",
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",
@@ -326,7 +327,6 @@ def _test_processing_correctness_one(
     "omni-research/Tarsier-7b",
     "omni-research/Tarsier2-Recap-7b",
     "mistralai/Voxtral-Mini-3B-2507",
-    "naver-clova-ix/donut-base-finetuned-docvqa",
 ])
 @pytest.mark.parametrize("hit_rate", [0.3, 0.5, 1.0])
 @pytest.mark.parametrize("num_batches", [32])
