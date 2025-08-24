@@ -728,22 +728,17 @@ python benchmarks/benchmark_serving.py \
   --endpoint /v1/chat/completion
 ```
 
-</details>
 
 ### Synthetic Random Images (random-mm)
 
-<details>
-<summary>Show more</summary>
 
-<br/>
 
 Generate synthetic image inputs alongside random text prompts to stress-test vision models without external datasets.
 
 Notes:
 
-- Works only with the OpenAI Chat-compatible backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
-- Set `--limit-mm-per-prompt` on the server to match your model config.
-- Video sampling is not yet implemented. If specifying videos in the bucket config, set their probability to 0.
+- Works only with online benchmark via the OpenAI  backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
+- Video sampling is not yet implemented.
 
 Start the server (example):
 
@@ -755,7 +750,9 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
   --mm-processor-kwargs max_pixels=1003520
 ```
 
-Fixed number of items and a single image resolution:
+Benchmark. It is recommended to use the flag `--ignore-eos` to simulate real responses. You can set the size of the output via the arg `random-output-len`.
+
+Ex.1: Fixed number of items and a single image resolutionm, enforcing generation of approx 40 tokens:
 
 ```bash
 vllm bench serve \
@@ -777,7 +774,7 @@ vllm bench serve \
   --seed 42
 ```
 
-Vary the number of items per request and use multiple image buckets:
+The number of items per request can be controlled by passing multiple image buckets:
 
 ```bash
   --random-mm-base-items-per-request 2 \
@@ -791,7 +788,7 @@ Flags specific to `random-mm`:
 - `--random-mm-base-items-per-request`: base number of multimodal items per request.
 - `--random-mm-num-mm-items-range-ratio`: vary item count uniformly in the closed integer range [floor(n·(1−r)), ceil(n·(1+r))]. Set r=0 to keep it fixed; r=1 allows 0 items.
 - `--random-mm-limit-mm-per-prompt`: per-modality hard caps, e.g. '{"image": 3, "video": 0}'.
-- `--random-mm-bucket-config`: dict mapping (H, W, T) → probability. Entries with probability 0 are removed; remaining probabilities are renormalized to sum to 1. Use T=1 for images. Set any T>1 (videos) probability to 0 (video sampling not yet supported).
+- `--random-mm-bucket-config`: dict mapping (H, W, T) → probability. Entries with probability 0 are removed; remaining probabilities are renormalized to sum to 1. Use T=1 for images. Set any T>1 for videos (video sampling not yet supported).
 
 Behavioral notes:
 
