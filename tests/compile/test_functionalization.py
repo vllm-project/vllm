@@ -8,11 +8,12 @@ import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.compilation.fusion import (FUSED_OPS, FusionPass, QuantKey,
-                                     kFp8DynamicTokenSym, kFp8StaticTensorSym)
+from vllm.compilation.fusion import FUSED_OPS, FusionPass
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import CompilationConfig, PassConfig, VllmConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey, kFp8DynamicTokenSym, kFp8StaticTensorSym)
 
 from .backend import TestBackend
 
