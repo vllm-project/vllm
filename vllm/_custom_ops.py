@@ -1589,14 +1589,18 @@ def convert_fp8(output: torch.Tensor,
     torch.ops._C_cache_ops.convert_fp8(output, input, scale, kv_dtype)
 
 
-def gather_cache(src_cache: torch.Tensor,
-                 dst: torch.Tensor,
-                 block_table: torch.Tensor,
-                 cu_seq_lens: torch.Tensor,
-                 batch_size: int,
-                 seq_starts: Optional[torch.Tensor] = None) -> None:
-    torch.ops._C_cache_ops.gather_cache(src_cache, dst, block_table,
-                                        cu_seq_lens, batch_size, seq_starts)
+def gather_and_maybe_dequant_cache(
+        src_cache: torch.Tensor,
+        dst: torch.Tensor,
+        block_table: torch.Tensor,
+        cu_seq_lens: torch.Tensor,
+        batch_size: int,
+        kv_cache_dtype: str,
+        scale: torch.Tensor,
+        seq_starts: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C_cache_ops.gather_and_maybe_dequant_cache(
+        src_cache, dst, block_table, cu_seq_lens, batch_size, kv_cache_dtype,
+        scale, seq_starts)
 
 
 def get_device_attribute(attribute: int, device: int) -> int:
@@ -1827,3 +1831,86 @@ if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
         M = mat1.size(0)
         N = mat2.size(0)
         return torch.empty((M, N), dtype=out_dtype)
+
+
+class CPUDNNLGEMMHandler:
+
+    def __init__(self) -> None:
+        self.handler: Optional[int] = None
+        self.n = -1
+        self.k = -1
+
+    def __del__(self):
+        if self.handler is not None:
+            torch.ops._C.release_dnnl_matmul_handler(self.handler)
+
+
+def create_onednn_scaled_mm(
+    weight: torch.Tensor,  # [K, N]
+    weight_scales: torch.Tensor,
+    output_type: torch.dtype,
+    dynamic_quant: bool,
+    use_azp: bool,
+    primitive_cache_size: int = 128,
+) -> CPUDNNLGEMMHandler:
+    handler = CPUDNNLGEMMHandler()
+    handler.k, handler.n = weight.size()
+    handler.handler = torch.ops._C.create_onednn_scaled_mm_handler(
+        weight, weight_scales, output_type, dynamic_quant, use_azp,
+        primitive_cache_size)
+    return handler
+
+
+def onednn_scaled_int8_quant(input: torch.Tensor,
+                             scale: Optional[torch.Tensor] = None,
+                             azp: Optional[torch.Tensor] = None,
+                             symmetric: bool = True):
+    """
+    Quantize the input tensor to int8 and return the quantized tensor and scale, and maybe azp.
+
+    Args:
+        input: The input tensor to be quantized to int8.
+        scale: Optional scaling factor for the int8 quantization.
+            When not provided, we invoke dynamic-per-token quantization.
+        azp: Optional zero-point for the int8 quantization.
+            Must be provided for asymmetric quantization if `scale` is provided.
+        symmetric: Whether to use symmetric quantization (scale only, azp ignored).
+
+    Returns:
+      tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] : Output int8 tensor, scales, and optionally azp.
+    """
+    output = torch.empty_like(input, dtype=torch.int8)
+    token_num = input.numel() // input.shape[-1]
+    input = input.view((token_num, input.shape[-1]))
+    if scale is not None:
+        # static-per-tensor quantization.
+        assert symmetric == (
+            azp
+            is None), "azp must only be provided for asymmetric quantization."
+        torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
+        return output, scale, azp
+
+    # dynamic-per-token quantization.
+    input_scales = torch.empty((token_num, 1),
+                               device=input.device,
+                               dtype=torch.float32)
+    input_azp = None if symmetric else torch.empty_like(input_scales,
+                                                        dtype=torch.int32)
+    torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales,
+                                           input_azp)
+    return output, input_scales, input_azp
+
+
+def onednn_scaled_mm(
+    dnnl_handler: CPUDNNLGEMMHandler,
+    x: torch.Tensor,
+    output: torch.Tensor,
+    input_scale: Optional[torch.Tensor],
+    input_zp: Optional[torch.Tensor],
+    input_zp_adj: Optional[torch.Tensor],
+    bias: Optional[torch.Tensor],
+) -> torch.Tensor:
+    torch.ops._C.onednn_scaled_mm(output, x, input_scale, input_zp,
+                                  input_zp_adj, bias, dnnl_handler.handler)
+
+    return output
