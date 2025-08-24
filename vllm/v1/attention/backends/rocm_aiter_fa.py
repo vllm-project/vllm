@@ -148,10 +148,8 @@ if current_platform.is_rocm():
         block_table: torch.Tensor,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
-        total_tokens: int = 0,
+        total_tokens: int,
     ) -> torch.Tensor:
-        if total_tokens == 0:
-            total_tokens = int(cu_seqlens_k[-1].item())
         k, v = vllm_layout_trans(cu_seqlens_q, cu_seqlens_k, block_table,
                                  k_cache, v_cache, max_seqlen_k, k_scale,
                                  v_scale, q.dtype, total_tokens)
@@ -222,7 +220,6 @@ class AiterFlashAttentionMetadata:
     seq_lens: torch.Tensor
     slot_mapping: torch.Tensor
     block_table: torch.Tensor
-    cu_seq_lens: Optional[torch.Tensor]
 
     # For cascade attention.
     use_cascade: bool
@@ -269,30 +266,10 @@ class AiterFlashAttentionMetadataBuilder(
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
         if self.use_full_cuda_graph:
-            cu_seq_lens = torch.zeros(seq_lens.shape[0] + 1,
-                                      dtype=torch.int32,
-                                      device=seq_lens.device)
-            torch.cumsum(seq_lens,
-                         dim=0,
-                         dtype=cu_seq_lens.dtype,
-                         out=cu_seq_lens[1:])
             num_actual_kv_tokens = self.model_config.max_model_len * \
                 self.scheduler_config.max_num_partial_prefills
         else:
-            if max_query_len > 1:
-                # We pre-compute cumulative seq len needed for prefill attention
-                # here to avoid recomputing it for every layer
-                cu_seq_lens = torch.zeros(seq_lens.shape[0] + 1,
-                                          dtype=torch.int32,
-                                          device=seq_lens.device)
-                torch.cumsum(seq_lens,
-                             dim=0,
-                             dtype=cu_seq_lens.dtype,
-                             out=cu_seq_lens[1:])
-                num_actual_kv_tokens = int(cu_seq_lens[-1].item())
-            else:
-                cu_seq_lens = None
-                num_actual_kv_tokens = 0
+            num_actual_kv_tokens = int(seq_lens.sum())
 
         use_cascade = common_prefix_len > 0
 
@@ -305,7 +282,6 @@ class AiterFlashAttentionMetadataBuilder(
             seq_lens=seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
-            cu_seq_lens=cu_seq_lens,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
         )
@@ -492,6 +468,14 @@ class AiterFlashAttentionImpl(AttentionImpl):
             block_table = attn_metadata.block_table
 
             if max_seqlen_q > 1:
+                cu_seq_lens = torch.zeros(seqused_k.shape[0] + 1,
+                                          dtype=torch.int32,
+                                          device=query.device)
+                torch.cumsum(seqused_k,
+                             dim=0,
+                             dtype=cu_seq_lens.dtype,
+                             out=cu_seq_lens[1:])
+
                 torch.ops.vllm.flash_attn_varlen_func(
                     query[:num_actual_tokens],
                     key_cache,
@@ -504,7 +488,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     alibi_slopes=self.alibi_slopes,
                     window_size=self.sliding_window,
                     block_table=block_table,
-                    cu_seqlens_k=attn_metadata.cu_seq_lens,
+                    cu_seqlens_k=cu_seq_lens,
                     k_scale=layer._k_scale,
                     v_scale=layer._v_scale,
                     total_tokens=attn_metadata.num_actual_kv_tokens,
