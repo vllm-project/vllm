@@ -141,6 +141,7 @@ class OpenAIServingChat(OpenAIServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        t0 = time.perf_count()
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -288,6 +289,7 @@ class OpenAIServingChat(OpenAIServing):
         assert len(generators) == 1
         result_generator, = generators
 
+        t1 = time.perf_counter()
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
@@ -295,9 +297,13 @@ class OpenAIServingChat(OpenAIServing):
                 conversation, tokenizer, request_metadata)
 
         try:
-            return await self.chat_completion_full_generator(
+            resp = await self.chat_completion_full_generator(
                 request, result_generator, request_id, model_name,
                 conversation, tokenizer, request_metadata)
+
+            t2 = time.perf_counter()
+            print(f">> {t1-t0}, {t2-t1}")
+            return resp
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
