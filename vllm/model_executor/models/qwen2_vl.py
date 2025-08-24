@@ -96,8 +96,10 @@ class Qwen2VLImagePixelInputs(TensorSchema):
         - cps: Number of channels * patch_size * patch_size
     
     Historical context:
-        - pixel_values shape: (num_patches, num_channels * patch_size * patch_size)
-        - image_grid_thw shape: (num_images, 3) in (grid_t, grid_h, grid_w) format
+        - pixel_values shape: (num_patches, num_channels * patch_size * 
+          patch_size)
+        - image_grid_thw shape: (num_images, 3) in (grid_t, grid_h, grid_w)
+          format
     """
     type: Literal["pixel_values"]
 
@@ -121,9 +123,11 @@ class Qwen2VLImageEmbeddingInputs(TensorSchema):
     
     Historical context:
         - image_embeds shape: (num_image_features, hidden_size)
-        - num_image_features varies based on the number and resolution of the images.
+        - num_image_features varies based on the number and resolution of the
+          images.
         - hidden_size must match the hidden size of language model backbone.
-        - image_grid_thw shape: (num_images, 3) in (grid_t, grid_h, grid_w) format
+        - image_grid_thw shape: (num_images, 3) in (grid_t, grid_h, grid_w)
+          format
     """
     type: Literal["image_embeds"]
 
@@ -147,12 +151,15 @@ class Qwen2VLVideoPixelInputs(TensorSchema):
     Dimensions:
         - np: The total number of patches over each video over each prompt in
               the batch
-        - ctps: Number of channels * temporal_patch_size * patch_size * patch_size
+        - ctps: Number of channels * temporal_patch_size * patch_size * 
+          patch_size
         - nv: Number of videos
     
     Historical context:
-        - pixel_values_videos shape: (num_patches, num_channels * temporal_patch_size * patch_size * patch_size)
-        - video_grid_thw shape: (num_videos, 3) in (grid_t, grid_h, grid_w) format
+        - pixel_values_videos shape: (num_patches, num_channels * 
+          temporal_patch_size * patch_size * patch_size)
+        - video_grid_thw shape: (num_videos, 3) in (grid_t, grid_h, grid_w)
+          format
     """
     type: Literal["pixel_values_videos"]
 
@@ -176,9 +183,11 @@ class Qwen2VLVideoEmbeddingInputs(TensorSchema):
     
     Historical context:
         - video_embeds shape: (num_video_features, hidden_size)
-        - num_video_features varies based on the number and resolution of the videos.
+        - num_video_features varies based on the number and resolution of the
+          videos.
         - hidden_size must match the hidden size of language model backbone.
-        - video_grid_thw shape: (num_videos, 3) in (grid_t, grid_h, grid_w) format
+        - video_grid_thw shape: (num_videos, 3) in (grid_t, grid_h, grid_w)
+          format
     """
     type: Literal["video_embeds"]
 
