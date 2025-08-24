@@ -152,10 +152,10 @@ class CuMemAllocator:
         self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
         self.allocator_and_pools: dict[str, Any] = {}
-        self.python_malloc_callback_ref = self.python_malloc_callback
-        self.python_free_callback_ref = self.python_free_callback
+        self.python_malloc_callback = self._python_malloc_callback
+        self.python_free_callback = self._python_free_callback
 
-    def python_malloc_callback(self, allocation_handle: HandleType) -> None:
+    def _python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """
         Internal method to store the allocation data
         when memory is allocated in the memory pool."""
@@ -164,7 +164,7 @@ class CuMemAllocator:
             allocation_handle, self.current_tag)
         return
 
-    def python_free_callback(self, ptr: int) -> HandleType:
+    def _python_free_callback(self, ptr: int) -> HandleType:
         """
         Internal method to look up the allocation data
         when memory is freed in the memory pool."""
@@ -251,9 +251,8 @@ class CuMemAllocator:
 
         old_tag = self.current_tag
         self.current_tag = tag
-        with use_memory_pool_with_allocator(
-                self.python_malloc_callback_ref,
-                self.python_free_callback_ref) as data:
+        with use_memory_pool_with_allocator(self.python_malloc_callback,
+                                            self.python_free_callback) as data:
             # start to hit another PyTorch bug in PyTorch 2.6,
             # possibly because of gc-related issue w.r.t. the allocator and
             # the memory pool.
