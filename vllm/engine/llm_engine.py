@@ -51,9 +51,9 @@ from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import (
     TokenizerGroup, init_tokenizer_from_configs)
-from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
-                                  usage_message)
+from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, Device, resolve_obj_by_qualname, weak_bind
+from vllm.v1.utils import report_usage_stats
 from vllm.version import __version__ as VLLM_VERSION
 from vllm.worker.model_runner_base import InputProcessingError
 
@@ -262,39 +262,7 @@ class LLMEngine:
         self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
-        if is_usage_stats_enabled():
-            from vllm.model_executor.model_loader import (
-                get_architecture_class_name)
-            usage_message.report_usage(
-                get_architecture_class_name(self.model_config),
-                usage_context,
-                extra_kvs={
-                    # Common configuration
-                    "dtype":
-                    str(self.model_config.dtype),
-                    "tensor_parallel_size":
-                    self.parallel_config.tensor_parallel_size,
-                    "block_size":
-                    self.cache_config.block_size,
-                    "gpu_memory_utilization":
-                    self.cache_config.gpu_memory_utilization,
-
-                    # Quantization
-                    "quantization":
-                    self.model_config.quantization,
-                    "kv_cache_dtype":
-                    str(self.cache_config.cache_dtype),
-
-                    # Feature flags
-                    "enable_lora":
-                    bool(self.lora_config),
-                    "enable_prefix_caching":
-                    self.cache_config.enable_prefix_caching,
-                    "enforce_eager":
-                    self.model_config.enforce_eager,
-                    "disable_custom_all_reduce":
-                    self.parallel_config.disable_custom_all_reduce,
-                })
+        report_usage_stats(self.vllm_config, usage_context)
 
         self.cached_scheduler_outputs = [
             SchedulerOutputState()
