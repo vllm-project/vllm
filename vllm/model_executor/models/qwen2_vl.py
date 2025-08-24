@@ -102,7 +102,7 @@ class Qwen2VLImagePixelInputs(TensorSchema):
     type: Literal["pixel_values"]
 
     pixel_values: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor,
         TensorShape("np", "cps"),
     ]
 
@@ -128,7 +128,7 @@ class Qwen2VLImageEmbeddingInputs(TensorSchema):
     type: Literal["image_embeds"]
 
     image_embeds: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor,
         TensorShape("nf", "hs"),
     ]
 
@@ -157,7 +157,7 @@ class Qwen2VLVideoPixelInputs(TensorSchema):
     type: Literal["pixel_values_videos"]
 
     pixel_values_videos: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor,
         TensorShape("np", "ctps"),
     ]
 
@@ -183,7 +183,7 @@ class Qwen2VLVideoEmbeddingInputs(TensorSchema):
     type: Literal["video_embeds"]
 
     video_embeds: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor,
         TensorShape("nf", "hs"),
     ]
 
