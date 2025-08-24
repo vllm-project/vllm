@@ -853,9 +853,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsQuant):
 
     packed_modules_mapping = {
-        "gate_up_proj": [
-            "gate_proj", "up_proj"
-        ],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     # To ensure correct weight loading and mapping.
