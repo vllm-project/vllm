@@ -533,7 +533,11 @@ class Platform:
         """
         cls = self.__class__
         if cls._global_graph_pool is None:
-            cls._global_graph_pool = self.graph_pool_handle()
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            allocator = CuMemAllocator.get_instance()
+            with allocator.use_memory_pool(tag="cuda_graph") as (mem_pool, _):
+                cls._global_graph_pool = mem_pool.id
         return cls._global_graph_pool
 
     @classmethod
