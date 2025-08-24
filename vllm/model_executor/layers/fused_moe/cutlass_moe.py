@@ -484,7 +484,10 @@ def cutlass_moe_fp8(
         0)
 
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
+        MoEPrepareAndFinalizeNoEP(
+            quant_dtype=torch.float8_e4m3fn,
+            per_act_token_quant=per_act_token,
+        ),
         CutlassExpertsFp8(
             out_dtype=a.dtype,
             per_act_token_quant=per_act_token,

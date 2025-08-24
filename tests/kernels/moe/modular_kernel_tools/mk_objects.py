@@ -374,7 +374,11 @@ def make_prepare_finalize(
             a1_gscale=_make_gscale(moe.num_local_experts),
         )
     else:
-        return MoEPrepareAndFinalizeNoEP()
+        return MoEPrepareAndFinalizeNoEP(
+            quant_dtype=moe.quant_dtype,
+            per_act_token_quant=moe.per_act_token_quant,
+            block_shape=moe.block_shape,
+        )
 
 
 def _slice(rank: int, num_local_experts: int, t: torch.Tensor) -> torch.Tensor:

@@ -2036,7 +2036,17 @@ def modular_triton_fused_moe(
     block_shape: Optional[list[int]] = None,
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
+        MoEPrepareAndFinalizeNoEP(
+            quant_dtype=get_config_quant_dtype(
+                use_fp8_w8a8,
+                use_int8_w8a8,
+                use_int8_w8a16,
+                use_int4_w4a16,
+                use_mxfp4_w4a4,
+            ),
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
+        ),
         TritonExperts(
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a8=use_int8_w8a8,
