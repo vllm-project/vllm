@@ -535,9 +535,14 @@ class Platform:
         if cls._global_graph_pool is None:
             from vllm.device_allocator.cumem import CuMemAllocator
 
-            allocator = CuMemAllocator.get_instance()
-            with allocator.use_memory_pool(tag="cuda_graph") as mem_pool:
-                cls._global_graph_pool = mem_pool.id
+            if CuMemAllocator.instance is None:
+                cls._global_graph_pool = self.graph_pool_handle()
+            else:
+                # Existence of CuMemAllocator instance indicates sleep mode
+                # was enabled. The instance was created in GPU worker.
+                allocator = CuMemAllocator.get_instance()
+                with allocator.use_memory_pool(tag="cuda_graph") as mem_pool:
+                    cls._global_graph_pool = mem_pool.id
         return cls._global_graph_pool
 
     @classmethod
