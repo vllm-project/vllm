@@ -125,8 +125,8 @@ class HpuPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
-        logger.warning("Pin memory is not supported on HPU.")
-        return False
+        logger.info("Pin memory is supported on HPU.")
+        return True
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
