@@ -82,8 +82,8 @@ find_package(Torch REQUIRED)
 # Supported NVIDIA architectures.
 # This check must happen after find_package(Torch) because that's when CMAKE_CUDA_COMPILER_VERSION gets defined
 if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
-   CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
-  set(CUDA_SUPPORTED_ARCHS "8.0;8.6;8.7;8.9;9.0;10.0;10.3;11.0;12.0;12.1")
+   CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+  set(CUDA_SUPPORTED_ARCHS "7.5;8.0;8.6;8.7;8.9;9.0;10.0;10.3;11.0;12.0;12.1")
 elseif(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
    CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
   set(CUDA_SUPPORTED_ARCHS "7.0;7.2;7.5;8.0;8.6;8.7;8.9;9.0;10.0;12.0")
@@ -256,11 +256,13 @@ set(VLLM_EXT_SRC
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  set(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
+  SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
-  set(CUTLASS_REVISION "v4.2.0" CACHE STRING "CUTLASS revision to use")
+  # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
+  set(CUTLASS_REVISION "v4.0.0" CACHE STRING "CUTLASS revision to use")
 
-  if(DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
+  # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
+  if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
     set(VLLM_CUTLASS_SRC_DIR $ENV{VLLM_CUTLASS_SRC_DIR})
   endif()
 
@@ -268,56 +270,23 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     if(NOT IS_ABSOLUTE VLLM_CUTLASS_SRC_DIR)
       get_filename_component(VLLM_CUTLASS_SRC_DIR "${VLLM_CUTLASS_SRC_DIR}" ABSOLUTE)
     endif()
-    message(STATUS "VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
+    message(STATUS "The VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
     FetchContent_Declare(cutlass SOURCE_DIR ${VLLM_CUTLASS_SRC_DIR})
   else()
-    # --- Resolve CUTLASS revision with a fallback to main if the requested tag doesn't exist ---
-    set(_cutlass_repo "https://github.com/nvidia/cutlass.git")
-    set(_requested_tag "${CUTLASS_REVISION}")
-    set(_fallback_branch "main")
-
-    find_program(GIT_EXECUTABLE git REQUIRED)
-
-    # Default to shallow clone; disable it if a commit SHA is requested (better robustness)
-    set(_use_shallow TRUE)
-    if(_requested_tag MATCHES "^[0-9a-fA-F]{7,40}$")
-      set(_use_shallow FALSE)
-    endif()
-
-    # Check if the requested tag exists in the remote
-    execute_process(
-      COMMAND "${GIT_EXECUTABLE}" ls-remote --tags "${_cutlass_repo}" "refs/tags/${_requested_tag}"
-      RESULT_VARIABLE _tag_res
-      OUTPUT_VARIABLE _tag_out
-      ERROR_VARIABLE _tag_err
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-
-    if(_tag_res EQUAL 0 AND _tag_out)
-      # Tag found
-      set(CUTLASS_EFFECTIVE_REV "${_requested_tag}")
-      message(STATUS "CUTLASS: using tag ${CUTLASS_EFFECTIVE_REV}")
-    else()
-      # Tag not found -> use the fallback branch (latest commit on that branch)
-      set(CUTLASS_EFFECTIVE_REV "${_fallback_branch}")
-      # For branches, shallow cloning is fine
-      set(_use_shallow TRUE)
-      message(WARNING "CUTLASS: tag '${_requested_tag}' not found in remote. "
-                      "Falling back to the latest on '${_fallback_branch}'.")
-    endif()
-
-    # Fetch CUTLASS with the resolved revision
     FetchContent_Declare(
-      cutlass
-      GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-      GIT_TAG ${CUTLASS_EFFECTIVE_REV}
-      GIT_PROGRESS TRUE
-      GIT_SHALLOW ${_use_shallow}
+        cutlass
+        GIT_REPOSITORY https://github.com/nvidia/cutlass.git
+        # Please keep this in sync with CUTLASS_REVISION line above.
+        GIT_TAG ${CUTLASS_REVISION}
+        GIT_PROGRESS TRUE
+
+        # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
+        # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
+        # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
+        GIT_SHALLOW TRUE
     )
   endif()
-
   FetchContent_MakeAvailable(cutlass)
-endif()
 
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/awq/gemm_kernels.cu"
@@ -491,7 +460,7 @@ endif()
 
   # The cutlass_scaled_mm kernels for Blackwell SM100 (c3x, i.e. CUTLASS 3.x)
   # require CUDA 12.8 or later
-  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;11.0a" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
     set(SRCS
       "csrc/quantization/cutlass_w8a8/scaled_mm_c3x_sm100.cu"
@@ -784,6 +753,33 @@ endif()
                      "found in CUDA target architectures")
     endif()
   endif()
+
+  # Only build W4A8 kernels if we are building for something compatible with sm90a
+  cuda_archs_loose_intersection(W4A8_ARCHS "9.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND W4A8_ARCHS)
+    set(SRCS
+       "csrc/quantization/cutlass_w4a8/w4a8_mm_entry.cu")
+
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${W4A8_ARCHS}")
+
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+
+    message(STATUS "Building W4A8 kernels for archs: ${W4A8_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0
+        AND W4A8_ARCHS)
+      message(STATUS "Not building W4A8 kernels as CUDA Compiler version is "
+                     "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
+                     "later if you intend on running w4a16 quantized models on "
+                     "Hopper.")
+    else()
+      message(STATUS "Not building W4A8 kernels as no compatible archs "
+                     "found in CUDA target architectures")
+    endif()
+  endif()
+
 # if CUDA endif
 endif()
 
