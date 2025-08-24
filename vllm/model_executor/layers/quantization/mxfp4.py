@@ -32,7 +32,7 @@ from vllm.utils.flashinfer import has_flashinfer
 logger = init_logger(__name__)
 
 
-def _should_use_flashinfer_mxfp4_bf16():
+def should_use_flashinfer_mxfp4_bf16():
     """Determine if FlashInfer MXFP4 BF16 should be used."""
     # If explicitly set, respect the setting
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16"):
@@ -60,7 +60,7 @@ def _should_use_flashinfer_mxfp4_mxfp8():
 
 def should_use_flashinfer_mxfp4():
     return (_should_use_flashinfer_mxfp4_mxfp8()
-            or _should_use_flashinfer_mxfp4_bf16())
+            or should_use_flashinfer_mxfp4_bf16())
 
 
 class Mxfp4Config(QuantizationConfig):
@@ -182,11 +182,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 256)
             hidden_size = round_up(hidden_size, 256)
-        elif _should_use_flashinfer_mxfp4_bf16(
+        elif should_use_flashinfer_mxfp4_bf16(
         ) and current_platform.is_device_capability(
                 90) or current_platform.is_rocm():
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 128)
+            hidden_size = round_up(hidden_size, 128)
         else:
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 64)
@@ -391,7 +392,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w2_bias = Parameter(torch.stack(gemm2_bias_shuffled).reshape(
                 self.num_experts, -1),
                                       requires_grad=False)
-        elif _should_use_flashinfer_mxfp4_bf16(
+        elif should_use_flashinfer_mxfp4_bf16(
         ) and current_platform.is_device_capability(90):
             assert layer.w13_weight.dtype == torch.uint8, (
                 f"layer.w13_weight.dtype: {layer.w13_weight.dtype}, "
@@ -501,7 +502,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
             layer.w2_weight_scale = torch.nn.Parameter(
                 w2_scales_interleaved.cuda(), requires_grad=False)
-
         else:
             from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
@@ -633,7 +633,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             from flashinfer import mxfp8_quantize, trtllm_fp4_block_scale_moe
             assert not self.moe.use_ep, (
                 "EP is not supported for flashinfer mxfp4 moe backend yet.")
-            if _should_use_flashinfer_mxfp4_bf16():
+            if should_use_flashinfer_mxfp4_bf16():
                 assert x.dtype == torch.bfloat16
                 x_quant = x
                 x_scale = None
@@ -670,7 +670,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 True,  # do finalize
             )[0]
             return trtllm_gen_output
-        elif _should_use_flashinfer_mxfp4_bf16(
+        elif should_use_flashinfer_mxfp4_bf16(
         ) and current_platform.is_device_capability(90):
             from vllm.utils.flashinfer import (autotune,
                                                flashinfer_cutlass_fused_moe)
@@ -695,14 +695,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 e_score_correction_bias=e_score_correction_bias,
             )
 
-            with torch.inference_mode(), autotune(self.flashinfer_autotune):
-                output = flashinfer_cutlass_fused_moe(
+            output = torch.empty_like(x, dtype=torch.bfloat16)
+            with autotune(self.flashinfer_autotune):
+                _ = flashinfer_cutlass_fused_moe(
                     input=x,
-                    token_selected_experts=topk_ids,
+                    token_selected_experts=topk_ids.to(torch.int).contiguous(),
                     token_final_scales=topk_weights,
                     fc1_expert_weights=layer.w13_weight,
                     fc2_expert_weights=layer.w2_weight,
                     output_dtype=torch.bfloat16,
+                    output=output,
                     quant_scales=quant_scales,
                     fc1_expert_biases=layer.w13_bias,
                     fc2_expert_biases=layer.w2_bias,
@@ -714,8 +716,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     ep_size=self.moe.ep_size,
                     ep_rank=self.moe.ep_rank,
                     use_w4_group_scaling=True,
-                )[0]
-                self.flashinfer_autotune = False
+                )
+
+            self.flashinfer_autotune = False
             return output
         else:
             return triton_kernel_moe_forward(
