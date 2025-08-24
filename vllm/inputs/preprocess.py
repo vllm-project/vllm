@@ -253,7 +253,7 @@ class InputPreprocessor:
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
         *,
-        mm_ids_override: Optional[dict[str, list[str]]] = None,
+        mm_ids_override: Optional[dict[str, list[Optional[str]]]] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> MultiModalInputs:
@@ -269,19 +269,6 @@ class InputPreprocessor:
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
 
-        # If any override IDs are provided, enforce that all modalities/items
-        # present in mm_data are covered.
-        if mm_ids_override and any(
-                len(v) > 0 for v in mm_ids_override.values()):
-            for modality, items in mm_data.items():
-                expected = len(items) if isinstance(items, list) else 1
-                ids = mm_ids_override.get(modality)
-                if ids is None or len(ids) != expected:
-                    raise ValueError(
-                        "When providing 'multi_modal_ids', you must provide "
-                        "IDs for every item of all modalities present in the "
-                        "request.")
-
         return mm_processor.apply(
             prompt,
             mm_data,
@@ -296,7 +283,7 @@ class InputPreprocessor:
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
         *,
-        mm_ids_override: Optional[dict[str, list[str]]] = None,
+        mm_ids_override: Optional[dict[str, list[Optional[str]]]] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> MultiModalInputs:
@@ -310,19 +297,6 @@ class InputPreprocessor:
                                                          tokenizer=tokenizer)
         if mm_processor_kwargs is None:
             mm_processor_kwargs = {}
-
-        # If any override IDs are provided, enforce that all modalities/items
-        # present in mm_data are covered.
-        if mm_ids_override and any(
-                len(v) > 0 for v in mm_ids_override.values()):
-            for modality, items in mm_data.items():
-                expected = len(items) if isinstance(items, list) else 1
-                ids = mm_ids_override.get(modality)
-                if ids is None or len(ids) != expected:
-                    raise ValueError(
-                        "When providing 'multi_modal_ids', you must provide "
-                        "IDs for every item of all modalities present in the "
-                        "request.")
 
         return mm_processor.apply(
             prompt,
@@ -377,8 +351,7 @@ class InputPreprocessor:
                 prompt_token_ids,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
-                mm_ids_override=cast(Optional[dict[str, list[str]]],
-                                     parsed_content.get("multi_modal_ids")),
+                mm_ids_override=parsed_content.get("multi_modal_ids"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
             )
@@ -408,8 +381,7 @@ class InputPreprocessor:
                 prompt_token_ids,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
-                mm_ids_override=cast(Optional[dict[str, list[str]]],
-                                     parsed_content.get("multi_modal_ids")),
+                mm_ids_override=parsed_content.get("multi_modal_ids"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
             )
@@ -438,8 +410,7 @@ class InputPreprocessor:
                 prompt_text,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
-                mm_ids_override=cast(Optional[dict[str, list[str]]],
-                                     parsed_content.get("multi_modal_ids")),
+                mm_ids_override=parsed_content.get("multi_modal_ids"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
             )
@@ -473,8 +444,7 @@ class InputPreprocessor:
                 prompt_text,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
-                mm_ids_override=cast(Optional[dict[str, list[str]]],
-                                     parsed_content.get("multi_modal_ids")),
+                mm_ids_override=parsed_content.get("multi_modal_ids"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
             )

@@ -147,6 +147,42 @@ class Processor:
         self._validate_sampling_params(params, lora_request)
         self._validate_supported_sampling_params(params)
 
+    def _validate_multi_modal_ids(self, prompt: PromptType) -> None:
+        """
+        Validate that user-provided multi_modal_ids align with multi_modal_data
+        in the incoming request prompt(s). Only checks lengths; `None` entries
+        are allowed and will be auto-hashed downstream.
+        """
+
+        def _validate_single(single_prompt: Union[dict, str]) -> None:
+            if not isinstance(single_prompt, dict):
+                return
+            mm_data = single_prompt.get("multi_modal_data")
+            mm_ids = single_prompt.get("multi_modal_ids")
+            if not mm_data or not mm_ids:
+                return
+
+            for modality, items in mm_data.items():
+                if modality in mm_ids:
+                    expected = len(items) if isinstance(items, list) else 1
+                    if len(mm_ids[modality]) != expected:
+                        raise ValueError(
+                            f"multi_modal_ids for modality '{modality}' must "
+                            "have same length as data: got "
+                            f"{len(mm_ids[modality])} ids vs {expected} items."
+                        )
+
+        # Handle explicit encoder/decoder prompts or singleton prompt
+        if isinstance(prompt, dict) and "encoder_prompt" in prompt:
+            enc = prompt.get("encoder_prompt")
+            dec = prompt.get("decoder_prompt")
+            if enc is not None:
+                _validate_single(enc)
+            if dec is not None:
+                _validate_single(dec)
+        else:
+            _validate_single(prompt)  # type: ignore[arg-type]
+
     def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
@@ -248,6 +284,9 @@ class Processor:
         if arrival_time is None:
             arrival_time = time.time()
 
+        # Validate multimodal ids alignment with mm_data at request layer
+        self._validate_multi_modal_ids(prompt)
+
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
@@ -263,6 +302,7 @@ class Processor:
             params=params,
             processed_inputs=processed_inputs,
         )
+
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
         self._validate_model_inputs(processed_inputs, lora_request)

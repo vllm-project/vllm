@@ -1356,7 +1356,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
         *,
-        override_ids: Optional[dict[str, list[str]]] = None,
+        override_ids: Optional[dict[str, list[Optional[str]]]] = None,
     ) -> MultiModalHashes:
         """Create MM hashes to be returned (only used in V1)."""
         model_id = self.info.model_id
@@ -1365,14 +1365,22 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         override_ids = override_ids or {}
 
         for modality, items in mm_items.items():
-            if modality in override_ids and override_ids[modality]:
-                ids = override_ids[modality]
-                if len(ids) != len(items):
-                    raise ValueError(
-                        f"multi_modal_ids for modality '{modality}' must "
-                        f"have same length as data: got {len(ids)} ids vs "
-                        f"{len(items)} items.")
-                hashes[modality] = list(ids)
+            if modality in override_ids:
+                mm_ids = override_ids[modality]
+                # For None entries, compute a hash; otherwise, use provided ID.
+                computed: list[str] = []
+                for i, item in enumerate(items):
+                    mm_id = mm_ids[i]
+                    if mm_id is None:
+                        computed.append(
+                            MultiModalHasher.hash_kwargs(
+                                model_id=model_id,
+                                **{modality: item},
+                                **hf_processor_mm_kwargs,
+                                **tokenization_kwargs))
+                    else:
+                        computed.append(mm_id)
+                hashes[modality] = computed
             else:
                 hashes[modality] = [
                     MultiModalHasher.hash_kwargs(model_id=model_id,
@@ -1414,7 +1422,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
         *,
-        override_ids: Optional[dict[str, list[str]]] = None,
+        override_ids: Optional[dict[str, list[Optional[str]]]] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         (
             prompt_ids,
@@ -1462,7 +1470,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
         *,
-        override_ids: Optional[dict[str, list[str]]] = None,
+        override_ids: Optional[dict[str, list[Optional[str]]]] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         """
         Apply the HF processor on the full prompt text,
@@ -1713,7 +1721,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
         *,
-        mm_ids_override: Optional[dict[str, list[str]]] = None,
+        mm_ids_override: Optional[dict[str, list[Optional[str]]]] = None,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1828,7 +1836,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
         *,
-        mm_ids_override: Optional[dict[str, list[str]]] = None,
+        mm_ids_override: Optional[dict[str, list[Optional[str]]]] = None,
     ) -> MultiModalEncDecInputs:
         """
         Process multi-modal inputs to be used in vLLM.
