@@ -258,6 +258,10 @@ class MoEInputQuantizer:
         :param A_scale: Optional static/per-tensor scale for FP8.
         :return: (A_q, A_scale_out) FP8-quantized activations and scale.
         """
+        assert self.quant_fp8 is not None, (
+            "QuantFP8 quantizer not initialized, " +
+            "QuantFP8 is supported only with " +
+            "quant_dtype=torch.float8_e4m3fn and block_shape=None", )
         return self.quant_fp8(A, A_scale)
 
     def forward_native(
