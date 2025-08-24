@@ -459,9 +459,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
 
   # The cutlass_scaled_mm kernels for Blackwell SM100 (c3x, i.e. CUTLASS 3.x)
-  # require CUDA 12.8 or later
-  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.1a" "${CUDA_ARCHS}")
-  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
+  # require CUDA 13.0 or later
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.3a;11.0a;12.0a;12.1a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0 AND SCALED_MM_ARCHS)
     set(SRCS
       "csrc/quantization/cutlass_w8a8/scaled_mm_c3x_sm100.cu"
       "csrc/quantization/cutlass_w8a8/c3x/scaled_mm_sm100_fp8.cu"
@@ -558,7 +558,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 
   # FP4 Archs and flags
-  cuda_archs_loose_intersection(FP4_ARCHS "10.0a" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(FP4_ARCHS "10.0a;10.3a;11.0a;12.0a;12.1a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_ARCHS)
     set(SRCS
       "csrc/quantization/fp4/nvfp4_quant_kernels.cu"
@@ -579,7 +579,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 
   # CUTLASS MLA Archs and flags
-  cuda_archs_loose_intersection(MLA_ARCHS "10.0a" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(MLA_ARCHS "10.0a;10.3a;11.0a;12.0a;12.1a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND MLA_ARCHS)
     set(SRCS
       "csrc/attention/mla/cutlass_mla_kernels.cu"
@@ -624,7 +624,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
-  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.3a;11.0a;12.0a;12.1a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
     set(SRCS "csrc/quantization/cutlass_w8a8/moe/grouped_mm_c3x_sm100.cu")
     set_gencode_flags_for_srcs(
@@ -645,7 +645,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 
   # moe_data.cu is used by all CUTLASS MoE kernels.
-  cuda_archs_loose_intersection(CUTLASS_MOE_DATA_ARCHS "9.0a;10.0a" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(CUTLASS_MOE_DATA_ARCHS "9.0a;10.0a;10.3a;11.0a;12.0a;12.1a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND CUTLASS_MOE_DATA_ARCHS)
     set(SRCS "csrc/quantization/cutlass_w8a8/moe/moe_data.cu")
     set_gencode_flags_for_srcs(
@@ -664,7 +664,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
-  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(SCALED_MM_ARCHS "10.0a;10.3a;11.0a;12.0a;12.1a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
     set(SRCS "csrc/quantization/cutlass_w8a8/moe/blockwise_scaled_group_mm_sm100.cu")
     set_gencode_flags_for_srcs(
