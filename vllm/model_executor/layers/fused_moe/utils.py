@@ -161,8 +161,8 @@ class MoEInputQuantizer:
     """
     Quantize MoE activations via a unified API.
 
-    When configured for FP8 without block quantization, initializes a QuantFP8
-    CustomOp for Inductor-friendly FP8. Otherwise, defers to native paths for
+    When configured for FP8 without block quantization, initializes a `QuantFP8`
+    `CustomOp` for Inductor-friendly FP8. Otherwise, defers to native paths for
     FP8, INT8, NVFP4, or MXFP4.
     """
 
@@ -213,7 +213,7 @@ class MoEInputQuantizer:
         """
         Quantize activations and return (quantized, scale).
 
-        Uses the FP8 CustomOp when available; otherwise selects the native
+        Uses the FP8 `CustomOp` when available; otherwise selects the native
         path based on the requested quantization type.
 
         :param A: Input activations of shape [tokens, hidden_dim].
@@ -247,7 +247,7 @@ class MoEInputQuantizer:
         A_scale: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
-        Apply the configured FP8 CustomOp (QuantFP8).
+        Apply the configured FP8 `CustomOp` (`QuantFP8`).
 
         Requires the instance to be configured for FP8 without block
         quantization. Uses dynamic per-token quantization if enabled;
@@ -313,9 +313,12 @@ class MoEInputQuantizer:
                 is_sf_swizzled_layout=is_fp4_scale_swizzled,
             )
         elif quant_dtype == "mxfp4":
-            return MoEInputQuantizer._mxfp4_quantize(A, A_scale,
-                                                     per_act_token_quant,
-                                                     block_shape)
+            return MoEInputQuantizer._mxfp4_quantize(
+                A,
+                A_scale,
+                per_act_token_quant,
+                block_shape,
+            )
         else:
             return A, A_scale
 
