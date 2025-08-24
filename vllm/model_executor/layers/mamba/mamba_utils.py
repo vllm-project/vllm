@@ -30,12 +30,21 @@ class MambaStateDtypeCalculator:
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
-        # Now supports float32 states with the updated kernel
-        return MambaStateDtypeCalculator.mamba2_state_dtype(
-            model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype)
+        return cls._mamba_state_dtype(model_dtype, mamba_cache_dtype,
+                                      mamba_ssm_cache_dtype)
 
     @classmethod
     def mamba2_state_dtype(
+        cls,
+        model_dtype: Union[ModelDType, torch.dtype],
+        mamba_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: MambaDType,
+    ) -> tuple[torch.dtype, ...]:
+        return cls._mamba_state_dtype(model_dtype, mamba_cache_dtype,
+                                      mamba_ssm_cache_dtype)
+
+    @classmethod
+    def _mamba_state_dtype(
         cls,
         model_dtype: Union[ModelDType, torch.dtype],
         mamba_cache_dtype: MambaDType,
