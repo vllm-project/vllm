@@ -6,7 +6,7 @@ from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import torch
-from pydantic import TypeAdapter, model_validator
+from pydantic import model_validator
 from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
@@ -55,13 +55,6 @@ class EPLBConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
-
-    @classmethod
-    def from_cli(cls, cli_value: str) -> "EPLBConfig":
-        """Parse the CLI value for the compilation config.
-        -O1, -O2, -O3, etc. is handled in FlexibleArgumentParser.
-        """
-        return TypeAdapter(EPLBConfig).validate_json(cli_value)
 
 
 @config
@@ -143,7 +136,8 @@ class ParallelConfig:
     placement_group: Optional[PlacementGroup] = None
     """ray distributed model workers placement group."""
 
-    distributed_executor_backend: Optional[Union[DistributedExecutorBackend,
+    distributed_executor_backend: Optional[Union[str,
+                                                 DistributedExecutorBackend,
                                                  type[ExecutorBase]]] = None
     """Backend to use for distributed model
     workers, either "ray" or "mp" (multiprocessing). If the product
@@ -416,23 +410,22 @@ class ParallelConfig:
     def use_ray(self) -> bool:
         return self.distributed_executor_backend == "ray" or (
             isinstance(self.distributed_executor_backend, type)
-            and self.distributed_executor_backend.uses_ray)
+            and getattr(self.distributed_executor_backend, "uses_ray", False))
 
     @model_validator(mode='after')
     def _verify_args(self) -> Self:
         # Lazy import to avoid circular import
         from vllm.executor.executor_base import ExecutorBase
         from vllm.platforms import current_platform
-        if self.distributed_executor_backend not in (
-                "ray", "mp", "uni",
-                "external_launcher", None) and not (isinstance(
+        if self.distributed_executor_backend is not None and not isinstance(
+                self.distributed_executor_backend, str) and not (isinstance(
                     self.distributed_executor_backend, type) and issubclass(
                         self.distributed_executor_backend, ExecutorBase)):
             raise ValueError(
                 "Unrecognized distributed executor backend "
                 f"{self.distributed_executor_backend}. Supported "
-                "values are 'ray', 'mp' 'uni', 'external_launcher' or"
-                " custom ExecutorBase subclass.")
+                "values are 'ray', 'mp' 'uni', 'external_launcher', "
+                " custom ExecutorBase subclass or its import path.")
         if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
