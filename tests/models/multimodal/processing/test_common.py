@@ -166,7 +166,7 @@ _ADD_SPECIAL_TOKENS_OVERRIDES = {
     "paligemma": False,
     "ultravox": False,
     "whisper": False,
-    "vision-encoder-decoder": False,
+    "donut": False,
 }
 
 _IGNORE_MM_KEYS = {

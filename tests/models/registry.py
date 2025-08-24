@@ -523,7 +523,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MllamaForConditionalGeneration": _HfExamplesInfo("meta-llama/Llama-3.2-11B-Vision-Instruct"),  # noqa: E501
     "WhisperForConditionalGeneration": _HfExamplesInfo("openai/whisper-large-v3"),  # noqa: E501
     "DonutForConditionalGeneration": _HfExamplesInfo("naver-clova-ix/donut-base-finetuned-docvqa",  # noqa: E501
-                                                     hf_overrides={"architectures": ["DonutForConditionalGeneration"]},  # noqa: E501
+                                                     hf_overrides={"architectures": ["DonutForConditionalGeneration"], "model_type": "donut"},  # noqa: E501
                                                      extras={"dolphin": "ByteDance/Dolphin"}),  # noqa: E501
     # [Cross-encoder]
     "JinaVLForRanking": _HfExamplesInfo("jinaai/jina-reranker-m0"),   # noqa: E501
