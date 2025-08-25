@@ -117,6 +117,16 @@ __device__ inline void cp_async1(void* smem_ptr, const void* glob_ptr) {
       "l"(glob_ptr), "n"(BYTES));
 }
 
+__device__ inline void cp_async4(void* smem_ptr, const void* glob_ptr) {
+  const int BYTES = 16;
+  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+  asm volatile(
+      "{\n"
+      "   cp.async.cg.shared.global [%0], [%1], %2;\n"
+      "}\n" ::"r"(smem),
+      "l"(glob_ptr), "n"(BYTES));
+}
+
 __device__ __forceinline__ void cp_async_fence() {
   asm volatile("cp.async.commit_group;\n" ::);
 }
@@ -132,7 +142,7 @@ __device__ __forceinline__ void cp_async_wait<0>() {
 }
 
 template <typename scalar_t, uint32_t NUM_WARPS, typename Idx_t,
-          int GROUP_SIZE = 128, int NUM_STAGES = 1>
+          int GROUP_SIZE = 128, int NUM_STAGES = 3>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const scalar_t* __restrict__ _input,  // (E, T, 2*H), element strides
     __nv_fp8_e4m3* __restrict__ _y_q,     // (E, T, H)
@@ -160,7 +170,6 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   const Idx_t tid = threadIdx.x;
   const Idx_t warp_id = tid / WARP_SIZE;
   const Idx_t lane_id = tid % WARP_SIZE;
-  const Idx_t num_warps = (blockDim.x + WARP_SIZE - 1) / WARP_SIZE;
 
   // how many tokens for this expert
 
@@ -190,40 +199,55 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   auto y_q_ptr = _y_q + yq_off;
   auto y_s_ptr = _y_s + base_ys;
 
-  auto s_ptr = reinterpret_cast<void*>(s_buff + tid);
+  auto s_ptr = s_buff + tid;
 
   const Idx_t n_tokens = s_count;
 
-  Idx_t t_load = 0;
+  Idx_t t_load = 0, stage = 0;
   auto load_and_advance_y_pred = [&]() {
     if (t_load < n_tokens) {
       if (tid < 64) {
-        cp_async1(s_ptr, reinterpret_cast<const void*>(gate_ptr));
+        cp_async1(
+            reinterpret_cast<void*>(s_ptr + (stage % NUM_STAGES) * GROUP_SIZE),
+            reinterpret_cast<const void*>(gate_ptr));
         gate_ptr += stride_i_t_half;
       } else {
-        cp_async1(s_ptr, reinterpret_cast<const void*>(up_ptr));
+        cp_async1(
+            reinterpret_cast<void*>(s_ptr + (stage % NUM_STAGES) * GROUP_SIZE),
+            reinterpret_cast<const void*>(up_ptr));
         up_ptr += stride_i_t_half;
       }
       t_load++;
+      stage++;
     }
+
+    // Always fence, even if there's nothing to do.
     cp_async_fence();
   };
 
-  load_and_advance_y_pred();
+#pragma unroll
+  for (int i = 0; i < NUM_STAGES; i++) {
+    load_and_advance_y_pred();
+  }
 
   auto s_gate_ptr = reinterpret_cast<__nv_bfloat16*>(s_buff) + tid;
   auto s_up_ptr = reinterpret_cast<__nv_bfloat16*>(s_buff) + GROUP_SIZE + tid;
 
+  int compute_stage = 0;
   for (Idx_t t = 0; t < n_tokens; ++t) {
     float gate, upv, y = -std::numeric_limits<float>::max();
 
-    cp_async_wait<0>();
+    cp_async_wait<NUM_STAGES - 1>();
     __syncthreads();
 
-    gate = __bfloat162float(*s_gate_ptr);
+    gate = __bfloat162float(
+        *(s_gate_ptr + 2 * (compute_stage % NUM_STAGES) * GROUP_SIZE));
     gate = silu(gate);
-    upv = __bfloat162float(*s_up_ptr);
+    upv = __bfloat162float(
+        *(s_up_ptr + 2 * (compute_stage % NUM_STAGES) * GROUP_SIZE));
     y = gate * upv;
+
+    compute_stage++;
 
     __syncthreads();
 
@@ -238,7 +262,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
     float absmax = 0.f;
     if (warp_id == 0) {
-      float m = (lane_id < num_warps) ? s_warp_max[lane_id] : 0.f;
+      float m = (lane_id < NUM_WARPS) ? s_warp_max[lane_id] : 0.f;
       m = warp_max(m);
       if (lane_id == 0) s_warp_max[0] = m;
     }

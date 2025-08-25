@@ -63,6 +63,13 @@ configs = [
     (8, 256, 7168),
     (8, 512, 7168),
     (8, 1024, 7168),
+    (9, 16, 7168),
+    (9, 32, 7168),
+    (9, 64, 7168),
+    (9, 128, 7168),
+    (9, 256, 7168),
+    (9, 512, 7168),
+    (9, 1024, 7168),
     # (16, 64, 2048),
     # (32, 128, 4096),
     # (256, 16, 7168),
@@ -75,19 +82,19 @@ configs = [
 ]
 
 
-print(f"GPU: {torch.cuda.get_device_name()} Baseline")
-print(f"{'Config':<20} {'Time(ms)':<10} {'GFLOPS':<10} {'GB/s':<10}")
-print("-" * 50)
-
-for E, T, H in configs:
-    time_ms, gflops, gbps = benchmark(gold, E, T, H)
-    print(f"E={E:3d},T={T:4d},H={H:4d} {time_ms:8.3f} {gflops:8.1f} {gbps:8.1f}")
-
-
 print(f"GPU: {torch.cuda.get_device_name()} CUDA Kernel")
 print(f"{'Config':<20} {'Time(ms)':<10} {'GFLOPS':<10} {'GB/s':<10}")
 print("-" * 50)
 
 for E, T, H in configs:
     time_ms, gflops, gbps = benchmark(silu_mul_fp8_quant_deep_gemm_cuda, E, T, H)
+    print(f"E={E:3d},T={T:4d},H={H:4d} {time_ms:8.3f} {gflops:8.1f} {gbps:8.1f}")
+
+
+print(f"GPU: {torch.cuda.get_device_name()} Baseline")
+print(f"{'Config':<20} {'Time(ms)':<10} {'GFLOPS':<10} {'GB/s':<10}")
+print("-" * 50)
+
+for E, T, H in configs:
+    time_ms, gflops, gbps = benchmark(gold, E, T, H)
     print(f"E={E:3d},T={T:4d},H={H:4d} {time_ms:8.3f} {gflops:8.1f} {gbps:8.1f}")
