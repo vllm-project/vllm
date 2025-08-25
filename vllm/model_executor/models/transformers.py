@@ -106,11 +106,8 @@ def can_enable_torch_compile(vllm_config: VllmConfig) -> bool:
 
 
 def replace_linear_class(
-    linear: nn.Linear,
-    style: Literal["colwise", "rowwise"],
-    quant_config: QuantizationConfig,
-    *,
-    prefix: str = "",
+    linear: nn.Linear, style: Literal["colwise", "rowwise"],
+    quant_config: QuantizationConfig
 ) -> Union[ColumnParallelLinear, RowParallelLinear, ReplicatedLinear]:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
@@ -144,7 +141,6 @@ def replace_linear_class(
         output_size=linear.out_features,
         bias=linear.bias is not None,
         quant_config=quant_config,
-        prefix=prefix,
         return_bias=False,
         **vllm_linear_kwargs,
     )
@@ -561,10 +557,8 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                     generator = (p for p in tp_plan if re.match(p, qual_name))
                     pattern = next(generator, None)
                     style = tp_plan.get(pattern, "replicate")
-                    new_module = replace_linear_class(child_module,
-                                                      style,
-                                                      self.quant_config,
-                                                      prefix=qual_name)
+                    new_module = replace_linear_class(child_module, style,
+                                                      self.quant_config)
                     setattr(module, child_name, new_module)
                     log_replacement(qual_name, child_module, new_module)
                 else:
