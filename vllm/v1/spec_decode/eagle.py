@@ -421,7 +421,7 @@ class EagleProposer:
             tree_positions = torch.empty((3, 0),
                                          device=self.positions.device,
                                          dtype=self.positions.dtype)
-            assert positions.dim() == 3 or 2
+            assert positions.dim() in (2, 3)
             # Precompute the draft token positions. -> (3, B, L)
             flattened_draft_positions = (
                 positions.view(3, batch_size, 1) +
