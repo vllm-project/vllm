@@ -22,7 +22,6 @@ def _make_model_runner_output(
             for i, req_id in enumerate(req_ids)
         },
         sampled_token_ids=[[i] for i in range(len(req_ids))],
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],

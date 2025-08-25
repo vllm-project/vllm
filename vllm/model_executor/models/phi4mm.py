@@ -21,7 +21,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import (AudioProcessorItems, ImageEmbeddingItems,
                                    ImageProcessorItems, ImageSize,
                                    MultiModalDataItems, MultiModalDataParser)
@@ -262,9 +262,9 @@ class Phi4MMImageEncoder(nn.Module):
             img_features.shape[1]))
         assert base_feat_height == base_feat_height_target \
             and base_feat_width == base_feat_height_target, \
-                f'base_feat_height: {base_feat_height},"\
-                f" base_feat_width: {base_feat_width}, "\
-                f"expect {base_feat_height_target} features for hd transform'
+                (f"base_feat_height: {base_feat_height}, "
+                 f"base_feat_width: {base_feat_width}, "
+                 f"expect {base_feat_height_target} features for hd transform")
 
         # bs x max_num_crops x (24x24) x C
         img_features = img_features.view(bs, -1,
@@ -802,7 +802,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         image_tokens: list[str] = self.info.image_tokens  # type: ignore
         audio_tokens: list[str] = self.info.audio_tokens  # type: ignore

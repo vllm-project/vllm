@@ -14,7 +14,8 @@ from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
     initialize_model, process_weights_after_loading, set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
-    get_gguf_extra_tensor_names, gguf_quant_weights_iterator)
+    get_gguf_extra_tensor_names, get_gguf_weight_type_map,
+    gguf_quant_weights_iterator)
 
 
 class GGUFModelLoader(BaseModelLoader):
@@ -131,6 +132,17 @@ class GGUFModelLoader(BaseModelLoader):
         if "lm_head.weight" in get_gguf_extra_tensor_names(
                 local_model_path, gguf_weights_map):
             model_config.hf_config.update({"tie_word_embeddings": True})
+
+        weight_type_map = get_gguf_weight_type_map(model_config.model,
+                                                   gguf_weights_map)
+
+        # filter out unquantized modules to skip
+        unquant_names = [
+            name.removesuffix(".weight")
+            for name, weight_type in weight_type_map.items()
+            if weight_type == "F32" and name.endswith(".weight")
+        ]
+        vllm_config.quant_config.unquantized_modules.extend(unquant_names)
 
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):

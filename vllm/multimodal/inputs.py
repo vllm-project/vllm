@@ -11,7 +11,7 @@ from typing import (TYPE_CHECKING, Any, Literal, Optional, TypedDict, TypeVar,
                     Union, cast, final)
 
 import numpy as np
-from typing_extensions import NotRequired, TypeAlias
+from typing_extensions import NotRequired, TypeAlias, deprecated
 
 from vllm.utils import LazyLoader, full_groupby, is_list_of
 from vllm.utils.jsontree import JSONTree, json_map_leaves
@@ -656,7 +656,7 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
     def __init__(self, data: Mapping[str, MultiModalFieldElem] = {}) -> None:
         super().__init__(data)
 
-        modalities = {elem.modality for elem in self.data.values()}
+        modalities = {elem.modality for elem in self.values()}
         assert len(modalities) == 1, f"Found different modalities={modalities}"
         self._modality = next(iter(modalities))
 
@@ -664,20 +664,15 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
     def modality(self) -> str:
         return self._modality
 
-    def get_data(self) -> Mapping[str, NestedTensors]:
+    def get_data(self) -> dict[str, NestedTensors]:
         return {key: elem.data for key, elem in self.items()}
 
 
-class MultiModalKwargs:
+class MultiModalKwargsItems(UserDict[str, Sequence[MultiModalKwargsItem]]):
     """
-    A dictionary that represents the keyword arguments to
-    [`torch.nn.Module.forward`][].
-
-    The metadata `items` enables us to obtain the keyword arguments
-    corresponding to each data item in
-    [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems], via
-    [`get_item`][vllm.multimodal.inputs.MultiModalKwargs.get_item] and
-    [`get_items`][vllm.multimodal.inputs.MultiModalKwargs.get_items].
+    A dictionary of
+    [`MultiModalKwargsItem`][vllm.multimodal.inputs.MultiModalKwargsItem]s
+    by modality.
     """
 
     @staticmethod
@@ -712,19 +707,64 @@ class MultiModalKwargs:
                 elems = [v[item_idx] for v in elems_in_modality.values()]
                 items.append(MultiModalKwargsItem.from_elems(elems))
 
-        return MultiModalKwargs(items)
+        return MultiModalKwargsItems.from_seq(items)
 
-    def __init__(self, items: Sequence[MultiModalKwargsItem] = ()) -> None:
-        super().__init__()
-
+    @staticmethod
+    def from_seq(items: Sequence[MultiModalKwargsItem]):
         items_by_modality = full_groupby(items, key=lambda x: x.modality)
-        self._items_by_modality = dict(items_by_modality)
+        return MultiModalKwargsItems(items_by_modality)
 
-        self._data: Optional[Mapping[str, NestedTensors]] = None
+    def __getitem__(self, modality: str):
+        if modality not in self:
+            raise KeyError(f"Modality {modality!r} not found. "
+                           f"Available modalities: {set(self.keys())}")
 
-    @property
-    def modalities(self):
-        return self._items_by_modality.keys()
+        return super().__getitem__(modality)
+
+    def get_data(self, *, pin_memory: bool = False) -> "MultiModalKwargs":
+        elems_by_key = defaultdict[str, list[MultiModalFieldElem]](list)
+        for items in self.values():
+            for item in items:
+                for key, elem in item.items():
+                    elems_by_key[key].append(elem)
+
+        return MultiModalKwargs({
+            key:
+            elems[0].field.reduce_data(elems, pin_memory=pin_memory)
+            for key, elems in elems_by_key.items() if len(elems) > 0
+        })
+
+
+class MultiModalKwargs(UserDict[str, NestedTensors]):
+    """
+    A dictionary that represents the keyword arguments to
+    [`torch.nn.Module.forward`][].
+    """
+
+    @staticmethod
+    @deprecated("`MultiModalKwargs.from_hf_inputs` is deprecated and "
+                "will be removed in v0.13. "
+                "Please use `MultiModalKwargsItems.from_hf_inputs` and "
+                "access the tensor data using `.get_data()`.")
+    def from_hf_inputs(
+        hf_inputs: "BatchFeature",
+        config_by_key: Mapping[str, MultiModalFieldConfig],
+    ):
+        return MultiModalKwargsItems.from_hf_inputs(hf_inputs, config_by_key) \
+            .get_data()
+
+    @staticmethod
+    @deprecated("`MultiModalKwargs.from_items` is deprecated and "
+                "will be removed in v0.13. "
+                "Please use `MultiModalKwargsItems.from_seq` and "
+                "access the tensor data using `.get_data()`.")
+    def from_items(
+        items: Sequence[MultiModalKwargsItem],
+        *,
+        pin_memory: bool = False,
+    ):
+        return MultiModalKwargsItems.from_seq(items) \
+            .get_data(pin_memory=pin_memory)
 
     @staticmethod
     def _try_stack(nested_tensors: NestedTensors,
@@ -813,92 +853,24 @@ class MultiModalKwargs:
 
         return cast(BatchedTensorInputs, json_mapped)
 
-    def keys(self):
-        return self.get_data().keys()
-
-    def values(self):
-        return self.get_data().values()
-
-    def items(self):
-        return self.get_data().items()
-
-    def get(self, key: str, /, default=None):
-        return self.get_data().get(key, default)
-
-    def pop(self, key: str, *args, **kwargs):
-        data = dict(self.get_data())
-        res = data.pop(key, *args, **kwargs)
-
-        for items in self._items_by_modality.values():
-            for item in items:
-                item.pop(key, *args, **kwargs)
-
-        self._data = None
-
-        return res
-
-    def __iter__(self):
-        return iter(self.get_data())
-
     def __getitem__(self, key: str):
-        return self.get_data()[key]
+        if key not in self:
+            raise KeyError(f"Keyword argument {key!r} not found. "
+                           f"Available keys: {set(self.keys())}")
+
+        return super().__getitem__(key)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):
             return False
 
-        return self._items_by_modality == other._items_by_modality
+        for k in self:
+            if k not in other:
+                return False
+            if not nested_tensors_equal(self[k], other[k]):
+                return False
 
-    def _validate_modality(self, method_name: str, modality: str) -> None:
-        if not self._items_by_modality:
-            raise RuntimeError(
-                f"`{method_name}` is not supported when "
-                "MultiModalKwargs is not initialized with `items`")
-
-        if modality not in self._items_by_modality:
-            available_modalities = set(self._items_by_modality.keys())
-            raise KeyError(f"Modality {modality!r} not found. "
-                           f"Available modalities: {available_modalities}")
-
-    def get_item_count(self, modality: str) -> int:
-        """Get the number of items belonging to a modality."""
-        self._validate_modality("get_item_count", modality)
-        return len(self._items_by_modality[modality])
-
-    def get_item(self, modality: str, item_index: int) -> MultiModalKwargsItem:
-        """
-        Get the keyword arguments corresponding to an item identified by
-        its modality and index.
-        """
-        self._validate_modality("get_item", modality)
-        return self._items_by_modality[modality][item_index]
-
-    def get_items(self, modality: str) -> Sequence[MultiModalKwargsItem]:
-        """
-        Get the keyword arguments corresponding to each item belonging to
-        a modality.
-        """
-        self._validate_modality("get_items", modality)
-        return self._items_by_modality[modality]
-
-    def get_data(self,
-                 *,
-                 pin_memory: bool = False) -> Mapping[str, NestedTensors]:
-        if self._data is not None:
-            return self._data
-
-        elems_by_key = defaultdict[str, list[MultiModalFieldElem]](list)
-        for items in self._items_by_modality.values():
-            for item in items:
-                for key, elem in item.items():
-                    elems_by_key[key].append(elem)
-
-        data = {
-            key: elems[0].field.reduce_data(elems, pin_memory=pin_memory)
-            for key, elems in elems_by_key.items() if len(elems) > 0
-        }
-        self._data = data
-        return data
+        return True
 
 
 MultiModalPlaceholderDict: TypeAlias = Mapping[str, Sequence[PlaceholderRange]]
@@ -926,10 +898,10 @@ class MultiModalInputs(TypedDict):
     token_type_ids: NotRequired[list[int]]
     """The token type IDs of the prompt."""
 
-    mm_kwargs: MultiModalKwargs
+    mm_kwargs: MultiModalKwargsItems
     """Keyword arguments to be directly passed to the model after batching."""
 
-    mm_hashes: Optional["MultiModalHashDict"]
+    mm_hashes: "MultiModalHashDict"
     """The hashes of the multi-modal data."""
 
     mm_placeholders: "MultiModalPlaceholderDict"

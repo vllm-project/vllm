@@ -305,7 +305,7 @@ class FlexAttentionMetadataBuilder(
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
-        max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
+        max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
@@ -428,6 +428,7 @@ class FlexAttentionImpl(AttentionImpl):
         attn_metadata: FlexAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FLexAttention.
 
@@ -441,7 +442,7 @@ class FlexAttentionImpl(AttentionImpl):
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
-        if output_scale is not None:
+        if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
                 " for FlexAttentionImpl")

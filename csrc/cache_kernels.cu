@@ -624,9 +624,9 @@ void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
 namespace vllm {
 
 // grid is launched with dimensions (batch, num_splits)
-template <typename scalar_t>
-__global__ void gather_cache(
-    const scalar_t* __restrict__ src_cache,   // [NUM_BLOCKS, BLOCK_SIZE,
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void gather_and_maybe_dequant_cache(
+    const cache_t* __restrict__ src_cache,    // [NUM_BLOCKS, BLOCK_SIZE,
                                               // ENTRIES...]
     scalar_t* __restrict__ dst,               // [TOT_TOKENS, ENTRIES...]
     const int32_t* __restrict__ block_table,  // [BATCH, BLOCK_INDICES]
@@ -634,6 +634,7 @@ __global__ void gather_cache(
     const int32_t block_size, const int32_t entry_size,
     const int64_t block_table_stride, const int64_t cache_block_stride,
     const int64_t cache_entry_stride, const int64_t dst_entry_stride,
+    const float* __restrict__ scale,
     const int32_t* __restrict__ seq_starts) {  // Optional: starting offsets per
                                                // batch
 
@@ -675,10 +676,16 @@ __global__ void gather_cache(
     if (partial_block_size) full_blocks_end -= 1;
   }
 
-  auto copy_entry = [&](const scalar_t* __restrict__ _src,
+  auto copy_entry = [&](const cache_t* __restrict__ _src,
                         scalar_t* __restrict__ _dst) {
-    for (int i = threadIdx.x; i < entry_size; i += blockDim.x)
-      _dst[i] = _src[i];
+    for (int i = threadIdx.x; i < entry_size; i += blockDim.x) {
+      if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
+        _dst[i] = static_cast<scalar_t>(_src[i]);
+      } else {
+        _dst[i] =
+            fp8::scaled_convert<scalar_t, cache_t, kv_dt>(_src[i], *scale);
+      }
+    }
   };
 
   for (int pid = split_start; pid < full_blocks_end; ++pid) {
@@ -705,25 +712,31 @@ __global__ void gather_cache(
 }  // namespace vllm
 
 // Macro to dispatch the kernel based on the data type.
-#define CALL_GATHER_CACHE(CPY_DTYPE)                                    \
-  vllm::gather_cache<CPY_DTYPE><<<grid, block, 0, stream>>>(            \
-      reinterpret_cast<CPY_DTYPE*>(src_cache.data_ptr()),               \
-      reinterpret_cast<CPY_DTYPE*>(dst.data_ptr()),                     \
-      block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
-      block_size, entry_size, block_table_stride, cache_block_stride,   \
-      cache_entry_stride, dst_entry_stride, seq_starts_ptr);
+// SCALAR_T is the data type of the destination tensor.
+// CACHE_T is the stored data type of kv-cache.
+// KV_DTYPE is the real data type of kv-cache.
+#define CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE)                      \
+  vllm::gather_and_maybe_dequant_cache<SCALAR_T, CACHE_T, KV_DTYPE>         \
+      <<<grid, block, 0, stream>>>(                                         \
+          reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),                 \
+          reinterpret_cast<SCALAR_T*>(dst.data_ptr()),                      \
+          block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
+          block_size, entry_size, block_table_stride, cache_block_stride,   \
+          cache_entry_stride, dst_entry_stride,                             \
+          reinterpret_cast<const float*>(scale.data_ptr()), seq_starts_ptr);
 
 // Gather sequences from the cache into the destination tensor.
 //  - cu_seq_lens contains the cumulative sequence lengths for each batch
 //  - block_table contains the cache block indices for each sequence
 //  - Optionally, seq_starts (if provided) offsets the starting block index by
 //  (seq_starts[bid] / page_size)
-void gather_cache(
+void gather_and_maybe_dequant_cache(
     torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, ENTRIES...]
     torch::Tensor const& dst,          // [TOT_TOKENS, ENTRIES...]
     torch::Tensor const& block_table,  // [BATCH, BLOCK_INDICES]
     torch::Tensor const& cu_seq_lens,  // [BATCH+1]
-    int64_t batch_size,
+    int64_t batch_size, const std::string& kv_cache_dtype,
+    torch::Tensor const& scale,
     std::optional<torch::Tensor> seq_starts = std::nullopt) {
   at::cuda::OptionalCUDAGuard device_guard(src_cache.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
@@ -761,20 +774,8 @@ void gather_cache(
   dim3 grid(batch_size, num_splits);
   dim3 block(1024);
 
-  TORCH_CHECK(src_cache.dtype() == dst.dtype(),
-              "src_cache and dst must have the same dtype");
-
-  const int dtype_bits = src_cache.element_size() * 8;
   const int32_t* seq_starts_ptr =
       seq_starts.has_value() ? seq_starts.value().data_ptr<int32_t>() : nullptr;
 
-  if (dtype_bits == 32) {
-    CALL_GATHER_CACHE(uint32_t);
-  } else if (dtype_bits == 16) {
-    CALL_GATHER_CACHE(uint16_t);
-  } else if (dtype_bits == 8) {
-    CALL_GATHER_CACHE(uint8_t);
-  } else {
-    TORCH_CHECK(false, "Unsupported data type width: ", dtype_bits);
-  }
+  DISPATCH_BY_KV_CACHE_DTYPE(dst.dtype(), kv_cache_dtype, CALL_GATHER_CACHE);
 }

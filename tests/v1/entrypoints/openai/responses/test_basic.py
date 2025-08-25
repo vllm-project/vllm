@@ -73,3 +73,16 @@ async def test_chat_with_input_type(client: openai.AsyncOpenAI):
     ], )
     print(response)
     assert response.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_logprobs(client: openai.AsyncOpenAI):
+    response = await client.responses.create(
+        include=["message.output_text.logprobs"],
+        input="What is 13 * 24?",
+        top_logprobs=5,
+    )
+    print(response)
+    outputs = response.output
+    assert outputs[-1].content[-1].logprobs
+    assert len(outputs[-1].content[-1].logprobs[0].top_logprobs) == 5

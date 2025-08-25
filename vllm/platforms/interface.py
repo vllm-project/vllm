@@ -81,6 +81,7 @@ class CpuArchEnum(enum.Enum):
     X86 = enum.auto()
     ARM = enum.auto()
     POWERPC = enum.auto()
+    S390X = enum.auto()
     OTHER = enum.auto()
     UNKNOWN = enum.auto()
 
@@ -377,6 +378,8 @@ class Platform:
             return CpuArchEnum.ARM
         elif machine.startswith("ppc"):
             return CpuArchEnum.POWERPC
+        elif machine == "s390x":
+            return CpuArchEnum.S390X
 
         return CpuArchEnum.OTHER if machine else CpuArchEnum.UNKNOWN
 
@@ -562,7 +565,8 @@ class Platform:
         raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
         """
         Returns if the kv_cache_dtype is supported by the current platform.
         """

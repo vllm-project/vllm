@@ -268,7 +268,7 @@ class CpuPlatform(Platform):
                 DEFAULT_MAX_NUM_BATCHED_TOKENS)
 
     @classmethod
-    def get_allowed_cpu_memory_node_list(
+    def get_allowed_cpu_core_node_list(
             cls) -> tuple[list[int], list[LogicalCPUInfo]]:
         assert platform.system() == "Linux"
 
@@ -332,5 +332,6 @@ class CpuPlatform(Platform):
         supplied model configuration.
         """
         arch = cls.get_cpu_architecture()
-        return (cls.supports_v1(model_config) and arch
-                in (CpuArchEnum.X86, CpuArchEnum.POWERPC, CpuArchEnum.ARM))
+        return (cls.supports_v1(model_config)
+                and arch in (CpuArchEnum.X86, CpuArchEnum.POWERPC,
+                             CpuArchEnum.ARM, CpuArchEnum.S390X))

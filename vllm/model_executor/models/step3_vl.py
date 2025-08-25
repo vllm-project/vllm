@@ -28,7 +28,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
@@ -520,20 +520,18 @@ class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo]
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_placeholder_token_id = hf_processor.image_token_id
-        batch_num_patches = out_mm_kwargs["num_patches"].tolist()
 
         def get_replacement_step1o(item_idx: int):
-            img_out = out_mm_kwargs.get_item("image", item_idx)
-            num_patches = batch_num_patches[item_idx]
+            out_item = out_mm_kwargs["image"][item_idx]
+            num_patches = int(out_item["num_patches"].data)
             if num_patches > 0:
-                patch_newline_mask = img_out["patch_newline_mask"].data.tolist(
-                )
+                patch_newline_mask = out_item["patch_newline_mask"].data
                 image_repl_ids = hf_processor._get_image_repl_features(
-                    1, num_patches, patch_newline_mask)[1]
+                    1, num_patches, patch_newline_mask.tolist())[1]
             else:
                 image_repl_ids = hf_processor._get_image_repl_features(
                     1, 0, None)[1]
@@ -884,8 +882,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.config = config
         self.multimodal_config = multimodal_config
-        self.use_data_parallel = (vllm_config.parallel_config.
-                                  enable_multimodal_encoder_data_parallel)
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         if multimodal_config.get_limit_per_prompt("image"):
             self.vision_model = Step3VisionTransformer(

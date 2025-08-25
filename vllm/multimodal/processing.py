@@ -23,8 +23,9 @@ from vllm.utils import flatten_2d_lists, full_groupby
 from .cache import MultiModalCache
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
-                     MultiModalFieldConfig, MultiModalInputs, MultiModalKwargs,
-                     MultiModalKwargsItem, PlaceholderRange)
+                     MultiModalFieldConfig, MultiModalInputs,
+                     MultiModalKwargsItem, MultiModalKwargsItems,
+                     PlaceholderRange)
 from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
                     MultiModalDataParser)
 
@@ -985,8 +986,20 @@ _I = TypeVar("_I", bound=BaseProcessingInfo)
 MultiModalHashes = dict[str, list[str]]
 """
 A collection of hashes with a similar structure as
-[`MultiModalKwargs`][vllm.multimodal.inputs.MultiModalKwargs].
+[`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems].
 """
+
+MultiModalPromptUpdates = dict[str, Sequence[BoundPromptUpdate]]
+"""
+A collection of prompt updates with a similar structure as
+[`MultiModalKwargsItems`][vllm.multimodal.inputs.MultiModalKwargsItems].
+"""
+
+
+class MultiModalProcessingInfo(NamedTuple):
+    kwargs: MultiModalKwargsItems
+    hashes: MultiModalHashes
+    prompt_updates: MultiModalPromptUpdates
 
 
 class BaseMultiModalProcessor(ABC, Generic[_I]):
@@ -1095,7 +1108,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         """
         Given the original multi-modal items for this modality
@@ -1361,18 +1374,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         cache: ProcessingCache,
         mm_cache_items_or_hashes: dict[str, list[_CacheItemOrHash]],
-        mm_missing_kwargs: MultiModalKwargs,
-    ) -> dict[str, list[MultiModalKwargsItem]]:
+        mm_missing_kwargs: MultiModalKwargsItems,
+    ) -> MultiModalKwargsItems:
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
         merged_items = defaultdict[str, list[MultiModalKwargsItem]](list)
         for modality, items_or_hashes in mm_cache_items_or_hashes.items():
             for item_or_hash in items_or_hashes:
                 if isinstance(item_or_hash, str):
-                    kw_item = mm_missing_kwargs.get_item(
-                        modality,
-                        mm_missing_next_idx[modality],
-                    )
+                    kw_item = mm_missing_kwargs[modality][
+                        mm_missing_next_idx[modality]]
                     cache.put(item_or_hash, kw_item)
                     mm_missing_next_idx[modality] += 1
                 else:
@@ -1380,7 +1391,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
                 merged_items[modality].append(kw_item)
 
-        return dict(merged_items)
+        return MultiModalKwargsItems(merged_items)
 
     def _apply_hf_processor(
         self,
@@ -1388,9 +1399,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        *,
-        return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         (
             prompt_ids,
             mm_processed_data,
@@ -1403,17 +1412,30 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             enable_hf_prompt_update=True,
         )
 
-        mm_kwargs = MultiModalKwargs.from_hf_inputs(
+        mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_processed_data,
             self._get_mm_fields_config(mm_processed_data,
                                        hf_processor_mm_kwargs),
         )
 
-        mm_hashes = (self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
-                                         tokenization_kwargs)
-                     if return_mm_hashes else None)
+        mm_hashes = self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
+                                        tokenization_kwargs)
 
-        return prompt_ids, mm_kwargs, mm_hashes, is_update_applied
+        unbound_prompt_updates = self._get_prompt_updates(
+            mm_data_items,
+            hf_processor_mm_kwargs,
+            mm_kwargs,
+        )
+        mm_prompt_updates = self._bind_and_group_updates(
+            unbound_prompt_updates)
+
+        mm_info = MultiModalProcessingInfo(
+            kwargs=mm_kwargs,
+            hashes=mm_hashes,
+            prompt_updates=mm_prompt_updates,
+        )
+
+        return prompt_ids, mm_info, is_update_applied
 
     def _cached_apply_hf_processor(
         self,
@@ -1421,9 +1443,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        *,
-        return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         """
         Apply the HF processor on the full prompt text,
         caching the results and reusing cached results.
@@ -1437,7 +1457,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
                 tokenization_kwargs=tokenization_kwargs,
-                return_mm_hashes=return_mm_hashes,
             )
 
         mm_hashes = self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
@@ -1450,8 +1469,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_data_items=mm_data_items,
             mm_hashes=mm_hashes,
         )
-
-        mm_hashes_to_return = mm_hashes if return_mm_hashes else None
 
         # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
@@ -1468,24 +1485,33 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             enable_hf_prompt_update=False,
         )
 
-        mm_missing_kwargs = MultiModalKwargs.from_hf_inputs(
+        mm_missing_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_missing_processed_data,
             self._get_mm_fields_config(mm_missing_processed_data,
                                        hf_processor_mm_kwargs),
         )
 
-        mm_cache_items_merged = self._merge_mm_kwargs(
+        mm_kwargs = self._merge_mm_kwargs(
             cache,
             mm_cache_items_or_hashes=mm_cache_items_or_hashes,
             mm_missing_kwargs=mm_missing_kwargs,
         )
 
-        mm_kwargs = MultiModalKwargs([
-            item for cache_items in mm_cache_items_merged.values()
-            for item in cache_items
-        ])
+        unbound_prompt_updates = self._get_prompt_updates(
+            mm_data_items,
+            hf_processor_mm_kwargs,
+            mm_kwargs,
+        )
+        mm_prompt_updates = self._bind_and_group_updates(
+            unbound_prompt_updates)
 
-        return prompt_ids, mm_kwargs, mm_hashes_to_return, is_update_applied
+        mm_info = MultiModalProcessingInfo(
+            kwargs=mm_kwargs,
+            hashes=mm_hashes,
+            prompt_updates=mm_prompt_updates,
+        )
+
+        return prompt_ids, mm_info, is_update_applied
 
     def _bind_and_group_updates(
         self,
@@ -1585,14 +1611,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _validate_mm_kwargs(
         self,
-        mm_kwargs: MultiModalKwargs,
+        mm_kwargs: MultiModalKwargsItems,
         mm_item_counts: Mapping[str, int],
     ) -> None:
         for modality, item_count in mm_item_counts.items():
-            if modality in mm_kwargs.modalities:
-                items = mm_kwargs.get_items(modality)
-            else:
-                items = []
+            items = mm_kwargs.get(modality, [])
 
             if len(items) != item_count:
                 raise RuntimeError(
@@ -1628,19 +1651,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def _maybe_apply_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
         prompt_ids: list[int],
-        mm_kwargs: MultiModalKwargs,
+        mm_kwargs: MultiModalKwargsItems,
+        mm_prompt_updates: MultiModalPromptUpdates,
         is_update_applied: bool,
     ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
-        unbound_prompt_updates = self._get_prompt_updates(
-            mm_items,
-            hf_processor_mm_kwargs,
-            mm_kwargs,
-        )
-        mm_prompt_updates = self._bind_and_group_updates(
-            unbound_prompt_updates)
-
         mm_item_counts = mm_items.get_all_counts()
         self._validate_mm_kwargs(mm_kwargs, mm_item_counts)
 
@@ -1674,7 +1689,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1696,23 +1710,21 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         (
             prompt_ids,
-            mm_kwargs,
-            mm_hashes,
+            mm_info,
             is_update_applied,
         ) = self._cached_apply_hf_processor(
             prompt,
             mm_items,
             hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            return_mm_hashes=return_mm_hashes,
         )
 
         # NOTE: tokenization_kwargs are not required to init processor
         prompt_ids, prompt, mm_placeholders = self._maybe_apply_prompt_updates(
             mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             prompt_ids=prompt_ids,
-            mm_kwargs=mm_kwargs,
+            mm_kwargs=mm_info.kwargs,
+            mm_prompt_updates=mm_info.prompt_updates,
             is_update_applied=is_update_applied,
         )
 
@@ -1725,8 +1737,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             type="multimodal",
             prompt=prompt,
             prompt_token_ids=prompt_ids,
-            mm_kwargs=mm_kwargs,
-            mm_hashes=mm_hashes,
+            mm_kwargs=mm_info.kwargs,
+            mm_hashes=mm_info.hashes,
             mm_placeholders=mm_placeholder_ranges,
         )
 
@@ -1789,7 +1801,6 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        return_mm_hashes: bool = False,
     ) -> MultiModalEncDecInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1804,7 +1815,6 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             mm_data,
             hf_processor_mm_kwargs,
             tokenization_kwargs,
-            return_mm_hashes,
         )
 
         return self._get_enc_dec_inputs(

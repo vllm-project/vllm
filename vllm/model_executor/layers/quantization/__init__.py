@@ -15,7 +15,6 @@ QuantizationMethods = Literal[
     "fbgemm_fp8",
     "modelopt",
     "modelopt_fp4",
-    "marlin",
     "bitblas",
     "gguf",
     "gptq_marlin_24",
@@ -25,7 +24,6 @@ QuantizationMethods = Literal[
     "gptq",
     "compressed-tensors",
     "bitsandbytes",
-    "qqq",
     "hqq",
     "experts_int8",
     "neuron_quant",
@@ -37,6 +35,7 @@ QuantizationMethods = Literal[
     "rtn",
     "inc",
     "mxfp4",
+    "petit_nvfp4",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -106,13 +105,12 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .hqq_marlin import HQQMarlinConfig
     from .inc import INCConfig
     from .ipex_quant import IPEXConfig
-    from .marlin import MarlinConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
     from .neuron_quant import NeuronQuantConfig
+    from .petit import PetitNvFp4Config
     from .ptpc_fp8 import PTPCFp8Config
-    from .qqq import QQQConfig
     from .rtn import RTNConfig
     from .torchao import TorchAOConfig
     from .tpu_int8 import Int8TpuConfig
@@ -125,7 +123,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "fbgemm_fp8": FBGEMMFp8Config,
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
-        "marlin": MarlinConfig,
         "bitblas": BitBLASConfig,
         "gguf": GGUFConfig,
         "gptq_marlin_24": GPTQMarlin24Config,
@@ -136,7 +133,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
         "ptpc_fp8": PTPCFp8Config,
-        "qqq": QQQConfig,
         "hqq": HQQMarlinConfig,
         "experts_int8": ExpertsInt8Config,
         "neuron_quant": NeuronQuantConfig,
@@ -148,6 +144,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "rtn": RTNConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
+        "petit_nvfp4": PetitNvFp4Config,
     }
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)

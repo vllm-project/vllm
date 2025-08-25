@@ -5,6 +5,7 @@ import asyncio
 import copy
 import functools
 import importlib
+import json
 import os
 import signal
 import subprocess
@@ -101,7 +102,8 @@ class RemoteOpenAIServer:
                  env_dict: Optional[dict[str, str]] = None,
                  seed: Optional[int] = 0,
                  auto_port: bool = True,
-                 max_wait_seconds: Optional[float] = None) -> None:
+                 max_wait_seconds: Optional[float] = None,
+                 override_hf_configs: Optional[dict[str, Any]] = None) -> None:
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
                 raise ValueError("You have manually specified the port "
@@ -119,6 +121,12 @@ class RemoteOpenAIServer:
                                  f"when `seed={seed}`.")
 
             vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
+
+        if override_hf_configs is not None:
+            vllm_serve_args = vllm_serve_args + [
+                "--hf-overrides",
+                json.dumps(override_hf_configs)
+            ]
 
         parser = FlexibleArgumentParser(
             description="vLLM's remote OpenAI server.")

@@ -150,15 +150,15 @@ def create_and_prepopulate_kv_cache(
 
     # Permute the context blocks (excluding block 0 which is null)
     if randomize_blocks:
-        perm = torch.randperm(
-            blocks_end - 1) + 1  # Random permutation starting from block 1
+        # Random permutation starting from block 1
+        perm = torch.randperm(blocks_end - 1) + 1
     else:
-        perm = torch.arange(
-            1, blocks_end)  # Sequential order starting from block 1
+        # Sequential order starting from block 1
+        perm = torch.arange(1, blocks_end)
 
     inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
-    inv_perm[1:] = torch.argsort(
-        perm) + 1  # Add 1 to account for starting from block 1
+    # Add 1 to account for starting from block 1
+    inv_perm[1:] = torch.argsort(perm) + 1
     kv_cache[:, 1:blocks_end, ...] = kv_cache[:, perm, ...]
 
     # Construct the right block table
@@ -281,7 +281,8 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
 
 @pytest.mark.parametrize("batch_spec_name", [
     "small_decode", "small_prefill", "mixed_small", "medium_decode",
-    "medium_prefill", "mixed_medium"
+    "medium_prefill", "mixed_medium", "large_decode", "large_prefill",
+    "single_decode", "single_prefill"
 ])
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 def test_backend_correctness(batch_spec_name: str, model: str):
@@ -302,7 +303,8 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     """
     batch_spec = BATCH_SPECS[batch_spec_name]
     vllm_config = create_vllm_config(model_name=model,
-                                     max_model_len=max(batch_spec.seq_lens))
+                                     max_model_len=max(batch_spec.seq_lens),
+                                     num_gpu_blocks=8192)
     device = torch.device("cuda:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
@@ -465,12 +467,6 @@ def test_backend_correctness(batch_spec_name: str, model: str):
                                    rtol=rtol,
                                    atol=atol)
 
-        if not all_close:
-            print(f"[{backend_name}] output differs from SDPA baseline. "
-                  f"Max diff: {max_diff:.6f} (rel: {max_rel_diff:.6f})")
-            print(f"[{backend_name}] output: {backend_output}")
-            print(f"[{backend_name}] SDPA baseline: {sdpa_output}")
-
         assert all_close, (
             f"[{backend_name}] output differs from SDPA baseline. "
-            f"Max diff: {max_diff:.6f} (rel: {max_rel_diff:.6f})")
+            f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})")

@@ -121,11 +121,11 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
 
         # Load balancing settings.
         vllm_config = get_current_vllm_config()
-        parallel_config = vllm_config.parallel_config
+        eplb_config = vllm_config.parallel_config.eplb_config
         self.enable_eplb = enable_eplb
 
         self.n_logical_experts = self.n_routed_experts
-        self.n_redundant_experts = parallel_config.num_redundant_experts
+        self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_physical_experts = (self.n_logical_experts +
                                    self.n_redundant_experts)
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
@@ -139,7 +139,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                                 top_k=config.num_experts_per_tok,
                                 hidden_size=config.hidden_size,
                                 intermediate_size=config.moe_intermediate_size,
-                                reduce_results=False,
+                                reduce_results=True,
                                 renormalize=config.norm_topk_prob,
                                 quant_config=quant_config,
                                 prefix=f"{prefix}.experts",
@@ -162,10 +162,6 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states=hidden_states,
                                            router_logits=router_logits)
-
-        if self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
-                final_hidden_states)
 
         return final_hidden_states.view(orig_shape)
 
@@ -367,7 +363,8 @@ class Qwen3MoeModel(nn.Module):
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
         enable_eplb = parallel_config.enable_eplb
-        self.num_redundant_experts = parallel_config.num_redundant_experts
+        eplb_config = parallel_config.eplb_config
+        self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
