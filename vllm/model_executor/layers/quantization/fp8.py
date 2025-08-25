@@ -1082,25 +1082,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             logical_replica_count=logical_replica_count,
         )
 
-        # If present, self.fused_experts always needs to take precendence
-        # over other methods.
-        if self.fused_experts:
-            return self.fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                quant_config=self.moe_quant_config,
-                expert_map=expert_map,
-            )
-        elif self.rocm_aiter_moe_enabled:
+        #
+        # Note: the order of checks is important since self.fused_experts
+        # can override fused_experts or cutlass but not rocm or marlin.
+        #
+        if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
                 rocm_aiter_fused_experts)
+            assert self.fused_experts is None
             return rocm_aiter_fused_experts(
                 x,
                 layer.w13_weight,
@@ -1114,6 +1103,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         elif self.use_marlin:
             assert activation == "silu", (
                 f"{activation} not supported for Marlin MoE.")
+            assert self.fused_experts is None
             return torch.ops.vllm.fused_marlin_moe(
                 x,
                 layer.w13_weight,
@@ -1129,6 +1119,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
+        elif self.fused_experts:
+            return self.fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                quant_config=self.moe_quant_config,
+                expert_map=expert_map,
+            )
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert self.block_quant is None
             assert (not renormalize and custom_routing_function is not None)
