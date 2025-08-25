@@ -1378,7 +1378,7 @@ class RowParallelLinear(LinearBase):
         return output, output_bias
 
     def extra_repr(self) -> str:
-        s = f"input_features={self.input_size_per_partition}"
+        s = f"in_features={self.input_size_per_partition}"
         s += f", output_features={self.output_size}"
         s += f", bias={self.bias is not None}"
         s += f", tp_size={self.tp_size}"
