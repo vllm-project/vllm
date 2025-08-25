@@ -690,10 +690,9 @@ def test_compressed_tensors_nvfp4(vllm_runner, args):
     or not current_platform.has_device_capability(90),
     reason="W4A8 FP8 is not yet supported on this GPU type.",
 )
-@pytest.mark.parametrize(
-    "args",
-    [("czhu-cohere/Meta-Llama-3-8B-Instruct-W4A8-compressed-tensors-test",
-      CompressedTensorsW4A8Fp8)])
+@pytest.mark.parametrize("args", [
+    ("czhu-cohere/TinyLlama-1.1B-Chat-v1.0-W4A8-e2e", CompressedTensorsW4A8Fp8)
+])
 def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
     model, scheme = args
     with vllm_runner(model, enforce_eager=True) as llm:
