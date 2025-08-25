@@ -621,13 +621,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
-            extra_expert_args={
-                "w1_bias": layer.w13_bias,
-                "w2_bias": layer.w2_bias,
-                "gemm1_alpha": layer.gemm1_alpha,
-                "gemm1_beta": layer.gemm1_beta,
-                "gemm1_clamp_limit": layer.gemm1_clamp_limit
-            })
+        )
 
     def apply(
         self,

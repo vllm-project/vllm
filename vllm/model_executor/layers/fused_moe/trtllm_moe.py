@@ -4,16 +4,11 @@ from typing import Any, Optional
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP)
 from vllm.utils import next_power_of_2
-
-if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-        or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
-    from flashinfer import trtllm_fp4_block_scale_routed_moe
 
 
 class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -24,7 +19,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.gemm1_alpha = layer.gemm1_alpha
         self.gemm1_beta = layer.gemm1_beta
         self.gemm1_clamp_limit = layer.gemm1_clamp_limit
-        self.w1_bias = layer.w1_bias
+        self.w13_bias = layer.w13_bias
         self.w2_bias = layer.w2_bias
 
     @property
@@ -109,7 +104,6 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
-        extra_expert_args: Optional[dict[str, Any]],
     ):
         topk = topk_ids.size(-1)
         local_num_experts = w1.size(0)
@@ -119,7 +113,8 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         x_quant = hidden_states
         x_scale = a1q_scale
         if x_scale is not None:
-            x_scale = x_scale.view(torch.float8_e4m3fn).reshape(-1)
+            x_scale = x_scale.view(torch.float8_e4m3fn).reshape(
+                *x_quant.shape[:-1], -1)
 
         packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
             torch.bfloat16).view(torch.int16)
@@ -140,7 +135,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "gemm1_weights_scale":
             w1_scale,
             "gemm1_bias":
-            self.w1_bias,
+            self.w13_bias,
             "gemm1_alpha":
             self.gemm1_alpha,
             "gemm1_beta":
@@ -185,5 +180,6 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             output,
         }
 
+        from flashinfer import trtllm_fp4_block_scale_routed_moe
         trtllm_fp4_block_scale_routed_moe(**kwargs)
         return output
