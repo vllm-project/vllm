@@ -845,8 +845,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
+        attn_metadata_cache: dict[tuple[KVCacheSpec, tuple[str, str]],
+                                  Any] = {}
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
 
             if isinstance(kv_cache_group_spec.kv_cache_spec,
                           EncoderOnlyAttentionSpec):
@@ -907,10 +910,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         builder,
                     )
 
-                attn_metadata_i = (builder.build(
-                    common_prefix_len=common_prefix_len,
-                    common_attn_metadata=common_attn_metadata,
-                ))
+                cache_key = (kv_cache_spec, builder.unique_cls_id())
+                if cache_key in attn_metadata_cache \
+                    and builder.supports_update_block_table:
+                    cached_attn_metadata = attn_metadata_cache[cache_key]
+                    attn_metadata_i = builder.update_block_table(
+                        cached_attn_metadata,
+                        blk_table_tensor,
+                        slot_mapping,
+                    )
+                else:
+                    attn_metadata_i = (builder.build(
+                        common_prefix_len=common_prefix_len,
+                        common_attn_metadata=common_attn_metadata,
+                    ))
+                    attn_metadata_cache[cache_key] = attn_metadata_i
 
                 fast_prefill_metadata = attn_metadata_i
                 if (self.cache_config.kv_sharing_fast_prefill

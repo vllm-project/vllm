@@ -6,8 +6,7 @@ from typing import List, Optional
 import torch
 
 from vllm import envs
-from vllm.attention.backends.abstract import (AttentionBackend,
-                                              AttentionMetadata)
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig, QuantizationConfig
 from vllm.v1.attention.backends.utils import (
@@ -23,23 +22,34 @@ def create_chunked_local_attention_backend(
     attention_chunk_size: int,
     block_size: int,
 ) -> type[AttentionBackend]:
-    prefix = f"ChunkedLocalAttention_{attention_chunk_size}_{block_size}_"
-
+    name_prefix = f"ChunkedLocalAttention_{attention_chunk_size}_{block_size}_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
 
     class ChunkedLocalAttentionBuilder(underlying_builder):  # type: ignore
+        # Make sure the unique_cls_id is not the same for different
+        # attention_chunk_size and block_size.
+        __specialization_key__ = (attention_chunk_size, block_size)
 
         def build(self,
                   common_prefix_len: int,
                   common_attn_metadata: CommonAttentionMetadata,
-                  fast_build: bool = False) -> AttentionMetadata:
-            common_attn_metadata = make_local_attention_virtual_batches(
-                attention_chunk_size, common_attn_metadata, block_size)
-            return super().build(common_prefix_len, common_attn_metadata,
-                                 fast_build)
+                  fast_build: bool = False):
+            cm, make_virtual_batches_block_table = \
+                make_local_attention_virtual_batches(
+                    attention_chunk_size, common_attn_metadata, block_size)
+            metadata = super().build(common_prefix_len, cm, fast_build)
+            metadata.make_virtual_batches_block_table = \
+                make_virtual_batches_block_table
+            return metadata
+
+        def update_block_table(self, metadata, blk_table: torch.Tensor,
+                               slot_mapping: torch.Tensor):
+            blk_table = metadata.make_virtual_batches_block_table(blk_table)
+            return super().update_block_table(metadata, blk_table,
+                                              slot_mapping)
 
     attn_backend = subclass_attention_backend(
-        name_prefix=prefix,
+        name_prefix=name_prefix,
         attention_backend_cls=underlying_attn_backend,
         builder_cls=ChunkedLocalAttentionBuilder)
 
