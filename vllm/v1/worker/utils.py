@@ -298,3 +298,32 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         # NOTE: Use list because of v0 PP virtual engine.
         forward_context[layer_name].kv_cache = [kv_cache]
+
+
+class CpuGpuBuffer:
+
+    def __init__(
+        self,
+        *args,
+        dtype: torch.dtype,
+        device: torch.device,
+        pin_memory: bool,
+    ):
+        self.cpu = torch.zeros(*args,
+                               dtype=dtype,
+                               device="cpu",
+                               pin_memory=pin_memory)
+        self.np = self.cpu.numpy()
+        self.gpu = self.cpu.to(device)
+
+    def copy_to_gpu(self, n: Optional[int] = None) -> None:
+        if n is None:
+            return self.gpu.copy_(self.cpu, non_blocking=True)
+        return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
+
+    def copy_to_cpu(self, n: Optional[int] = None) -> None:
+        """NOTE: Because this method is non-blocking, explicit synchronization
+        is needed to ensure the data is copied to CPU."""
+        if n is None:
+            return self.cpu.copy_(self.gpu, non_blocking=True)
+        return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
