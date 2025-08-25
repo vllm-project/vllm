@@ -275,32 +275,6 @@ PRODUCT_TOOL: ChatCompletionToolParam = {
     },
 }
 
-SEARCH_TOOL_WITH_OBJECT_ARGUMENT: ChatCompletionToolParam = {
-    "type": "function",
-    "function": {
-        "name": "search",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "search_request": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string"
-                        },
-                        "retrieval_method": {
-                            "enum": ["keyword", "neural", "rrf"],
-                            "type": "string"
-                        }
-                    },
-                    "required": ["query", "retrieval_method"]
-                }
-            },
-            "required": ["search_request"]
-        }
-    }
-}
-
 MESSAGES_WITHOUT_TOOLS: list[ChatCompletionMessageParam] = [{
     "role":
     "user",
@@ -419,11 +393,3 @@ MESSAGES_ASKING_FOR_PRODUCT_INFO: list[ChatCompletionMessageParam] = [
         "7355608 and inserted true?",
     },
 ]
-
-MESSAGES_ASKING_FOR_SEARCH_WITH_OBJECT: list[ChatCompletionMessageParam] = [{
-    "role":
-    "user",
-    "content":
-    "Please search for information about latest transformers papers with rrf "
-    "method."
-}]
