@@ -147,6 +147,7 @@ def test_basic_interface():
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
     request = create_request(request_id=1,
+                             block_size=BLOCK_SIZE,
                              num_tokens=NUM_TOKENS,
                              do_remote_prefill=True)
     request_id = request.request_id
@@ -186,6 +187,7 @@ def test_prompt_less_than_block_size():
 
     # Request will have 1 partial remote block.
     request = create_request(request_id=1,
+                             block_size=BLOCK_SIZE,
                              num_tokens=NUM_TOKENS,
                              do_remote_prefill=True,
                              num_remote_blocks=1)
@@ -229,6 +231,9 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                 num_blocks=1,
                 block_len=self.block_len,
                 attn_backend_name=self.backend_name,
+                # `self.kv_cache_layout` is only forced to HND when vllm engine
+                # is started. We mock HND here.
+                kv_cache_layout="HND",
             ),
             remote_tp_size=remote_tp_size)
         return {0: remote_agent_name}

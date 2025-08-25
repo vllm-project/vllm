@@ -120,7 +120,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
-                mm_inputs=[],
+                mm_kwargs=[],
                 mm_hashes=[],
                 mm_positions=[],
                 sampling_params=SamplingParams(),
@@ -772,6 +772,8 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
                 head_dim=hf_config.mamba_d_head,
                 rms_norm_eps=hf_config.rms_norm_eps,
                 activation=hf_config.hidden_act,
+                cache_config=cache_config,
+                model_config=model_config,
                 prefix=key,
             )
         # suppress var not used error

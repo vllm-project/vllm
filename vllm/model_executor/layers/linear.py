@@ -16,6 +16,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
@@ -41,7 +42,6 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "GPTQMarlinLinearMethod",
     "Fp8LinearMethod",
     "MarlinLinearMethod",
-    "QQQLinearMethod",
     "GPTQMarlin24LinearMethod",
     "TPUInt8LinearMethod",
     "GPTQLinearMethod",
@@ -199,11 +199,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if current_platform.is_cpu() and envs.VLLM_CPU_SGL_KERNEL:
+            from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
             N, K = layer.weight.size()
             dtype = layer.weight.dtype
-            if (torch._C._cpu._is_amx_tile_supported()
-                    and dtype == torch.bfloat16 and N % 32 == 0
-                    and K % 32 == 0):
+            if check_cpu_sgl_kernel(N, K, dtype):
                 packed_weight = torch.ops._C.convert_weight_packed(
                     layer.weight)
                 assert packed_weight.size() == layer.weight.size()
@@ -215,7 +214,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
             else:
                 logger.warning(
                     "CPU SGL kernels require Intel AMX support,"
-                    " bfloat16 weight, IC and OC are divisible by 32.")
+                    " bf16/fp16/int8 weight, IC and OC are divisible by "
+                    "32 and 16.")
                 layer.use_cpu_sgl = False
 
     def apply(self,
@@ -226,7 +226,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         return dispatch_unquantized_gemm()(layer, x, layer.weight, bias)
 
 
-class LinearBase(torch.nn.Module):
+class LinearBase(CustomOp):
     """Base linear layer.
 
     Args:
@@ -269,12 +269,8 @@ class LinearBase(torch.nn.Module):
                                                               prefix=prefix)
         self.return_bias = return_bias
 
-    def forward(
-        self, x: torch.Tensor
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        raise NotImplementedError
 
-
+@CustomOp.register("replicated_linear")
 class ReplicatedLinear(LinearBase):
     """Replicated linear layer.
 
@@ -440,9 +436,10 @@ class MergedReplicatedLinear(ReplicatedLinear):
             shard_offset = sum(self.output_sizes[:loaded_shard_id])
             shard_size = self.output_sizes[loaded_shard_id]
 
-        param[shard_offset:shard_offset + shard_size] = loaded_weight
+        param.data[shard_offset:shard_offset + shard_size] = loaded_weight
 
 
+@CustomOp.register("column_parallel_linear")
 class ColumnParallelLinear(LinearBase):
     """Linear layer with column parallelism.
 
@@ -694,8 +691,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
-        # Special case for AQLM codebooks.
-        is_metadata = getattr(param, "is_metadata", False)
         # Special case for per-tensor scale to load scalar into fused array.
         needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
 
@@ -783,13 +778,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             if not is_sharded_weight:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                      shard_size)
-        # Special case for AQLM codebooks.
-        elif is_metadata:
-            # metadata indicates fixed size concatenated along dim 0
-            shard_size = loaded_weight.shape[0]
-            shard_offset = loaded_shard_id * shard_size
-            param_data = param_data.narrow(0, shard_offset, shard_size)
-
         # Special case for per-tensor scales in fused case.
         elif needs_scalar_to_array:
             param_data, loaded_weight = adjust_scalar_to_fused_array(
@@ -1083,8 +1071,6 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
-        # Special case for AQLM codebooks.
-        is_metadata = getattr(param, "is_metadata", False)
 
         # Special case for per-tensor scales in fused case.
         needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
@@ -1206,13 +1192,6 @@ class QKVParallelLinear(ColumnParallelLinear):
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx,
                                                      shard_size)
 
-        # Special case for for AQLM codebooks.
-        elif is_metadata:
-            # metadata indicates fixed size concatenated along dim 0
-            shard_size = loaded_weight.shape[0]
-            shard_index = ["q", "k", "v"].index(loaded_shard_id)
-            param_data = param_data.narrow(0, shard_index * shard_size,
-                                           shard_size)
         # Special case for per-tensor scales in fused case.
         elif needs_scalar_to_array:
             param_data, loaded_weight = adjust_scalar_to_fused_array(
@@ -1229,6 +1208,7 @@ class QKVParallelLinear(ColumnParallelLinear):
         param_data.copy_(loaded_weight)
 
 
+@CustomOp.register("row_parallel_linear")
 class RowParallelLinear(LinearBase):
     """Linear layer with row parallelism.
 
@@ -1405,6 +1385,7 @@ class RowParallelLinear(LinearBase):
         return s
 
 
+@CustomOp.register("qkv_cross_parallel_linear")
 class QKVCrossParallelLinear(LinearBase):
     """Linear layers for efficient cross-attention's QKV transformation.
 
