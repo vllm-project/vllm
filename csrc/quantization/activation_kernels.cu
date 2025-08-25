@@ -193,34 +193,41 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   auto s_ptr = reinterpret_cast<void*>(s_buff + tid);
 
   const Idx_t n_tokens = s_count;
+
+  Idx_t t_load = 0;
+  auto load_and_advance_y_pred = [&]() {
+    if (t_load < n_tokens) {
+      if (tid < 64) {
+        cp_async1(s_ptr, reinterpret_cast<const void*>(gate_ptr));
+        gate_ptr += stride_i_t_half;
+      } else {
+        cp_async1(s_ptr, reinterpret_cast<const void*>(up_ptr));
+        up_ptr += stride_i_t_half;
+      }
+      t_load++;
+    }
+    cp_async_fence();
+  };
+
+  load_and_advance_y_pred();
+
+  auto s_gate_ptr = reinterpret_cast<__nv_bfloat16*>(s_buff) + tid;
+  auto s_up_ptr = reinterpret_cast<__nv_bfloat16*>(s_buff) + GROUP_SIZE + tid;
+
   for (Idx_t t = 0; t < n_tokens; ++t) {
     float gate, upv, y = -std::numeric_limits<float>::max();
 
-    if (tid < 64) {
-      cp_async1(s_ptr, reinterpret_cast<const void*>(gate_ptr));
-      gate_ptr += stride_i_t_half;
-    }
-
-    cp_async_fence();
-
-    if (tid >= 64) {
-      cp_async1(s_ptr, reinterpret_cast<const void*>(up_ptr));
-      up_ptr += stride_i_t_half;
-    }
-
-    cp_async_fence();
-
-    cp_async_wait<1>();
-    __syncthreads();
-    gate = __bfloat162float(reinterpret_cast<__nv_bfloat16*>(s_buff)[tid]);
-    gate = silu(gate);
-
     cp_async_wait<0>();
     __syncthreads();
-    upv = __bfloat162float(
-        reinterpret_cast<__nv_bfloat16*>(s_buff)[GROUP_SIZE + tid]);
 
+    gate = __bfloat162float(*s_gate_ptr);
+    gate = silu(gate);
+    upv = __bfloat162float(*s_up_ptr);
     y = gate * upv;
+
+    __syncthreads();
+
+    load_and_advance_y_pred();
 
     float v = fabsf(y);
     v = warp_max(v);

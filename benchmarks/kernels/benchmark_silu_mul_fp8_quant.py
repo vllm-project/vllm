@@ -65,6 +65,7 @@ configs = [
     (256, 1024, 7168),
 ]
 
+
 print(f"GPU: {torch.cuda.get_device_name()}")
 print(f"{'Config':<20} {'Time(ms)':<10} {'GFLOPS':<10} {'GB/s':<10}")
 print("-" * 50)
