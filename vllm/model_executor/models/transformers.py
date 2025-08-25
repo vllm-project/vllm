@@ -30,6 +30,7 @@ from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, VllmConfig)
+from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
@@ -679,13 +680,14 @@ class TransformersMoEBase(TransformersBase):
 
         text_config = self.text_config
 
-        # TODO: Remove once https://github.com/huggingface/transformers/pull/40156
-        # is released. Attribute mapping will allow us to simply read
-        # text_config.num_experts
+        # Positional arguments
         num_experts = self.model_config.get_num_experts()
         top_k = text_config.num_experts_per_token
         hidden_size = text_config.hidden_size
-        intermediate_size = 768  # TODO: set this properly
+        names = ["moe_intermediate_size", "intermediate_size"]
+        intermediate_size = getattr_iter(text_config, names, None)
+
+        # Reduction kwargs
         reduce_results = getattr(text_config, "num_experts_shared", 0) == 0
         renormalize = getattr(text_config, "norm_topk_prob", top_k > 1)
 
