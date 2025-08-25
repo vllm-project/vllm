@@ -6,7 +6,7 @@ import copy
 import pickle
 from contextlib import contextmanager, suppress
 from typing import (Any, AsyncGenerator, Dict, Iterable, Iterator, List,
-                    Mapping, Optional, Union, cast)
+                    Mapping, Optional, Union)
 
 import cloudpickle
 import psutil
@@ -450,7 +450,7 @@ class MQLLMEngineClient(EngineClient):
     def dead_error(self) -> BaseException:
         return ENGINE_DEAD_ERROR(self._errored_with)
 
-    async def generate(
+    def generate(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
@@ -477,12 +477,10 @@ class MQLLMEngineClient(EngineClient):
                 Any priority other than 0 will lead to an error if the
                 scheduling policy is not "priority".
         """
-        return cast(
-            AsyncGenerator[RequestOutput, None],
-            self._process_request(prompt, sampling_params, request_id,
-                                  lora_request, trace_headers, priority))
+        return self._process_request(prompt, sampling_params, request_id,
+                                     lora_request, trace_headers, priority)
 
-    async def encode(
+    def encode(
         self,
         prompt: PromptType,
         pooling_params: PoolingParams,
@@ -621,7 +619,7 @@ class MQLLMEngineClient(EngineClient):
             raise request_output
         return request_output.is_sleeping
 
-    async def add_lora(self, lora_request: LoRARequest) -> None:
+    async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
         # Uses the same I/O as generate requests
         request = RPCLoadAdapterRequest(lora_request)

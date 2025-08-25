@@ -902,7 +902,7 @@ class AsyncLLMEngine(EngineClient):
             await self.abort(request_id)
             raise
 
-    async def encode(
+    def encode(
         self,
         prompt: PromptType,
         pooling_params: PoolingParams,
@@ -1021,8 +1021,8 @@ class AsyncLLMEngine(EngineClient):
     async def is_sleeping(self) -> bool:
         return self.engine.is_sleeping()
 
-    async def add_lora(self, lora_request: LoRARequest) -> None:
-        self.engine.add_lora(lora_request)
+    async def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.engine.add_lora(lora_request)
 
     async def collective_rpc(self,
                              method: str,
