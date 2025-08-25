@@ -151,8 +151,8 @@ def test_schedule_request_multi_images_respect_space_limit():
 
     num_tokens_to_schedule = 0
     assert manager.can_allocate(req, 0, compute_budget, num_tokens_to_schedule)
-    num_tokens_to_schedule += req._token_counts[0]
-    compute_budget -= req._token_counts[0]
+    num_tokens_to_schedule += req.get_num_encoder_tokens(0)
+    compute_budget -= req.get_num_encoder_tokens(0)
 
     assert not manager.can_allocate(req, 1, compute_budget,
                                     num_tokens_to_schedule)
@@ -164,8 +164,8 @@ def test_schedule_request_multi_images_respect_compute_limit():
     compute_budget = 10
     num_tokens_to_schedule = 0
     assert manager.can_allocate(req, 0, compute_budget, num_tokens_to_schedule)
-    num_tokens_to_schedule += req._token_counts[0]
-    compute_budget -= req._token_counts[0]
+    num_tokens_to_schedule += req.get_num_encoder_tokens(0)
+    compute_budget -= req.get_num_encoder_tokens(0)
 
     assert not manager.can_allocate(req, 1, compute_budget,
                                     num_tokens_to_schedule)
