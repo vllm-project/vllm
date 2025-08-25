@@ -99,10 +99,18 @@ class vLLMCommBackend(CommBackend):
         print(f"hereallgather:{self._group}")
         gathered = self._group.all_gather(tensor)
         return gathered.cpu().tolist()#.cpu().tolist()
+
     
     def allgather_bytes(self, data: bytes):
+        # return torch.distributed.broadcast_object_list(
+        result = [data] * self.Get_size()
+        torch.distributed.all_gather_object(result, data)
+        # print(result)
+        return result
         # Step 1: Convert bytes to tensor
-        local_tensor = torch.ByteTensor(list(data)).unsqueeze(0).to("cuda")  # or "cpu"
+        device_id = torch.cuda.current_device()
+        device_str = f"cuda:{device_id}"
+        local_tensor = torch.ByteTensor(list(data)).unsqueeze(0).to(device_str)  # or "cpu"
 
         # # Step 2: Gather sizes of each data chunk from all ranks
         # local_size = torch.IntTensor([len(local_tensor)]).to("cuda")
@@ -127,6 +135,7 @@ class vLLMCommBackend(CommBackend):
         gathered = self._group.all_gather(local_tensor, dim=0)
         print(f"what is gathered:{gathered}")
         result = [bytes(gathered[i].cpu().tolist()) for i in range(self.Get_size())]
+        # result = [i.to(device_str) for i in result]
         # result = gathered.tolist()
         # print(f"after to list:{result}")
         # result = [bytes(i[0]) for i in result]

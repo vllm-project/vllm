@@ -24,8 +24,10 @@ def get_global_num_tokens_cpu():
 def get_local_sizes():
     return get_forward_context().dp_metadata.get_chunk_sizes_across_dp_rank()
 
-enable_flashinfer_fp4_allgather = False
-enable_flashinfer_alltoall = True
+all2all=True
+enable_flashinfer_alltoall = all2all 
+enable_flashinfer_fp4_allgather = not enable_flashinfer_alltoall
+
 assert enable_flashinfer_fp4_allgather + enable_flashinfer_alltoall == 1
 class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
@@ -40,6 +42,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.use_dp = use_dp
         self.a1_gscale = a1_gscale
         self.local_tokens = None
+        self.alltoall_info = None
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -98,7 +101,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 # TODO(shuw): need to consider chunking for global_num_tokens_cpu
                 all2all_manager = get_ep_group().device_communicator.all2all_manager
                 # print(f"in prepare before all2all, a1:{a1.shape}, topk_ids:{topk_ids.shape}, topk_ids:{topk_ids} and global_num_tokens_cpu:{global_num_tokens_cpu}")
-                a1, topk_ids, topk_weights = all2all_manager.dispatch(
+                a1, topk_ids, topk_weights, alltoall_info = all2all_manager.dispatch(
                     get_dp_group().device_communicator,
                     global_num_tokens_cpu,
                     a1,
@@ -109,6 +112,8 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                     # self.ep_rank,
                     # self.ep_size,
                 )
+       
+                self.alltoall_info = alltoall_info
 
                 # print(f"in prepare after all2all, a1:{a1.shape}; num_experts:{num_experts}, topk_ids:{topk_ids.shape}")
             
@@ -118,7 +123,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 quant_config.quant_dtype,
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
-                is_fp4_scale_swizzled=not self.use_dp  # delay swizzle to after comm
+                is_fp4_scale_swizzled=not self.use_dp or enable_flashinfer_alltoall  # delay swizzle to after comm
             )
 
             if enable_flashinfer_fp4_allgather:
@@ -151,16 +156,18 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 # token_count = fused_expert_output.shape[0]
                 token_count = output.shape[0]
                 # print(f"before combine fused_expert_output:{fused_expert_output.shape} and token_count:{token_count}")
-                output_local = all2all_manager.flashinfer_alltoall_combine(
+                fused_expert_output = all2all_manager.flashinfer_alltoall_combine(
                     fused_expert_output,
                     # TODO(shuw): need to consider chunking for global_num_tokens_cpu
                     # ep_rank=self.ep_rank,
                     # ep_size=self.ep_size,
                     top_k=top_k,
                     token_count=token_count,
+                    alltoall_info=self.alltoall_info,
                 )
                 # print(f"after combine output:{output.shape}; fused_expert_output:{fused_expert_output.shape}")
-                output.copy_(output_local)
+                # local_output = fused_expert_output[:token_count]
+                output.copy_(fused_expert_output)
         else:
             output.copy_(fused_expert_output)
         # output.copy_(fused_expert_output[:output.shape[0]])

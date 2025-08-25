@@ -333,6 +333,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
         self.dp_config = get_vllm_mnnvl_config()
         
         self.workspace_tensor = MnnvlMoe.get_moe_workspaces(self.mapping, self.dp_config)
+        self.prepare_workspace_tensor = MnnvlMoe.get_moe_prepare_workspace(self.mapping, self.dp_config)
 
         self.world_size = world_size
         self.rank = rank
@@ -350,16 +351,46 @@ class FlashInferAllToAllManager(All2AllManagerBase):
 
     def cleanup(self):
         """Clean up workspace"""
-        if self.initialized and self.workspace_tensor is not None:
+        if self.initialized and self.workspace_tensor is not None and self.prepare_workspace_tensor is not None:
             try:
                 del self.workspace_tensor
             except Exception as e:
                 logger.warning(f"Failed to cleanup FlashInfer workspace: {e}")
             finally:
                 self.workspace_tensor = None
+                self.prepare_workspace_tensor = None
                 self.mapping = None
                 self.initialized = False
     
+    # def dispatch(
+    #     self,
+    #     global_num_tokens_cpu: list[int],
+    #     x: torch.Tensor,
+    #     topk_ids: torch.Tensor,
+    #     topk_weights: torch.Tensor,
+    #     top_k: int,
+    #     num_experts: int,
+    # ):
+    #     # assert (
+    #     #     ensure_alltoall_workspace_initialized()
+    #     # ), "FlashInfer AllToAll workspace not available"
+    #     ep_rank = self.rank
+    #     ep_size = self.world_size
+    #     max_num_token = max(global_num_tokens_cpu
+    #                         ) if global_num_tokens_cpu is not None else x.shape[0]
+    #     assert self.prepare_workspace_tensor is not None, "alltoall_prepare_workspace should be initialized"
+    
+    #     alltoall_info, topk_ids, topk_weights, _ = MnnvlMoe.mnnvl_moe_alltoallv_prepare_without_allgather(
+    #         expert_ids=topk_ids, scales=topk_weights, expert_statics=None, workspace=self.prepare_workspace_tensor,
+    #         max_token_count_per_rank=max_num_token, ep_rank=ep_rank, ep_size=ep_size, expert_count=num_experts,
+    #         slot_count=num_experts, top_k=top_k)
+    #     # self.alltoall_info = alltoall_info
+    #     x = MnnvlMoe.mnnvl_moe_alltoallv(
+    #         x, alltoall_info, self.workspace_tensor, ep_rank, ep_size)
+    #     # print(f"inside: after: {x.shape}")
+    #     return x, topk_ids, topk_weights, alltoall_info
+
+
     def dispatch(
         self,
         comm,
@@ -371,7 +402,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
         num_experts: int,
         # ep_rank: int,
         # ep_size: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, MoEAlltoallInfo]:
         # TODO(shuw): add later
         # assert (
         #     ensure_alltoall_workspace_initialized()
@@ -412,12 +443,12 @@ class FlashInferAllToAllManager(All2AllManagerBase):
                 ep_rank,
                 ep_size,
             ))
-        self.alltoall_info = alltoall_info
+        # self.alltoall_info = alltoall_info
         # print(f"inside: before: {x.shape}, rank:{ep_rank}, max_num_token:{max_num_token}")
         x = MnnvlMoe.mnnvl_moe_alltoallv(
             x, alltoall_info, self.workspace_tensor, ep_rank, ep_size)
         # print(f"inside: after: {x.shape}")
-        return x, topk_ids, topk_weights
+        return x, topk_ids, topk_weights, alltoall_info
 
     def flashinfer_alltoall_combine(
         self,
@@ -426,6 +457,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
         # ep_rank: int,
         # ep_size: int,
         token_count: int,
+        alltoall_info,
     ):
         # TODO(shuw): add later
         # assert (
@@ -435,7 +467,7 @@ class FlashInferAllToAllManager(All2AllManagerBase):
         ep_size = self.world_size
         return MnnvlMoe.mnnvl_moe_alltoallv_combine(
             output,
-            self.alltoall_info,
+            alltoall_info,
             self.workspace_tensor,
             ep_rank=ep_rank,
             ep_size=ep_size,
