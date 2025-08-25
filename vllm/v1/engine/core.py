@@ -310,13 +310,16 @@ class EngineCore:
                         break
                     logger.info(
                         "[EAGLE3 dbg] engine take_draft head=%s lens=%s",  # noqa: G004
-                        head, [len(x) for x in draft_token_ids.draft_token_ids])
+                        head,
+                        [len(x) for x in draft_token_ids.draft_token_ids])
                 except Exception:
                     pass
                 self.scheduler.update_draft_token_ids(draft_token_ids)
         else:
-            print(f"normal post step called!!!")
-        print(f"split line II ========================================================")
+            print("normal post step called!!!")
+        print(
+            "split line II ========================================================"
+        )
 
     def step_with_batch_queue(
             self) -> tuple[Optional[dict[int, EngineCoreOutputs]], bool]:

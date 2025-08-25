@@ -21,9 +21,8 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.flashinfer import FlashInferMetadata, FlashInferMetadataBuilder
-from vllm.v1.attention.backends.rocm_aiter_fa import (
-    AiterFlashAttentionMetadata)
+from vllm.v1.attention.backends.flashinfer import (FlashInferMetadata,
+                                                   FlashInferMetadataBuilder)
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
@@ -122,7 +121,8 @@ class EagleProposer:
             self.allowed_attn_types = tuple(rocm_types)
         else:
             self.allowed_attn_types = (FlashAttentionMetadata,
-                                       TreeAttentionMetadata, FlashInferMetadata)
+                                       TreeAttentionMetadata,
+                                       FlashInferMetadata)
 
         # Parse the speculative token tree.
         spec_token_tree = self.speculative_config.speculative_token_tree
@@ -188,8 +188,7 @@ class EagleProposer:
         new_common = None
         # For FlashInfer first pass, reorder to decode-first contiguous layout
         # so that prefill slice matches num_prefill_tokens.
-        if isinstance(builder,
-                      FlashInferMetadataBuilder):
+        if isinstance(builder, FlashInferMetadataBuilder):
             qsl_cpu = common_attn_metadata.query_start_loc_cpu
             query_lens_cpu = qsl_cpu[1:] - qsl_cpu[:-1]
             decode_req_idxs = torch.nonzero(query_lens_cpu <= 1,
@@ -212,20 +211,21 @@ class EagleProposer:
                 if token_indices:
                     token_perm_cpu = torch.cat(token_indices, dim=0)
                 else:
-                    token_perm_cpu = torch.arange(0,
-                                                  common_attn_metadata.
-                                                  num_actual_tokens,
-                                                  dtype=torch.int64)
+                    token_perm_cpu = torch.arange(
+                        0,
+                        common_attn_metadata.num_actual_tokens,
+                        dtype=torch.int64)
 
                 # Build reordered CommonAttentionMetadata
                 reordered_query_lens = query_lens_cpu[req_order]
                 new_qsl_cpu = torch.zeros_like(qsl_cpu)
                 new_qsl_cpu[1:] = torch.cumsum(reordered_query_lens,
-                                               dim=0, dtype=qsl_cpu.dtype)
+                                               dim=0,
+                                               dtype=qsl_cpu.dtype)
                 new_max_q_len = int(reordered_query_lens.max().item())
                 new_seq_lens = common_attn_metadata.seq_lens[req_order].to(
-                        device=common_attn_metadata.seq_lens.device,
-                        non_blocking=True)
+                    device=common_attn_metadata.seq_lens.device,
+                    non_blocking=True)
                 new_max_seq_len = int(new_seq_lens.max().item())
                 new_common = CommonAttentionMetadata(
                     query_start_loc=new_qsl_cpu.to(
@@ -258,8 +258,7 @@ class EagleProposer:
                 # view, then set last tokens per reordered request
                 permuted_input_ids = self.input_ids[:num_tokens][token_perm]
                 last_token_indices = (new_common.query_start_loc[1:].to(
-                    device=target_positions.device,
-                    dtype=torch.int64) - 1)
+                    device=target_positions.device, dtype=torch.int64) - 1)
                 next_token_ids_reordered = next_token_ids[req_order.to(
                     device=next_token_ids.device)]
                 permuted_input_ids[last_token_indices] = (
@@ -268,10 +267,9 @@ class EagleProposer:
 
         # Build attention metadata once, using reordered metadata if created
         attn_metadata = builder.build_for_drafting(
-            common_attn_metadata=new_common if new_common is not None
-            else common_attn_metadata,
+            common_attn_metadata=new_common
+            if new_common is not None else common_attn_metadata,
             draft_index=0)
-
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -296,7 +294,7 @@ class EagleProposer:
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
             input_ids = None
         else:
-            inputs_embeds = None
+            # inputs_embeds = None
             input_ids = self.input_ids[:num_input_tokens]
 
         with set_forward_context(per_layer_attn_metadata,
@@ -363,7 +361,7 @@ class EagleProposer:
             block_table_tensor = getattr(attn_metadata, 'block_table_tensor',
                                          None)
             if block_table_tensor is None:
-                block_table_tensor = getattr(attn_metadata, 'block_table')
+                block_table_tensor = attn_metadata.block_table
 
             new_common = CommonAttentionMetadata(
                 query_start_loc=qsl_gpu,
@@ -455,12 +453,6 @@ class EagleProposer:
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size],
                                                None)
-            try:
-                logger.info(
-                    "[EAGLE3 dbg] k-loop step logits=%s",  # noqa: G004
-                    tuple(logits.shape))
-            except Exception:
-                pass
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
 
@@ -470,7 +462,8 @@ class EagleProposer:
             head = draft_token_ids[0, :min(8, draft_token_ids.shape[1])]
             logger.info(
                 "[EAGLE3 dbg] proposed draft ids (req0) head=%s shape=%s",  # noqa: G004
-                head.tolist(), tuple(draft_token_ids.shape))
+                head.tolist(),
+                tuple(draft_token_ids.shape))
         except Exception:
             pass
         return draft_token_ids
@@ -779,18 +772,15 @@ class EagleProposer:
                 "The EAGLE head's vocab embedding will be loaded separately"
                 " from the target model.")
 
-        if (get_pp_group().world_size == 1 and
-                self.model.lm_head.weight.shape ==
-                target_language_model.lm_head.weight.shape):
+        if (get_pp_group().world_size == 1 and self.model.lm_head.weight.shape
+                == target_language_model.lm_head.weight.shape):
             logger.info("Assuming the EAGLE head shares the same lm_head"
                         " with the target model.")
             del self.model.lm_head
             self.model.lm_head = target_language_model.lm_head
         else:
-            logger.info(
-                "The EAGLE head's lm_head will be loaded separately"
-                " from the target model.")
-            
+            logger.info("The EAGLE head's lm_head will be loaded separately"
+                        " from the target model.")
 
     @torch.inference_mode()
     def dummy_run(

@@ -1070,10 +1070,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         bonus_logits_indices = torch.from_numpy(bonus_logits_indices).to(
             self.device, non_blocking=True)
 
+<<<<<<< HEAD
         # Compute the draft token ids.
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
         draft_token_ids = self.input_ids.gpu[logits_indices]
         draft_token_ids = draft_token_ids[target_logits_indices + 1]
+=======
+        # Prefer scheduled drafts to derive draft_token_ids for alignment
+        flat_draft_ids: list[int] = []
+        for rid in self.input_batch.req_ids:
+            flat_draft_ids.extend(scheduled_spec_decode_tokens.get(rid, []))
+        expected_num = int(num_draft_tokens.sum())
+        if len(flat_draft_ids) == expected_num and expected_num > 0:
+            draft_token_ids = torch.tensor(flat_draft_ids,
+                                           dtype=torch.int32,
+                                           device=self.device)
+        else:
+            draft_token_ids = self.input_ids[logits_indices]
+            draft_token_ids = draft_token_ids[target_logits_indices + 1]
+>>>>>>> 28953465f (fix format)
 
         metadata = SpecDecodeMetadata(
             draft_token_ids=draft_token_ids,
@@ -1667,7 +1682,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     _targ_argmax = _targ.argmax(dim=-1)
                     logger.info(
                         "[EAGLE3 dbg] target_logits check: n=%s, draft_ids=%s, targ_argmax=%s, targ_shape=%s",  # noqa: G004
-                        int(_n), _draft_ids.tolist(), _targ_argmax.tolist(),
+                        int(_n),
+                        _draft_ids.tolist(),
+                        _targ_argmax.tolist(),
                         tuple(target_logits.shape))
             except Exception:
                 pass
@@ -1678,14 +1695,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 bonus_token_ids,
                 sampling_metadata,
             )
-            try:
-                logger.info(
-                    "[EAGLE3 dbg] rejection out row0=%s bonus_head=%s",  # noqa: G004
-                    output_token_ids[0].tolist() if output_token_ids.size(0) > 0 else [],
-                    bonus_token_ids[:1].tolist(),
-                )
-            except Exception:
-                pass
             sampler_output.sampled_token_ids = output_token_ids
 
         num_nans_in_logits = {}
@@ -1735,9 +1744,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch.vocab_size,
             )
             logger.info(
-                    "[EAGLE3 dbg] rejection sampler parsed out=%s",  # noqa: G004
-                    valid_sampled_token_ids[0]
-                )
+                "[EAGLE3 dbg] rejection sampler parsed out=%s",  # noqa: G004
+                valid_sampled_token_ids[0])
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
@@ -1769,7 +1777,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             try:
                 logger.info(
                     "[EAGLE3 dbg] append req=%s tokens=%s",  # noqa: G004
-                    req_id, sampled_ids[:8])
+                    req_id,
+                    sampled_ids[:8])
             except Exception:
                 pass
 
@@ -1786,8 +1795,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 spec_decode_common_attn_metadata,
             )
         self.eplb_step()
-        logger.info( "[EAGLE3 dbg] draft token ids: %s", self._draft_token_ids)
-        print(f"========================================================")
+        logger.info("[EAGLE3 dbg] draft token ids: %s", self._draft_token_ids)
+        print("========================================================")
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
