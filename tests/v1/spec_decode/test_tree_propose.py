@@ -35,8 +35,10 @@ def create_mock_vllm_config(uses_mrope=True):
     config.speculative_config = Mock()
     config.speculative_config.num_speculative_tokens = 3
     config.speculative_config.method = "eagle"
-    # Tree: root + 2 children + 2 grandchildren = 5 nodes, num_drafts_per_level=[1,2,2]
-    config.speculative_config.speculative_token_tree = "[(0,), (0, 0), (0, 1), (0, 0, 0), (0, 1, 0)]"
+    # Tree: root + 2 children + 2 grandchildren = 5 nodes
+    # num_drafts_per_level=[1,2,2]
+    config.speculative_config.speculative_token_tree = \
+        "[(0,), (0, 0), (0, 1), (0, 0, 0), (0, 1, 0)]"
 
     # Draft model config
     draft_model_config = Mock()
@@ -63,7 +65,8 @@ class MockAttentionGroup:
         self.call_count = 0
 
     def create_mock_metadata(self, common_attn_metadata, draft_index):
-        # Use the query_len encoded in common_attn_metadata to make num_actual_tokens consistent
+        # Use the query_len encoded in common_attn_metadata 
+        # to make num_actual_tokens consistent
         num_tokens = common_attn_metadata.num_actual_tokens
         mock_attn_metadata = Mock()
         mock_attn_metadata.num_actual_tokens = int(num_tokens)
@@ -140,13 +143,15 @@ class TestEagleProposerTreeMRoPE:
         config = create_mock_vllm_config(uses_mrope=True)
         runner = create_runner(batch_size, self.device)
 
-        # Use normal constructor so __init__ sets everything (arange, tree_draft_pos_offsets, buffers)
+        # Use normal constructor so __init__ sets everything
+        # (arange, tree_draft_pos_offsets, buffers)
         proposer = EagleProposer(config, self.device, runner)
         proposer.attn_layer_names = ["layer1", "layer2"]  # minimal requirement
 
         # Mock model
         mock_model = Mock()
-        # Return shapes must match num_input_tokens; we won't rely on exact sizes here because we slice [:num_tokens]
+        # Return shapes must match num_input_tokens
+        # we won't rely on exact sizes here because we slice [:num_tokens]
         mock_model.return_value = (
             torch.randn(batch_size * 4,
                         proposer.hidden_size,

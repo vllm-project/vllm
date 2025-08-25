@@ -293,11 +293,13 @@ class EagleProposer:
             if self.uses_mrope:
                 positions += 1
                 # NOTE(woosuk): We should handle the case where the draft model
-                # generates tokens beyond the max model length. Since it is complex
-                # to remove such requests from the batch, we keep them in the batch
-                # but adjust the position ids and slot mappings to avoid the
-                # out-of-range access during the model execution. The draft tokens
-                # generated with this adjustment should be ignored.
+                # generates tokens beyond the max model length.
+                # Since it is complex to remove such requests from the batch,
+                # we keep them in the batch but adjust the position ids 
+                # and slot mappings to avoid the
+                # out-of-range access during the model execution.
+                # The draft tokens generated with this adjustment
+                # should be ignored.
                 exceeds_max_model_len = positions[0] >= self.max_model_len
                 # Mask out the position ids that exceed the max model length.
                 # Otherwise, we may get out-of-range error in RoPE.
