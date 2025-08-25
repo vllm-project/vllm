@@ -176,10 +176,10 @@ class HarmonyContext(ConversationContext):
     async def init_tool_sessions(self, tool_server: Optional[ToolServer],
                                  exit_stack: AsyncExitStack) -> None:
         if tool_server:
-            for tool_name, session in self.available_tools.items():
+            for tool_name in self.available_tools:
                 self._tool_sessions[
                     tool_name] = await exit_stack.enter_async_context(
-                        tool_server.new_session(session))
+                        tool_server.new_session(tool_name))
 
 
 class StreamingHarmonyContext(HarmonyContext):
