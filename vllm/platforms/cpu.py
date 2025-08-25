@@ -335,3 +335,33 @@ class CpuPlatform(Platform):
         return (cls.supports_v1(model_config)
                 and arch in (CpuArchEnum.X86, CpuArchEnum.POWERPC,
                              CpuArchEnum.ARM, CpuArchEnum.S390X))
+
+    @classmethod
+    def empty_cache(cls):
+        pass
+
+    @classmethod
+    def reset_peak_memory_stats(cls):
+        pass
+
+    @classmethod
+    def mem_get_info(cls):
+        # FIXME: impl
+        # Returning (0, 0) as a placeholder for (free, total) memory.
+        return (0, 0)
+
+    @classmethod
+    def memory_stats(cls):
+        # FIXME: impl
+        # Returning an empty dict as a placeholder for memory stats.
+        return {}
+
+    @classmethod
+    def memory_reserved(cls):
+        # FIXME: impl
+        # Returning 0 as a placeholder for reserved memory.
+        return 0
+
+    @classmethod
+    def synchronize(cls):
+        pass

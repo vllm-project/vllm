@@ -330,7 +330,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 and (weight.stride(-2) * weight.element_size()) % 512 == 0):
             num_pad = 256 // weight.element_size()
             weight = F.pad(weight, (0, num_pad), "constant", 0)[..., :-num_pad]
-            torch.cuda.empty_cache()
+            current_platform.empty_cache()
         return weight
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

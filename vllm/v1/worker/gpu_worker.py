@@ -97,7 +97,7 @@ class Worker(WorkerBase):
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
-        free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
+        free_bytes_before_sleep = current_platform.mem_get_info()[0]
 
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -109,7 +109,7 @@ class Worker(WorkerBase):
 
         allocator = CuMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
-        free_bytes_after_sleep, total = torch.cuda.mem_get_info()
+        free_bytes_after_sleep, total = current_platform.mem_get_info()
         freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
@@ -164,12 +164,13 @@ class Worker(WorkerBase):
 
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-            self.device = torch.device(f"cuda:{self.local_rank}")
+            self.device = torch.device(
+                f"{current_platform.device_name}:{self.local_rank}")
             current_platform.set_device(self.device)
 
             _check_if_gpu_supports_dtype(self.model_config.dtype)
             gc.collect()
-            torch.cuda.empty_cache()
+            current_platform.empty_cache()
 
             # take current memory snapshot
             self.init_snapshot = MemorySnapshot()
@@ -231,8 +232,8 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
+        current_platform.empty_cache()
+        current_platform.reset_peak_memory_stats()
         GiB = lambda b: b / GiB_bytes
 
         # Execute a forward pass with dummy inputs to profile the memory usage
@@ -317,7 +318,7 @@ class Worker(WorkerBase):
         # sampling related tensors of max possible shape to avoid memory
         # fragmentation issue.
         # NOTE: This is called after `capture_model` on purpose to prevent
-        # memory buffers from being cleared by `torch.cuda.empty_cache`.
+        # memory buffers from being cleared by `current_platform.empty_cache`.
         if get_pp_group().is_last_rank:
             max_num_reqs = min(self.scheduler_config.max_num_seqs,
                                self.scheduler_config.max_num_batched_tokens)
