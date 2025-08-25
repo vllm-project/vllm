@@ -2148,6 +2148,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         kv_connector_output = None
         if ubatch_slices is not None:
             num_input_tokens = num_input_tokens // 2
+        # logger.debug(f"NUM TOKENS FOR BATCH {num_input_tokens}")
         with set_forward_context(attn_metadata,
                                     vllm_config=self.vllm_config,
                                     num_tokens=num_input_tokens or 1,
@@ -2609,7 +2610,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                           self.vllm_config,
                                           runtime_mode=CUDAGraphMode.FULL)
         elif self.parallel_config.enable_microbatching:
-            self.model = UBatchWrapper(self.model, self.vllm_config, self.device)
+            if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+                self.model = UBatchWrapper(self.model, self.vllm_config, CUDAGraphMode.FULL, self.device)
+            else:
+                self.model = UBatchWrapper(self.model, self.vllm_config, CUDAGraphMode.NONE, self.device)
+
 
     def reload_weights(self) -> None:
         assert getattr(self, "model", None) is not None, \
@@ -3350,10 +3355,27 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "decode" if uniform_decode else "mixed prefill-decode",
                     cudagraph_runtime_mode.name))
         enable_microbatching = self.parallel_config.enable_microbatching
-        if enable_microbatching:
-            assert cudagraph_runtime_mode is CUDAGraphMode.FULL
-            assert uniform_decode is True
         # We skip EPLB here since we don't want to record dummy metrics
+        if enable_microbatching and uniform_decode:
+            for num_tokens in compilation_cases:
+                if num_tokens < self.parallel_config.microbatching_token_threshold:
+                    logger.debug(f"{num_tokens} IS OVER THE THRESHOLD FOR GRAPH CAPTURE {self.parallel_config.microbatching_token_threshold}")
+                    continue
+                for _ in range(self.compilation_config.cudagraph_num_of_warmups):
+                    force_attention = (
+                        cudagraph_runtime_mode == CUDAGraphMode.FULL)
+                    self._dummy_run(num_tokens,
+                                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                                    force_attention=force_attention,
+                                    uniform_decode=True,
+                                    allow_microbatching=True,
+                                    skip_eplb=True)
+                # DBO Only supports running with Full cudagraphs with uniform decode lengths
+                self._dummy_run(num_tokens,
+                                cudagraph_runtime_mode=CUDAGraphMode.FULL,
+                                uniform_decode=True,
+                                allow_microbatching=True,
+                                skip_eplb=True)
         for num_tokens in compilation_cases:
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
                 # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
@@ -3367,13 +3389,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                                 force_attention=force_attention,
                                 uniform_decode=uniform_decode,
-                                allow_microbatching=enable_microbatching,
+                                allow_microbatching=False,
                                 skip_eplb=True)
             self._dummy_run(num_tokens,
                             cudagraph_runtime_mode=cudagraph_runtime_mode,
                             uniform_decode=uniform_decode,
-                            allow_microbatching=enable_microbatching,
+                            allow_microbatching=False,
                             skip_eplb=True)
+
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """

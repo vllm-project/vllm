@@ -21,6 +21,7 @@ from vllm.platforms import current_platform
 from vllm.utils import weak_ref_tensors
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 from vllm.sequence import IntermediateTensors
+from vllm.compilation.cuda_graph import CUDAGraphWrapper
 
 
 
@@ -46,6 +47,7 @@ class UBatchWrapper:
     def __init__(self,
                  runnable: Callable,
                  vllm_config: VllmConfig,
+                 runtime_mode: CUDAGraphMode,
                  device: torch.cuda.device):
         self.runnable = runnable
         self.vllm_config = vllm_config
@@ -55,6 +57,11 @@ class UBatchWrapper:
 
         self.cudagraphs = {}
 
+        self.cudagraph_wrapper = None
+        self.graph_pool = None
+        if runtime_mode is not CUDAGraphMode.NONE:
+            self.cudagraph_wrapper = CUDAGraphWrapper(runnable, vllm_config, runtime_mode=runtime_mode)
+            self.graph_pool = current_platform.get_global_graph_pool()
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
     def __getattr__(self, key: str):
@@ -117,7 +124,8 @@ class UBatchWrapper:
                             ubatch_metadata=ubatch_metadata,
                         )
             with torch.cuda.graph(cudagraph_metadata.cudagraph,
-                                  stream=compute_stream):
+                                  stream=compute_stream,
+                                  pool=self.graph_pool):
                 # logger.info("STARTING WAKEUP LOOP")
                 for start_signal in start_signals:
                     start_signal.set()
@@ -234,12 +242,19 @@ class UBatchWrapper:
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
-        # cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
         ubatch_slices = forward_context.ubatch_slices
         # If there's no ubatching, just run the runnable object
         # logger.info(f"GETTING TO THE WRAPPER")
+        # Check the cudagraph_runtime_mode
+        cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
+        # logger.debug(f"IN UBATCH WRAPPER CUDA MODE {cudagraph_runtime_mode} BD: {batch_descriptor} UBATCH SLICES {ubatch_slices}")
         if ubatch_slices is None:
-            return self.runnable(*args, **kwargs)
+            if cudagraph_runtime_mode is CUDAGraphMode.NONE:
+                return self.runnable(*args, **kwargs)
+            else:
+                # logger.info("RUNNING THROUGH THE CUDAGRAPH WRAPPER")
+                assert self.cudagraph_wrapper is not None
+                return self.cudagraph_wrapper(*args, **kwargs)
 
         attn_metadata = forward_context.attn_metadata
         num_tokens = (ubatch_slices[0].token_slice.stop - ubatch_slices[0].token_slice.start) * 2
@@ -255,15 +270,13 @@ class UBatchWrapper:
         assert dp_metadata is not None
         num_tokens_across_dp = dp_metadata._num_tokens_across_dp
 
-        # Check the cudagraph_runtime_mode
-        cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
-        print(f"CUDAGRAPH RUNTIME MODE {cudagraph_runtime_mode}")
+        # print(f"CUDAGRAPH RUNTIME MODE {cudagraph_runtime_mode}")
         # return self._run_ubatches(ubatch_metadata, self.runnable) 
 
 
         if num_tokens not in self.cudagraphs \
             and cudagraph_runtime_mode is CUDAGraphMode.FULL:
-            logger.debug(f"CAPTURING {num_tokens}")
+            # logger.debug(f"CAPTURING {num_tokens}")
             ubatch_metadata = self._make_ubatch_metadata(
                     ubatch_slices=ubatch_slices,
                     attn_metadata=attn_metadata,
@@ -280,11 +293,11 @@ class UBatchWrapper:
         elif num_tokens in self.cudagraphs \
             and cudagraph_runtime_mode is CUDAGraphMode.FULL:
             cudagraph_metadata = self.cudagraphs[num_tokens]
-            logger.debug(f"UBATCH REPLAY {num_tokens}")
+            # logger.debug(f"UBATCH REPLAY {num_tokens}")
             cudagraph_metadata.cudagraph.replay()
             return cudagraph_metadata.outputs
         else:
-            logger.debug(f"RUNNING NORMALLY {num_tokens}")
+            # logger.debug(f"RUNNING NORMALLY {num_tokens}")
             ubatch_metadata = self._make_ubatch_metadata(
                     ubatch_slices=ubatch_slices,
                     attn_metadata=attn_metadata,

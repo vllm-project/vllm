@@ -53,6 +53,7 @@ class PiecewiseBackend:
 
         self.compile_sizes: set[int] = set(
             self.compilation_config.compile_sizes)
+        logger.debug(f"GRAPH COMPILATION SIZES {self.compile_sizes}")
 
         self.first_run_finished = False
 
