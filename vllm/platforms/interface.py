@@ -7,7 +7,7 @@ import random
 import sys
 from datetime import timedelta
 from platform import uname
-from typing import TYPE_CHECKING, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
 
 import numpy as np
 import torch
