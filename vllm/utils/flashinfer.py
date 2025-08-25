@@ -148,33 +148,17 @@ def has_nvidia_artifactory() -> bool:
         return False
 
 
-def use_trtllm_attention(
-    num_tokens: int,
-    max_seq_len: int,
-    kv_cache_dtype: str,
-    num_qo_heads: Optional[int],
-    num_kv_heads: Optional[int],
-    attn_head_size: Optional[int],
-    has_sinks: bool = False,
-) -> bool:
+@functools.cache
+def supports_trtllm_attention() -> tuple[bool, Optional[str]]:
+    """Cache result which only depends on the environment"""
+    # This is a lambda, call it once
+    env_value = envs.VLLM_USE_TRTLLM_ATTENTION
+
     # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
     if not (current_platform.is_device_capability(100)
             and has_nvidia_artifactory()):
-        return False
+        return False, env_value
 
-    # Check if the dimensions are supported by TRTLLM decode attention
-    if (attn_head_size is None or num_qo_heads is None or num_kv_heads is None
-            or num_qo_heads % num_kv_heads != 0):
-        return False
-
-    # If sinks are being used, we must use TRTLLM attention as it's
-    # the only backend that supports them
-    if has_sinks:
-        logger.info_once(
-            "Using TRTLLM attention (required for attention sinks).")
-        return True
-
-    env_value = envs.VLLM_USE_TRTLLM_ATTENTION
     if env_value is not None:
         logger.info_once("VLLM_USE_TRTLLM_ATTENTION is set to %s", env_value)
         # Environment variable is set - respect it
@@ -184,14 +168,55 @@ def use_trtllm_attention(
         use_trtllm = (env_value == "1")
         if use_trtllm:
             logger.info_once("Using TRTLLM attention.")
-        return use_trtllm
-    else:
+        return use_trtllm, env_value
+
+    return True, None
+
+
+def use_trtllm_attention(
+    num_qo_heads: int,
+    num_kv_heads: int,
+    num_tokens: int,
+    max_seq_len: int,
+    kv_cache_dtype: str,
+    q_dtype: torch.dtype,
+    is_prefill: bool,
+    has_sinks: bool = False,
+) -> bool:
+    use_trtllm, env_value = supports_trtllm_attention()
+    if not use_trtllm:
+        return False
+
+    if num_qo_heads % num_kv_heads != 0:
+        return False
+
+    # Must use TRTLLM attention if query is FP8 quantized
+    if q_dtype == current_platform.fp8_dtype():
+        logger.info_once("Using TRTLLM attention (query is quantized).")
+        return True
+
+    # TRTLLM prefill attention does not support FP8 kv cache with
+    # non-quantized query
+    if is_prefill and kv_cache_dtype.startswith("fp8"):
+        return False
+
+    # If sinks are being used, we must use TRTLLM attention as it's
+    # the only backend that supports them
+    if has_sinks:
+        logger.info_once(
+            "Using TRTLLM attention (required for attention sinks).")
+        return True
+
+    if env_value is None:
         # Environment variable not set - use auto-detection
         use_trtllm = (num_tokens <= 256 and max_seq_len < 131072
                       and kv_cache_dtype == "auto")
         if use_trtllm:
             logger.warning_once("Using TRTLLM attention (auto-detected).")
         return use_trtllm
+
+    # Environment variable is set to 1 - respect it
+    return True
 
 
 if has_flashinfer():
@@ -274,6 +299,7 @@ __all__ = [
     "has_flashinfer_moe",
     "has_flashinfer_cutlass_fused_moe",
     "has_nvidia_artifactory",
+    "supports_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
 ]

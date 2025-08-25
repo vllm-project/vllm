@@ -146,6 +146,8 @@ def test_ngram_correctness(
              "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct", 4),
             True,
             marks=pytest.mark.skip(reason="Skipping due to CI OOM issues")),
+        (("eagle", "eagle618/deepseek-v3-random",
+          "eagle618/eagle-deepseek-v3-random", 1), False),
         pytest.param(("eagle", "Qwen/Qwen2.5-VL-7B-Instruct",
                       "Rayzl/qwen2.5-vl-7b-eagle3-sgl", 1),
                      False,
@@ -160,7 +162,8 @@ def test_ngram_correctness(
         "llama3_eagle3",
         "llama4_eagle",
         "llama4_eagle_mm",
-        "qwen2.5_vl_eagle"
+        "qwen2.5_vl_eagle",
+        "deepseek_eagle"
     ])
 @pytest.mark.parametrize("attn_backend",
                          get_attn_backend_list_based_on_platform())
@@ -186,6 +189,7 @@ def test_eagle_correctness(
     '''
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
+        m.setenv("VLLM_MLA_DISABLE", "1")
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
         if (attn_backend == "TRITON_ATTN_VLLM_V1"
