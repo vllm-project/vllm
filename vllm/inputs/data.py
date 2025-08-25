@@ -31,9 +31,9 @@ class TextPrompt(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
-    multi_modal_ids: NotRequired["MultiModalHashDict"]
+    multi_modal_uuids: NotRequired["MultiModalHashDict"]
     """
-    Optional user-specified IDs for multimodal items, mapped by modality.
+    Optional user-specified UUIDs for multimodal items, mapped by modality.
     Lists must match the number of items per modality and may contain `None`.
     For `None` entries, the hasher will compute IDs automatically; non-None
     entries override the default hashes for caching.
@@ -68,9 +68,9 @@ class TokensPrompt(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
-    multi_modal_ids: NotRequired["MultiModalHashDict"]
+    multi_modal_uuids: NotRequired["MultiModalHashDict"]
     """
-    Optional user-specified IDs for multimodal items, mapped by modality.
+    Optional user-specified UUIDs for multimodal items, mapped by modality.
     Lists must match the number of items per modality and may contain `None`.
     For `None` entries, the hasher will compute IDs automatically; non-None
     entries override the default hashes for caching.

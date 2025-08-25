@@ -147,30 +147,35 @@ class Processor:
         self._validate_sampling_params(params, lora_request)
         self._validate_supported_sampling_params(params)
 
-    def _validate_multi_modal_ids(self, prompt: PromptType) -> None:
+    def _validate_multi_modal_uuids(self, prompt: PromptType) -> None:
         """
-        Validate that user-provided multi_modal_ids align with multi_modal_data
-        in the incoming request prompt(s). Only checks lengths; `None` entries
-        are allowed and will be auto-hashed downstream.
+        Validate that user-provided multi_modal_uuids align with
+        multi_modal_data in the incoming request prompt(s).
+        Only checks lengths; `None` entries are allowed and will be 
+        auto-hashed downstream.
         """
 
         def _validate_single(single_prompt: Union[dict, str]) -> None:
             if not isinstance(single_prompt, dict):
                 return
             mm_data = single_prompt.get("multi_modal_data")
-            mm_ids = single_prompt.get("multi_modal_ids")
-            if not mm_data or not mm_ids:
+            mm_uuids = single_prompt.get("multi_modal_uuids")
+            if not mm_data or not mm_uuids:
                 return
 
             for modality, items in mm_data.items():
-                if modality in mm_ids:
+                if modality in mm_uuids:
                     expected = len(items) if isinstance(items, list) else 1
-                    if len(mm_ids[modality]) != expected:
+                    if len(mm_uuids[modality]) != expected:
                         raise ValueError(
-                            f"multi_modal_ids for modality '{modality}' must "
-                            "have same length as data: got "
-                            f"{len(mm_ids[modality])} ids vs {expected} items."
-                        )
+                            f"multi_modal_uuids for modality '{modality}' "
+                            "must have same length as data: got "
+                            f"{len(mm_uuids[modality])} uuids vs "
+                            f"{expected} items.")
+                else:
+                    raise ValueError(
+                        f"multi_modal_uuids for modality '{modality}' must "
+                        "be provided if multi_modal_data is provided.")
 
         # Handle explicit encoder/decoder prompts or singleton prompt
         if isinstance(prompt, dict) and "encoder_prompt" in prompt:
@@ -285,7 +290,7 @@ class Processor:
             arrival_time = time.time()
 
         # Validate multimodal ids alignment with mm_data at request layer
-        self._validate_multi_modal_ids(prompt)
+        self._validate_multi_modal_uuids(prompt)
 
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
