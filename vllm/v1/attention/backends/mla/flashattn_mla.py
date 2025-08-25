@@ -168,11 +168,11 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
                 "FP8 FlashAttention MLA not yet supported")
 
         kv_c_cache = kv_c_and_k_pe_cache[..., :self.kv_lora_rank]
-        kv_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank:]
+        k_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank:]
 
         o = flash_attn_varlen_func(
             q=q_pe,
-            k=kv_pe_cache.unsqueeze(-2),  # Add head dim of 1
+            k=k_pe_cache.unsqueeze(-2),  # Add head dim of 1
             v=kv_c_cache.unsqueeze(-2),  # Add head dim of 1
             q_v=q_nope,
             max_seqlen_q=attn_metadata.decode.max_query_len,
