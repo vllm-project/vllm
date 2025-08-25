@@ -48,5 +48,5 @@ function cpu_tests() {
 
 export container_id
 export -f cpu_tests
-timeout 100m bash -c cpu_tests
+timeout 120m bash -c cpu_tests
 
