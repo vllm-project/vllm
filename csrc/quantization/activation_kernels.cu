@@ -125,6 +125,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
     // quant params
     float eps, float fp8_min, float fp8_max, bool use_ue8m0) {
+  __shared__ __nv_bfloat162 s_buff[GROUP_SIZE];
   __shared__ float s_warp_max[NUM_WARPS];  // size = numWarpsPerBlock
   // block handles one (expert e, group g)
   Idx_t pid = blockIdx.x;
@@ -138,36 +139,50 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   const Idx_t num_warps = (blockDim.x + WARP_SIZE - 1) / WARP_SIZE;
 
   // how many tokens for this expert
-  const Idx_t n_tokens = counts[e * stride_counts_e];
+
+  __shared__ Idx_t s_count;
+
+  if (!tid) {
+    s_count = counts[e * stride_counts_e];
+  }
 
   // base offsets (element-based)
   const Idx_t base_i = e * stride_i_e + g * GROUP_SIZE * stride_i_h;
   const Idx_t base_yq = e * stride_yq_e + g * GROUP_SIZE * stride_yq_h;
   const Idx_t base_ys = e * stride_ys_e + g * stride_ys_g;
 
+  __syncthreads();
+
+  const Idx_t n_tokens = s_count;
   for (Idx_t t = 0; t < n_tokens; ++t) {
     float gate, upv, y = -std::numeric_limits<float>::max();
     Idx_t gate_off = base_i + t * stride_i_t + tid * stride_i_h;
     Idx_t up_off = base_i + H * stride_i_h + t * stride_i_t + tid * stride_i_h;
 
-    // load & convert to float
-    gate = __bfloat162float(input[gate_off]);
-    upv = __bfloat162float(input[up_off]);
+    if (tid < 64) {
+      s_buff[tid] = reinterpret_cast<const __nv_bfloat162* __restrict__>(
+          input)[gate_off >> 1u];
+    } else {
+      s_buff[64 + tid] = reinterpret_cast<const __nv_bfloat162* __restrict__>(
+          input)[up_off >> 1u];
+    }
 
-    // SiLU * up
+    __syncthreads();
+
+    gate = __bfloat162float(reinterpret_cast<__nv_bfloat16*>(s_buff)[tid]);
+    upv = __bfloat162float(
+        reinterpret_cast<__nv_bfloat16*>(s_buff)[GROUP_SIZE + tid]);
+
     gate = silu(gate);
     y = gate * upv;
 
-    // warp-local reduction of abs(y)
     float v = fabsf(y);
     v = warp_max(v);
 
-    // write one value per warp
     if (lane_id == 0) s_warp_max[warp_id] = v;
 
     __syncthreads();
 
-    // warp 0 reduces the per-warp maxima
     float absmax = 0.f;
     if (warp_id == 0) {
       float m = (lane_id < num_warps) ? s_warp_max[lane_id] : 0.f;
@@ -179,7 +194,6 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     absmax = s_warp_max[0];
     absmax = fmaxf(absmax, eps);
 
-    // compute scale (power-of-two if requested)
     float scale = absmax / fp8_max;
 
     if (use_ue8m0) {
