@@ -229,8 +229,7 @@ class GptOssModel(nn.Module):
         x = self.embedding(input_ids)
         aux_hidden_states: list[torch.Tensor] = []
         for idx, layer in enumerate(self.layers):
-            # Collect auxiliary hidden states before running the selected layer,
-            # following the convention used in other models (e.g., LLaMA/Qwen).
+            # For pre-norm architecture, capture states before layer processing
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(x)
             x = layer(x, positions)
@@ -637,7 +636,7 @@ class GptOssForCausalLM(nn.Module, SupportsEagle3):
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.model.layers)
-        return (1, num_layers // 2-1, num_layers - 4)
+        return (1, num_layers // 2 - 1, num_layers - 4)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
