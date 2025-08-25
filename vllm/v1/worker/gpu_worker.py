@@ -337,7 +337,7 @@ class Worker(WorkerBase):
                     hidden_states=last_hidden_states)
 
         # Warmup kernels used during model execution
-        # kernel_warmup(self)
+        kernel_warmup(self)
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.

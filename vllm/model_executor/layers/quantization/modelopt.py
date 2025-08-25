@@ -1463,9 +1463,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             assert is_valid_flashinfer_cutlass_fused_moe(
                 x, layer.w13_weight, layer.w2_weight), (
                     "Flashinfer CUTLASS Fused MoE not applicable!")
-            # print('tt'*20)
-            # print(x.shape, topk_ids.shape, topk_weights.shape)
-            # out = torch.empty_like(x)
             out = self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,

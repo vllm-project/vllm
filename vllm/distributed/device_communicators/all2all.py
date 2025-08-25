@@ -8,7 +8,7 @@ import torch.distributed as dist
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import has_deep_ep, has_pplx
-from vllm.utils.flashinfer import (has_flashinfer, has_flashinfer_all2all)
+from vllm.utils.flashinfer import has_flashinfer_all2all
 
 
 from .base_device_communicator import All2AllManagerBase, Cache
@@ -270,6 +270,29 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         handle.set_num_sms(self.num_sms)
         return handle
 
+def ensure_alltoall_workspace_initialized():
+    """Ensure workspace is initialized"""
+    if not has_flashinfer_all2all():
+        return False
+
+    world_size = get_tensor_model_parallel_world_size()
+    if world_size <= 1:
+        return False
+
+    rank = dist.get_rank()
+
+    if (
+        not _alltoall_workspace_manager.initialized
+        or _alltoall_workspace_manager.world_size != world_size
+    ):
+        _alltoall_workspace_manager.initialize(
+            world_size=world_size,
+            rank=rank,
+            # TODO(tmorris): Get num gpus per node
+        )
+
+    return _alltoall_workspace_manager.initialized
+
 class FlashInferAllToAllManager(All2AllManagerBase):
     """
     All2All communication based on flashinfer kernels.
@@ -283,10 +306,6 @@ class FlashInferAllToAllManager(All2AllManagerBase):
                 "rank=%d, world size=%d", self.rank, self.world_size)
         self.initialized = False
         self.alltoall_info = None
-        self.initialize(
-            world_size=self.world_size,
-            rank=self.rank,
-        )
         
     def initialize(
         self,
@@ -302,25 +321,13 @@ class FlashInferAllToAllManager(All2AllManagerBase):
         logger.debug(
                 "making map: "
                 "rank=%d, world size=%d", rank, world_size)
-        # print(f"At a2a initialize: {world_size}, {rank}, {gpus_per_node}, {4}")
-        # self.mapping = Mapping(
-        #     world_size=world_size,
-        #     rank=rank,
-        #     gpus_per_node=gpus_per_node,
-        #     tp_size=4,
-        #     # dp_size=world_size,  #VLLM is dp
-        # )
         self.mapping = Mapping(
             world_size,
             rank,
             gpus_per_node,
-            tp_size=4,
-            # dp_size=world_size,  #VLLM is dp
+            tp_size=world_size,
         )
-        # ref
-        # self.mapping = Mapping(
-        #     self.world_size, self.rank, self.local_world_size, tp_size=self.world_size
-        # )
+
         from vllm.distributed.device_communicators.mnnvl_compat import (
             vLLMCommBackend)
         def get_vllm_mnnvl_config() -> MnnvlConfig:
@@ -333,7 +340,6 @@ class FlashInferAllToAllManager(All2AllManagerBase):
         self.dp_config = get_vllm_mnnvl_config()
         
         self.workspace_tensor = MnnvlMoe.get_moe_workspaces(self.mapping, self.dp_config)
-        self.prepare_workspace_tensor = MnnvlMoe.get_moe_prepare_workspace(self.mapping, self.dp_config)
 
         self.world_size = world_size
         self.rank = rank
@@ -345,51 +351,35 @@ class FlashInferAllToAllManager(All2AllManagerBase):
             f"world_size {world_size}"
         )
 
+    def ensure_alltoall_workspace_initialized(self):
+        """Ensure workspace is initialized"""
+        if not has_flashinfer_all2all():
+            return False
+
+        if self.world_size <= 1:
+            return False
+
+        if not self.initialized:
+            self.initialize(
+                world_size=self.world_size,
+                rank=self.rank,
+            )
+        return self.initialized
 
     def get_handle(self, kwargs):
         return self
 
     def cleanup(self):
         """Clean up workspace"""
-        if self.initialized and self.workspace_tensor is not None and self.prepare_workspace_tensor is not None:
+        if self.initialized and self.workspace_tensor is not None:# and self.prepare_workspace_tensor is not None:
             try:
                 del self.workspace_tensor
             except Exception as e:
                 logger.warning(f"Failed to cleanup FlashInfer workspace: {e}")
             finally:
                 self.workspace_tensor = None
-                self.prepare_workspace_tensor = None
                 self.mapping = None
                 self.initialized = False
-    
-    # def dispatch(
-    #     self,
-    #     global_num_tokens_cpu: list[int],
-    #     x: torch.Tensor,
-    #     topk_ids: torch.Tensor,
-    #     topk_weights: torch.Tensor,
-    #     top_k: int,
-    #     num_experts: int,
-    # ):
-    #     # assert (
-    #     #     ensure_alltoall_workspace_initialized()
-    #     # ), "FlashInfer AllToAll workspace not available"
-    #     ep_rank = self.rank
-    #     ep_size = self.world_size
-    #     max_num_token = max(global_num_tokens_cpu
-    #                         ) if global_num_tokens_cpu is not None else x.shape[0]
-    #     assert self.prepare_workspace_tensor is not None, "alltoall_prepare_workspace should be initialized"
-    
-    #     alltoall_info, topk_ids, topk_weights, _ = MnnvlMoe.mnnvl_moe_alltoallv_prepare_without_allgather(
-    #         expert_ids=topk_ids, scales=topk_weights, expert_statics=None, workspace=self.prepare_workspace_tensor,
-    #         max_token_count_per_rank=max_num_token, ep_rank=ep_rank, ep_size=ep_size, expert_count=num_experts,
-    #         slot_count=num_experts, top_k=top_k)
-    #     # self.alltoall_info = alltoall_info
-    #     x = MnnvlMoe.mnnvl_moe_alltoallv(
-    #         x, alltoall_info, self.workspace_tensor, ep_rank, ep_size)
-    #     # print(f"inside: after: {x.shape}")
-    #     return x, topk_ids, topk_weights, alltoall_info
-
 
     def dispatch(
         self,
@@ -400,13 +390,10 @@ class FlashInferAllToAllManager(All2AllManagerBase):
         topk_weights: torch.Tensor,
         top_k: int,
         num_experts: int,
-        # ep_rank: int,
-        # ep_size: int,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, MoEAlltoallInfo]:
-        # TODO(shuw): add later
-        # assert (
-        #     ensure_alltoall_workspace_initialized()
-        # ), "FlashInfer AllToAll workspace not available"
+        assert (
+            self.ensure_alltoall_workspace_initialized()
+        ), "FlashInfer AllToAll workspace not available"
 
         # gather router info
         # Assume same number of tokens across all devices if global_num_tokens_cpu is None
@@ -427,7 +414,6 @@ class FlashInferAllToAllManager(All2AllManagerBase):
         gathered_topk_weights = torch.flatten(gathered_topk_weights.contiguous(),
                                             start_dim=0,
                                             end_dim=-2)
-        # _flashinfer_all2all = comm.all2all_manager?
         gathered_target_rank_ids = MnnvlMoe.compute_target_rank_id(
             gathered_topk_ids, num_experts, ep_size)
         
@@ -443,26 +429,22 @@ class FlashInferAllToAllManager(All2AllManagerBase):
                 ep_rank,
                 ep_size,
             ))
-        # self.alltoall_info = alltoall_info
-        # print(f"inside: before: {x.shape}, rank:{ep_rank}, max_num_token:{max_num_token}")
+
         x = MnnvlMoe.mnnvl_moe_alltoallv(
             x, alltoall_info, self.workspace_tensor, ep_rank, ep_size)
-        # print(f"inside: after: {x.shape}")
         return x, topk_ids, topk_weights, alltoall_info
 
     def flashinfer_alltoall_combine(
         self,
         output: torch.Tensor,
         top_k: int,
-        # ep_rank: int,
-        # ep_size: int,
         token_count: int,
         alltoall_info,
     ):
         # TODO(shuw): add later
-        # assert (
-        #     ensure_alltoall_workspace_initialized()
-        # ), "FlashInfer AllToAll workspace not available"
+        assert (
+            self.ensure_alltoall_workspace_initialized()
+        ), "FlashInfer AllToAll workspace not available"
         ep_rank = self.rank
         ep_size = self.world_size
         return MnnvlMoe.mnnvl_moe_alltoallv_combine(
