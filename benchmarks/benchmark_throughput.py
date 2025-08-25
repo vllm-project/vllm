@@ -94,7 +94,6 @@ def run_vllm(
             prompts, sampling_params, lora_request=lora_requests, use_tqdm=True
         )
         end = time.perf_counter()
-
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
         # output_len should be the same for all requests.

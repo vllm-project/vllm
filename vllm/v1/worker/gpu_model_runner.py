@@ -1682,9 +1682,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     _targ_argmax = _targ.argmax(dim=-1)
                     logger.info(
                         "[EAGLE3 dbg] target_logits check: n=%s, draft_ids=%s, targ_argmax=%s, targ_shape=%s",  # noqa: G004
-                        int(_n),
-                        _draft_ids.tolist(),
-                        _targ_argmax.tolist(),
+                        int(_n), _draft_ids.tolist(), _targ_argmax.tolist(),
                         tuple(target_logits.shape))
             except Exception:
                 pass
@@ -1744,8 +1742,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch.vocab_size,
             )
             logger.info(
-                "[EAGLE3 dbg] rejection sampler parsed out=%s",  # noqa: G004
-                valid_sampled_token_ids[0])
+                    "[EAGLE3 dbg] rejection sampler parsed out=%s",  # noqa: G004
+                    valid_sampled_token_ids[0]
+                )
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
@@ -1777,8 +1776,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             try:
                 logger.info(
                     "[EAGLE3 dbg] append req=%s tokens=%s",  # noqa: G004
-                    req_id,
-                    sampled_ids[:8])
+                    req_id, sampled_ids[:8])
             except Exception:
                 pass
 
@@ -1795,8 +1793,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 spec_decode_common_attn_metadata,
             )
         self.eplb_step()
-        logger.info("[EAGLE3 dbg] draft token ids: %s", self._draft_token_ids)
-        print("========================================================")
+        logger.info( "[EAGLE3 dbg] draft token ids: %s", self._draft_token_ids)
+        print(f"========================================================")
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
