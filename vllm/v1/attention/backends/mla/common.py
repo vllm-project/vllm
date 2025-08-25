@@ -193,6 +193,7 @@ from dataclasses import dataclass, field
 from typing import ClassVar, Generic, Optional, TypeVar, Union
 
 import torch
+from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -203,6 +204,7 @@ from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
@@ -1039,6 +1041,38 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 W_K, dtype=current_platform.fp8_dtype())
             self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(
                 W_V, dtype=current_platform.fp8_dtype())
+
+            # The kernel operates on non-padded inputs. Hence, pre-compiling
+            # triton kernel to avoid runtime compilation for unseen batch sizes
+            # Pre-compile for batch sizes 1 to 1024 to cover most use-cases.
+            # On DS-R1, this step adds roughly 50s to the model loading time.
+            max_batch_size = 1024  # [ToDo] Find the optimal upper limit
+            pre_compilation_list = list(range(1, max_batch_size + 1))
+            if is_global_first_rank():
+                pre_compilation_list = tqdm(
+                    pre_compilation_list,
+                    desc="[Aiter Triton] Pre-compiling fp8 BMM kernel",
+                    total=max_batch_size,
+                )
+
+            for m in pre_compilation_list:
+                x = torch.empty((self.W_K.shape[0], m, self.W_K.shape[2]),
+                                dtype=torch.bfloat16,
+                                device=self.W_K.device)
+                aiter_triton_fp8_bmm(x,
+                                     self.W_K,
+                                     self.W_K_scale,
+                                     group_size=128,
+                                     transpose_bm=True)
+
+                x = torch.empty((self.W_V.shape[0], m, self.W_V.shape[2]),
+                                dtype=torch.bfloat16,
+                                device=self.W_V.device)
+                aiter_triton_fp8_bmm(x,
+                                     self.W_V,
+                                     self.W_V_scale,
+                                     group_size=128,
+                                     transpose_bm=True)
         else:
             # Convert from (L, N, V) to (N, L, V)
             self.W_UV = W_UV.transpose(0, 1)
