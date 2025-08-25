@@ -419,7 +419,7 @@ class ModelConfig:
     """Enable spliting the input batch into nano-batches for intra-device parallelism"""
     max_num_nano_batches: int = 2
     """Maximum number of nano-batches to split the input batch into"""
-    min_nano_split_tokens: int = 512
+    min_nano_split_tokens: int = 1024
     """Minimum number of tokens to split the input batch"""
 
     def compute_hash(self) -> str:
