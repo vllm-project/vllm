@@ -817,7 +817,9 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/topk_softmax_kernels.cu")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_MOE_EXT_SRC "csrc/moe/moe_wna16.cu")
+  list(APPEND VLLM_MOE_EXT_SRC
+    "csrc/moe/moe_wna16.cu"
+    "csrc/moe/grouped_topk_kernels.cu")
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
