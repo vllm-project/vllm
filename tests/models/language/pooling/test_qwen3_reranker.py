@@ -90,7 +90,14 @@ def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
 def test_rerank_models_mteb_tp(vllm_runner,
                                model_info: RerankModelInfo) -> None:
 
+    assert model_info.architecture == "Qwen3ForSequenceClassification"
+
+    vllm_extra_kwargs: dict[str, Any] = {
+        "tensor_parallel_size": 2,
+    }
+
     mteb_test_rerank_models(Qwen3RerankerHfRunner,
                             vllm_runner,
                             model_info,
+                            vllm_extra_kwargs,
                             atol=1.2e-2)
