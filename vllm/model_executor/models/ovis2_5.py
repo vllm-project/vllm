@@ -513,7 +513,8 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         raise AssertionError("This line should be unreachable.")
 
     def _process_image_input(
-            self, image_input: OvisImagePatchInputs) -> MultiModalEmbeddings:
+        self, image_input: Union[OvisImagePatchInputs, OvisVideoPatchInputs]
+    ) -> MultiModalEmbeddings:
         image_patches_flat = image_input["flat_data"]
         patches_per_image = image_input["patches_per_image"]
         indicator_tokens = image_input["indicator_tokens"]
