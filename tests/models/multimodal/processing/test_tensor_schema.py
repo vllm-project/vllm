@@ -3,13 +3,11 @@
 import tempfile
 from collections.abc import Iterable
 from contextlib import contextmanager
-from copy import deepcopy
 from functools import partial
 from typing import Any, Union
 
 import numpy as np
 import pytest
-import torch
 import torch.nn as nn
 from mistral_common.protocol.instruct.messages import (ImageChunk, TextChunk,
                                                        UserMessage)
@@ -22,7 +20,6 @@ from vllm.distributed import (cleanup_dist_env_and_memory,
                               initialize_model_parallel)
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
-from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
@@ -49,12 +46,14 @@ VideoInput = Union[list[Image.Image], list[np.ndarray],
 AudioInput = list[tuple[np.ndarray, int]]
 
 
-def _resize_data(_data: Union[Image.Image, np.ndarray], size_factor: float,
-                 transpose: int) -> Union[Image.Image, np.ndarray]:
+def _resize_data(_data: Union[Image.Image, np.ndarray],
+                 size_factor: float) -> Union[Image.Image, np.ndarray]:
     assert size_factor <= 1, "Size factor must be less than 1"
     # Image input
     if isinstance(_data, Image.Image):
-        return rescale_image_size(_data, size_factor, transpose=transpose)
+        W, H = _data.width, _data.height
+        W, H = map(lambda x: int(x * size_factor), (W, H))
+        return _data.resize((W, H))
     # Video input with PIL Images
     elif is_list_of(_data, Image.Image):
         W, H = next(iter(_data)).width, next(iter(_data)).height
@@ -78,22 +77,17 @@ def resize_mm_data(
                         ...]) -> Union[ImageInput, VideoInput, AudioInput]:
     size_factors = size_factors[:len(data)]
     if is_list_of(data, (Image.Image, np.ndarray, list)):
-        # Use `transpose` start from 2 to create images with
-        # various aspect ratio through rotation
-        return [
-            _resize_data(d, s, transpose=idx + 2)
-            for idx, (d, s) in enumerate(zip(data, size_factors))
-        ]
+        return [_resize_data(d, s) for d, s in zip(data, size_factors)]
     elif is_list_of(data, tuple):
-        return [(_resize_data(d, s, transpose=idx + 2), meta)
-                for idx, ((d, meta), s) in enumerate(zip(data, size_factors))]
+        return [(_resize_data(d, s), meta)
+                for (d, meta), s in zip(data, size_factors)]
     raise ValueError("Unsupported multimodal data type.")
 
 
 def create_batched_mm_kwargs(
     model_config: ModelConfig,
     processor: BaseMultiModalProcessor,
-    size_factors: tuple[float, ...] = (1.0, 0.5, 0.1),
+    size_factors: tuple[float, ...] = (1.0, 0.5, 0.25),
 ) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
     processing_info = processor.info
     dummy_inputs = processor.dummy_inputs
@@ -226,11 +220,8 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
     model_config.get_multimodal_config().limit_per_prompt = limit_mm_per_prompt
     processor = factories.build_processor(ctx, cache=None)
 
-    torch.set_default_dtype(torch.float16)
     with initialize_dummy_model(model_cls, model_config) as model:
         for modality, _, mm_kwargs in create_batched_mm_kwargs(
                 model_config, processor):
-
             for method_name in inputs_parse_methods:
-                getattr(model, method_name)(modality=modality,
-                                            **deepcopy(mm_kwargs))
+                getattr(model, method_name)(modality=modality, **mm_kwargs)
