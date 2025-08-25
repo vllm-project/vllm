@@ -686,7 +686,11 @@ class Scheduler(SchedulerInterface):
         mm_positions = request.mm_positions
         assert mm_positions is not None
         assert len(mm_positions) > 0
-        to_schedule = set()
+
+        # NOTE: since scheduler operates on the request level (possibly with
+        # multiple encoder inputs per request), we need to create temporary
+        # trackers for accounting at the encoder input level.
+        mm_hashes_to_schedule = set()
         num_tokens_to_schedule = 0
         for i, pos_info in enumerate(mm_positions):
             start_pos = pos_info.offset
@@ -706,7 +710,7 @@ class Scheduler(SchedulerInterface):
 
             # The same encoder input has already been scheduled in the current
             # step.
-            if request.mm_hashes[i] in to_schedule:
+            if request.mm_hashes[i] in mm_hashes_to_schedule:
                 continue
 
             if self.encoder_cache_manager.check_and_update_cache(request, i):
@@ -745,8 +749,9 @@ class Scheduler(SchedulerInterface):
 
             num_tokens_to_schedule += num_encoder_tokens
             encoder_compute_budget -= num_encoder_tokens
-            to_schedule.add(request.mm_hashes[i])
+            mm_hashes_to_schedule.add(request.mm_hashes[i])
             encoder_inputs_to_schedule.append(i)
+
         return (
             encoder_inputs_to_schedule,
             num_new_tokens,
