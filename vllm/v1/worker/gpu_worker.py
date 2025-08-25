@@ -167,7 +167,7 @@ class Worker(WorkerBase):
             self.device = torch.device(f"cuda:{self.local_rank}")
             current_platform.set_device(self.device)
 
-            _check_if_gpu_supports_dtype(self.model_config.dtype)
+            current_platform.check_if_supports_dtype(self.model_config.dtype)
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -612,23 +612,3 @@ def init_worker_distributed_environment(
                                       parallel_config.pipeline_parallel_size)
 
     ensure_kv_transfer_initialized(vllm_config)
-
-
-def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
-    # Check if the GPU supports the dtype.
-    if torch_dtype == torch.bfloat16:  # noqa: SIM102
-        if not current_platform.has_device_capability(80):
-            capability = current_platform.get_device_capability()
-            gpu_name = current_platform.get_device_name()
-
-            if capability is None:
-                compute_str = "does not have a compute capability"
-            else:
-                version_str = capability.as_version_str()
-                compute_str = f"has compute capability {version_str}"
-
-            raise ValueError(
-                "Bfloat16 is only supported on GPUs with compute capability "
-                f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
-                "You can use float16 instead by explicitly setting the "
-                "`dtype` flag in CLI, for example: --dtype=half.")
