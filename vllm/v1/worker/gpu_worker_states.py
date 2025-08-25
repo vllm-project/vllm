@@ -109,8 +109,6 @@ class RequestState:
         self.req_id_to_index: dict[str, int] = {}
         self.index_to_req_id: dict[int, str] = {}
         self.free_indices = list(range(max_num_cached_reqs))
-        # Used to construct the input batch.
-        self._add_scalar_attr("idx_mapping", torch.int32)
 
         # Request states.
         self.req_data: dict[int, RequestData] = {}

@@ -659,7 +659,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         slot_mappings = self.block_tables.compute_slot_mappings(
-            query_start_loc, self.positions[:total_num_scheduled_tokens])
+            query_start_loc, self.positions.gpu[:total_num_scheduled_tokens])
 
         # Used in the below loop.
         query_start_loc_cpu = self.query_start_loc.cpu[:num_reqs + 1]
