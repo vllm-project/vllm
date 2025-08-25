@@ -1399,7 +1399,8 @@ class FusedMoE(CustomOp):
 
         return [
             weight.view(self.local_num_experts, -1) for name, weight in weights
-            if name not in NON_EXPERT_WEIGHTS and weight.shape != torch.Size([])
+            if name not in NON_EXPERT_WEIGHTS
+            and weight.shape != torch.Size([])
         ]
 
     def set_eplb_state(
