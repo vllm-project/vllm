@@ -47,7 +47,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def generate(
+    def generate(
         self,
         prompt: PromptType,
         sampling_params: SamplingParams,
@@ -216,7 +216,7 @@ class EngineClient(ABC):
         yield beam_search_output
 
     @abstractmethod
-    async def encode(
+    def encode(
         self,
         prompt: PromptType,
         pooling_params: PoolingParams,
@@ -321,7 +321,7 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def add_lora(self, lora_request: LoRARequest) -> None:
+    async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
         ...
 
