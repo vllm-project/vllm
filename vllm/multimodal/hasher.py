@@ -4,7 +4,7 @@
 import pickle
 import uuid
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Union
 
 import numpy as np
 import torch
@@ -16,7 +16,7 @@ from vllm.multimodal.image import convert_image_mode
 
 logger = init_logger(__name__)
 
-MultiModalHashDict = dict[str, list[Optional[str]]]
+MultiModalHashDict = dict[str, list[str]]
 """
 A dictionary containing hashes for items in each modality.
 """
