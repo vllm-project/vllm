@@ -553,7 +553,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 self._get_tile_tokens_dim(x, top_k),
                 1 if renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
-                tune_max_num_tokens=self.max_captute_size,
+                tune_max_num_tokens=self.max_capture_size,
             )[0]
             return trtllm_gen_output
         else:
