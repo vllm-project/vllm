@@ -36,7 +36,7 @@ from vllm.config.compilation import (CompilationConfig, CompilationLevel,
 from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
-from vllm.config.utils import ConfigType, config
+from vllm.config.utils import ConfigType, config, getattr_iter
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.platforms import current_platform
@@ -1502,17 +1502,12 @@ class ModelConfig:
     def get_num_experts(self) -> int:
         """Returns the number of experts in the model."""
         num_expert_names = [
-            "moe_num_experts",  # Dbrx
             "num_experts",  # Jamba
+            "moe_num_experts",  # Dbrx
             "n_routed_experts",  # DeepSeek
             "num_local_experts",  # Mixtral
         ]
-        num_experts = 0
-        for name in num_expert_names:
-            num_experts = getattr(self.hf_text_config, name, 0)
-            if num_experts > 0:
-                break
-        return num_experts
+        return getattr_iter(self.hf_text_config, num_expert_names, 0)
 
     def get_layers_start_end_indices(
             self, parallel_config: "ParallelConfig") -> tuple[int, int]:
