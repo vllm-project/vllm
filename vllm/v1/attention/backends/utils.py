@@ -5,8 +5,7 @@ import enum
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, make_dataclass
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Generic, Optional,
-                    TypeVar)
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
 
 import numpy as np
 import torch
@@ -58,6 +57,8 @@ class CommonAttentionMetadata:
     """Total number of tokens in batch"""
     max_query_len: int
     """Longest query in batch"""
+    max_seq_len: int
+    """Longest context length in batch"""
 
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
@@ -107,6 +108,7 @@ def _make_metadata_with_slice(
 
     seq_lens = attn_metadata.seq_lens[request_slice]
     seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
+    max_seq_len = int(seq_lens_cpu.max())
     num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[
         request_slice]
 
@@ -128,6 +130,7 @@ def _make_metadata_with_slice(
         num_reqs=num_requests,
         num_actual_tokens=num_actual_tokens,
         max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
         block_table_tensor=block_table_tensor,
         slot_mapping=slot_mapping,
     )
@@ -158,18 +161,21 @@ class AttentionCGSupport(enum.Enum):
     Here we do not consider the cascade attention, as currently
     it is never cudagraph supported."""
 
+    ALWAYS = 3
+    """Cudagraph always supported; supports mixed-prefill-decode"""
+    UNIFORM_BATCH = 2
+    """Cudagraph supported for batches the only contain query lengths that are
+    the same, this can be used for spec-decode 
+        i.e. "decodes" are 1 + num_speculative_tokens"""
+    UNIFORM_SINGLE_TOKEN_DECODE = 1
+    """Cudagraph supported for batches the only contain query_len==1 decodes"""
     NEVER = 0
     """NO cudagraph support"""
-    PURE_DECODE_ONLY = 1
-    """Cudagraph supported for pure decode, need to run without
-    cudagraph for mixed prefill-decode batches"""
-    ALWAYS = 2
-    """Cudagraph always supported"""
 
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
-    # Does this backend/builder support CUDA Graphs for attention.
-    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
+    # Does this backend/builder support CUDA Graphs for attention (default: no).
+    cudagraph_support: ClassVar[AttentionCGSupport] = \
         AttentionCGSupport.NEVER
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
@@ -198,13 +204,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
                 result of a build call may only be used for few layers/iters.
         """
         raise NotImplementedError
-
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        """
-        Can this batch (with given metadata) use CUDA Graphs for attention.
-        """
-        return False
 
     def build_for_cudagraph_capture(
             self, common_attn_metadata: CommonAttentionMetadata) -> M:
@@ -252,19 +251,23 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
 
 @functools.lru_cache
 def get_kv_cache_layout():
+    # Format specified by the code.
     global _KV_CACHE_LAYOUT_OVERRIDE
-    # Override with format specified by the user.
+
+    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
+        cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
+        logger.info_once("`_KV_CACHE_LAYOUT_OVERRIDE` variable detected. " \
+                         "Setting KV cache layout to %s.", cache_layout)
+        return cache_layout
+
+    # Format specified by the user.
     cache_layout = envs.VLLM_KV_CACHE_LAYOUT
+    # When neither the user nor the override specified a layout, get default
     if cache_layout is None:
-        if envs.VLLM_USE_TRTLLM_ATTENTION:
-            cache_layout = "HND"
-        else:
-            cache_layout = get_kv_connector_cache_layout()
+        cache_layout = get_kv_connector_cache_layout()
     else:
         logger.info_once("`VLLM_KV_CACHE_LAYOUT` environment variable " \
         "detected. Setting KV cache layout to %s.", cache_layout)
-    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
-        cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
     return cache_layout
 
 
@@ -464,8 +467,9 @@ def make_local_attention_virtual_batches(
         attn_chunk_size)[arange > 0]
 
     # convert from q_seqlens to cu_seqlens_q
-    cu_seqlens_q_local = np.pad(np.cumsum(seqlens_q_local), (1, 0))\
-        .astype(np.int32)
+    cu_seqlens_q_local = np.empty(virtual_batches + 1, dtype=np.int32)
+    np.cumsum(seqlens_q_local, out=cu_seqlens_q_local[1:])
+    cu_seqlens_q_local[0] = 0
 
     # compute the seqlens_k_local,
     #  basically a full local attention block for all but the last block in each
@@ -508,11 +512,10 @@ def make_local_attention_virtual_batches(
     #     [ 22, 23 ], < local-batch 6, (batch 2, starting from k[4])
     #     [ 24, 25 ], < local-batch 7, (batch 2, starting from k[8])
     #   ]
-    block_indices= np.broadcast_to(
-        np.arange(pages_per_local_batch, dtype=np.int32),
-        (virtual_batches, pages_per_local_batch)) \
-            + np.expand_dims(block_starts, axis=1)
-    block_indices = block_indices.flatten().clip(max=block_table.shape[1] - 1)
+    block_indices = (block_starts[:, None] +
+                     np.arange(pages_per_local_batch, dtype=np.int32))
+    block_indices = block_indices.reshape(-1).clip(max=block_table.shape[1] -
+                                                   1)
     batch_indices = np.repeat(np.arange(actual_batch_size, dtype=np.int32),
                               local_blocks * pages_per_local_batch)
     block_table_local = block_table[batch_indices, block_indices]\
@@ -520,6 +523,7 @@ def make_local_attention_virtual_batches(
 
     query_start_loc_cpu = torch.from_numpy(cu_seqlens_q_local)
     seq_lens_cpu = torch.from_numpy(seqlens_k_local)
+    max_seq_len = int(seq_lens_cpu.max())
 
     return CommonAttentionMetadata(
         query_start_loc_cpu=query_start_loc_cpu,
@@ -531,39 +535,11 @@ def make_local_attention_virtual_batches(
         num_reqs=len(seq_lens_cpu),
         num_actual_tokens=common_attn_metadata.num_actual_tokens,
         max_query_len=seqlens_q_local.max(),
+        max_seq_len=max_seq_len,
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
     )
-
-
-def subclass_attention_metadata_builder(
-    name_prefix: str,
-    builder_cls: type[AttentionMetadataBuilder[M]],
-    build_preprocess_fn: Callable[[CommonAttentionMetadata],
-                                  CommonAttentionMetadata],
-) -> type[AttentionMetadataBuilder[M]]:
-    """
-    Return a new subclass of `builder_cls` whose .build(...) method
-    first calls build_preprocess_fn(common_attn_metadata) on the metadata.
-    """
-    name: str = name_prefix + builder_cls.__name__  # type: ignore
-
-    def build(self,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False):
-        return builder_cls.build(self, common_prefix_len,
-                                 build_preprocess_fn(common_attn_metadata),
-                                 fast_build)
-
-    Wrapped = type(
-        name,
-        (builder_cls, ),  # inherit from the original
-        {
-            "build": build,
-        })
-    return Wrapped  # type: ignore
 
 
 def subclass_attention_backend(
