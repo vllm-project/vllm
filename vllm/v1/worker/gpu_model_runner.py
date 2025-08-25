@@ -1302,6 +1302,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                              "Please turn off chunked prefill by "
                              "`--no-enable-chunked-prefill` before using it.")
 
+        if "score" in supported_tasks:
+            num_labels = getattr(
+                self.model_config.hf_config, "num_labels", 0)
+            if num_labels != 1:
+                supported_tasks.remove("score")
+                logger.info_once("Score API is only enabled for num_labels == 1.")
+
         return supported_tasks
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
