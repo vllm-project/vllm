@@ -132,7 +132,7 @@ __device__ __forceinline__ void cp_async_wait<0>() {
 }
 
 template <typename scalar_t, uint32_t NUM_WARPS, typename Idx_t,
-          int GROUP_SIZE = 128>
+          int GROUP_SIZE = 128, int NUM_STAGES = 1>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const scalar_t* __restrict__ _input,  // (E, T, 2*H), element strides
     __nv_fp8_e4m3* __restrict__ _y_q,     // (E, T, H)
@@ -149,7 +149,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
     // quant params
     float eps, float fp8_min, float fp8_max, bool use_ue8m0) {
-  __shared__ __nv_bfloat162 s_buff[GROUP_SIZE];
+  __shared__ __nv_bfloat162 s_buff[GROUP_SIZE * NUM_STAGES];
   __shared__ float s_warp_max[NUM_WARPS];  // size = numWarpsPerBlock
   // block handles one (expert e, group g)
   Idx_t pid = blockIdx.x;
@@ -169,6 +169,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   if (!tid) {
     s_count = counts[e * stride_counts_e];
   }
+
+  const Idx_t stride_i_t_half = stride_i_t >> 1u;
 
   // base offsets (element-based)
   const Idx_t base_i = e * stride_i_e + g * GROUP_SIZE * stride_i_h;
@@ -194,29 +196,30 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   for (Idx_t t = 0; t < n_tokens; ++t) {
     float gate, upv, y = -std::numeric_limits<float>::max();
 
-#if 1
     if (tid < 64) {
       cp_async1(s_ptr, reinterpret_cast<const void*>(gate_ptr));
-      gate_ptr += (stride_i_t >> 1u);
-    } else {
-      cp_async1(s_ptr, reinterpret_cast<const void*>(up_ptr));
-      up_ptr += (stride_i_t >> 1u);
+      gate_ptr += stride_i_t_half;
     }
 
     cp_async_fence();
+
+    if (tid >= 64) {
+      cp_async1(s_ptr, reinterpret_cast<const void*>(up_ptr));
+      up_ptr += stride_i_t_half;
+    }
+
+    cp_async_fence();
+
+    cp_async_wait<1>();
+    __syncthreads();
+    gate = __bfloat162float(reinterpret_cast<__nv_bfloat16*>(s_buff)[tid]);
+    gate = silu(gate);
+
     cp_async_wait<0>();
     __syncthreads();
-
-    gate = __bfloat162float(reinterpret_cast<__nv_bfloat16*>(s_buff)[tid]);
     upv = __bfloat162float(
         reinterpret_cast<__nv_bfloat16*>(s_buff)[GROUP_SIZE + tid]);
-#else
-    Idx_t gate_off = base_i + t * stride_i_t + tid * stride_i_h;
-    Idx_t up_off = base_i + H * stride_i_h + t * stride_i_t + tid * stride_i_h;
-    gate = __bfloat162float(input[gate_off]);
-    upv = __bfloat162float(input[up_off]);
-#endif
-    gate = silu(gate);
+
     y = gate * upv;
 
     float v = fabsf(y);
