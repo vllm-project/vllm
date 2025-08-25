@@ -539,7 +539,7 @@ class MQLLMEngineClient(EngineClient):
         if request_id in self.output_queues:
             raise ValueError(f"Request {request_id} already exists")
 
-        # 1) Create output queue for this requests.
+        # 1) Create output queue for this request.
         queue: asyncio.Queue[Union[RequestOutput,
                                    BaseException]] = asyncio.Queue()
         self.output_queues[request_id] = queue
@@ -651,7 +651,7 @@ class MQLLMEngineClient(EngineClient):
         # Uses the same I/O as generate requests
         request = RPCLoadAdapterRequest(lora_request)
 
-        # Create output queue for this requests.
+        # Create output queue for this request.
         queue: asyncio.Queue[Union[None, BaseException]] = asyncio.Queue()
         self.output_queues[request.request_id] = queue
 

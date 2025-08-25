@@ -455,8 +455,7 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(
                 **self.compilation_config)
         if isinstance(self.eplb_config, dict):
-            self.eplb_config = EPLBConfig.from_cli(json.dumps(
-                self.eplb_config))
+            self.eplb_config = EPLBConfig(**self.eplb_config)
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -605,7 +604,7 @@ class EngineArgs:
             **guided_decoding_kwargs["disable_additional_properties"])
         guided_decoding_group.add_argument(
             "--reasoning-parser",
-            # This choices is a special case because it's not static
+            # This choice is a special case because it's not static
             choices=list(ReasoningParserManager.reasoning_parsers),
             **guided_decoding_kwargs["reasoning_backend"])
 
@@ -1047,7 +1046,7 @@ class EngineArgs:
             # details from the config directly
             # no user input required / expected
             if isinstance(hf_config, SpeculatorsConfig):
-                # We create one since we dont create one
+                # We create one since we don't create one
                 self.speculative_config = {}
                 self.speculative_config[
                     "num_speculative_tokens"] = hf_config.num_lookahead_tokens
@@ -1763,7 +1762,7 @@ class AsyncEngineArgs(EngineArgs):
     def add_cli_args(parser: FlexibleArgumentParser,
                      async_args_only: bool = False) -> FlexibleArgumentParser:
         # Initialize plugin to update the parser, for example, The plugin may
-        # adding a new kind of quantization method to --quantization argument or
+        # add a new kind of quantization method to --quantization argument or
         # a new device to --device argument.
         load_general_plugins()
         if not async_args_only:
