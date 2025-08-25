@@ -21,6 +21,8 @@ from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.mm_input_cache import MultiModalInputCacheClient
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
+from vllm.v1.structured_output.backend_lm_format_enforcer import (
+    validate_structured_output_request_lm_format_enforcer)
 from vllm.v1.structured_output.backend_outlines import (
     validate_structured_output_request_outlines)
 from vllm.v1.structured_output.backend_xgrammar import (
@@ -200,6 +202,9 @@ class Processor:
         elif engine_level_backend == "outlines":
             # outlines backend
             validate_structured_output_request_outlines(params)
+        elif engine_level_backend == "lm-format-enforcer":
+            # lm format enforcer backend
+            validate_structured_output_request_lm_format_enforcer(params)
         else:
             # NOTE: engine_level_backend must be "auto" here, because we have
             # checked supported_backends above.
@@ -389,7 +394,7 @@ class Processor:
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)
 
                 if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check for Whisper
+                    return  # Skip encoder length check for Whisper and Donut
 
             if model_config.is_multimodal_model:
                 suggestion = (
