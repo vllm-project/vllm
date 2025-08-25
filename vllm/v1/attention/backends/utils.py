@@ -5,8 +5,7 @@ import enum
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, make_dataclass
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Generic, Optional,
-                    TypeVar)
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
 
 import numpy as np
 import torch
@@ -541,35 +540,6 @@ def make_local_attention_virtual_batches(
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
     )
-
-
-def subclass_attention_metadata_builder(
-    name_prefix: str,
-    builder_cls: type[AttentionMetadataBuilder[M]],
-    build_preprocess_fn: Callable[[CommonAttentionMetadata],
-                                  CommonAttentionMetadata],
-) -> type[AttentionMetadataBuilder[M]]:
-    """
-    Return a new subclass of `builder_cls` whose .build(...) method
-    first calls build_preprocess_fn(common_attn_metadata) on the metadata.
-    """
-    name: str = name_prefix + builder_cls.__name__  # type: ignore
-
-    def build(self,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False):
-        return builder_cls.build(self, common_prefix_len,
-                                 build_preprocess_fn(common_attn_metadata),
-                                 fast_build)
-
-    Wrapped = type(
-        name,
-        (builder_cls, ),  # inherit from the original
-        {
-            "build": build,
-        })
-    return Wrapped  # type: ignore
 
 
 def subclass_attention_backend(
