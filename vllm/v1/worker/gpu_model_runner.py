@@ -2292,7 +2292,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
                     self.kv_cache_config.kv_cache_groups):
                 common_attn_metadata = CommonAttentionMetadata(
-                    query_start_loc=self.query_start_loc.cpu[:num_reqs + 1],
+                    query_start_loc=self.query_start_loc.gpu[:num_reqs + 1],
                     query_start_loc_cpu=self.query_start_loc.cpu[:num_reqs +
                                                                  1],
                     seq_lens=self.seq_lens.gpu[:num_reqs],
