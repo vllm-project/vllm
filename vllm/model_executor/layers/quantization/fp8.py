@@ -14,7 +14,7 @@ from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE, FusedMoEActivationFormat, FusedMoEConfig, FusedMoEMethodBase,
+    FusedMoE, FusedMoEActivationFormat, FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize,
     FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.fused_moe.config import (
@@ -577,18 +577,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 "CutlassBlockScaledGroupedGemm not supported on the current "
                 "platform.")
 
-    def maybe_make_prepare_finalize(
-        self,
-        moe: FusedMoEConfig,
-    ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
-        if self.flashinfer_moe_backend != FlashinferMoeBackend.CUTLASS:
-            return super().maybe_make_prepare_finalize(moe)
-
-        prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-            moe, )
-        logger.debug_once("%s", prepare_finalize.__class__.__name__)
-        return prepare_finalize
-
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
@@ -928,6 +916,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
                     layer.w2_weight_scale_inv)
 
+    def maybe_make_prepare_finalize(
+            self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
+        if (self.rocm_aiter_moe_enabled or self.use_marlin
+                or self.flashinfer_moe_backend
+                == FlashinferMoeBackend.TENSORRT_LLM):
+            return None
+        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            prepare_finalize = (
+                build_flashinfer_fp8_cutlass_moe_prepare_finalize(self.moe))
+            logger.debug_once("%s", prepare_finalize.__class__.__name__)
+            return prepare_finalize
+        else:
+            return super().maybe_make_prepare_finalize()
+
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
@@ -976,8 +978,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
-        if (self.use_marlin or self.flashinfer_moe_backend
-                != FlashinferMoeBackend.CUTLASS):
+        if self.use_marlin:
             return None
 
         return fp8_w8a8_moe_quant_config(
@@ -1019,41 +1020,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert logical_replica_count is not None
             assert isinstance(layer, FusedMoE)
 
-        if self.fused_experts:
-            topk_weights, topk_ids = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-                indices_type=self.topk_indices_dtype,
-                enable_eplb=enable_eplb,
-                expert_map=expert_map,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
-
-            return self.fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                quant_config=self.moe_quant_config,
-                expert_map=expert_map,
-            )
-
-        elif self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+        if (self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+                and self.fused_experts is None):
             assert activation == 'silu', (
                 f"Expected 'silu' activation but got {activation}")
             assert scoring_func == 'sigmoid', (
@@ -1114,18 +1082,21 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             logical_replica_count=logical_replica_count,
         )
 
-        if self.fused_experts is not None:
+        # If present, self.fused_experts always needs to take precendence
+        # over other methods.
+        if self.fused_experts:
             return self.fused_experts(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights,
-                topk_ids,
-                inplace=False,
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
                 activation=activation,
                 global_num_experts=global_num_experts,
-                expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input,
+                quant_config=self.moe_quant_config,
+                expert_map=expert_map,
             )
         elif self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501

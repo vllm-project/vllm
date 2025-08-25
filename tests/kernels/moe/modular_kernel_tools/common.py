@@ -555,6 +555,7 @@ def make_modular_kernel(
         moe,
         quant_config,
         prepare_finalize.num_dispatchers(),
+        config.N,
     )
 
     modular_kernel = mk.FusedMoEModularKernel(

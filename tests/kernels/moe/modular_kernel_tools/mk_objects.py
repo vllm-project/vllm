@@ -385,11 +385,24 @@ def _slice(rank: int, num_local_experts: int, t: torch.Tensor) -> torch.Tensor:
     return t[s:e]
 
 
+def make_cutlass_strides(
+    e: int,
+    n: int,
+    k: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ab_strides1 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
+    ab_strides2 = torch.full((e, ), n, device="cuda", dtype=torch.int64)
+    c_strides1 = torch.full((e, ), 2 * n, device="cuda", dtype=torch.int64)
+    c_strides2 = torch.full((e, ), k, device="cuda", dtype=torch.int64)
+    return ab_strides1, ab_strides2, c_strides1, c_strides2
+
+
 def make_fused_experts(
     fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
     moe: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig,
     num_dispatchers: int,
+    N: int,
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
 
     batch_kwargs = {
@@ -431,16 +444,26 @@ def make_fused_experts(
         print(f"Making NaiveBatchedExperts {kwargs} ...")
         experts = NaiveBatchedExperts(**kwargs)
     elif fused_experts_type == CutlassExpertsFp8:
+        strides = make_cutlass_strides(moe.num_experts, N, moe.hidden_dim)
         kwargs = {
             "out_dtype": moe.in_dtype,
+            "ab_strides1": strides[0],
+            "ab_strides2": strides[1],
+            "c_strides1": strides[2],
+            "c_strides2": strides[3],
         } | quant_kwargs
         print(f"Making CutlassExpertsFp8 {kwargs} ...")
         experts = CutlassExpertsFp8(**kwargs)
     elif fused_experts_type == CutlassBatchedExpertsFp8:
+        strides = make_cutlass_strides(moe.num_experts, N, moe.hidden_dim)
         kwargs = {
             "max_experts_per_worker": moe.num_local_experts,
             "num_dispatchers": num_dispatchers,
             "out_dtype": moe.in_dtype,
+            "ab_strides1": strides[0],
+            "ab_strides2": strides[1],
+            "c_strides1": strides[2],
+            "c_strides2": strides[3],
         } | quant_kwargs
         print(f"Making CutlassBatchedExpertsFp8 {kwargs} ...")
         experts = CutlassBatchedExpertsFp8(**kwargs)

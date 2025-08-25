@@ -303,26 +303,26 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
 
     def maybe_make_prepare_finalize(
-        self,
-        moe: FusedMoEConfig,
-    ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
-        if self.fused_experts is not None or \
-            self.flashinfer_moe_backend != FlashinferMoeBackend.CUTLASS:
-            return super().maybe_make_prepare_finalize(moe)
-
-        prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-            moe)
-        logger.debug_once("%s", prepare_finalize.__class__.__name__)
-        return prepare_finalize
+        self, ) -> Optional[mk.FusedMoEPrepareAndFinalize]:
+        # TRT LLM not supported with all2all yet.
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+            return None
+        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            prepare_finalize = (
+                build_flashinfer_fp8_cutlass_moe_prepare_finalize(self.moe))
+            logger.debug_once("%s", prepare_finalize.__class__.__name__)
+            return prepare_finalize
+        else:
+            return super().maybe_make_prepare_finalize()
 
     def select_gemm_impl(
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
-        moe: FusedMoEConfig,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        assert self.moe_quant_config is not None
         experts = select_cutlass_fp8_gemm_impl(
-            moe,
+            self.moe,
             self.moe_quant_config,
         )
         logger.debug_once("Using %s", experts.__class__.__name__)
@@ -517,7 +517,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptFp8MoEMethod` yet.")
 
-        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+        if (self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+                and self.fused_experts is None):
             assert activation == 'silu', (
                 f"Expected 'silu' activation but got {activation}")
             assert not renormalize
@@ -548,52 +549,54 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             indices_type=self.topk_indices_dtype,
         )
 
-        if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+        # If present, self.fused_experts always needs to take precendence
+        # over other methods.
+        if self.fused_experts is not None:
+            return self.fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                inplace=False,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert not renormalize
             assert activation == 'silu', (
                 f"Expected 'silu' activation but got {activation}")
-            if self.fused_experts is not None:
-                return self.fused_experts(
-                    x,
-                    layer.w13_weight,
-                    layer.w2_weight,
-                    topk_weights,
-                    topk_ids,
-                    inplace=False,
-                    activation=activation,
-                    global_num_experts=global_num_experts,
-                    expert_map=expert_map,
-                    apply_router_weight_on_input=apply_router_weight_on_input,
-                )
-            else:
-                return flashinfer_cutlass_moe_fp8(
-                    x,
-                    layer,
-                    topk_weights,
-                    topk_ids,
-                    inplace=False,
-                    activation=activation,
-                    global_num_experts=global_num_experts,
-                    expert_map=expert_map,
-                    apply_router_weight_on_input=apply_router_weight_on_input,
-                )
-        from vllm.model_executor.layers.fused_moe.fused_moe import (
-            fused_experts)
-        assert self.moe_quant_config is not None
+            return flashinfer_cutlass_moe_fp8(
+                x,
+                layer,
+                topk_weights,
+                topk_ids,
+                inplace=False,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+        else:
+            from vllm.model_executor.layers.fused_moe.fused_moe import (
+                fused_experts)
+            assert self.moe_quant_config is not None
 
-        return fused_experts(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=True,
-            activation=activation,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            quant_config=self.moe_quant_config,
-        )
+            return fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                quant_config=self.moe_quant_config,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
 
 
 class ModelOptNvFp4Config(QuantizationConfig):
@@ -1043,14 +1046,18 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def maybe_make_prepare_finalize(
             self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
-        if (self.allow_flashinfer and self.flashinfer_moe_backend
-                == FlashinferMoeBackend.CUTLASS):
+        if (self.use_marlin or self.flashinfer_moe_backend
+                == FlashinferMoeBackend.TENSORRT_LLM):
+            return None
+        elif (self.allow_flashinfer
+              and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS):
+            # For now, fp4 moe only works with the flashinfer dispatcher.
             prepare_finalize = (
                 build_flashinfer_fp4_cutlass_moe_prepare_finalize(self.moe))
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
-
-        return super().maybe_make_prepare_finalize()
+        else:
+            return super().maybe_make_prepare_finalize()
 
     def select_gemm_impl(
         self,
@@ -1403,8 +1410,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 "EPLB not supported for `ModelOptNvFp4FusedMoE` yet.")
         assert activation == "silu", "Only SiLU activation is supported."
 
-        if self.allow_flashinfer and \
-            self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+        if (self.fused_experts is None and self.allow_flashinfer
+                and self.flashinfer_moe_backend
+                == FlashinferMoeBackend.TENSORRT_LLM):
             import flashinfer
 
             from vllm.model_executor.models.llama4 import Llama4MoE
@@ -1472,26 +1480,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
 
-        if self.use_marlin:
-            return torch.ops.vllm.fused_marlin_moe(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                None,
-                None,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                router_logits,
-                topk_weights,
-                topk_ids,
-                global_scale1=layer.w13_weight_scale_2,
-                global_scale2=layer.w2_weight_scale_2,
-                quant_type_id=scalar_types.float4_e2m1f.id,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                workspace=layer.workspace)
-
+        # If present, self.fused_experts always needs to take precendence
+        # over other methods.
         if self.fused_experts is not None:
             assert self.allow_flashinfer and \
                self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
@@ -1512,11 +1502,30 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
+        elif self.use_marlin:
+            return torch.ops.vllm.fused_marlin_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                None,
+                None,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                global_scale1=layer.w13_weight_scale_2,
+                global_scale2=layer.w2_weight_scale_2,
+                quant_type_id=scalar_types.float4_e2m1f.id,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map)
+
         elif (self.allow_flashinfer
               and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS):
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 flashinfer_cutlass_moe_fp4)
-            assert self.moe_quant_configis is not None
+            assert self.moe_quant_config is not None
 
             return flashinfer_cutlass_moe_fp4(
                 hidden_states=x,
