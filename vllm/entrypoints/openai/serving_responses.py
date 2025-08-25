@@ -371,7 +371,6 @@ class OpenAIServingResponses(OpenAIServing):
             )
         except Exception as e:
             return self.create_error_response(str(e))
-        return self.create_error_response("Should not reach here")
 
     async def _make_request(
         self,
@@ -828,7 +827,7 @@ class OpenAIServingResponses(OpenAIServing):
             status_code=HTTPStatus.BAD_REQUEST,
         )
 
-    async def responses_stream_generator(
+    async def _process_streaming_events(
         self,
         request: ResponsesRequest,
         sampling_params: SamplingParams,
@@ -837,18 +836,8 @@ class OpenAIServingResponses(OpenAIServing):
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-        created_time: Optional[int] = None,
+        created_time: int,
     ) -> AsyncGenerator[str, None]:
-        # TODO:
-        # 1. Handle disconnect
-
-        if not isinstance(context, StreamingHarmonyContext):
-            raise NotImplementedError(
-                "Streaming is not supported for responses API without Harmony."
-            )
-
-        created_time = created_time or int(time.time())
-
         sequence_number = 0
 
         def _send_event(event: BaseModel):
@@ -1260,3 +1249,31 @@ class OpenAIServingResponses(OpenAIServing):
                 sequence_number=-1,
                 response=final_response.model_dump(),
             ))
+
+    async def responses_stream_generator(
+        self,
+        request: ResponsesRequest,
+        sampling_params: SamplingParams,
+        result_generator: AsyncIterator[Optional[ConversationContext]],
+        context: ConversationContext,
+        model_name: str,
+        tokenizer: AnyTokenizer,
+        request_metadata: RequestResponseMetadata,
+        created_time: Optional[int] = None,
+    ) -> AsyncGenerator[str, None]:
+        # TODO:
+        # 1. Handle disconnect
+
+        if not isinstance(context, StreamingHarmonyContext):
+            raise NotImplementedError(
+                "Streaming is not supported for responses API without Harmony."
+            )
+
+        created_time = created_time or int(time.time())
+
+        async with AsyncExitStack() as exit_stack:
+            await context.init_tool_sessions(self.tool_server, exit_stack)
+            async for event_data in self._process_streaming_events(
+                    request, sampling_params, result_generator, context,
+                    model_name, tokenizer, request_metadata, created_time):
+                yield event_data

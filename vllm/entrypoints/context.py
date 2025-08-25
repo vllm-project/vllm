@@ -177,9 +177,10 @@ class HarmonyContext(ConversationContext):
                                  exit_stack: AsyncExitStack) -> None:
         if tool_server:
             for tool_name in self.available_tools:
-                self._tool_sessions[
-                    tool_name] = await exit_stack.enter_async_context(
-                        tool_server.new_session(tool_name))
+                if tool_name not in self._tool_sessions:
+                    self._tool_sessions[
+                        tool_name] = await exit_stack.enter_async_context(
+                            tool_server.new_session(tool_name))
 
 
 class StreamingHarmonyContext(HarmonyContext):
