@@ -107,6 +107,30 @@ __device__ __forceinline__ float warp_max(float v) {
   return v;
 }
 
+__device__ inline void cp_async1(void* smem_ptr, const void* glob_ptr) {
+  const int BYTES = 4;
+  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
+  asm volatile(
+      "{\n"
+      "   cp.async.ca.shared.global [%0], [%1], %2;\n"
+      "}\n" ::"r"(smem),
+      "l"(glob_ptr), "n"(BYTES));
+}
+
+__device__ __forceinline__ void cp_async_fence() {
+  asm volatile("cp.async.commit_group;\n" ::);
+}
+
+template <int N>
+__device__ __forceinline__ void cp_async_wait() {
+  asm volatile("cp.async.wait_group %0;\n" ::"n"(N));
+}
+
+template <>
+__device__ __forceinline__ void cp_async_wait<0>() {
+  asm volatile("cp.async.wait_all;\n" ::);
+}
+
 template <typename scalar_t, uint32_t NUM_WARPS, typename Idx_t,
           int GROUP_SIZE = 128>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
@@ -160,16 +184,23 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 #if 1
     if (tid < 64) {
       Idx_t gate_off = ((base_i + t * stride_i_t) >> 1u) + tid;
-      s_buff[tid] =
-          __ldg(reinterpret_cast<const __nv_bfloat162* __restrict__>(input) +
-                gate_off);
+      cp_async1(
+          reinterpret_cast<void*>(s_buff + tid),
+          reinterpret_cast<const void*>(
+              reinterpret_cast<const __nv_bfloat162* __restrict__>(input) +
+              gate_off));
     } else {
       Idx_t up_off =
           ((base_i + H * stride_i_h + t * stride_i_t) >> 1u) + (tid - 64u);
-      s_buff[tid] = __ldg(
-          reinterpret_cast<const __nv_bfloat162* __restrict__>(input) + up_off);
+      cp_async1(
+          reinterpret_cast<void*>(s_buff + tid),
+          reinterpret_cast<const void*>(
+              reinterpret_cast<const __nv_bfloat162* __restrict__>(input) +
+              up_off));
     }
 
+    cp_async_fence();
+    cp_async_wait<0>();
     __syncthreads();
 
     gate = __bfloat162float(reinterpret_cast<__nv_bfloat16*>(s_buff)[tid]);
