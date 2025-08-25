@@ -26,9 +26,20 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
-
+from vllm.platforms import current_platform
 from .utils import extract_layer_index, maybe_prefix
+import os
 
+if current_platform.is_rocm():
+    from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
+
+
+VLLM_USE_AITER_TRITON_FUSED_SPLIT_QKV_ROPE = (os.getenv("VLLM_USE_AITER_TRITON_FUSED_SPLIT_QKV_ROPE", "False").lower() in ("true", "1"))
+VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD = (os.getenv("VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD", "False").lower() in ("true", "1"))
+if VLLM_USE_AITER_TRITON_FUSED_SPLIT_QKV_ROPE:
+    from aiter.ops.triton.fused_qkv_split_qk_rope import fused_qkv_split_qk_rope
+if VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD:
+    from aiter.ops.triton.fused_add_rmsnorm_pad import fused_add_rmsnorm_pad
 
 class OAIAttention(nn.Module):
 
@@ -118,15 +129,38 @@ class OAIAttention(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor,
                 positions: torch.Tensor) -> torch.Tensor:
-        t = self.norm(hidden_states)
-
+        # t = self.norm(hidden_states)
+        if isinstance(hidden_states, tuple) and current_platform.is_rocm() and VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD:
+            hidden_states, res = hidden_states
+            t, hidden_states = fused_add_rmsnorm_pad(hidden_states, self.norm.weight, self.norm.variance_epsilon, res)
+        else:
+            t = self.norm(hidden_states)
         qkv, _ = self.qkv(t)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        # q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # q, k = self.rotary_emb(positions, q, k)
+        if VLLM_USE_AITER_TRITON_FUSED_SPLIT_QKV_ROPE:
+            cos, sin = self.rotary_emb.cos_sin_cache.chunk(2, dim = -1)
+            q, k, v = fused_qkv_split_qk_rope(
+                qkv,
+                cos,
+                sin,
+                positions,
+                self.num_local_attention_heads, self.num_local_key_value_heads, self.head_dim,
+                is_neox=self.rotary_emb.is_neox_style,
+                offsets = None,
+                reuse_freqs_front_part = (self.head_dim // 2 == cos.shape[-1]),
+                nope_first = False,
+            )
+            q = q.view(-1, self.q_size)
+            k = k.view(-1, self.kv_size)
+        else:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q, k = self.rotary_emb(positions, q, k)
         v = v.contiguous()
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
-
+        if current_platform.is_rocm() and VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD:
+            return output, hidden_states
         return output + hidden_states
 
 
@@ -144,6 +178,7 @@ class MLPBlock(torch.nn.Module):
         self.num_experts = config.num_local_experts
         self.experts_per_token = config.num_experts_per_tok
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
+        self.hidden_size = config.hidden_size
         self.norm = RMSNorm(config.hidden_size, eps=1e-5)
         self.router = torch.nn.Linear(config.hidden_size,
                                       config.num_local_experts,
@@ -161,10 +196,21 @@ class MLPBlock(torch.nn.Module):
                                 has_bias=True,
                                 activation="swiglu_oai")
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        t = self.norm(x)
-        g = self.router(t)
-        t = self.experts(hidden_states=t, router_logits=g)
+    def forward(self, x: torch.Tensor | tuple) -> torch.Tensor:
+        if isinstance(x, tuple) and current_platform.is_rocm() and VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD:
+            x, res = x
+            t, x = fused_add_rmsnorm_pad(x, self.norm.weight, self.norm.variance_epsilon, res, x_pad_to_multiple=256)
+        else:
+            t = self.norm(x)
+
+        if current_platform.is_rocm():
+            g = gemm_a16w16(t[:, :self.hidden_size], self.router.weight, self.router.bias)
+        else:
+            g = self.router(t[:, :self.hidden_size])
+        t = self.experts(hidden_states=t, router_logits=g)[:, :self.hidden_size]
+
+        if current_platform.is_rocm() and VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD:
+            return x, t
         return x + t
 
 
@@ -222,7 +268,11 @@ class GptOssModel(nn.Module):
         x = self.embedding(input_ids)
         for layer in self.layers:
             x = layer(x, positions)
-        x = self.norm(x)
+        if isinstance(x, tuple) and current_platform.is_rocm() and VLLM_USE_AITER_TRITON_FUSED_ADD_RMSNORM_PAD:
+            x, res = x
+            x, _ = fused_add_rmsnorm_pad(x, self.norm.weight, self.norm.variance_epsilon, res)
+        else:
+            x = self.norm(x)
         return x
 
 

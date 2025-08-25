@@ -9,7 +9,10 @@ from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
-
+import os
+if current_platform.is_rocm():
+    from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
+VLLM_USE_AITER_TRITON_GEMM = (os.getenv("VLLM_USE_AITER_TRITON_GEMM", "False").lower() in ("true", "1"))
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
     # Shuffle weight along the last dimension so that
@@ -91,6 +94,16 @@ def default_unquantized_gemm(layer: torch.nn.Module,
                              bias: Optional[torch.Tensor] = None):
     return torch.nn.functional.linear(x, weight, bias)
 
+def aiter_GEMM_check(m, n, k):
+    if ((n == 5120 and k == 2880)
+        or (n == 2880 and k == 4096)
+        or (n == 128 and k == 2880)
+        or (n == 640 and k == 2880)
+        or (n == 2880 and k == 512)):
+        return True
+    return False
+
+
 
 def rocm_unquantized_gemm_impl(
         x: torch.Tensor,
@@ -98,6 +111,9 @@ def rocm_unquantized_gemm_impl(
         bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     from vllm.platforms.rocm import on_gfx9
     k = weight.shape[1]
+    m = weight.shape[0]
+    x_view = x.view(-1, x.size(-1))
+    n = x_view.shape[0]
     use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and on_gfx9() and \
                     x.dtype in [torch.float16, torch.bfloat16] \
                     and k % 8 == 0 and bias is None)
@@ -105,9 +121,9 @@ def rocm_unquantized_gemm_impl(
     if use_skinny is not True:
         return torch.nn.functional.linear(x, weight, bias)
 
-    x_view = x.view(-1, x.size(-1))
-    n = x_view.shape[0]
-    m = weight.shape[0]
+    # x_view = x.view(-1, x.size(-1))
+    # n = x_view.shape[0]
+    # m = weight.shape[0]
     cu_count = current_platform.get_cu_count()
 
     if m > 8 and 0 < n <= 4:
