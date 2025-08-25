@@ -8,7 +8,7 @@ from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
-from typing import Any, Callable, Final, Optional, Union
+from typing import Callable, Final, Optional, Union
 
 import jinja2
 import openai.types.responses as openai_responses_types
@@ -265,106 +265,70 @@ class OpenAIServingResponses(OpenAIServing):
                 builtin_tool_list.append("browser")
             if self.tool_server.has_tool("python"):
                 builtin_tool_list.append("python")
-        async with AsyncExitStack() as exit_stack:
-            try:
-                if self.tool_server is not None:
-                    # TODO: initialize tool sessions lazily when the session
-                    # is actually used.
-                    tool_session_ctxs: dict[str, Any] = {
-                        tool_name:
-                        exit_stack.enter_async_context(
-                            self.tool_server.new_session(tool_name))
-                        if not request.background else tool_name
-                        for tool_name in builtin_tool_list
-                    }
-                    tool_sessions = {}
-                    for tool_name in builtin_tool_list:
-                        tool_sessions[tool_name] = (
-                            await tool_session_ctxs[tool_name]
-                            if not request.background else
-                            tool_session_ctxs[tool_name])
-                else:
-                    assert len(builtin_tool_list) == 0
-                    tool_sessions = {}
-                for i, engine_prompt in enumerate(engine_prompts):
-                    default_max_tokens = self.max_model_len - len(
-                        engine_prompt["prompt_token_ids"])
-                    sampling_params = request.to_sampling_params(
-                        default_max_tokens, self.default_sampling_params)
 
-                    trace_headers = (None if raw_request is None else await
-                                     self._get_trace_headers(
-                                         raw_request.headers))
+        if self.tool_server is not None:
+            available_tools = builtin_tool_list
+        else:
+            assert len(builtin_tool_list) == 0
+            available_tools = []
+        try:
+            for i, engine_prompt in enumerate(engine_prompts):
+                default_max_tokens = self.max_model_len - len(
+                    engine_prompt["prompt_token_ids"])
+                sampling_params = request.to_sampling_params(
+                    default_max_tokens, self.default_sampling_params)
 
-                    context: ConversationContext
-                    if self.use_harmony:
-                        if request.stream:
-                            context = StreamingHarmonyContext(
-                                messages, tool_sessions)
-                        else:
-                            context = HarmonyContext(messages, tool_sessions)
+                trace_headers = (None if raw_request is None else await
+                                 self._get_trace_headers(raw_request.headers))
+
+                context: ConversationContext
+                if self.use_harmony:
+                    if request.stream:
+                        context = StreamingHarmonyContext(
+                            messages, available_tools)
                     else:
-                        context = SimpleContext()
-                    generator = self._generate_with_builtin_tools(
-                        request_id=request.request_id,
-                        request_prompt=request_prompts[i],
-                        engine_prompt=engine_prompt,
-                        sampling_params=sampling_params,
-                        context=context,
-                        lora_request=lora_request,
-                        priority=request.priority,
-                        trace_headers=trace_headers,
-                    )
-                    generators.append(generator)
-            except ValueError as e:
-                # TODO: Use a vllm-specific Validation Error
-                return self.create_error_response(str(e))
-
-            assert len(generators) == 1
-            result_generator, = generators
-
-            # Store the input messages.
-            if request.store:
-                self.msg_store[request.request_id] = messages
-
-            if request.background:
-                created_time = int(time.time())
-                response = ResponsesResponse.from_request(
-                    request,
-                    sampling_params,
-                    model_name=model_name,
-                    created_time=created_time,
-                    output=[],
-                    status="queued",
-                    usage=None,
+                        context = HarmonyContext(messages, available_tools)
+                else:
+                    context = SimpleContext()
+                generator = self._generate_with_builtin_tools(
+                    request_id=request.request_id,
+                    request_prompt=request_prompts[i],
+                    engine_prompt=engine_prompt,
+                    sampling_params=sampling_params,
+                    context=context,
+                    lora_request=lora_request,
+                    priority=request.priority,
+                    trace_headers=trace_headers,
                 )
-                async with self.response_store_lock:
-                    self.response_store[response.id] = response
+                generators.append(generator)
+        except ValueError as e:
+            # TODO: Use a vllm-specific Validation Error
+            return self.create_error_response(str(e))
 
-                # Run the request in the background.
-                task = asyncio.create_task(
-                    self._run_background_request(
-                        request,
-                        sampling_params,
-                        result_generator,
-                        context,
-                        model_name,
-                        tokenizer,
-                        request_metadata,
-                        created_time,
-                    ),
-                    name=f"create_{response.id}",
-                )
+        assert len(generators) == 1
+        result_generator, = generators
 
-                # For cleanup.
-                response_id = response.id
-                self.background_tasks[response_id] = task
-                task.add_done_callback(
-                    lambda _: self.background_tasks.pop(response_id, None))
-                return response
+        # Store the input messages.
+        if request.store:
+            self.msg_store[request.request_id] = messages
 
-            if request.stream:
-                return self.responses_stream_generator(
+        if request.background:
+            created_time = int(time.time())
+            response = ResponsesResponse.from_request(
+                request,
+                sampling_params,
+                model_name=model_name,
+                created_time=created_time,
+                output=[],
+                status="queued",
+                usage=None,
+            )
+            async with self.response_store_lock:
+                self.response_store[response.id] = response
+
+            # Run the request in the background.
+            task = asyncio.create_task(
+                self._run_background_request(
                     request,
                     sampling_params,
                     result_generator,
@@ -372,20 +336,41 @@ class OpenAIServingResponses(OpenAIServing):
                     model_name,
                     tokenizer,
                     request_metadata,
-                )
+                    created_time,
+                ),
+                name=f"create_{response.id}",
+            )
 
-            try:
-                return await self.responses_full_generator(
-                    request,
-                    sampling_params,
-                    result_generator,
-                    context,
-                    model_name,
-                    tokenizer,
-                    request_metadata,
-                )
-            except Exception as e:
-                return self.create_error_response(str(e))
+            # For cleanup.
+            response_id = response.id
+            self.background_tasks[response_id] = task
+            task.add_done_callback(
+                lambda _: self.background_tasks.pop(response_id, None))
+            return response
+
+        if request.stream:
+            return self.responses_stream_generator(
+                request,
+                sampling_params,
+                result_generator,
+                context,
+                model_name,
+                tokenizer,
+                request_metadata,
+            )
+
+        try:
+            return await self.responses_full_generator(
+                request,
+                sampling_params,
+                result_generator,
+                context,
+                model_name,
+                tokenizer,
+                request_metadata,
+            )
+        except Exception as e:
+            return self.create_error_response(str(e))
         return self.create_error_response("Should not reach here")
 
     async def _make_request(

@@ -72,10 +72,11 @@ class HarmonyContext(ConversationContext):
     def __init__(
         self,
         messages: list,
-        tool_sessions: dict[str, Union[Tool, str]],
+        available_tools: list[str],
     ):
         self._messages = messages
-        self._tool_sessions = tool_sessions
+        self.available_tools = available_tools
+        self._tool_sessions: dict[str, Union[ClientSession, Tool]] = {}
 
         self.parser = get_streamable_parser_for_assistant()
         self.num_init_messages = len(messages)
@@ -175,12 +176,10 @@ class HarmonyContext(ConversationContext):
     async def init_tool_sessions(self, tool_server: Optional[ToolServer],
                                  exit_stack: AsyncExitStack) -> None:
         if tool_server:
-            for tool_name, session in self._tool_sessions.items():
-                if isinstance(session, str):
-                    assert tool_name == session
-                    self._tool_sessions[
-                        tool_name] = await exit_stack.enter_async_context(
-                            tool_server.new_session(session))
+            for tool_name, session in self.available_tools.items():
+                self._tool_sessions[
+                    tool_name] = await exit_stack.enter_async_context(
+                        tool_server.new_session(session))
 
 
 class StreamingHarmonyContext(HarmonyContext):
