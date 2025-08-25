@@ -5,7 +5,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from math import ceil
-from typing import Optional, Union, cast
+from typing import Literal, Optional, Union, cast
 
 import numpy as np
 import regex as re
@@ -17,9 +17,9 @@ from mistral_common.protocol.instruct.messages import (AudioChunk, RawAudio,
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.protocol.transcription.request import TranscriptionRequest
 from mistral_common.tokens.tokenizers.audio import Audio, AudioEncoder
+
 from transformers import TensorType, WhisperConfig
 from transformers.tokenization_utils_base import TextInput
-
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -451,7 +451,8 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_generation_prompt(cls, audio: np.ndarray,
                               model_config: ModelConfig,
                               stt_config: SpeechToTextConfig,
-                              language: Optional[str], task_type: str,
+                              language: Optional[str],
+                              task_type: Literal["transcribe", "translate"],
                               request_prompt: str) -> PromptType:
         tokenizer = cached_tokenizer_from_config(model_config)
         audio = Audio(audio, int(stt_config.sample_rate),

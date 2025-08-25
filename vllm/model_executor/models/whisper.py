@@ -4,15 +4,15 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import nullcontext
-from typing import Optional, TypedDict, Union, cast
+from typing import Literal, Optional, TypedDict, Union, cast
 
 import numpy as np
 import torch
 from torch import nn
+
 from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
                           WhisperProcessor)
 from transformers.models.whisper.modeling_whisper import sinusoids
-
 from vllm.attention import Attention, AttentionType
 from vllm.attention.layer import MultiHeadAttention
 from vllm.config import (CacheConfig, ModelConfig, SpeechToTextConfig,
@@ -783,7 +783,7 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             model_config: ModelConfig,  # not needed here
             stt_config: SpeechToTextConfig,
             language: Optional[str],
-            task_type: str,
+            task_type: Literal["transcribe", "translate"],
             request_prompt: str) -> PromptType:
         if language is None:
             raise ValueError(

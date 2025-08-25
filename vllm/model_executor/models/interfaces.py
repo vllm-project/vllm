@@ -8,9 +8,9 @@ from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
 import numpy as np
 import torch
 from torch import Tensor
-from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
+from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from vllm.config import ModelConfig, SpeechToTextConfig
 from vllm.inputs import TokensPrompt
 from vllm.inputs.data import PromptType
@@ -729,7 +729,8 @@ class SupportsTranscription(Protocol):
     def get_generation_prompt(cls, audio: np.ndarray,
                               stt_config: SpeechToTextConfig,
                               model_config: ModelConfig,
-                              language: Optional[str], task_type: str,
+                              language: Optional[str],
+                              task_type: Literal["transcribe", "translate"],
                               request_prompt: str) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
