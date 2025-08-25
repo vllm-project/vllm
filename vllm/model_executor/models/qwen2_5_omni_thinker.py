@@ -309,9 +309,8 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
 
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
-                mm_prompt_updates,
                 prompt_ids,
-                mm_item_counts,
+                mm_prompt_updates,
             )
             self._validate_mm_placeholders(
                 mm_placeholders,
@@ -328,7 +327,6 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
             ) = self._apply_prompt_updates(
                 prompt_ids,
                 mm_prompt_updates,
-                mm_item_counts,
             )
             self._validate_mm_placeholders(
                 mm_placeholders,

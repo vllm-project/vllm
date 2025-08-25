@@ -828,26 +828,19 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
                 target=[image_token_id] * num_image_tokens,
                 replacement=get_replacement_mantis,
             )
-        ])
+        ], mm_item_counts)
 
         prompt_ids, prompt, _ = self._apply_prompt_updates(
             result["prompt_token_ids"],
             mantis_mm_repls,
-            mm_item_counts,
         )
 
-        unbound_orig_repls = self._get_prompt_updates(
+        orig_repls = self._get_mm_prompt_updates(
             mm_items,
             hf_processor_mm_kwargs,
             mm_kwargs,
         )
-        orig_repls = self._bind_and_group_updates(unbound_orig_repls)
-
-        mm_placeholders = self._find_mm_placeholders(
-            orig_repls,
-            prompt_ids,
-            mm_item_counts,
-        )
+        mm_placeholders = self._find_mm_placeholders(prompt_ids, orig_repls)
         self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
         mm_placeholder_ranges = {
