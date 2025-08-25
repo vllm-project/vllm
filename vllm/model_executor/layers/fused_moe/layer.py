@@ -1394,15 +1394,12 @@ class FusedMoE(CustomOp):
         # `e_score_correction_bias` is a bias for each logical expert,
         # with shape (num_logical_experts,), not an expert weight.
         NON_EXPERT_WEIGHTS = {
-            "e_score_correction_bias",
-            # skip input scales as they are scalers
-            "w13_input_scale",
-            "w2_input_scale",
+            "e_score_correction_bias", 
         }
 
         return [
             weight.view(self.local_num_experts, -1) for name, weight in weights
-            if name not in NON_EXPERT_WEIGHTS
+            if name not in NON_EXPERT_WEIGHTS and weight.shape != torch.Size([])
         ]
 
     def set_eplb_state(
