@@ -927,3 +927,25 @@ def get_model_path(model: Union[str, Path], revision: Optional[str] = None):
 
     from huggingface_hub import snapshot_download
     return snapshot_download(repo_id=model, **common_kwargs)
+
+
+def get_hf_file_bytes(file_name: str,
+                      model: Union[str, Path],
+                      revision: Optional[str] = 'main') -> Optional[bytes]:
+    """Get file contents from HuggingFace repository as bytes."""
+    file_path = try_get_local_file(model=model,
+                                   file_name=file_name,
+                                   revision=revision)
+
+    if file_path is None:
+        hf_hub_file = hf_hub_download(model,
+                                      file_name,
+                                      revision=revision,
+                                      token=_get_hf_token())
+        file_path = Path(hf_hub_file)
+
+    if file_path is not None and file_path.is_file():
+        with open(file_path, 'rb') as file:
+            return file.read()
+
+    return None
