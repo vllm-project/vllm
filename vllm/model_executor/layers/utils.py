@@ -108,26 +108,25 @@ def cpu_unquantized_gemm(layer: torch.nn.Module,
         return torch.nn.functional.linear(x, weight, bias)
 
 
-def rocm_unquantized_gemm(layer: torch.nn.Module,
-                          x: torch.Tensor,
-                          weight: torch.Tensor,
-                          bias: Optional[torch.Tensor] = None):
-    # Get configuration from environment variables
-    from vllm.platforms.rocm import on_gfx9
-    ON_MI300 = on_gfx9()
-    use_skinny = envs.VLLM_ROCM_USE_SKINNY_GEMM and ON_MI300
-    use_aiter = (aiter_ops.is_aiter_supported() and envs.VLLM_ROCM_USE_AITER
-                 and envs.VLLM_ROCM_USE_AITER_LINEAR)
+def rocm_aiter_unquantized_gemm(layer: torch.nn.Module,
+                                x: torch.Tensor,
+                                weight: torch.Tensor,
+                                bias: Optional[torch.Tensor] = None):
+    return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
 
+
+def rocm_unquantized_gemm_impl(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    from vllm.platforms.rocm import on_gfx9
     k = weight.shape[1]
-    _use_skinny = (use_skinny and \
+    use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and on_gfx9() and \
                     x.dtype in [torch.float16, torch.bfloat16] \
                     and k % 8 == 0 and bias is None)
 
-    if not _use_skinny:
-        if use_aiter:
-            return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
-        return default_unquantized_gemm(x, weight, bias)
+    if use_skinny is not True:
+        return torch.nn.functional.linear(x, weight, bias)
 
     x_view = x.view(-1, x.size(-1))
     n = x_view.shape[0]
@@ -140,15 +139,29 @@ def rocm_unquantized_gemm(layer: torch.nn.Module,
     elif m % 4 == 0 and n == 1 and k <= 8192:
         out = ops.LLMM1(weight, x_view, 4)
         return out.view(*x.shape[:-1], weight.shape[0])
+    return torch.nn.functional.linear(x, weight, bias)
 
-    if use_aiter:
-        return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
-    return default_unquantized_gemm(x, weight, bias)
+
+def rocm_unquantized_gemm_impl_fake(
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    return x.new_empty((*x.shape[:-1], weight.shape[0]))
+
+
+def rocm_unquantized_gemm(layer: torch.nn.Module,
+                          x: torch.Tensor,
+                          weight: torch.Tensor,
+                          bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    return torch.ops.vllm.rocm_unquantized_gemm_impl(x, weight, bias)
 
 
 def dispatch_unquantized_gemm() -> Callable[
     [torch.nn.Module, torch.Tensor, torch.Tensor, Optional[torch.Tensor]],
     torch.Tensor]:
+    if (aiter_ops.is_aiter_supported() and envs.VLLM_ROCM_USE_AITER
+            and envs.VLLM_ROCM_USE_AITER_LINEAR):
+        return rocm_aiter_unquantized_gemm
     if current_platform.is_rocm():
         return rocm_unquantized_gemm
     if current_platform.is_cpu():
