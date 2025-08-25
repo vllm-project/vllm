@@ -84,7 +84,7 @@ def test_cache_item_size(item, expected_size):
     # Should not be used since there is nothing to convert to text
     mock_tokenizer = cast(AnyTokenizer, object())
     prompt_update = PromptInsertion("dummy", "target", "insertion") \
-        .bind(mock_tokenizer)
+        .resolve(mock_tokenizer, 0)
 
     cache[""] = MultiModalProcessorCacheItem(item, [prompt_update])
     assert cache.currsize == expected_size
