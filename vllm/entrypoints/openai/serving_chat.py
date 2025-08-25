@@ -663,9 +663,9 @@ class OpenAIServingChat(OpenAIServing):
                         harmony_parser = harmony_parsers[i]
                         for token_id in output.token_ids:
                             harmony_parser.process(token_id)
-                        # FIXME(woosuk): Support function calling
-                        is_final = harmony_parser.current_channel == "final"
-                        if not (request.include_reasoning or is_final):
+                        is_reasoning = \
+                            harmony_parser.current_channel == "analysis"
+                        if not request.include_reasoning and is_reasoning:
                             # Skip the reasoning content.
                             continue
                         delta_text = harmony_parser.last_content_delta or ""
@@ -695,11 +695,11 @@ class OpenAIServingChat(OpenAIServing):
                             current_token_ids = as_list(output.token_ids)
 
                     if self.use_harmony:
-                        if is_final:
-                            delta_message = DeltaMessage(content=delta_text)
-                        else:
+                        if is_reasoning:
                             delta_message = DeltaMessage(
                                 reasoning_content=delta_text)
+                        else:
+                            delta_message = DeltaMessage(content=delta_text)
                     # handle streaming deltas for tools with named tool_choice
                     elif tool_choice_function_name:
                         if (self.reasoning_parser and not reasoning_end_arr[i]
