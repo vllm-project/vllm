@@ -168,7 +168,6 @@ class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        vllm_config.model_config.hf_config.num_labels = 2
         pooler_config = vllm_config.model_config.pooler_config
 
         if pooler_config.step_tag_id is None:
@@ -179,7 +178,6 @@ class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        vllm_config.model_config.hf_config.num_labels = 1
         pooler_config = vllm_config.model_config.pooler_config
 
         if pooler_config.softmax is None:
