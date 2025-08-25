@@ -22,10 +22,10 @@ from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          get_history_tool_calls_cnt,
                                          make_tool_call_id)
 from vllm.entrypoints.harmony_utils import (
-    get_developer_message, get_stop_tokens_for_assistant_actions,
-    get_streamable_parser_for_assistant, get_system_message, parse_chat_input,
-    parse_chat_output, render_for_completion, get_harmony_tools, trim_function_tool_prefix,
-    parse_regular_messages)
+    get_developer_message, get_harmony_tools,
+    get_stop_tokens_for_assistant_actions, get_streamable_parser_for_assistant,
+    get_system_message, parse_chat_output, parse_regular_messages,
+    render_for_completion, trim_function_tool_prefix)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
@@ -667,8 +667,10 @@ class OpenAIServingChat(OpenAIServing):
                         is_reasoning = \
                             harmony_parser.current_channel == "analysis"
                         # Only return the tool call if the tools are provided.
-                        is_harmony_tool = (harmony_parser.current_channel == "commentary" and request.tools)
-                        harmony_tool = trim_function_tool_prefix(harmony_parser.current_recipient)
+                        is_harmony_tool = (harmony_parser.current_channel
+                                           == "commentary" and request.tools)
+                        harmony_tool = trim_function_tool_prefix(
+                            harmony_parser.current_recipient)
                         if not request.include_reasoning and is_reasoning:
                             # Skip the reasoning content.
                             continue
@@ -707,10 +709,10 @@ class OpenAIServingChat(OpenAIServing):
                                 id=make_tool_call_id(),
                                 type="function",
                                 function=DeltaFunctionCall(
-                                    name=harmony_tool,
-                                    arguments=delta_text),
+                                    name=harmony_tool, arguments=delta_text),
                                 index=i)
-                            delta_message = DeltaMessage(tool_calls=[delta_tool_call])
+                            delta_message = DeltaMessage(
+                                tool_calls=[delta_tool_call])
                         else:
                             delta_message = DeltaMessage(content=delta_text)
                     # handle streaming deltas for tools with named tool_choice

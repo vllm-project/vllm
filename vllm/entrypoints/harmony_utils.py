@@ -12,11 +12,11 @@ from openai.types.responses.response_function_web_search import (
     ActionFind, ActionOpenPage, ActionSearch, ResponseFunctionWebSearch)
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent)
-from openai.types.responses.tool import Tool, FunctionTool
+from openai.types.responses.tool import FunctionTool, Tool
 from openai_harmony import (Author, Conversation, DeveloperContent,
                             HarmonyEncodingName, Message, ReasoningEffort,
                             Role, StreamableParser, SystemContent, TextContent,
-                            ToolDescription, ToolNamespaceConfig, load_harmony_encoding)
+                            ToolDescription, load_harmony_encoding)
 
 from vllm.entrypoints.openai.protocol import ResponseInputOutputItem
 from vllm.utils import random_uuid
