@@ -12,15 +12,15 @@ from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
                         MultiLevelCascadeAttentionWrapper)
 from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
+from flashinfer.utils import FP4Tensor
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape)
+    QuantKey, kFp8StaticTensorSym, kNvfp4Quant)
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.flashinfer import (supports_trtllm_attention,
@@ -41,6 +41,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec
 FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 
 FP8_DTYPE = current_platform.fp8_dtype()
+FP4_DTYPE = torch.uint8
 
 logger = init_logger(__name__)
 
@@ -228,8 +229,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.q_data_type = self.kv_cache_dtype
         else:
             self.kv_cache_dtype = self.kv_cache_spec.dtype
-        self.use_tensor_cores = (envs.VLLM_FLASHINFER_FORCE_TENSOR_CORES or
-                                 (self.num_qo_heads // self.num_kv_heads > 4))
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -308,7 +307,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 paged_kv_indptr_buffer=paged_kv_indptr,
                 paged_kv_indices_buffer=paged_kv_indices,
                 paged_kv_last_page_len_buffer=paged_kv_last_page_len,
-                use_tensor_cores=self.use_tensor_cores)
+                # Tensor cores are enabled by default because the perf would be
+                # atleast as good as cuda cores for all attention ops in latest
+                # gpus.
+                use_tensor_cores=True,
+            )
 
             # save the decode wrapper
             if use_cudagraph:
@@ -463,7 +466,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         page_size = self.page_size
         max_q_len = common_attn_metadata.max_query_len
-        max_seq_len = common_attn_metadata.seq_lens_cpu.max().item()
+        max_seq_len = common_attn_metadata.max_seq_len
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         block_table_tensor = common_attn_metadata.block_table_tensor
@@ -652,14 +655,12 @@ class FlashInferImpl(AttentionImpl):
                                     and num_heads % num_kv_heads == 0)
         self.bmm1_scale: Optional[float] = None
         self.bmm2_scale: Optional[float] = None
+        self.o_sf_scale: Optional[float] = None
 
-    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
-                                     group_shape: GroupShape):
-        supported_quant_type = (dtype == FP8_DTYPE and static
-                                and group_shape == GroupShape.PER_TENSOR)
+    def fused_output_quant_supported(self, quant_key: QuantKey):
         return (self.support_trtllm_attn
                 and self.kv_cache_dtype.startswith("fp8")
-                and supported_quant_type)
+                and quant_key in (kFp8StaticTensorSym, kNvfp4Quant))
 
     def forward(
         self,
@@ -671,6 +672,7 @@ class FlashInferImpl(AttentionImpl):
         attn_metadata: FlashInferMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashInfer.
 
@@ -704,19 +706,32 @@ class FlashInferImpl(AttentionImpl):
         if output_scale is None:
             assert attn_metadata.q_data_type != FP8_DTYPE, \
                 "Query can only be FP8 if output fusion happened."
+            assert output_block_scale is None, "output_block_scale "\
+                "is not supported when fusion has not happened"
         else:
             assert attn_metadata.q_data_type == FP8_DTYPE, \
                 "Query must be FP8 when attn+quant fusion happened."
             assert (attn_metadata.prefill_use_trtllm and
                     attn_metadata.decode_use_trtllm), "Must use TRT-LLM attn"
-            assert output.dtype == FP8_DTYPE, \
-                "Output must be FP8 when attn+quant fusion happened."
 
-            # TRTLLM attn kernel requires o scale as a host scalar, store the
-            # o scale to host scalar in warmup run with cuda graph not enabled
+            if output.dtype == FP8_DTYPE:
+                assert output_block_scale is None, \
+                    "output_block_scale should not be provided for fp8 output"
+            elif output.dtype == FP4_DTYPE:
+                assert output_block_scale is not None, \
+                    "output_block_scale is required for nvfp4 output"
+            else:
+                raise ValueError(f"Unsupported output dtype: {output.dtype}")
+
+            # TRTLLM attn kernel requires o scale to pass as a host scalar,
+            # store the o scale as a host scalar in warmup run with cuda graph
+            # not enabled
             if layer._o_scale_float is None:
                 layer._o_scale_float = output_scale.cpu().item()
-                self.bmm2_scale = self.bmm2_scale / layer._o_scale_float
+                if output.dtype == FP8_DTYPE:
+                    self.bmm2_scale = self.bmm2_scale / layer._o_scale_float
+                elif output.dtype == FP4_DTYPE:
+                    self.o_sf_scale = layer._o_scale_float
 
             # Insert FP8 quant for query
             num_tokens, num_heads, head_size = query.shape
@@ -817,6 +832,16 @@ class FlashInferImpl(AttentionImpl):
                 assert block_tables_prefill.is_contiguous()
                 assert seq_lens_prefill.is_contiguous()
 
+                if output.dtype == FP4_DTYPE:
+                    assert self.o_sf_scale is not None
+                    out = FP4Tensor(data=output[num_decode_tokens:],
+                                    scale=output_block_scale,
+                                    scale_start_index=num_decode_tokens,
+                                    original_shape=prefill_query.shape)
+                else:
+                    assert self.o_sf_scale is None
+                    out = output[num_decode_tokens:]
+
                 trtllm_batch_context_with_kv_cache(
                     query=prefill_query,
                     kv_cache=kv_cache_permute,
@@ -832,7 +857,8 @@ class FlashInferImpl(AttentionImpl):
                     cum_seq_lens_kv=attn_metadata.paged_kv_indptr_gpu,
                     window_left=self.window_left,
                     sinks=self.sinks,
-                    out=output[num_decode_tokens:],
+                    o_sf_scale=self.o_sf_scale,
+                    out=out,
                 )
 
         if num_decode_tokens > 0:
@@ -869,6 +895,16 @@ class FlashInferImpl(AttentionImpl):
                 assert block_tables_decode.is_contiguous()
                 assert seq_lens_decode.is_contiguous()
 
+                if output.dtype == FP4_DTYPE:
+                    assert self.o_sf_scale is not None
+                    out = FP4Tensor(data=output[:num_decode_tokens],
+                                    scale=output_block_scale,
+                                    scale_start_index=0,
+                                    original_shape=decode_query.shape)
+                else:
+                    assert self.o_sf_scale is None
+                    out = output[:num_decode_tokens]
+
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
                     kv_cache=kv_cache_permute,
@@ -880,7 +916,8 @@ class FlashInferImpl(AttentionImpl):
                     bmm2_scale=self.bmm2_scale,
                     window_left=self.window_left,
                     sinks=self.sinks,
-                    out=output[:num_decode_tokens],
+                    o_sf_scale=self.o_sf_scale,
+                    out=out,
                 )
         return output_padded
 
@@ -984,52 +1021,29 @@ def fast_plan_decode(
     self._paged_kv_last_page_len_buf.copy_(last_page_len_cpu,
                                            non_blocking=True)
 
-    if self.use_tensor_cores:
-        qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
+    qo_indptr_host = _get_range_buf(batch_size + 1, "cpu")
 
-        try:
-            # Make sure we pass exactly 15 arguments for tensor core version
-            self._plan_info = self._cached_module.plan(
-                self._float_workspace_buffer,
-                self._int_workspace_buffer,
-                self._pin_memory_int_workspace_buffer,
-                qo_indptr_host,
-                indptr_cpu,
-                seq_lens_cpu,
-                batch_size,  # total_num_rows
-                batch_size,
-                num_qo_heads,
-                num_kv_heads,
-                page_size,
-                self.is_cuda_graph_enabled,
-                head_dim,
-                head_dim,
-                False,  # causal
-            )
-        except Exception as e:
-            raise RuntimeError(f"Error in tensor core plan: {e}") from e
-    else:
-        try:
-            # Make sure we pass exactly 15 arguments for standard version
-            self._plan_info = self._cached_module.plan(
-                self._float_workspace_buffer,
-                self._int_workspace_buffer,
-                self._pin_memory_int_workspace_buffer,
-                indptr_cpu,
-                batch_size,
-                num_qo_heads,
-                num_kv_heads,
-                page_size,
-                self.is_cuda_graph_enabled,
-                window_left,
-                logits_soft_cap,
-                head_dim,
-                head_dim,
-                torch.empty(0, dtype=q_data_type),
-                torch.empty(0, dtype=kv_data_type),
-            )
-        except Exception as e:
-            raise RuntimeError(f"Error in standard plan: {e}") from e
+    try:
+        # Make sure we pass exactly 15 arguments for tensor core version
+        self._plan_info = self._cached_module.plan(
+            self._float_workspace_buffer,
+            self._int_workspace_buffer,
+            self._pin_memory_int_workspace_buffer,
+            qo_indptr_host,
+            indptr_cpu,
+            seq_lens_cpu,
+            batch_size,  # total_num_rows
+            batch_size,
+            num_qo_heads,
+            num_kv_heads,
+            page_size,
+            self.is_cuda_graph_enabled,
+            head_dim,
+            head_dim,
+            False,  # causal
+        )
+    except Exception as e:
+        raise RuntimeError(f"Error in tensor core plan: {e}") from e
 
     self._pos_encoding_mode = pos_encoding_mode
     self._window_left = window_left
