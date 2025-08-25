@@ -9,6 +9,7 @@ import vllm._aiter_ops as aiter_ops
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
 
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
@@ -92,29 +93,6 @@ def default_unquantized_gemm(layer: torch.nn.Module,
     return torch.nn.functional.linear(x, weight, bias)
 
 
-def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype):
-    return (torch._C._cpu._is_amx_tile_supported()
-            and (dtype in (torch.bfloat16, torch.int8)) and k % 32 == 0
-            and n % 16 == 0)
-
-
-def cpu_unquantized_gemm(layer: torch.nn.Module,
-                         x: torch.Tensor,
-                         weight: torch.Tensor,
-                         bias: Optional[torch.Tensor] = None):
-    if getattr(layer, "use_cpu_sgl", False):
-        return torch.ops._C.weight_packed_linear(x, weight, bias, True)
-    else:
-        return torch.nn.functional.linear(x, weight, bias)
-
-
-def rocm_aiter_unquantized_gemm(layer: torch.nn.Module,
-                                x: torch.Tensor,
-                                weight: torch.Tensor,
-                                bias: Optional[torch.Tensor] = None):
-    return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
-
-
 def rocm_unquantized_gemm_impl(
         x: torch.Tensor,
         weight: torch.Tensor,
@@ -154,6 +132,38 @@ def rocm_unquantized_gemm(layer: torch.nn.Module,
                           weight: torch.Tensor,
                           bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     return torch.ops.vllm.rocm_unquantized_gemm_impl(x, weight, bias)
+
+
+direct_register_custom_op(
+    op_name="rocm_unquantized_gemm_impl",
+    op_func=rocm_unquantized_gemm_impl,
+    mutates_args=[],
+    fake_impl=rocm_unquantized_gemm_impl_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
+
+
+def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype):
+    return (torch._C._cpu._is_amx_tile_supported()
+            and (dtype in (torch.bfloat16, torch.int8)) and k % 32 == 0
+            and n % 16 == 0)
+
+
+def cpu_unquantized_gemm(layer: torch.nn.Module,
+                         x: torch.Tensor,
+                         weight: torch.Tensor,
+                         bias: Optional[torch.Tensor] = None):
+    if getattr(layer, "use_cpu_sgl", False):
+        return torch.ops._C.weight_packed_linear(x, weight, bias, True)
+    else:
+        return torch.nn.functional.linear(x, weight, bias)
+
+
+def rocm_aiter_unquantized_gemm(layer: torch.nn.Module,
+                                x: torch.Tensor,
+                                weight: torch.Tensor,
+                                bias: Optional[torch.Tensor] = None):
+    return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
 
 
 def dispatch_unquantized_gemm() -> Callable[
