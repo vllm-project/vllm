@@ -1968,7 +1968,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             num_nans_in_logits = {}
             num_nans_for_index = logits.isnan().sum(dim=-1).cpu().numpy()
-            for i, req_id in input_batch.req_ids:
+            for i, req_id in enumerate(input_batch.req_ids):
                 num_nans_in_logits[req_id] = (int(num_nans_for_index[i])
                                               if num_nans_for_index is not None
                                               and i < logits.shape[0] else 0)
