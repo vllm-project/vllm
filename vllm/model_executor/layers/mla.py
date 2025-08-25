@@ -15,15 +15,15 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 class MLAModules:
     """Modules used in MLA.
     """
+    kv_a_layernorm: torch.nn.Module
+    kv_b_proj: torch.nn.Module
+    rotary_emb: torch.nn.Module
+    o_proj: torch.nn.Module
     fused_qkv_a_proj: Optional[torch.nn.Module]
     kv_a_proj_with_mqa: Optional[torch.nn.Module]
     q_a_layernorm: Optional[torch.nn.Module]
     q_b_proj: Optional[torch.nn.Module]
     q_proj: Optional[torch.nn.Module]
-    kv_a_layernorm: Optional[torch.nn.Module]
-    kv_b_proj: Optional[torch.nn.Module]
-    rotary_emb: Optional[torch.nn.Module]
-    o_proj: Optional[torch.nn.Module]
 
 
 @CustomOp.register("mla")
@@ -134,13 +134,13 @@ class MultiHeadLatentAttention(CustomOp):
 
         kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim],
                                    dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c)  # type: ignore
+        kv_c_normed = self.kv_a_layernorm(kv_c)
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(  # type: ignore
+        q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
             positions, q[..., self.qk_nope_head_dim:], k_pe)
 
         attn_out = self.mla_attn(
@@ -149,7 +149,7 @@ class MultiHeadLatentAttention(CustomOp):
             k_pe,
             output_shape=(hidden_states.shape[0],
                           self.num_heads * self.v_head_dim))
-        return self.o_proj(attn_out)[0]  # type: ignore
+        return self.o_proj(attn_out)[0]
 
     def forward_cuda(self, *args, **kwargs):
         return self.forward_native(*args, **kwargs)

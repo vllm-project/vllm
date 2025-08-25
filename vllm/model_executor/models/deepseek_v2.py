@@ -463,6 +463,10 @@ class DeepseekV2MLAAttention(nn.Module):
             self.scaling = self.scaling * mscale * mscale
 
         mla_modules = MLAModules(
+            kv_a_layernorm=self.kv_a_layernorm,
+            kv_b_proj=self.kv_b_proj,
+            rotary_emb=self.rotary_emb,
+            o_proj=self.o_proj,
             fused_qkv_a_proj=self.fused_qkv_a_proj
             if self.q_lora_rank is not None else None,
             kv_a_proj_with_mqa=self.kv_a_proj_with_mqa
@@ -471,10 +475,6 @@ class DeepseekV2MLAAttention(nn.Module):
             if self.q_lora_rank is not None else None,
             q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else None,
-            kv_a_layernorm=self.kv_a_layernorm,
-            kv_b_proj=self.kv_b_proj,
-            rotary_emb=self.rotary_emb,
-            o_proj=self.o_proj,
         )
         self.mla_attn = MultiHeadLatentAttention(
             self.hidden_size,
