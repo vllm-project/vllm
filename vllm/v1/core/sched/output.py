@@ -143,9 +143,9 @@ class SchedulerOutput:
     # steps. This is used to notify the workers about the finished requests
     # so that they can free the cached states for those requests.
     finished_req_ids: set[str]
-    # list of (req_id, encoder_input_index) tuples.
-    # Used to free the encoder cache.
-    free_encoder_input_ids: list[tuple[str, int]]
+    # list of mm_hash strings associated with the encoder outputs to be
+    # freed from the encoder cache.
+    free_encoder_mm_hashes: list[str]
 
     # Dict of request ids to their index within the batch
     # for filling the next token bitmask
