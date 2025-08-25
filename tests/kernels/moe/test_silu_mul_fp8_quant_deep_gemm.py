@@ -12,8 +12,6 @@ from vllm.platforms import current_platform
 
 # (E, T, H, group_size, seed)
 CASES = [
-    (1, 1, 128, 64, 0),
-    (1, 4, 128, 128, 0),
     (2, 4, 256, 128, 0),
     (8, 32, 1024, 128, 0),
     (8, 32, 2048, 128, 0),

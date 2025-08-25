@@ -156,15 +156,17 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   const Idx_t n_tokens = s_count;
   for (Idx_t t = 0; t < n_tokens; ++t) {
     float gate, upv, y = -std::numeric_limits<float>::max();
-    Idx_t gate_off = base_i + t * stride_i_t + tid * stride_i_h;
-    Idx_t up_off = base_i + H * stride_i_h + t * stride_i_t + tid * stride_i_h;
 
+#if 1
     if (tid < 64) {
-      s_buff[tid] = reinterpret_cast<const __nv_bfloat162* __restrict__>(
-          input)[gate_off >> 1u];
+      Idx_t gate_off = ((base_i + t * stride_i_t) >> 1u) + tid;
+      s_buff[tid] =
+          reinterpret_cast<const __nv_bfloat162* __restrict__>(input)[gate_off];
     } else {
-      s_buff[64 + tid] = reinterpret_cast<const __nv_bfloat162* __restrict__>(
-          input)[up_off >> 1u];
+      Idx_t up_off =
+          ((base_i + H * stride_i_h + t * stride_i_t) >> 1u) + (tid - 64u);
+      s_buff[tid] =
+          reinterpret_cast<const __nv_bfloat162* __restrict__>(input)[up_off];
     }
 
     __syncthreads();
@@ -172,7 +174,12 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     gate = __bfloat162float(reinterpret_cast<__nv_bfloat16*>(s_buff)[tid]);
     upv = __bfloat162float(
         reinterpret_cast<__nv_bfloat16*>(s_buff)[GROUP_SIZE + tid]);
-
+#else
+    Idx_t gate_off = base_i + t * stride_i_t + tid * stride_i_h;
+    Idx_t up_off = base_i + H * stride_i_h + t * stride_i_t + tid * stride_i_h;
+    gate = __bfloat162float(input[gate_off]);
+    upv = __bfloat162float(input[up_off]);
+#endif
     gate = silu(gate);
     y = gate * upv;
 
