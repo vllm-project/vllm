@@ -389,15 +389,9 @@ class PoolerMultiLabelClassify(PoolerActivation):
 
 class PoolerClassify(PoolerActivation):
 
-    def __init__(self):
-        super().__init__()
-
-        from vllm.config import get_current_vllm_config
-        vllm_config = get_current_vllm_config()
-        self.num_labels = getattr(vllm_config.model_config.hf_config, "num_labels", 0)
-
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        if self.num_labels == 1:
+        num_labels = pooled_data.shape[-1]
+        if num_labels < 2:
             return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
 
         return F.softmax(pooled_data.float(), dim=-1).to(pooled_data.dtype)
@@ -405,15 +399,9 @@ class PoolerClassify(PoolerActivation):
 
 class PoolerScore(PoolerActivation):
 
-    def __init__(self):
-        super().__init__()
-
-        from vllm.config import get_current_vllm_config
-        vllm_config = get_current_vllm_config()
-        self.num_labels = getattr(vllm_config.model_config.hf_config, "num_labels", 0)
-
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        if self.num_labels == 1:
+        num_labels = pooled_data.shape[-1]
+        if num_labels < 2:
             return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
 
         return pooled_data
@@ -673,8 +661,13 @@ class ClassifierPooler(Pooler):
         # pooled_data shape: [batchsize, hidden_size]
 
         if self.classifier is not None:
-            pooled_data = self.classifier(pooled_data)
-        # pooled_data shape: [batchsize, num_labels]
+            # apply classifier once on the full batch if possible
+            if isinstance(pooled_data, torch.Tensor):
+                pooled_data = self.classifier(pooled_data)
+            elif len({data.shape for data in pooled_data}) <= 1:
+                pooled_data = self.classifier(torch.stack(pooled_data))
+            else:
+                pooled_data = [self.classifier(data) for data in pooled_data]
 
         pooling_params = get_pooling_params(pooling_metadata)
         flags = [p.activation for p in pooling_params]
@@ -687,7 +680,6 @@ class ClassifierPooler(Pooler):
                 for vecs, f in zip(pooled_data, flags)
             ]
 
-        # scores shape: [batchsize, num_labels]
         return build_output(scores)
 
 

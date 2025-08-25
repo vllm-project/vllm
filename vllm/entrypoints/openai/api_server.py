@@ -1797,12 +1797,16 @@ async def init_app_state(
         state.openai_serving_models,
         request_logger=request_logger,
     ) if "classify" in supported_tasks else None
+
+    enable_serving_reranking = ("classify" in supported_tasks and getattr(
+        model_config.hf_config, "num_labels", 0) == 1)
     state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if ("embed" in supported_tasks or "score" in supported_tasks) else None
+    ) if ("embed" in supported_tasks or enable_serving_reranking) else None
+
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
