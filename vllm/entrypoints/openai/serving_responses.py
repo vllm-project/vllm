@@ -453,58 +453,58 @@ class OpenAIServingResponses(OpenAIServing):
                 # TODO: Use a vllm-specific Validation Error
                 return self.create_error_response(str(e))
 
-            if self.use_harmony:
-                assert isinstance(context, HarmonyContext)
-                output = self._make_response_output_items_with_harmony(context)
-                # TODO: these are all 0 for now!
-                num_prompt_tokens = context.num_prompt_tokens
-                num_generated_tokens = context.num_output_tokens
-                num_cached_tokens = context.num_cached_tokens
-                num_reasoning_tokens = context.num_reasoning_tokens
-            else:
-                assert isinstance(context, SimpleContext)
-                final_res = context.last_output
-                assert final_res is not None
-                assert len(final_res.outputs) == 1
-                final_output = final_res.outputs[0]
+        if self.use_harmony:
+            assert isinstance(context, HarmonyContext)
+            output = self._make_response_output_items_with_harmony(context)
+            # TODO: these are all 0 for now!
+            num_prompt_tokens = context.num_prompt_tokens
+            num_generated_tokens = context.num_output_tokens
+            num_cached_tokens = context.num_cached_tokens
+            num_reasoning_tokens = context.num_reasoning_tokens
+        else:
+            assert isinstance(context, SimpleContext)
+            final_res = context.last_output
+            assert final_res is not None
+            assert len(final_res.outputs) == 1
+            final_output = final_res.outputs[0]
 
-                output = self._make_response_output_items(
-                    request, final_output, tokenizer)
+            output = self._make_response_output_items(request, final_output,
+                                                      tokenizer)
 
-                # Calculate usage.
-                assert final_res.prompt_token_ids is not None
-                num_prompt_tokens = len(final_res.prompt_token_ids)
-                num_generated_tokens = len(final_output.token_ids)
-                num_cached_tokens = final_res.num_cached_tokens
-                num_reasoning_tokens = 0
+            # Calculate usage.
+            assert final_res.prompt_token_ids is not None
+            num_prompt_tokens = len(final_res.prompt_token_ids)
+            num_generated_tokens = len(final_output.token_ids)
+            num_cached_tokens = final_res.num_cached_tokens
+            num_reasoning_tokens = 0
 
-            usage = ResponseUsage(
-                input_tokens=num_prompt_tokens,
-                output_tokens=num_generated_tokens,
-                total_tokens=num_prompt_tokens + num_generated_tokens,
-                input_tokens_details=InputTokensDetails(
-                    cached_tokens=num_cached_tokens),
-                output_tokens_details=OutputTokensDetails(
-                    reasoning_tokens=num_reasoning_tokens),
-            )
-            response = ResponsesResponse.from_request(
-                request,
-                sampling_params,
-                model_name=model_name,
-                created_time=created_time,
-                output=output,
-                status="completed",
-                usage=usage,
-            )
+        usage = ResponseUsage(
+            input_tokens=num_prompt_tokens,
+            output_tokens=num_generated_tokens,
+            total_tokens=num_prompt_tokens + num_generated_tokens,
+            input_tokens_details=InputTokensDetails(
+                cached_tokens=num_cached_tokens),
+            output_tokens_details=OutputTokensDetails(
+                reasoning_tokens=num_reasoning_tokens),
+        )
+        response = ResponsesResponse.from_request(
+            request,
+            sampling_params,
+            model_name=model_name,
+            created_time=created_time,
+            output=output,
+            status="completed",
+            usage=usage,
+        )
 
-            if request.store:
-                async with self.response_store_lock:
-                    stored_response = self.response_store.get(response.id)
-                    # If the response is already cancelled, don't update it.
-                    if (stored_response is None
-                            or stored_response.status != "cancelled"):
-                        self.response_store[response.id] = response
-            return response
+        if request.store:
+            async with self.response_store_lock:
+                stored_response = self.response_store.get(response.id)
+                # If the response is already cancelled, don't update it.
+                if (stored_response is None
+                        or stored_response.status != "cancelled"):
+                    self.response_store[response.id] = response
+        return response
 
     def _topk_logprobs(self, logprobs: dict[int,
                                             SampleLogprob], top_logprobs: int,

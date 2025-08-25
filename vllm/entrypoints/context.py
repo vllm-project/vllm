@@ -127,10 +127,10 @@ class HarmonyContext(ConversationContext):
         if recipient is not None:
             if recipient.startswith("browser."):
                 return await self.call_search_tool(
-                    self.tool_sessions["browser"], last_msg)
+                    self._tool_sessions["browser"], last_msg)
             elif recipient.startswith("python"):
                 return await self.call_python_tool(
-                    self.tool_sessions["python"], last_msg)
+                    self._tool_sessions["python"], last_msg)
         raise ValueError("No tool call found")
 
     def render_for_completion(self) -> list[int]:
