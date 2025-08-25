@@ -141,7 +141,7 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         self,
         model_output: str,
         request: ChatCompletionRequest,
-        token_ids: list[int] | None = None,
+        token_ids: Sequence[int] | None = None,
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from the model output.

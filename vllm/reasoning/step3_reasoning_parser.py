@@ -82,7 +82,7 @@ class Step3ReasoningParser(ReasoningParser):
         self,
         model_output: str,
         request: ChatCompletionRequest,
-        token_ids: list[int] | None = None,
+        token_ids: Sequence[int] | None = None,
     ) -> tuple[Optional[str], Optional[str]]:
 
         # Check if the model output contains the </think> token

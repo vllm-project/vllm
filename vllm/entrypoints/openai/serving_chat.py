@@ -489,6 +489,7 @@ class OpenAIServingChat(OpenAIServing):
                 for _ in range(num_choices)
             ]
             harmony_tools_streamed = [False] * num_choices
+        tools_streamed = [False] * num_choices
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
@@ -796,6 +797,7 @@ class OpenAIServingChat(OpenAIServing):
                             delta_message = DeltaMessage(tool_calls=[
                                 delta_tool_call,
                             ])
+                            tools_streamed[i] = True
 
                     elif request.tool_choice == "required":
                         assert previous_texts is not None
@@ -821,6 +823,7 @@ class OpenAIServingChat(OpenAIServing):
                         if (delta_message and delta_message.tool_calls and
                                 delta_message.tool_calls[0].id is not None):
                             history_tool_call_cnt += 1
+                            tools_streamed[i] = True
 
                         # update the previous values for the next iteration
                         previous_texts[i] = current_text
@@ -897,6 +900,8 @@ class OpenAIServingChat(OpenAIServing):
                                     current_token_ids=current_token_ids,
                                     delta_token_ids=delta_token_ids,
                                     request=request))
+                            if delta_message and delta_message.tool_calls:
+                                tools_streamed[i] = True
                     # when only tool calls
                     elif tool_choice_auto:
                         assert tool_parser is not None
@@ -909,6 +914,8 @@ class OpenAIServingChat(OpenAIServing):
                                 current_token_ids=current_token_ids,
                                 delta_token_ids=output.token_ids,
                                 request=request))
+                        if delta_message and delta_message.tool_calls:
+                            tools_streamed[i] = True
 
                     # when only reasoning
                     elif self.reasoning_parser:
@@ -944,7 +951,10 @@ class OpenAIServingChat(OpenAIServing):
                     # wasn't ready to send a token, then
                     #   get the next token without streaming a chunk
                     if delta_message is None:
-                        continue
+                        if output.finish_reason is None:
+                            continue
+                        else:
+                            delta_message = DeltaMessage()
 
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
@@ -1030,15 +1040,18 @@ class OpenAIServingChat(OpenAIServing):
                             ])
 
                         # Send the finish response for each request.n only once
+                        if auto_tools_called or tools_streamed[i] or (
+                                self.use_harmony
+                                and harmony_tools_streamed[i]):
+                            finish_reason_ = "tool_calls"
+                        else:
+                            finish_reason_ = output.finish_reason \
+                                if output.finish_reason else "stop"
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=delta_message,
                             logprobs=logprobs,
-                            finish_reason=output.finish_reason
-                            if not (auto_tools_called or
-                                    (self.use_harmony
-                                     and harmony_tools_streamed[i])) else
-                            "tool_calls",
+                            finish_reason=finish_reason_,
                             stop_reason=output.stop_reason,
                             token_ids=(as_list(output.token_ids)
                                        if request.return_token_ids else None))
