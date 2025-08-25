@@ -440,6 +440,21 @@ class RandomDataset(BenchmarkDataset):
                     request_id=request_id_prefix + str(i),
                 )
             )
+        # only used for embeddings benchmark.
+        if batchsize > 1:
+            batch_requests = []
+            # Create batched requests
+            for i in range(0, num_requests, batchsize):
+                batch = requests[i : i + batchsize]
+                batch_requests.append(
+                    SampleRequest(
+                        prompt=[req.prompt for req in batch],
+                        prompt_len=sum(req.prompt_len for req in batch),
+                        expected_output_len=0,
+                        request_id=request_id_prefix + str(i // batchsize),
+                    )
+                )
+            requests = batch_requests
         return requests
 
     def get_prefix(
@@ -476,8 +491,8 @@ class RandomDataset(BenchmarkDataset):
         input_high = math.ceil(real_input_len * (1 + range_ratio))
         output_low = math.floor(output_len * (1 - range_ratio))
         output_high = math.ceil(output_len * (1 + range_ratio))
-        # Ensure the lower bound for output length is at least 1 to 
-        # prevent sampling 0 tokens. 
+        # Ensure the lower bound for output length is at least 1 to
+        # prevent sampling 0 tokens.
         output_low = max(output_low, 1)
 
         if input_low > input_high:
@@ -506,7 +521,6 @@ class RandomDataset(BenchmarkDataset):
         offsets = self._rng.integers(0, tokenizer.vocab_size, 
                                         size=num_requests)
         return input_lens, output_lens, offsets
-
 
     def generate_token_sequence(
         self,
@@ -1110,7 +1124,8 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--random-batch-size",
         type=int,
         default=1,
-        help="Batch size for random sampling.",
+        help=("Batch size for random sampling. "
+              "Only used for embeddings benchmark."),
     )
 
     # random multimodal dataset options
@@ -1202,8 +1217,6 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "OBS bis.: Only image sampling is supported for now."
         ),
     )
-
-
 
     hf_group = parser.add_argument_group("hf dataset options")
     hf_group.add_argument("--hf-subset",
