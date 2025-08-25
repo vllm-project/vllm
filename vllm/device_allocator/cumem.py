@@ -162,6 +162,7 @@ class CuMemAllocator:
         """
         Internal method to store the allocation data
         when memory is allocated in the memory pool."""
+        print(f"_python_malloc_callback {self.current_tag=}")
         py_d_mem = allocation_handle[2]
         self.pointer_to_data[py_d_mem] = AllocationData(
             allocation_handle, self.current_tag)
