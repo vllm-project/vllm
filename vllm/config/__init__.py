@@ -2385,13 +2385,13 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{self.disable_by_batch_size=}")
 
-        # Allow Qwen family variants (e.g., qwen, qwen2, qwen3) and Llama.
-        eagle3_target_supported = ["llama", "qwen", "qwen2", "qwen3"]
+        # Allow Qwen family variants (e.g., qwen, qwen2, qwen3) and Llama via
+        # a prefix match on the model family.
+        eagle3_target_supported = ["llama", "qwen"]
         if self.method == "eagle3" and self.target_model_config:
             model_type = str(
                 self.target_model_config.hf_text_config.model_type).lower()
             if not any(model_type.startswith(supported)
-                       or supported in model_type
                        for supported in eagle3_target_supported):
                 raise ValueError(
                     f"Eagle3 is only supported for {eagle3_target_supported} models. "  # noqa: E501
