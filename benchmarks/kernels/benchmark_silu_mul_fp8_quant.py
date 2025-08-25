@@ -8,10 +8,13 @@ import torch
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     silu_mul_fp8_quant_deep_gemm_cuda,
 )
+from vllm.model_executor.layers.fused_moe.old_batched_deep_gemm_moe import (
+    silu_mul_fp8_quant_deep_gemm as gold,
+)
 from vllm.platforms import current_platform
 
 
-def benchmark(E, T, H, G=128, runs=100):
+def benchmark(k, E, T, H, G=128, runs=100):
     current_platform.seed_everything(42)
     y = torch.randn((E, T, 2 * H), dtype=torch.bfloat16, device="cuda").contiguous()
     tokens_per_expert = torch.randint(
@@ -20,14 +23,14 @@ def benchmark(E, T, H, G=128, runs=100):
 
     # Warmup
     for _ in range(20):
-        silu_mul_fp8_quant_deep_gemm_cuda(y, tokens_per_expert, group_size=G)
+        k(y, tokens_per_expert, group_size=G)
         torch.cuda.synchronize()
 
     # Benchmark
     torch.cuda.synchronize()
     start = time.perf_counter()
     for _ in range(runs):
-        silu_mul_fp8_quant_deep_gemm_cuda(y, tokens_per_expert, group_size=G)
+        k(y, tokens_per_expert, group_size=G)
     torch.cuda.synchronize()
 
     avg_time = (time.perf_counter() - start) / runs * 1000
@@ -52,24 +55,39 @@ def benchmark(E, T, H, G=128, runs=100):
 
 
 configs = [
-    (8, 32, 1024),
-    (16, 64, 2048),
-    (32, 128, 4096),
     # DeepSeekV3 Configs
-    (256, 16, 7168),
-    (256, 32, 7168),
-    (256, 64, 7168),
-    (256, 128, 7168),
-    (256, 256, 7168),
-    (256, 512, 7168),
-    (256, 1024, 7168),
+    (8, 16, 7168),
+    (8, 32, 7168),
+    (8, 64, 7168),
+    (8, 128, 7168),
+    (8, 256, 7168),
+    (8, 512, 7168),
+    (8, 1024, 7168),
+    # (16, 64, 2048),
+    # (32, 128, 4096),
+    # (256, 16, 7168),
+    # (256, 32, 7168),
+    # (256, 64, 7168),
+    # (256, 128, 7168),
+    # (256, 256, 7168),
+    # (256, 512, 7168),
+    # (256, 1024, 7168),
 ]
 
 
-print(f"GPU: {torch.cuda.get_device_name()}")
+print(f"GPU: {torch.cuda.get_device_name()} Baseline")
 print(f"{'Config':<20} {'Time(ms)':<10} {'GFLOPS':<10} {'GB/s':<10}")
 print("-" * 50)
 
 for E, T, H in configs:
-    time_ms, gflops, gbps = benchmark(E, T, H)
+    time_ms, gflops, gbps = benchmark(gold, E, T, H)
+    print(f"E={E:3d},T={T:4d},H={H:4d} {time_ms:8.3f} {gflops:8.1f} {gbps:8.1f}")
+
+
+print(f"GPU: {torch.cuda.get_device_name()} CUDA Kernel")
+print(f"{'Config':<20} {'Time(ms)':<10} {'GFLOPS':<10} {'GB/s':<10}")
+print("-" * 50)
+
+for E, T, H in configs:
+    time_ms, gflops, gbps = benchmark(silu_mul_fp8_quant_deep_gemm_cuda, E, T, H)
     print(f"E={E:3d},T={T:4d},H={H:4d} {time_ms:8.3f} {gflops:8.1f} {gbps:8.1f}")
