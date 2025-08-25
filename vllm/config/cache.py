@@ -116,7 +116,7 @@ class CacheConfig:
     In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
     some layers can skip tokens corresponding to prefill. This flag enables
     attention metadata for eligible layers to be overriden with metadata
-    necessary for implementating this optimization in some models (e.g. Gemma3n)
+    necessary for implementing this optimization in some models (e.g. Gemma3n)
     """
 
     def compute_hash(self) -> str:
