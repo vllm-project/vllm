@@ -3,8 +3,9 @@
 """Attention layer with FlashInfer."""
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
-from typing import ClassVar, Optional, Union
+from typing import Callable, ClassVar, Optional, Union
 
 import torch
 from flashinfer import (BatchDecodeWithPagedKVCacheWrapper,
@@ -162,11 +163,14 @@ class FlashInferMetadata:
     num_prefills: int
     num_prefill_tokens: int
 
+    # For update_block_table (paged_kv_indices, blk_table) -> None
+    _update_paged_kv_indices_: Callable[[torch.Tensor, torch.Tensor], None]
+
     # For cascade attention (CPU for planning).
     use_cascade: bool
     shared_qo_indptr_cpu: Optional[torch.Tensor] = None
     shared_kv_page_indptr_cpu: Optional[torch.Tensor] = None
-    shared_kv_page_indices_cpu: Optional[torch.Tensor] = None
+    shared_kv_page_indices: Optional[torch.Tensor] = None
     shared_kv_last_page_len_cpu: Optional[torch.Tensor] = None
 
     prefill_wrapper: Optional[BatchPrefillWithPagedKVCacheWrapper] = None
@@ -182,6 +186,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     reorder_batch_threshold: ClassVar[int] = 1
+    supports_update_block_table: bool = True
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -340,7 +345,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     attn_metadata.paged_kv_indptr_cpu
                 ],
                 [
-                    attn_metadata.shared_kv_page_indices_cpu,
+                    attn_metadata.shared_kv_page_indices,
                     attn_metadata.paged_kv_indices
                 ],
                 [
@@ -486,7 +491,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             shared_kv_page_indptr_cpu = torch.tensor([0, num_common_kv_blocks],
                                                      dtype=torch.int32,
                                                      device='cpu')
-            shared_kv_page_indices_cpu = block_table_tensor[
+            shared_kv_page_indices = block_table_tensor[
                 0, :num_common_kv_blocks]
             shared_kv_last_page_len_cpu = torch.tensor([page_size],
                                                        dtype=torch.int32,
@@ -498,7 +503,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             shared_qo_indptr_cpu = None
             shared_kv_page_indptr_cpu = None
-            shared_kv_page_indices_cpu = None
+            shared_kv_page_indices = None
             shared_kv_last_page_len_cpu = None
 
         max_num_blocks = block_table_bounds_cpu.max().item()
@@ -508,10 +513,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 < block_table_bounds.unsqueeze(1))
         # write self.paged_kv_indices inplace
         num_actual_pages = torch.sum(mask)
+
+        def _update_paged_kv_indices_(paged_kv_indices, block_table_tensor):
+            torch.masked_select(block_table_tensor[:, :max_num_blocks],
+                                mask,
+                                out=paged_kv_indices)
+
         paged_kv_indices = self.paged_kv_indices[:num_actual_pages]
-        torch.masked_select(block_table_tensor[:, :max_num_blocks],
-                            mask,
-                            out=paged_kv_indices)
+        _update_paged_kv_indices_(paged_kv_indices, block_table_tensor)
 
         # write self.paged_kv_indptr_cpu inplace (0-index is always 0)
         torch.cumsum(block_table_bounds_cpu,
@@ -569,13 +578,61 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             use_cascade=use_cascade,
             shared_qo_indptr_cpu=shared_qo_indptr_cpu,
             shared_kv_page_indptr_cpu=shared_kv_page_indptr_cpu,
-            shared_kv_page_indices_cpu=shared_kv_page_indices_cpu,
+            shared_kv_page_indices=shared_kv_page_indices,
             shared_kv_last_page_len_cpu=shared_kv_last_page_len_cpu,
+            _update_paged_kv_indices_=_update_paged_kv_indices_,
         )
 
         self._plan(attn_metadata)
 
         return attn_metadata
+
+    def update_block_table(self, metadata: FlashInferMetadata,
+                           blk_table: torch.Tensor,
+                           slot_mapping: torch.Tensor):
+        new = copy.copy(metadata)
+        # We only made a shallow copy of the metadata, so we need to allocate
+        # a new paged_kv_indices tensor.
+        new.paged_kv_indices = torch.empty_like(metadata.paged_kv_indices)
+        metadata._update_paged_kv_indices_(new.paged_kv_indices, blk_table)
+
+        new.block_table_tensor = blk_table
+        new.slot_mapping = slot_mapping
+
+        # A bit hacky but for perf just copy the wrapper and
+        # update the indices in the precomputed wrappers
+        if metadata.decode_wrapper is not None:
+            new.decode_wrapper = copy.copy(metadata.decode_wrapper)
+            if metadata.decode_wrapper._use_cuda_graph:
+                new.decode_wrapper._paged_kv_indices_buf\
+                    [:new.paged_kv_indices.shape[0]].copy_(new.paged_kv_indices)
+            else:
+                new.decode_wrapper._paged_kv_indices_buf = new.paged_kv_indices
+
+        if metadata.prefill_wrapper is not None:
+            assert not metadata.prefill_wrapper._use_cuda_graph
+            new.prefill_wrapper = copy.copy(metadata.prefill_wrapper)
+            new.prefill_wrapper._paged_kv_indices_buf = new.paged_kv_indices
+
+        assert metadata.cascade_wrapper is None
+        if metadata.cascade_wrapper is not None:
+            new.cascade_wrapper = copy.copy(metadata.cascade_wrapper)
+
+            assert len(new.cascade_wrapper._batch_prefill_wrappers) == 2, \
+                "Only support 2 level cascade supported"
+            assert metadata.shared_kv_page_indices is not None, \
+                "shared_kv_page_indices is required for cascade attention"
+
+            new.cascade_wrapper._batch_prefill_wrappers = \
+                [copy.copy(wrapper)
+                for wrapper in new.cascade_wrapper._batch_prefill_wrappers]
+            num_shared_pages = metadata.shared_kv_page_indices.shape[1]
+            new.cascade_wrapper._batch_prefill_wrappers[0]\
+                ._paged_kv_indices_buf = blk_table[:, :num_shared_pages]
+            new.cascade_wrapper._batch_prefill_wrappers[1]\
+                ._paged_kv_indices_buf = new.paged_kv_indices
+
+        return new
 
     def build_for_cudagraph_capture(
             self, common_attn_metadata: CommonAttentionMetadata):

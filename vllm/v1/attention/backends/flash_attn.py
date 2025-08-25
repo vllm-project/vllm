@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashAttention."""
+import copy
 from dataclasses import dataclass
 from typing import Optional
 
@@ -174,6 +175,7 @@ class FlashAttentionMetadataBuilder(
     #  https://github.com/vllm-project/vllm/issues/22945
     cudagraph_support = AttentionCGSupport.ALWAYS \
         if get_flash_attn_version() == 3 else AttentionCGSupport.UNIFORM_BATCH
+    supports_update_block_table: bool = True
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -360,6 +362,17 @@ class FlashAttentionMetadataBuilder(
             max_num_splits=max_num_splits,
             causal=causal)
         return attn_metadata
+
+    def update_block_table(
+        self,
+        metadata: FlashAttentionMetadata,
+        blk_table: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> FlashAttentionMetadata:
+        new_metadata = copy.deepcopy(metadata)
+        new_metadata.block_table = blk_table
+        new_metadata.slot_mapping = slot_mapping
+        return new_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return use_cascade_attention(*args, **kwargs)
