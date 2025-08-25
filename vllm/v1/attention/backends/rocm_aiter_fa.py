@@ -89,6 +89,7 @@ if current_platform.is_rocm():
             tl.store(k_values_ptr + kv_values_off, k_vals, mask=block_mask)
             tl.store(v_values_ptr + kv_values_off, v_vals, mask=block_mask)
 
+    @torch.inference_mode()
     def vllm_layout_trans(b_query_lens_loc, b_seq_lens_loc, block_table,
                           k_cache, v_cache, max_seq_len, k_scale, v_scale,
                           output_dtype, total_tokens):
