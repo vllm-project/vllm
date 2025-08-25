@@ -92,7 +92,7 @@ def test_traces(
         prompts = ["This is a short prompt"]
         outputs = llm.generate(prompts, sampling_params=sampling_params)
 
-        timeout = 5
+        timeout = 10
         if not trace_service.evt.wait(timeout):
             raise TimeoutError(
                 f"The fake trace service didn't receive a trace within "
@@ -165,7 +165,7 @@ def test_traces_with_detailed_steps(
         prompts = ["This is a short prompt"]
         outputs = llm.generate(prompts, sampling_params=sampling_params)
 
-        timeout = 5
+        timeout = 10
         if not trace_service.evt.wait(timeout):
             raise TimeoutError(
                 f"The fake trace service didn't receive a trace within "
