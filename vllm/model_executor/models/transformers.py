@@ -735,14 +735,14 @@ class TransformersMoEBase(TransformersBase):
                         topk_group=topk_group,
                         quant_config=self.quant_config,
                         prefix=qual_name,
-                        # custom_routing_function
-                        # scoring_func
+                        # TODO: custom_routing_function - llama4, phimoe
+                        # TODO: scoring_func - deepseek_v2, dots1, glm4_moe
                         e_score_correction_bias=e_score_correction_bias,
-                        # apply_router_weight_on_input
-                        # activation
+                        # TODO: apply_router_weight_on_input - llama4
+                        # TODO: activation - grok1, gpt-oss
                         enable_eplb=enable_eplb,
                         num_redundant_experts=num_redundant_experts,
-                        # has_bias
+                        # TODO: has_bias - gpt-oss
                     )
                     setattr(module, child_name, new_module)
                     log_replacement(qual_name, child_module, new_module)
