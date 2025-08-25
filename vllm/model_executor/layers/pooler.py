@@ -394,7 +394,8 @@ class PoolerClassify(PoolerActivation):
 
         from vllm.config import get_current_vllm_config
         vllm_config = get_current_vllm_config()
-        self.num_labels = getattr(vllm_config.model_config.hf_config, "num_labels", 0)
+        self.num_labels = getattr(vllm_config.model_config.hf_config,
+                                  "num_labels", 0)
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         if self.num_labels == 1:
@@ -410,7 +411,8 @@ class PoolerScore(PoolerActivation):
 
         from vllm.config import get_current_vllm_config
         vllm_config = get_current_vllm_config()
-        self.num_labels = getattr(vllm_config.model_config.hf_config, "num_labels", 0)
+        self.num_labels = getattr(vllm_config.model_config.hf_config,
+                                  "num_labels", 0)
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         if self.num_labels == 1:
