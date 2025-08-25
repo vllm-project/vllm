@@ -5,6 +5,7 @@ import json
 from argparse import ArgumentError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Annotated, Literal, Optional, Union
 
 import pytest
@@ -37,13 +38,17 @@ def test_optional_type():
     assert optional_type_func("42") == 42
 
 
-@pytest.mark.parametrize(("type_hint", "type", "expected"), [
-    (int, int, True),
-    (int, float, False),
-    (list[int], list, True),
-    (list[int], tuple, False),
-    (Literal[0, 1], Literal, True),
-])
+class TestEnum(Enum):
+    X = 1
+    Y = 2
+
+
+@pytest.mark.parametrize(
+    ("type_hint", "type", "expected"), [(int, int, True), (int, float, False),
+                                        (list[int], list, True),
+                                        (list[int], tuple, False),
+                                        (Literal[0, 1], Literal, True),
+                                        (TestEnum, Enum, True)])
 def test_is_type(type_hint, type, expected):
     assert is_type(type_hint, type) == expected
 

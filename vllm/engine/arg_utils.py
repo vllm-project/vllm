@@ -97,7 +97,10 @@ def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
 
 def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
     """Check if the type hint is a specific type."""
-    return type_hint is type or get_origin(type_hint) is type
+    is_enum = lambda cls: any("Enum" in base.__name__
+                              for base in getattr(cls, "__mro__", []))
+    return (type_hint is type or get_origin(type_hint) is type
+            or (is_enum(type) and is_enum(type_hint)))
 
 
 def contains_type(type_hints: set[TypeHint], type: TypeHintT) -> bool:
