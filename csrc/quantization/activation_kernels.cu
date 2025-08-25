@@ -161,12 +161,13 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     if (tid < 64) {
       Idx_t gate_off = ((base_i + t * stride_i_t) >> 1u) + tid;
       s_buff[tid] =
-          reinterpret_cast<const __nv_bfloat162* __restrict__>(input)[gate_off];
+          __ldg(reinterpret_cast<const __nv_bfloat162* __restrict__>(input) +
+                gate_off);
     } else {
       Idx_t up_off =
           ((base_i + H * stride_i_h + t * stride_i_t) >> 1u) + (tid - 64u);
-      s_buff[tid] =
-          reinterpret_cast<const __nv_bfloat162* __restrict__>(input)[up_off];
+      s_buff[tid] = __ldg(
+          reinterpret_cast<const __nv_bfloat162* __restrict__>(input) + up_off);
     }
 
     __syncthreads();
