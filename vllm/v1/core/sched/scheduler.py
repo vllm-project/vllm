@@ -252,6 +252,7 @@ class Scheduler(SchedulerInterface):
                         preempted_req = self.running.pop()
 
                     self.kv_cache_manager.free(preempted_req)
+                    self.encoder_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
                     if self.log_stats:
@@ -263,9 +264,6 @@ class Scheduler(SchedulerInterface):
                     if preempted_req == request:
                         # No more request to preempt.
                         can_schedule = False
-                        # Add this because do real encoder cache allocation
-                        # in _try_schedule_encoder_inputs
-                        self.encoder_cache_manager.free(request)
                         break
                 else:
                     # The request can be scheduled.
