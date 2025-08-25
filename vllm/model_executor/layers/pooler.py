@@ -392,20 +392,26 @@ class PoolerMultiLabelClassify(PoolerActivation):
 
 class PoolerClassify(PoolerActivation):
 
-    def __init__(self):
+    def __init__(self, static_num_labels=True):
         super().__init__()
 
-        from vllm.config import get_current_vllm_config
-        vllm_config = get_current_vllm_config()
-        self.num_labels = getattr(vllm_config.model_config.hf_config,
-                                  "num_labels", 0)
-        if self.num_labels == 0:
-            logger.warning("It's hard to imagine num_labels == 0, "
-                           "falling back to softmax. "
-                           "Please check if the configuration is correct.")
+        if static_num_labels:
+            from vllm.config import get_current_vllm_config
+            vllm_config = get_current_vllm_config()
+            self.num_labels = getattr(vllm_config.model_config.hf_config,
+                                      "num_labels", 0)
+            if self.num_labels == 0:
+                logger.warning("num_labels should be > 0 for classification"
+                               "models, falling back to softmax. "
+                               "Please check if the configuration is correct.")
+        else:
+            self.num_labels = None
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        if self.num_labels == 1:
+        num_labels = (self.num_labels if self.num_labels is not None else
+                      pooled_data.shape[-1])
+
+        if num_labels < 2:
             return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
 
         return F.softmax(pooled_data.float(), dim=-1).to(pooled_data.dtype)
@@ -418,19 +424,12 @@ class PoolerScore(PoolerActivation):
 
         from vllm.config import get_current_vllm_config
         vllm_config = get_current_vllm_config()
-        self.num_labels = getattr(vllm_config.model_config.hf_config,
-                                  "num_labels", 0)
-
-        if self.num_labels == 0:
-            logger.warning("It's hard to imagine num_labels == 0, "
-                           "falling back to softmax. "
-                           "Please check if the configuration is correct.")
+        num_labels = getattr(vllm_config.model_config.hf_config, "num_labels",
+                             0)
+        assert num_labels == 1, "Score api is only enabled for num_labels == 1."
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        if self.num_labels == 1:
-            return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
-
-        return pooled_data
+        return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
 
 
 class LambdaPoolerActivation(PoolerActivation):
@@ -527,7 +526,7 @@ class EmbeddingPoolerHead(PoolerHead):
 class RewardPoolerHead(PoolerHead):
 
     def __init__(self) -> None:
-        super().__init__(activation=PoolerClassify())
+        super().__init__(activation=PoolerClassify(static_num_labels=False))
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
