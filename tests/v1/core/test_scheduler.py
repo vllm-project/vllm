@@ -11,6 +11,7 @@ from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
+from vllm.v1.core.sched.request_queue import SchedulingPolicy
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
@@ -19,7 +20,8 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.request import StructuredOutputRequest
 
-from .utils import EOS_TOKEN_ID, create_requests, create_scheduler
+from .utils import (EOS_TOKEN_ID, create_request, create_requests,
+                    create_scheduler)
 
 
 def test_add_requests():
@@ -30,6 +32,29 @@ def test_add_requests():
         scheduler.add_request(request)
         assert request.request_id in scheduler.requests
         assert len(scheduler.waiting) == i + 1
+
+
+@pytest.mark.parametrize("scheduler_policy, priority, should_raise", [
+    (SchedulingPolicy.FCFS, 0, False),
+    (SchedulingPolicy.FCFS, 1, True),
+    (SchedulingPolicy.PRIORITY, 0, False),
+    (SchedulingPolicy.PRIORITY, 1, False),
+])
+def test_add_request_with_priority(
+    scheduler_policy: SchedulingPolicy,
+    priority: int,
+    should_raise: bool,
+):
+    scheduler = create_scheduler(policy=scheduler_policy)
+    request = create_request(request_id="0",
+                             prompt_token_ids=[0] * 10,
+                             priority=priority)
+    if should_raise:
+        with pytest.raises(ValueError) as exc_info:
+            scheduler.add_request(request)
+            assert "Priority scheduling is not enabled" in str(exc_info.value)
+    else:
+        scheduler.add_request(request)
 
 
 def test_finish_request():
