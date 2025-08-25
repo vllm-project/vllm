@@ -105,11 +105,11 @@ class Hermes2ProToolParser(ToolParser):
                 ]
                 tool_call_start = model_output.find(self.tool_call_start_token)
                 content = (model_output[:tool_call_start]
-                           if tool_call_start >= 0 else None)
+                           if tool_call_start > 0 else None)
                 return ExtractedToolCallInformation(
                     tools_called=True,
                     tool_calls=tool_calls,
-                    content=content if content else None)
+                    content=content)
 
             except Exception:
                 logger.exception(
