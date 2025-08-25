@@ -91,7 +91,7 @@ class CachedRequestData:
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
-    new_block_ids: list[tuple[list[int], ...]]
+    new_block_ids: list[Optional[tuple[list[int], ...]]]
     num_computed_tokens: list[int]
 
     @property
@@ -143,9 +143,9 @@ class SchedulerOutput:
     # steps. This is used to notify the workers about the finished requests
     # so that they can free the cached states for those requests.
     finished_req_ids: set[str]
-    # list of (req_id, encoder_input_index) tuples.
-    # Used to free the encoder cache.
-    free_encoder_input_ids: list[tuple[str, int]]
+    # list of mm_hash strings associated with the encoder outputs to be
+    # freed from the encoder cache.
+    free_encoder_mm_hashes: list[str]
 
     # Dict of request ids to their index within the batch
     # for filling the next token bitmask
