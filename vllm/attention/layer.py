@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -54,7 +55,7 @@ def check_xformers_availability():
     return USE_XFORMERS_OPS
 
 
-class Attention(nn.Module):
+class Attention(nn.Module, AttentionLayerBase):
     """Attention layer.
 
     This class takes query, key, and value tensors as input. The input tensors
