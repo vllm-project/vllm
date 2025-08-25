@@ -579,15 +579,15 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "Skip applying chat template to prompt, used only for custom dataset.",
     )
 
-    custom_group = parser.add_argument_group("spec bench dataset options")
-    custom_group.add_argument(
+    spec_bench_group = parser.add_argument_group("spec bench dataset options")
+    spec_bench_group.add_argument(
         "--spec-bench-output-len",
         type=int,
         default=256,
         help=
         "Number of output tokens per request, used only for spec bench dataset.",
     )
-    custom_group.add_argument(
+    spec_bench_group.add_argument(
         "--spec-bench-category",
         type=str,
         default=None,
