@@ -6,7 +6,7 @@ from typing import ClassVar, Optional
 
 import torch
 
-from vllm.attention.backends.abstract import (AttentionType,
+from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
                                               is_quantized_kv_cache)
 from vllm.attention.utils.fa_utils import (flash_attn_supports_mla,
                                            get_flash_attn_version)
@@ -159,6 +159,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashAttnMLAMetadata,
+        layer: AttentionLayer,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
