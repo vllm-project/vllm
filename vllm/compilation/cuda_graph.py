@@ -108,6 +108,7 @@ class CUDAGraphWrapper:
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
+        logger.info(f"CUDAGraphWrapper call {cudagraph_runtime_mode=}")
 
         if cudagraph_runtime_mode == CUDAGraphMode.NONE or \
                             cudagraph_runtime_mode != self.runtime_mode:
@@ -190,5 +191,7 @@ class CUDAGraphWrapper:
                 f"during replay. Expected {entry.input_addresses}, "
                 f"got {new_input_addresses}")
 
+        logger.info(
+            f"CUDAGraphWrapper replay cuda graph {entry.cudagraph.pool()=}")
         entry.cudagraph.replay()
         return entry.output

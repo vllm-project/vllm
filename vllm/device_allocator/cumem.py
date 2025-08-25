@@ -196,6 +196,7 @@ class CuMemAllocator:
             offload_tags = (offload_tags, )
 
         assert isinstance(offload_tags, tuple)
+        print("Sleeping allocator with tags: %s", offload_tags)
 
         for ptr, data in self.pointer_to_data.items():
             handle = data.handle
@@ -262,6 +263,7 @@ class CuMemAllocator:
             # the memory pool.
             # to avoid the issue, we keep a reference of the data.
             # see https://github.com/pytorch/pytorch/issues/146431 .
+            print(f"Using memory pool {mem_pool.id=} with {tag=}")
             self.allocator_and_pools[tag] = (mem_pool, allocator)
             yield mem_pool
             # PyTorch's bug, calling torch.cuda.empty_cache() will error
@@ -285,3 +287,26 @@ class CuMemAllocator:
             handle = data.handle
             sum_bytes += handle[1]
         return sum_bytes
+
+    def get_current_usage_by_tag(self, tag: str) -> int:
+        """
+        Get the total number of bytes allocated in the memory pool
+        with the specified tag.
+        """
+        sum_bytes: int = 0
+        for ptr, data in self.pointer_to_data.items():
+            if data.tag == tag:
+                handle = data.handle
+                sum_bytes += handle[1]
+        return sum_bytes
+
+    def get_current_items_by_tag(self, tag: str) -> int:
+        """
+        Get the total number of pointers allocated in the memory pool
+        with the specified tag.
+        """
+        count: int = 0
+        for ptr, data in self.pointer_to_data.items():
+            if data.tag == tag:
+                count += 1
+        return count
