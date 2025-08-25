@@ -1126,7 +1126,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_ENABLE_CUDAGRAPH_GC", "0"))),
 
     # Disable padding to CUDA graph capture batch sizes.
-    # TODO(wentao): https://github.com/issues/assigned?issue=vllm-project%7Cvllm%7C23378
+    # TODO(wentao): https://github.com/vllm-project/vllm/issues/23378
     # After the issue is fixed, we can remove this flag.
     "VLLM_DISABLE_PAD_FOR_CUDAGRAPH":
     lambda: bool(int(os.getenv("VLLM_DISABLE_PAD_FOR_CUDAGRAPH", "0"))),
