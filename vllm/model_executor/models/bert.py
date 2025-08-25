@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from transformers import BertConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -239,14 +239,13 @@ class BertSelfAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj")
 
-        self.attn = Attention(num_heads=self.num_heads,
-                              head_size=self.head_dim,
-                              scale=self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn",
-                              attn_type=AttentionType.ENCODER_ONLY)
+        self.attn = EncoderOnlyAttention(num_heads=self.num_heads,
+                                         head_size=self.head_dim,
+                                         scale=self.scaling,
+                                         num_kv_heads=self.num_kv_heads,
+                                         cache_config=cache_config,
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -528,9 +527,9 @@ def _encode_token_type_ids(input_ids: torch.Tensor,
 
 def _decode_token_type_ids(input_ids: torch.Tensor) -> torch.Tensor:
 
-    ids_mask = torch.ones(input_ids.shape,
-                          dtype=torch.int32,
-                          device=input_ids.device) << TOKEN_TYPE_SHIFT
+    ids_mask = torch.ones_like(input_ids,
+                               dtype=torch.int32,
+                               device=input_ids.device) << TOKEN_TYPE_SHIFT
     tokens_mask = ids_mask.bitwise_not()
 
     token_type_ids = input_ids.bitwise_and(ids_mask) >> TOKEN_TYPE_SHIFT

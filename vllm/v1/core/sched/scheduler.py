@@ -19,13 +19,13 @@ from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
-from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
                                        SchedulerOutput)
 from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
                                               create_request_queue)
-from vllm.v1.core.sched.utils import check_stop
+from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -177,15 +177,7 @@ class Scheduler(SchedulerInterface):
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
 
-        # NOTE: structured_output_request_ids maps
-        # a request's (request that uses structured output)
-        # request_id to the running request index.
-        # This will helps us determine to slice the grammar bitmask
-        # and only applies valid mask for requests that
-        # uses structured decoding.
-        structured_output_request_ids: dict[str, int] = {}
-
-        req_to_new_block_ids: dict[str, tuple[list[int], ...]] = {}
+        req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
@@ -260,6 +252,7 @@ class Scheduler(SchedulerInterface):
                         preempted_req = self.running.pop()
 
                     self.kv_cache_manager.free(preempted_req)
+                    self.encoder_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
                     if self.log_stats:
@@ -282,14 +275,7 @@ class Scheduler(SchedulerInterface):
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
-            if request.use_structured_output:
-                # PERF: in case of chunked prefill,
-                # request might not include any new tokens.
-                # Therefore, we might introduce some additional
-                # cycle to fill in the bitmask, which could be a big no-op.
-                structured_output_request_ids[request.request_id] = req_index
-            req_to_new_block_ids[request.request_id] = (
-                new_blocks.get_block_ids())
+            req_to_new_blocks[request.request_id] = new_blocks
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
             req_index += 1
@@ -478,9 +464,6 @@ class Scheduler(SchedulerInterface):
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
 
-                if request.use_structured_output:
-                    structured_output_request_ids[request.request_id] = (
-                        req_index)
                 req_index += 1
                 self.running.append(request)
                 if self.log_stats:
@@ -496,8 +479,8 @@ class Scheduler(SchedulerInterface):
 
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
-                req_to_new_block_ids[request.request_id] = (
-                    self.kv_cache_manager.get_block_ids(request.request_id))
+                req_to_new_blocks[request.request_id] = (
+                    self.kv_cache_manager.get_blocks(request.request_id))
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
@@ -539,15 +522,10 @@ class Scheduler(SchedulerInterface):
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
 
-        grammar_bitmask = self.structured_output_manager.grammar_bitmask(
-            self.requests,
-            structured_output_request_ids,
-            scheduled_spec_decode_tokens,
-        )
         # Construct the scheduler output.
         new_reqs_data = [
-            NewRequestData.from_request(req,
-                                        req_to_new_block_ids[req.request_id])
+            NewRequestData.from_request(
+                req, req_to_new_blocks[req.request_id].get_block_ids())
             for req in scheduled_new_reqs
         ]
         cached_reqs_data = self._make_cached_request_data(
@@ -555,8 +533,11 @@ class Scheduler(SchedulerInterface):
             scheduled_resumed_reqs,
             num_scheduled_tokens,
             scheduled_spec_decode_tokens,
-            req_to_new_block_ids,
+            req_to_new_blocks,
         )
+        structured_output_request_ids, grammar_bitmask = (
+            self.get_grammar_bitmask(self.running,
+                                     scheduled_spec_decode_tokens))
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -570,7 +551,8 @@ class Scheduler(SchedulerInterface):
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
-            free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
+            free_encoder_mm_hashes=self.encoder_cache_manager.
+            get_freed_mm_hashes(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
@@ -628,11 +610,11 @@ class Scheduler(SchedulerInterface):
         resumed_reqs: list[Request],
         num_scheduled_tokens: dict[str, int],
         spec_decode_tokens: dict[str, list[int]],
-        req_to_new_block_ids: dict[str, tuple[list[int], ...]],
+        req_to_new_blocks: dict[str, KVCacheBlocks],
     ) -> CachedRequestData:
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
-        new_block_ids: list[tuple[list[int], ...]] = []
+        new_block_ids: list[Optional[tuple[list[int], ...]]] = []
         num_computed_tokens: list[int] = []
 
         use_connector = self.connector is not None
@@ -655,7 +637,8 @@ class Scheduler(SchedulerInterface):
                 # out of bounds errors. TODO: Remove this once the KVConnector
                 # is updated to handle token IDs properly.
                 new_token_ids.append([])
-            new_block_ids.append(req_to_new_block_ids[req_id])
+            new_block_ids.append(
+                req_to_new_blocks[req_id].get_block_ids(allow_none=True))
             num_computed_tokens.append(req.num_computed_tokens)
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
@@ -717,7 +700,7 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
-            if self.encoder_cache_manager.has_cache(request, i):
+            if self.encoder_cache_manager.check_and_update_cache(request, i):
                 # The encoder input is already computed and cached.
                 continue
 
@@ -731,8 +714,8 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = start_pos - num_computed_tokens
                 break
 
-            if (not self.encoder_cache_manager.can_allocate(request, i)
-                    or num_encoder_tokens > encoder_budget):
+            if not self.encoder_cache_manager.try_allocate(
+                    request, i, encoder_budget):
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
                 # be processed altogether, as the encoder usually uses
@@ -752,6 +735,36 @@ class Scheduler(SchedulerInterface):
             encoder_budget -= num_encoder_tokens
             encoder_inputs_to_schedule.append(i)
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
+
+    def get_grammar_bitmask(
+        self,
+        requests: list[Request],
+        scheduled_spec_decode_tokens: dict[str, list[int]],
+    ):
+        # NOTE: structured_output_request_ids maps
+        # a request's (request that uses structured output)
+        # request_id to its index in the batch.
+        # This will helps us determine to slice the grammar bitmask
+        # and only applies valid mask for requests that
+        # uses structured decoding.
+        structured_output_request_ids: dict[str, int] = {}
+        for i, req in enumerate(requests):
+            if req.use_structured_output:
+                # PERF: in case of chunked prefill,
+                # request might not include any new tokens.
+                # Therefore, we might introduce some additional
+                # cycle to fill in the bitmask, which could be a big no-op.
+                structured_output_request_ids[req.request_id] = i
+
+        if not structured_output_request_ids:
+            bitmask = None
+        else:
+            bitmask = self.structured_output_manager.grammar_bitmask(
+                self.requests,
+                structured_output_request_ids,
+                scheduled_spec_decode_tokens,
+            )
+        return structured_output_request_ids, bitmask
 
     def update_from_output(
         self,
@@ -872,9 +885,7 @@ class Scheduler(SchedulerInterface):
 
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
-            self.running = [
-                req for req in self.running if req not in stopped_running_reqs
-            ]
+            self.running = remove_all(self.running, stopped_running_reqs)
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
@@ -904,10 +915,13 @@ class Scheduler(SchedulerInterface):
                         finished_requests=finished_set)
             finished_req_ids.clear()
 
-        if engine_core_outputs:
+        if (stats := self.make_stats(spec_decoding_stats)) is not None:
             # Return stats to only one of the front-ends.
-            next(iter(engine_core_outputs.values())).scheduler_stats = (
-                self.make_stats(spec_decoding_stats))
+            if (eco := next(iter(engine_core_outputs.values()), None)) is None:
+                # We must return the stats even if there are no request
+                # outputs this step.
+                engine_core_outputs[0] = eco = EngineCoreOutputs()
+            eco.scheduler_stats = stats
 
         return engine_core_outputs
 
@@ -1000,7 +1014,7 @@ class Scheduler(SchedulerInterface):
         else:
             request_ids = set(request_ids)
 
-        running_requests_to_remove = []
+        running_requests_to_remove = set()
         waiting_requests_to_remove = []
         valid_requests = []
 
@@ -1013,13 +1027,13 @@ class Scheduler(SchedulerInterface):
 
             valid_requests.append(request)
             if request.status == RequestStatus.RUNNING:
-                running_requests_to_remove.append(request)
+                running_requests_to_remove.add(request)
             else:
                 waiting_requests_to_remove.append(request)
 
         # Remove all requests from queues at once for better efficiency
-        for request in running_requests_to_remove:
-            self.running.remove(request)
+        if running_requests_to_remove:
+            self.running = remove_all(self.running, running_requests_to_remove)
         if waiting_requests_to_remove:
             self.waiting.remove_requests(waiting_requests_to_remove)
 

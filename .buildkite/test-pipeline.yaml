@@ -244,6 +244,7 @@ steps:
     - pytest -v -s v1/core
     - pytest -v -s v1/engine
     - pytest -v -s v1/entrypoints
+    - pytest -v -s v1/executor
     - pytest -v -s v1/sample
     - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
@@ -328,6 +329,7 @@ steps:
     - pytest -v -s compile/test_sequence_parallelism.py
     - pytest -v -s compile/test_async_tp.py
     - pytest -v -s compile/test_fusion_all_reduce.py
+    - pytest -v -s compile/test_decorator.py
 
 - label: PyTorch Fullgraph Smoke Test # 9min
   mirror_hardwares: [amdexperimental]
@@ -341,6 +343,7 @@ steps:
   - pytest -v -s compile/piecewise/test_simple.py
   - pytest -v -s compile/piecewise/test_toy_llama.py
   - pytest -v -s compile/piecewise/test_full_cudagraph.py
+  - pytest -v -s compile/piecewise/test_multiple_graphs.py
 
 - label: PyTorch Fullgraph Test # 18min
   mirror_hardwares: [amdexperimental]
@@ -543,6 +546,15 @@ steps:
   commands:
     - pytest -v -s models/language/pooling -m 'not core_model'
 
+- label: Multi-Modal Processor Test
+  source_file_dependencies:
+  - vllm/
+  - tests/models/multimodal
+  commands:
+    - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
+    - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
+    - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+
 - label: Multi-Modal Models Test (Standard)
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
@@ -552,9 +564,7 @@ steps:
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/multimodal/processing
-    - pytest -v -s --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/test_tensor_schema.py models/multimodal -m core_model
-    - pytest -v -s models/multimodal/test_tensor_schema.py -m core_model  # Needs mp_method="spawn"
+    - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
     - cd .. && pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
 
 - label: Multi-Modal Models Test (Extended) 1
@@ -565,7 +575,7 @@ steps:
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing models/multimodal -m 'not core_model'
+    - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
 
 - label: Multi-Modal Models Test (Extended) 2
   mirror_hardwares: [amdexperimental]
@@ -646,6 +656,7 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
+    - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
     # Fusion
     - pytest -v -s tests/compile/test_fusion_all_reduce.py
     - pytest -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
@@ -832,3 +843,10 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
+
+- label: Qwen MoE EP Test # optional
+  gpu: h200
+  optional: true
+  num_gpus: 2
+  commands:
+    - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 /vllm-workspace/examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048

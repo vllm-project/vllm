@@ -357,9 +357,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_KERNEL_SRC})
 
     set(MARLIN_SRCS
-       "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
        "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
-       "csrc/quantization/marlin/qqq/marlin_qqq_gemm_kernel.cu"
        "csrc/quantization/gptq_marlin/gptq_marlin.cu"
        "csrc/quantization/gptq_marlin/gptq_marlin_repack.cu"
        "csrc/quantization/gptq_marlin/awq_marlin_repack.cu")
@@ -752,6 +750,33 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                      "found in CUDA target architectures")
     endif()
   endif()
+
+  # Only build W4A8 kernels if we are building for something compatible with sm90a
+  cuda_archs_loose_intersection(W4A8_ARCHS "9.0a" "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND W4A8_ARCHS)
+    set(SRCS
+       "csrc/quantization/cutlass_w4a8/w4a8_mm_entry.cu")
+
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${W4A8_ARCHS}")
+
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+
+    message(STATUS "Building W4A8 kernels for archs: ${W4A8_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0
+        AND W4A8_ARCHS)
+      message(STATUS "Not building W4A8 kernels as CUDA Compiler version is "
+                     "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
+                     "later if you intend on running w4a16 quantized models on "
+                     "Hopper.")
+    else()
+      message(STATUS "Not building W4A8 kernels as no compatible archs "
+                     "found in CUDA target architectures")
+    endif()
+  endif()
+
 # if CUDA endif
 endif()
 
