@@ -20,7 +20,7 @@ class Step3ReasoningParser(ReasoningParser):
     """
     Reasoning parser for Step3 model.
 
-    The Step3 model uses </think> token to denote the end of reasoning 
+    The Step3 model uses </think> token to denote the end of reasoning
     text. This parser extracts all content before </think> as reasoning content.
     """
 
@@ -79,7 +79,10 @@ class Step3ReasoningParser(ReasoningParser):
             return DeltaMessage(reasoning_content=delta_text)
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+        token_ids: list[int] | None = None,
     ) -> tuple[Optional[str], Optional[str]]:
 
         # Check if the model output contains the </think> token

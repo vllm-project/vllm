@@ -1173,6 +1173,7 @@ class OpenAIServingChat(OpenAIServing):
             if self.use_harmony:
                 if TYPE_CHECKING:
                     assert self.tool_parser is not None
+                    assert self.reasoning_parser is not None
                 tool_parser = self.tool_parser(tokenizer)
                 reasoning_parser = self.reasoning_parser(tokenizer)
                 # NOTE: We use token_ids for openai tool parser

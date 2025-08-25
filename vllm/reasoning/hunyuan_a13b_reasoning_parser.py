@@ -22,16 +22,16 @@ class HunyuanA13BReasoningParser(ReasoningParser):
 
     HunyuanReasoningParser
 
-    This class implements a reasoning parser specifically designed 
-    for the Hunyuan A13B Model. It is responsible for parsing and 
-    extracting structured reasoning and answer segments from model 
+    This class implements a reasoning parser specifically designed
+    for the Hunyuan A13B Model. It is responsible for parsing and
+    extracting structured reasoning and answer segments from model
     outputs that follow a specific pattern.
 
     Key Features:
         - For non-stream output , Recognizes and extracts reasoning ("think")
          and answer ("answer") sections from text using regular expressions.
-        - For stream process, it require a token id sequences to change the 
-          reasoning state and other state so it maintains internal state to 
+        - For stream process, it require a token id sequences to change the
+          reasoning state and other state so it maintains internal state to
           manage parsing across multiple token.
 
 
@@ -91,7 +91,10 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         return []
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+        token_ids: list[int] | None = None,
     ) -> tuple[Optional[str], Optional[str]]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates

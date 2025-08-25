@@ -53,7 +53,10 @@ class GraniteReasoningParser(ReasoningParser):
             len(think_start) for think_start in self.valid_think_starts)
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+        token_ids: list[int] | None = None,
     ) -> tuple[Optional[str], Optional[str]]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
@@ -139,7 +142,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Args:
             text (str): Text to check for leading substr.
-        
+
         Returns:
             bool: True if any of the possible reasoning start seqs match.
         """
@@ -152,7 +155,7 @@ class GraniteReasoningParser(ReasoningParser):
 
         Args:
             text (str): Text to check for leading substr.
-        
+
         Returns:
             bool: True if any of the possible response start seqs match.
         """
