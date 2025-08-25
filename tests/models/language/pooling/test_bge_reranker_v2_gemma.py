@@ -126,9 +126,7 @@ class GemmaMtebEncoder(VllmMtebEncoder):
 
 
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
-def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo,
-                            monkeypatch) -> None:
-    monkeypatch.setenv("VLLM_USE_V1", "0")
+def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
 
     mteb_test_rerank_models(GemmaRerankerHfRunner,
                             vllm_runner,
