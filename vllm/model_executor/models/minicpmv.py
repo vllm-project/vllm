@@ -220,7 +220,7 @@ class Resampler2_5(BaseResampler):
         return x
 
 
-class Resampler3(BaseResampler):
+class Resampler4_5(BaseResampler):
 
     def __init__(self,
                  num_queries: int,
@@ -1644,7 +1644,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         quant_config = self._maybe_ignore_quant_config(quant_config)
         with set_default_torch_dtype(torch.float16):
             # The resampler in 4.0 remains consistent with the one in 2.5/2.6.
-            resampler = Resampler3(num_queries=self.config.query_num,
+            resampler = Resampler4_5(num_queries=self.config.query_num,
                                      embed_dim=embed_dim,
                                      num_heads=embed_dim // 128,
                                      kv_dim=vision_dim,
