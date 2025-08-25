@@ -705,10 +705,14 @@ class TransformersMoEBase(TransformersBase):
         topk_group = getattr(text_config, "topk_group", None)
         use_grouped_topk = bool(num_expert_group or topk_group)
 
-        if self.parallel_config.enable_eplb:
-            raise NotImplementedError(
-                "Transformers backend does not support EPLB yet!")
+        # Expert parallel load balancing kwargs
+        parallel_config = self.parallel_config
+        eplb_config = parallel_config.eplb_config
 
+        enable_eplb = parallel_config.enable_eplb
+        num_redundant_experts = eplb_config.num_redundant_experts
+
+        # Recursively fuse MoE layers
         def _fused_moe(module: nn.Module, prefix: str = ""):
             for child_name, child_module in module.named_children():
                 qual_name = maybe_prefix(prefix, child_name)
@@ -736,8 +740,8 @@ class TransformersMoEBase(TransformersBase):
                         e_score_correction_bias=e_score_correction_bias,
                         # apply_router_weight_on_input
                         # activation
-                        # enable_eplb
-                        # num_redundant_experts
+                        enable_eplb=enable_eplb,
+                        num_redundant_experts=num_redundant_experts,
                         # has_bias
                     )
                     setattr(module, child_name, new_module)
