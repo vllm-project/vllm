@@ -41,37 +41,33 @@ def get_split_config(
     max_num_nano_batches: int,
     min_nano_split_tokens: int,
 ) -> NanoSplitConfig:
-    token_batch_size = sum(num_tokens)
-    num_nano_batches = min(
-        batch_size,
-        (token_batch_size + min_nano_split_tokens - 1) // min_nano_split_tokens,
-        max_num_nano_batches,
-    )
-    nano_batch_split_indices = [0]
-    nano_batch_indices = [0]
-    nano_batch_sizes = []
-    nano_batch_num_tokens = []
+    num_nano_batches = 0
+    nano_batch_token_indices = [0]
+    nano_batch_req_indices = [0]
+    nano_batch_req_sizes = []
+    nano_batch_token_sizes = []
     prefix_sum = [0] + list(itertools.accumulate(num_tokens))
-    remaining_batches = num_nano_batches - len(nano_batch_split_indices) + 1
-    remaining_tokens = token_batch_size
-    while remaining_batches > 0:
-        next_index = min(
-            range(nano_batch_indices[-1], batch_size - remaining_batches + 1),
-            key=lambda x: abs(prefix_sum[x + 1] - prefix_sum[nano_batch_indices[-1]] - remaining_tokens / remaining_batches)
-        )
-        nano_batch_indices.append(next_index + 1)
-        nano_batch_split_indices.append(prefix_sum[next_index + 1])
-        nano_batch_sizes.append(nano_batch_indices[-1] - nano_batch_indices[-2])
-        nano_batch_num_tokens.append(nano_batch_split_indices[-1] - nano_batch_split_indices[-2])
-        remaining_tokens = token_batch_size - prefix_sum[next_index + 1]
-        remaining_batches -= 1
+    # Find the mid point of the tokens
+    mid = min(range(len(prefix_sum)), key=lambda i: abs(prefix_sum[i] - (prefix_sum[-1] - prefix_sum[i])))
+    if prefix_sum[mid] < min_nano_split_tokens or (prefix_sum[-1] - prefix_sum[mid]) < min_nano_split_tokens:
+        num_nano_batches = 1
+        nano_batch_req_indices.append(batch_size)
+        nano_batch_token_indices.append(prefix_sum[-1])
+        nano_batch_req_sizes.append(batch_size)
+        nano_batch_token_sizes.append(prefix_sum[-1])
+    else:
+        num_nano_batches = 2
+        nano_batch_req_indices.extend([mid, batch_size])
+        nano_batch_token_indices.extend([prefix_sum[mid], prefix_sum[-1]])
+        nano_batch_req_sizes.extend([mid, batch_size - mid])
+        nano_batch_token_sizes.extend([prefix_sum[mid], prefix_sum[-1] - prefix_sum[mid]])
 
     return NanoSplitConfig(
         num_nano_batches=num_nano_batches,
-        batch_sizes=nano_batch_sizes,
-        batch_indices=nano_batch_indices,
-        num_tokens=nano_batch_num_tokens,
-        split_indices=nano_batch_split_indices,
+        batch_sizes=nano_batch_req_sizes,
+        batch_indices=nano_batch_req_indices,
+        num_tokens=nano_batch_token_sizes,
+        split_indices=nano_batch_token_indices,
     )
 
 

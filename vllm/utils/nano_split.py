@@ -42,14 +42,14 @@ def prepare_nano_split_and_set_hooks(
     tokens = [scheduler_output.num_scheduled_tokens[rid] for rid in req_ids]
     num_scheduled_tokens = torch.tensor(tokens, dtype=torch.int32)
     cached_seqlens = input_batch.num_computed_tokens_cpu[:batch_size].tolist()
-    split_config = nano_manager.prepare_nano_split(
-        batch_size, tokens, cached_seqlens
-    )
+    split_config = nano_manager.prepare_nano_split(batch_size, tokens, cached_seqlens)
+    if split_config.num_nano_batches == 1:
+        return
 
     cu_num_tokens = torch.cumsum(num_scheduled_tokens, dim=0, dtype=torch.int32)
     query_start_loc_cpu = torch.zeros(batch_size + 1, dtype=torch.int32)
     query_start_loc_cpu[0] = 0
-    query_start_loc_cpu[1:batch_size + 1] = cu_num_tokens
+    query_start_loc_cpu[1 : batch_size + 1] = cu_num_tokens
     seq_lens_cpu = torch.zeros(batch_size, dtype=torch.int32)
     seq_lens_cpu[:batch_size] = (
         input_batch.num_computed_tokens_cpu_tensor[:batch_size] + num_scheduled_tokens
@@ -100,13 +100,9 @@ def prepare_nano_split_and_set_hooks(
             slot_mapping = blk_table.slot_mapping[start_token_idx:end_token_idx]
 
             common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=query_start_loc[
-                    start_req_idx : end_req_idx + 1
-                ]
+                query_start_loc=query_start_loc[start_req_idx : end_req_idx + 1]
                 - query_start_loc[start_req_idx],
-                query_start_loc_cpu=query_start_loc_cpu[
-                    start_req_idx : end_req_idx + 1
-                ]
+                query_start_loc_cpu=query_start_loc_cpu[start_req_idx : end_req_idx + 1]
                 - query_start_loc_cpu[start_req_idx],
                 seq_lens=seq_lens[start_req_idx:end_req_idx],
                 seq_lens_cpu=seq_lens_cpu[start_req_idx:end_req_idx],
@@ -142,7 +138,7 @@ def prepare_nano_split_and_set_hooks(
             attn_metadata=attn_metadata,
             virtual_engine=prev_forward_context.virtual_engine,
             dp_metadata=prev_forward_context.dp_metadata,
-            skip_cuda_graphs=prev_forward_context.skip_cuda_graphs,
+            skip_cuda_graphs=True,
         )
         for attn_metadata in attn_metadatas
     ]

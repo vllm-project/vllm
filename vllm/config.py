@@ -4649,6 +4649,12 @@ class VllmConfig:
             logger.info("full_cuda_graph is not supported with "
                         "cascade attention. Disabling cascade attention.")
             self.model_config.disable_cascade_attn = True
+        
+        if self.compilation_config.full_cuda_graph and \
+            self.model_config.enable_nano_batch_split:
+            logger.info("full_cuda_graph is not supported with "
+                        "nano batch split. Disabling nano batch split.")
+            self.model_config.enable_nano_batch_split = False
 
         disable_chunked_prefill_reasons: list[str] = []
 

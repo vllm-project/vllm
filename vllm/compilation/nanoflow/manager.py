@@ -101,7 +101,7 @@ class NanoSplitManager:
 
     def get_callable(self) -> Callable:
         def _forward(*args, **kwargs):
-            if self.cached_config is None:
+            if self.cached_config is None or self.cached_config.num_nano_batches == 1:
                 return self.original_graph_module(*args, **kwargs)
 
             num_nano_batches = self.cached_config.num_nano_batches
