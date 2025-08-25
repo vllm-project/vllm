@@ -150,11 +150,10 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     Idx_t gate_off = base_i + t * stride_i_t + tid * stride_i_h;
     Idx_t up_off = base_i + H * stride_i_h + t * stride_i_t + tid * stride_i_h;
 
-    if (tid < 64) {
-      // load & convert to float
-      gate = static_cast<float>(input[gate_off * 2u]);
-      upv = static_cast<float>(input[up_off * 2u]);
-    }
+    // load & convert to float
+    gate = __bfloat162float(input[gate_off]);
+    upv = __bfloat162float(input[up_off]);
+
     // SiLU * up
     gate = silu(gate);
     y = gate * upv;
@@ -190,14 +189,15 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     Idx_t yq_off = base_yq + t * stride_yq_t + tid * stride_yq_h;
 
     float q = fminf(fmaxf(y / scale, fp8_min), fp8_max);
-    y_q[yq_off] = __nv_fp8_e4m3(q);
 
+    __syncthreads();
+
+    // Keep writes here - we don't need to wait for them to resolve.
+    y_q[yq_off] = __nv_fp8_e4m3(q);
     if (tid == 0) {
       Idx_t ys_off = base_ys + t * stride_ys_t;
       y_s[ys_off] = scale;  // one scale per (e, t, g)
     }
-
-    __syncthreads();
   }
 }
 }  // namespace vllm
