@@ -549,12 +549,7 @@ class VllmBackend:
         self.graph = graph
         self.configure_post_pass()
 
-        if self.vllm_config.model_config.enable_nano_batch_split:
-            self.split_gm, self.piecewise_graphs = split_graph(graph, [
-                "vllm.all_reduce"
-            ])
-        else:
-            self.split_gm, self.piecewise_graphs = split_graph(graph, self.compilation_config.splitting_ops)
+        self.split_gm, self.piecewise_graphs = split_graph(graph, self.compilation_config.splitting_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
 
@@ -593,10 +588,7 @@ class VllmBackend:
         if not self.compilation_config.use_cudagraph or \
             not self.compilation_config.cudagraph_copy_inputs:
             if self.vllm_config.model_config.enable_nano_batch_split:
-                return nano_manager.get_callable(
-                    self.split_gm,
-                    vllm_config=self.vllm_config
-                )
+                return nano_manager.get_callable(self.split_gm, self.vllm_config)
             else:
                 return self.split_gm
 

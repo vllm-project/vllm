@@ -4611,6 +4611,22 @@ class VllmConfig:
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
 
+        if self.model_config.enable_nano_batch_split:
+            if self.model_config.enforce_eager:
+                logger.info("nano batch split is not supported with "
+                            "enforce_eager. Disabling nano batch split.")
+                self.model_config.enable_nano_batch_split = False
+            elif self.compilation_config.full_cuda_graph:
+                logger.info("full_cuda_graph is not supported with "
+                            "nano batch split. Disabling nano batch split.")
+                self.model_config.enable_nano_batch_split = False
+            elif self.compilation_config.splitting_ops:
+                logger.info("splitting_ops is not supported with "
+                            "nano batch split. Disabling nano batch split.")
+                self.model_config.enable_nano_batch_split = False
+            else:
+                self.compilation_config.splitting_ops = ["vllm.all_reduce"]
+
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.
         if self.compilation_config.pass_config.enable_async_tp:
@@ -4649,12 +4665,6 @@ class VllmConfig:
             logger.info("full_cuda_graph is not supported with "
                         "cascade attention. Disabling cascade attention.")
             self.model_config.disable_cascade_attn = True
-        
-        if self.compilation_config.full_cuda_graph and \
-            self.model_config.enable_nano_batch_split:
-            logger.info("full_cuda_graph is not supported with "
-                        "nano batch split. Disabling nano batch split.")
-            self.model_config.enable_nano_batch_split = False
 
         disable_chunked_prefill_reasons: list[str] = []
 
