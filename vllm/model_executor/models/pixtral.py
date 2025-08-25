@@ -15,7 +15,7 @@ from mistral_common.protocol.instruct.messages import (ImageChunk, TextChunk,
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
 from PIL import Image
-from transformers import PixtralVisionConfig, TensorType
+from transformers import BatchFeature, PixtralVisionConfig, TensorType
 from transformers.image_utils import ImageInput
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens)
@@ -163,10 +163,12 @@ class PixtralProcessorAdapter:
             images_processed.append(image_processed)
             images_tokens.append(image_tokens)
 
-        return {
-            "input_ids": torch.cat(images_tokens)[None].expand(len(text), -1),
-            "images": images_processed,
-        }
+        return BatchFeature({
+            "input_ids":
+            torch.cat(images_tokens)[None].expand(len(text), -1),
+            "images":
+            images_processed,
+        })
 
 
 class PixtralProcessingInfo(BaseProcessingInfo):
