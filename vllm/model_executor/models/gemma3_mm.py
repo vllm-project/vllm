@@ -28,7 +28,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         PlaceholderFeaturesInfo,
                                         PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails,
-                                        find_mm_placeholders,
                                         replace_token_matches)
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
@@ -401,7 +400,8 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
             repl_token_ids.extend(repl_toks)
             repl_orig_idxs.extend(orig_idx for _ in range(len(repl_toks)))
 
-        repls = find_mm_placeholders(repl_token_ids, mm_prompt_updates)
+        repls = super()._find_mm_placeholders(repl_token_ids,
+                                              mm_prompt_updates)
 
         return {
             modality: [
