@@ -22,7 +22,7 @@ def create_chunked_local_attention_backend(
     attention_chunk_size: int,
     block_size: int,
 ) -> type[AttentionBackend]:
-    name_prefix = f"ChunkedLocalAttention_{attention_chunk_size}_{block_size}_"
+    prefix = f"ChunkedLocalAttention_{attention_chunk_size}_{block_size}_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
 
     class ChunkedLocalAttentionBuilder(underlying_builder):  # type: ignore
@@ -49,7 +49,7 @@ def create_chunked_local_attention_backend(
                                               slot_mapping)
 
     attn_backend = subclass_attention_backend(
-        name_prefix=name_prefix,
+        name_prefix=prefix,
         attention_backend_cls=underlying_attn_backend,
         builder_cls=ChunkedLocalAttentionBuilder)
 
