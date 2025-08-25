@@ -27,10 +27,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     W4A16SPARSE24_SUPPORTED_BITS, WNA16_SUPPORTED_BITS, CompressedTensors24,
     CompressedTensorsScheme, CompressedTensorsW4A4Fp4,
-    CompressedTensorsW4A8Int, CompressedTensorsW4A16Fp4,
-    CompressedTensorsW4A16Sparse24, CompressedTensorsW8A8Fp8,
-    CompressedTensorsW8A8Int8, CompressedTensorsW8A16Fp8,
-    CompressedTensorsWNA16)
+    CompressedTensorsW4A8Fp8, CompressedTensorsW4A8Int,
+    CompressedTensorsW4A16Fp4, CompressedTensorsW4A16Sparse24,
+    CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
+    CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear import (  # noqa: E501
     CompressedTensorsLinearTransformMethod, get_linear_transform_schemes)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
@@ -113,8 +113,6 @@ class CompressedTensorsConfig(QuantizationConfig):
     ) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
-        # Check if the layer is skipped for quantization.
-        # TODO (@kylesayrs): support module names
         if isinstance(layer, LinearBase):
             # collect schemes
             quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
@@ -223,8 +221,10 @@ class CompressedTensorsConfig(QuantizationConfig):
                     format
                 ) if format is not None else is_activation_quantization_format(
                     quant_format)
-                if act_quant_format:
-                    input_activations = quant_config.get("input_activations")
+                # TODO(czhu): w4a8fp8 is in packed-quantized format
+                # but needs input activation quantization
+                input_activations = quant_config.get("input_activations")
+                if act_quant_format or input_activations:
                     # The only case where we have activation quant supported
                     # but no input_activations provided in the config
                     # should be w8a16fp8 w8a16fp8 can also run for cases where
@@ -375,6 +375,28 @@ class CompressedTensorsConfig(QuantizationConfig):
             input_quant.strategy == QuantizationStrategy.TENSOR)
         return is_symmetric_activation and is_per_tensor_activation
 
+    def _is_fp8_w4a8(self, weight_quant: BaseModel,
+                     input_quant: BaseModel) -> bool:
+        if not weight_quant or not input_quant:
+            return False
+        is_weight_4_bits = weight_quant.num_bits == 4
+        is_activation_8_bits = input_quant.num_bits == 8
+        weight_strategy = (
+            weight_quant.strategy == QuantizationStrategy.GROUP.value)
+        is_token = (weight_strategy and input_quant.strategy
+                    == QuantizationStrategy.TOKEN.value)
+        is_dynamic = not weight_quant.dynamic and input_quant.dynamic
+        is_symmetric = weight_quant.symmetric and input_quant.symmetric
+        # Only per-group symmetric weight (4bit)
+        # + per-tok symmetric activation (8bit) quantization supported.
+        return (is_weight_4_bits and is_activation_8_bits and is_token
+                and is_symmetric and is_dynamic)
+
+    def _is_fp8_w4a8_sm90(self, weight_quant: BaseModel,
+                          input_quant: BaseModel) -> bool:
+        return (self._check_scheme_supported(90, error=False, match_exact=True)
+                and self._is_fp8_w4a8(weight_quant, input_quant))
+
     def _is_fp8_w8a8_sm90(self, weight_quant: BaseModel,
                           input_quant: BaseModel) -> bool:
         return (self._check_scheme_supported(90, error=False, match_exact=True)
@@ -427,6 +449,13 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Detect If Mixed Precision
         if self._is_fp4a16_nvfp4(weight_quant, input_quant):
             return CompressedTensorsW4A16Fp4()
+
+        if self._is_fp8_w4a8_sm90(weight_quant, input_quant):
+            return CompressedTensorsW4A8Fp8(num_bits=weight_quant.num_bits,
+                                            strategy=weight_quant.strategy,
+                                            symmetric=weight_quant.symmetric,
+                                            group_size=weight_quant.group_size,
+                                            actorder=weight_quant.actorder)
 
         if self._is_wNa16_group_channel(weight_quant, input_quant):
             if (self.quant_format == CompressionFormat.marlin_24.value
@@ -528,7 +557,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Find the "target" in the compressed-tensors config
         # that our layer conforms to.
-        # TODO (@kylesayrs): support better matching with ct matching utils
+        # TODO (@kylesayrs): support ignore module names with ct matching utils
         if should_ignore_layer(layer_name,
                                ignore=self.ignore,
                                fused_mapping=self.packed_modules_mapping):
