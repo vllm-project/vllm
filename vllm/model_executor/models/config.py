@@ -268,7 +268,7 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
                 # Step size 8 for small batch sizes
                 cuda_graph_sizes += [i for i in range(8, 256, 8)]
                 # Step size 16 for larger batch sizes
-                cuda_graph_sizes += [i for i in range(256, 993, 16)]
+                cuda_graph_sizes += [i for i in range(256, 1025, 16)]
                 scheduler_config.cuda_graph_sizes = cuda_graph_sizes
                 logger.info(
                     "Overriding max cuda graph capture size to "
