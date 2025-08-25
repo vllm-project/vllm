@@ -43,7 +43,7 @@ class TestModel(torch.nn.Module):
             for _ in range(2)
         ]
         self.fp8_linear = Fp8LinearOp(
-            force_fp8_e4m3fnuz == force_fp8_e4m3fnuz,
+            force_fp8_e4m3fnuz=force_fp8_e4m3fnuz,
             act_quant_static=static,
             act_quant_group_shape=group_shape,
         )
