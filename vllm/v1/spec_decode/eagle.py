@@ -413,7 +413,7 @@ class EagleProposer:
         draft_hidden_states = hidden_states.view(batch_size, 1, -1)
 
         # Initialize empty tensors for concatenation with the level outputs.
-        tree_input_ids = torch.empty(0,
+        tree_input_ids = torch.empty((batch_size, 0),
                                      device=self.input_ids.device,
                                      dtype=self.input_ids.dtype)
         # M-RoPE
@@ -435,7 +435,7 @@ class EagleProposer:
             flattened_draft_positions = (
                 positions.view(batch_size, -1) +
                 self.tree_draft_pos_offsets[:batch_size, :])
-        tree_hidden_states = torch.empty(0,
+        tree_hidden_states = torch.empty((batch_size, 0, self.hidden_size),
                                          device=self.hidden_states.device,
                                          dtype=self.hidden_states.dtype)
         tree_depth = len(self.cu_drafts_per_level)
@@ -542,16 +542,16 @@ class EagleProposer:
 
             # Copy inputs to buffer for cudagraph.
             num_tokens = attn_metadata.num_actual_tokens
-            input_ids = tree_input_ids.view(-1)
+            input_ids = tree_input_ids.view(-1)[-num_tokens:]  # [B*qlen]
             self.input_ids[:num_tokens] = input_ids
             # M-RoPE
             if self.uses_mrope:
                 self.positions[:, :num_tokens] = \
-                    tree_positions.view(3, num_tokens)
+                    tree_positions.view(3, -1)[:,-num_tokens:]
             else:
-                self.positions[:num_tokens] = tree_positions.view(-1)
+                self.positions[:num_tokens] = tree_positions.view(-1)[-num_tokens:]
             self.hidden_states[:num_tokens] = tree_hidden_states.view(
-                num_tokens, -1)
+                num_tokens, -1)[-num_tokens:, :]
 
             if self.use_cuda_graph and \
                     num_tokens <= self.cudagraph_batch_sizes[-1]:

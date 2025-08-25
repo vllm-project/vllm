@@ -1,215 +1,151 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
 import torch
-from vllm.config.cache import CacheConfig
-from vllm.config.scheduler import SchedulerConfig
-from vllm.config import ModelConfig, VllmConfig
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
-from vllm.logger import init_logger
+from unittest.mock import Mock, patch
+
+from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.attention.backends.tree_attn import TreeAttentionMetadataBuilder
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
+from vllm.config import VllmConfig
 
-logger = init_logger(__name__)
+def create_mock_vllm_config(uses_mrope=True):
+    config = Mock(spec=VllmConfig)
 
+    # Model config
+    config.model_config = Mock()
+    config.model_config.dtype = torch.float16
+    config.model_config.max_model_len = 2048
+    config.model_config.uses_mrope = uses_mrope
+    config.model_config.is_multimodal_model = False
+    config.model_config.enforce_eager = False
 
-class MinimalEagleProposer:
-    
-    def __init__(self):
-        # M-RoPE related settings
-        self.uses_mrope = True
-        self.max_model_len = 8192
-        self.block_size = 16
-        
-        # Tree structure
-        self.tree_choices = [(0,), (0, 0), (0, 1), (1,)]
-        self.cu_drafts_per_level = [1, 3, 4]
-        self.child_drafts_per_level = [1, 2, 1] 
-        
-        # Device-related tensors
-        self.input_ids = torch.zeros(1000, dtype=torch.int32)
-        self.positions = torch.zeros((3, 1000), dtype=torch.int64)
-        self.hidden_states = torch.zeros((1000, 4096), dtype=torch.float16)
-        self.arange = torch.arange(10, dtype=torch.int32)
-        
-        # Tree offsets
-        max_batch_size = 8
-        self.tree_draft_pos_offsets = torch.arange(
-            1, len(self.tree_choices) + 1, dtype=torch.int32
-        ).repeat(max_batch_size, 1)
-        
-        # Mock components
-        self.vllm_config = MockVllmConfig()
-        self.model = MockModel()
-        self.runner = MockRunner()
-        self.attn_layer_names = ['layer1']
-        self.use_cuda_graph = False
+    # Cache config
+    config.cache_config = Mock()
+    config.cache_config.block_size = 16
 
-    def test_mrope_position_logic(self, batch_size, positions):
-        """Test the core logic of M-RoPE position handling"""
-        
-        print(f"Input positions shape: {positions.shape}")
-        print(f"Input positions: {positions}")
-        
-        # Validate input
-        assert positions.dim() == 2, f"M-RoPE positions should be 2D, got {positions.dim()}D"
-        assert positions.shape[0] == 3, f"M-RoPE positions should have 3 dims, got {positions.shape[0]}"
-        assert positions.shape[1] == batch_size, f"Batch size mismatch: {positions.shape[1]} vs {batch_size}"
-        
-        total_num_drafts = self.cu_drafts_per_level[0]
-        tree_depth = len(self.cu_drafts_per_level)
-        
-        # Test position updates for each level
-        for level in range(tree_depth - 1):
-            print(f"Testing level {level}")
-            
-            # M-RoPE position update
-            draft_positions = positions + (level + 1)
-            print(f"Level {level} draft_positions: {draft_positions}")
-            
-            # Check if exceeds maximum length
-            exceeds_max_model_len = (positions[0] + total_num_drafts) >= self.max_model_len
-            print(f"Level {level} exceeds_max_len: {exceeds_max_model_len}")
-            
-            # Position clamping
-            draft_positions = torch.where(
-                exceeds_max_model_len.unsqueeze(0),
-                0,
-                draft_positions,
-            ).view(3, batch_size, -1)
-            
-            print(f"Level {level} clamped positions shape: {draft_positions.shape}")
-            
-            # Validate shape correctness
-            assert draft_positions.shape == (3, batch_size, 1), \
-                f"Draft positions shape error at level {level}: {draft_positions.shape}"
-            
-        print("M-RoPE position logic test passed")
-        return True
+    # Scheduler config
+    config.scheduler_config = Mock()
+    config.scheduler_config.max_num_batched_tokens = 512
+    config.scheduler_config.max_num_seqs = 8
 
+    # Speculative config
+    config.speculative_config = Mock()
+    config.speculative_config.num_speculative_tokens = 3
+    config.speculative_config.method = "eagle"
+    # Tree: root + 2 children + 2 grandchildren = 5 nodes, num_drafts_per_level=[1,2,2]
+    config.speculative_config.speculative_token_tree = "[(0,), (0, 0), (0, 1), (0, 0, 0), (0, 1, 0)]"
 
-class MockVllmConfig:
-    def pad_for_cudagraph(self, x):
-        return x
+    # Draft model config
+    draft_model_config = Mock()
+    draft_model_config.get_hidden_size.return_value = 4096
+    config.speculative_config.draft_model_config = draft_model_config
 
+    # Compilation config
+    config.compilation_config = Mock()
+    config.compilation_config.level = Mock()
+    config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
 
-class MockModel:
-    def compute_logits(self, hidden_states, *args):
-        batch_size = hidden_states.shape[0]
-        vocab_size = 32000
-        return torch.randn(batch_size, vocab_size)
-    
-    def __call__(self, *args, **kwargs):
-        positions = kwargs.get('positions')
-        if positions is not None:
-            if positions.dim() == 2:  # M-RoPE case
-                num_tokens = positions.shape[1]
-            else:  # Standard case
-                num_tokens = positions.shape[0]
-        else:
-            num_tokens = 8
-        
-        hidden_size = 4096
-        dummy_last_hidden = torch.randn(num_tokens, hidden_size)
-        dummy_hidden = torch.randn(num_tokens, hidden_size)
-        return dummy_last_hidden, dummy_hidden
+    # Cudagraph pad passthrough
+    config.pad_for_cudagraph = lambda x: x
+    return config
 
+class MockAttentionGroup:
+    def __init__(self, batch_size, device):
+        self.metadata_builder = Mock(spec=TreeAttentionMetadataBuilder)
+        self.layer_names = ["layer1", "layer2"]
+        self.batch_size = batch_size
+        self.device = device
+        self.call_count = 0
 
-class MockTreeAttentionMetadataBuilder(TreeAttentionMetadataBuilder):
-    def __init__(self):
-        pass
-    
-    def build_for_drafting(self, **kwargs):
-        class MockTreeAttentionMetadata:
-            def __init__(self):
-                self.max_seq_len = 100
-                self.seq_lens = torch.tensor([50, 60])
-                self.block_table = torch.randint(0, 1000, (2, 100))
-                self.slot_mapping = torch.zeros(100, dtype=torch.long)
-                self.num_actual_tokens = 2
-        
-        return MockTreeAttentionMetadata()
+    def create_mock_metadata(self, common_attn_metadata, draft_index):
+        # Use the query_len encoded in common_attn_metadata to make num_actual_tokens consistent
+        num_tokens = common_attn_metadata.num_actual_tokens
+        mock_attn_metadata = Mock()
+        mock_attn_metadata.num_actual_tokens = int(num_tokens)
+        mock_attn_metadata.max_seq_len = int(common_attn_metadata.max_seq_len)
+        mock_attn_metadata.seq_lens = common_attn_metadata.seq_lens.clone()
+        mock_attn_metadata.block_table = torch.randint(
+            0, 100, (self.batch_size, 20), device=self.device
+        )
+        # Initialize slot_mapping with correct length (num_tokens)
+        mock_attn_metadata.slot_mapping = torch.randint(
+            0, 1000, (num_tokens,), device=self.device
+        )
+        return mock_attn_metadata
 
-
-class MockRunner:
-    def __init__(self):
-        class MockAttentionGroup:
-            def __init__(self):
-                self.metadata_builder = MockTreeAttentionMetadataBuilder()
-        
-        self.attn_groups = [[MockAttentionGroup()]]
-
-
-def test_mrope_position_updates():
-    """Test M-RoPE position update logic"""
-    print("Testing M-RoPE position updates...")
-    
-    proposer = MinimalEagleProposer()
-    
-    # Test data
-    batch_size = 2
-    positions = torch.tensor([
-        [50, 80],   # dim 0: sequence positions
-        [25, 40],   # dim 1: image positions  
-        [10, 15]    # dim 2: text positions
-    ], dtype=torch.int64)
-    
-    # Test position update logic
-    result = proposer.test_mrope_position_logic(batch_size, positions)
-    assert result == True, "M-RoPE position logic test failed"
-    
-    print("M-RoPE position updates test passed")
-
-
-def test_mrope_tree_propose_core():
-    """Test the core M-RoPE part of tree_propose"""
-    print("Testing tree_propose M-RoPE core logic...")
-    
-    proposer = MinimalEagleProposer()
-    batch_size = 2
-    
-    # M-RoPE positions: (3, batch_size)
-    positions = torch.tensor([
-        [50, 80],   # dim 0: sequence positions
-        [25, 40],   # dim 1: image positions  
-        [10, 15]    # dim 2: text positions
-    ], dtype=torch.int64)
-    
-    # Test precomputed draft token positions
-    # Precompute the draft token positions. -> (3, B, L)
-    flattened_draft_positions = (
-        positions.view(3, batch_size, 1) +
-        proposer.tree_draft_pos_offsets[:batch_size, :].unsqueeze(0)
+def create_runner(batch_size, device):
+    runner = Mock()
+    grp = MockAttentionGroup(batch_size, device)
+    grp.metadata_builder.build_for_drafting.side_effect = (
+        lambda common_attn_metadata, draft_index:
+            grp.create_mock_metadata(common_attn_metadata, draft_index)
     )
-    
-    print(f"Flattened draft positions shape: {flattened_draft_positions.shape}")
-    print(f"Flattened draft positions: {flattened_draft_positions}")
-    
-    # Validate shape
-    expected_shape = (3, batch_size, len(proposer.tree_choices))
-    assert flattened_draft_positions.shape == expected_shape, \
-        f"Shape mismatch: {flattened_draft_positions.shape} vs {expected_shape}"
-    
-    # Test query positions calculation
-    level = 0
-    query_len = proposer.cu_drafts_per_level[0]
-    query_positions = flattened_draft_positions[:, :, level:level + query_len]
-    
-    print(f"Query positions shape: {query_positions.shape}")
-    print(f"Query positions: {query_positions}")
-    
-    # Test block numbers calculation
-    block_numbers = query_positions[0] // proposer.block_size
-    print(f"Block numbers: {block_numbers}")
-    
-    print("tree_propose M-RoPE core logic test passed")
+    runner.attn_groups = [[grp]]
+    return runner
 
+def create_common_attn_metadata(batch_size, device="cuda"):
+    return CommonAttentionMetadata(
+        query_start_loc=torch.arange(0, batch_size + 1, 1, device=device, dtype=torch.int32),
+        seq_lens=torch.full((batch_size,), 50, device=device, dtype=torch.int32),
+        query_start_loc_cpu=torch.arange(0, batch_size + 1, 1, dtype=torch.int32),
+        seq_lens_cpu=torch.full((batch_size,), 50, dtype=torch.int32),
+        num_computed_tokens_cpu=torch.full((batch_size,), 40, dtype=torch.int32),
+        num_reqs=batch_size,
+        num_actual_tokens=batch_size * 1,
+        max_query_len=1,
+        max_seq_len=100,
+        block_table_tensor=torch.randint(0, 100, (batch_size, 20), device=device),
+        slot_mapping=torch.randint(0, 1000, (batch_size * 1,), device=device),
+        causal=True,
+    )
 
-if __name__ == "__main__":
-    print("Testing M-RoPE in tree_propose method")
-    
-    # Test position update logic
-    test_mrope_position_updates()
-    
-    # Test core calculation logic
-    test_mrope_tree_propose_core()
-    
-    print("All M-RoPE tree_propose tests passed")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+class TestEagleProposerTreeMRoPE:
+    def setup_method(self):
+        self.device = torch.device("cuda")
+        torch.cuda.empty_cache()
+
+    @patch('vllm.v1.spec_decode.eagle.set_forward_context')
+    @patch('vllm.v1.spec_decode.eagle.get_layers_from_vllm_config')
+    @patch('vllm.v1.spec_decode.eagle.get_model')
+    def test_propose_tree_mrope_tree_attention(self, mock_get_model, mock_get_layers, mock_set_forward_context):
+        batch_size = 2
+        mock_get_layers.return_value = {}
+
+        config = create_mock_vllm_config(uses_mrope=True)
+        runner = create_runner(batch_size, self.device)
+
+        # Use normal constructor so __init__ sets everything (arange, tree_draft_pos_offsets, buffers)
+        proposer = EagleProposer(config, self.device, runner)
+        proposer.attn_layer_names = ["layer1", "layer2"]  # minimal requirement
+
+        # Mock model
+        mock_model = Mock()
+        # Return shapes must match num_input_tokens; we won't rely on exact sizes here because we slice [:num_tokens]
+        mock_model.return_value = (
+            torch.randn(batch_size * 4, proposer.hidden_size, device=self.device),
+            torch.randn(batch_size * 4, proposer.hidden_size, device=self.device),
+        )
+        mock_model.compute_logits.return_value = torch.randn(batch_size * 2, 50000, device=self.device)
+        proposer.model = mock_model
+
+        vocab_size = 50000
+        logits = torch.randn(batch_size, vocab_size, device=self.device)
+        # M-RoPE positions shape: (3, batch_size)
+        positions = torch.randint(10, 100, (3, batch_size), device=self.device, dtype=torch.int64)
+        hidden_states = torch.randn(batch_size, proposer.hidden_size, device=self.device)
+        common_attn_metadata = create_common_attn_metadata(batch_size, self.device)
+
+        result = proposer.propose_tree(
+            batch_size=batch_size,
+            logits=logits,
+            positions=positions,
+            hidden_states=hidden_states,
+            common_attn_metadata=common_attn_metadata,
+        )
+
+        assert isinstance(result, list)
+        assert len(result) >= 1
+        for draft_tokens in result:
+            assert draft_tokens.shape[0] == batch_size
