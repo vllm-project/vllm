@@ -8,6 +8,7 @@ from typing import Any, Union
 
 import numpy as np
 import pytest
+import torch
 import torch.nn as nn
 from mistral_common.protocol.instruct.messages import (ImageChunk, TextChunk,
                                                        UserMessage)
@@ -220,6 +221,7 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
     model_config.get_multimodal_config().limit_per_prompt = limit_mm_per_prompt
     processor = factories.build_processor(ctx, cache=None)
 
+    torch.set_default_dtype(torch.float16)
     with initialize_dummy_model(model_cls, model_config) as model:
         for modality, _, mm_kwargs in create_batched_mm_kwargs(
                 model_config, processor):
