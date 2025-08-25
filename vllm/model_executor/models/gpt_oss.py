@@ -27,9 +27,9 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
+from .interfaces import SupportsEagle3
 from .utils import (AutoWeightsLoader, WeightsMapper, extract_layer_index,
                     maybe_prefix)
-from .interfaces import SupportsEagle3
 
 
 class OAIAttention(nn.Module):
@@ -224,8 +224,7 @@ class GptOssModel(nn.Module):
         # Layers at which to emit auxiliary hidden states (for EAGLE3)
         self.aux_hidden_state_layers: tuple[int] = tuple()
 
-    def forward(self, input_ids: torch.Tensor,
-                positions: torch.Tensor):
+    def forward(self, input_ids: torch.Tensor, positions: torch.Tensor):
         x = self.embedding(input_ids)
         aux_hidden_states: list[torch.Tensor] = []
         for idx, layer in enumerate(self.layers):
@@ -636,7 +635,7 @@ class GptOssForCausalLM(nn.Module, SupportsEagle3):
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.model.layers)
-        return (1, num_layers // 2 - 1, num_layers - 4)
+        return (2, num_layers // 2, num_layers - 3)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
