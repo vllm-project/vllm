@@ -21,8 +21,8 @@ from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
-from vllm.v1.core.sched.output import (CachedRequestData, NewRequestData,
-                                       SchedulerOutput)
+from vllm.v1.core.sched.output import (CachedRequestData, GrammarBitmask,
+                                       NewRequestData, SchedulerOutput)
 from vllm.v1.core.sched.request_queue import (SchedulingPolicy,
                                               create_request_queue)
 from vllm.v1.core.sched.utils import check_stop, remove_all
@@ -534,9 +534,6 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens,
             req_to_new_blocks,
         )
-        structured_output_request_ids, grammar_bitmask = (
-            self.get_grammar_bitmask(self.running,
-                                     scheduled_spec_decode_tokens))
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -551,8 +548,6 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
-            structured_output_request_ids=structured_output_request_ids,
-            grammar_bitmask=grammar_bitmask,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -736,9 +731,8 @@ class Scheduler(SchedulerInterface):
 
     def get_grammar_bitmask(
         self,
-        requests: list[Request],
-        scheduled_spec_decode_tokens: dict[str, list[int]],
-    ):
+        scheduler_output: SchedulerOutput,
+    ) -> Optional[GrammarBitmask]:
         # NOTE: structured_output_request_ids maps
         # a request's (request that uses structured output)
         # request_id to its index in the batch.
@@ -746,8 +740,10 @@ class Scheduler(SchedulerInterface):
         # and only applies valid mask for requests that
         # uses structured decoding.
         structured_output_request_ids: dict[str, int] = {}
-        for i, req in enumerate(requests):
-            if req.use_structured_output:
+        req_ids = scheduler_output.num_scheduled_tokens.keys()
+        for i, req_id in enumerate(req_ids):
+            req = self.requests.get(req_id)
+            if req is not None and req.use_structured_output:
                 # PERF: in case of chunked prefill,
                 # request might not include any new tokens.
                 # Therefore, we might introduce some additional
@@ -755,14 +751,13 @@ class Scheduler(SchedulerInterface):
                 structured_output_request_ids[req.request_id] = i
 
         if not structured_output_request_ids:
-            bitmask = None
-        else:
-            bitmask = self.structured_output_manager.grammar_bitmask(
-                self.requests,
-                structured_output_request_ids,
-                scheduled_spec_decode_tokens,
-            )
-        return structured_output_request_ids, bitmask
+            return None
+        bitmask = self.structured_output_manager.grammar_bitmask(
+            self.requests,
+            structured_output_request_ids,
+            scheduler_output.scheduled_spec_decode_tokens,
+        )
+        return GrammarBitmask(structured_output_request_ids, bitmask)
 
     def update_from_output(
         self,

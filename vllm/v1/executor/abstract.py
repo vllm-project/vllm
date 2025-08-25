@@ -88,12 +88,19 @@ class Executor(ExecutorBase):
         output = self.collective_rpc("get_kv_cache_spec")
         return output
 
-    def execute_model(
+    def prepare_inputs(self, scheduler_output) -> None:
+        self.collective_rpc("prepare_inputs", args=(scheduler_output, ))
+
+    def execute_model(self) -> None:
+        self.collective_rpc("execute_model")
+
+    def sample(
         self,
-        scheduler_output,
+        grammar_bitmask,
+        non_block: bool = True,
     ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
-        output = self.collective_rpc("execute_model",
-                                     args=(scheduler_output, ))
+        del non_block
+        output = self.collective_rpc("sample", args=(grammar_bitmask, ))
         return output[0]
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
