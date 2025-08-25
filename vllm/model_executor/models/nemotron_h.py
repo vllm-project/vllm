@@ -330,9 +330,10 @@ class NemotronHModel(nn.Module):
         lora_config = vllm_config.lora_config
 
         self.config = config
-        lora_vocab = ((lora_config.lora_extra_vocab_size *
+        # No additional vocabulary support for LoRA
+        lora_vocab = ((0 *
                        (lora_config.max_loras or 1)) if lora_config else 0)
-        self.vocab_size = config.vocab_size + lora_vocab
+        self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
@@ -549,8 +550,7 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
         self.model = NemotronHModel(vllm_config=vllm_config,
                                     prefix=maybe_prefix(prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        # No additional vocabulary for LoRA
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
             config.hidden_size,

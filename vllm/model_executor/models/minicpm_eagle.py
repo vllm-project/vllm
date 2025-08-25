@@ -150,9 +150,9 @@ class EagleMiniCPMModel(nn.Module):
         self.config = config
         self.cache_config = cache_config
         self.quant_config = quant_config
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
-        self.vocab_size = config.vocab_size + lora_vocab
+        # No additional vocabulary support for LoRA
+        lora_vocab = 0
+        self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
         self.fc = torch.nn.Linear(self.config.hidden_size * 2,
                                   self.config.hidden_size,
@@ -328,7 +328,7 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         unpadded_vocab_size = config.vocab_size
         if lora_config:
-            unpadded_vocab_size += lora_config.lora_extra_vocab_size
+            # No additional vocabulary for LoRA
         self.lm_head = ParallelLMHead(
             unpadded_vocab_size,
             config.hidden_size,
