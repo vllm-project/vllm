@@ -253,7 +253,7 @@ class InputPreprocessor:
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
         *,
-        mm_ids_override: Optional[dict[str, list[Optional[str]]]] = None,
+        mm_uuids: Optional[dict[str, list[Optional[str]]]] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> MultiModalInputs:
@@ -274,7 +274,7 @@ class InputPreprocessor:
             mm_data,
             hf_processor_mm_kwargs=mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            mm_ids_override=mm_ids_override,
+            mm_uuids=mm_uuids,
         )
 
     async def _process_multimodal_async(
@@ -283,7 +283,7 @@ class InputPreprocessor:
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
         *,
-        mm_ids_override: Optional[dict[str, list[Optional[str]]]] = None,
+        mm_uuids: Optional[dict[str, list[Optional[str]]]] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> MultiModalInputs:
@@ -303,7 +303,7 @@ class InputPreprocessor:
             mm_data,
             hf_processor_mm_kwargs=mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            mm_ids_override=mm_ids_override,
+            mm_uuids=mm_uuids,
         )
 
     def _process_embeds(
@@ -351,7 +351,7 @@ class InputPreprocessor:
                 prompt_token_ids,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
-                mm_ids_override=parsed_content.get("multi_modal_uuids"),
+                mm_uuids=parsed_content.get("multi_modal_uuids"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
             )
@@ -381,7 +381,7 @@ class InputPreprocessor:
                 prompt_token_ids,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
-                mm_ids_override=parsed_content.get("multi_modal_uuids"),
+                mm_uuids=parsed_content.get("multi_modal_uuids"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
             )
@@ -410,7 +410,7 @@ class InputPreprocessor:
                 prompt_text,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
-                mm_ids_override=parsed_content.get("multi_modal_uuids"),
+                mm_uuids=parsed_content.get("multi_modal_uuids"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
             )
@@ -444,7 +444,7 @@ class InputPreprocessor:
                 prompt_text,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
-                mm_ids_override=parsed_content.get("multi_modal_uuids"),
+                mm_uuids=parsed_content.get("multi_modal_uuids"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
             )
