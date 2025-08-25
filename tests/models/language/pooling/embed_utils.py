@@ -51,6 +51,9 @@ def correctness_test_embed_models(hf_runner,
     vllm_extra_kwargs = vllm_extra_kwargs or {}
     vllm_extra_kwargs["dtype"] = model_info.dtype
 
+    if model_info.hf_overrides is not None:
+        vllm_extra_kwargs["hf_overrides"] = model_info.hf_overrides
+
     with vllm_runner(model_info.name,
                      runner="pooling",
                      max_model_len=None,

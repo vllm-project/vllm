@@ -339,14 +339,18 @@ def softmax(data):
         return F.softmax(data, dim=-1)
 
 
-class EmbedModelInfo(NamedTuple):
+class ModelInfo(NamedTuple):
     name: str
-    is_matryoshka: bool = False
-    matryoshka_dimensions: Optional[list[int]] = None
     architecture: str = ""
     dtype: str = "auto"
+    hf_overrides: Optional[dict[str, Any]] = None
     default_pooling_type: str = ""
     enable_test: bool = True
+
+
+class EmbedModelInfo(ModelInfo):
+    is_matryoshka: bool = False
+    matryoshka_dimensions: Optional[list[int]] = None
 
 
 class CLSPoolingEmbedModelInfo(EmbedModelInfo):
@@ -357,12 +361,8 @@ class LASTPoolingEmbedModelInfo(EmbedModelInfo):
     default_pooling_type: str = "LAST"
 
 
-class RerankModelInfo(NamedTuple):
-    name: str
-    architecture: str = ""
-    dtype: str = "auto"
-    default_pooling_type: str = ""
-    enable_test: bool = True
+class RerankModelInfo(ModelInfo):
+    pass
 
 
 class CLSPoolingRerankModelInfo(RerankModelInfo):
