@@ -93,7 +93,6 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
 class Qwen2ForRewardModel(Qwen2RewardBaseModel):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        vllm_config.model_config.hf_config.num_labels = 1
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         pooler_config = vllm_config.model_config.pooler_config
@@ -107,7 +106,6 @@ class Qwen2ForRewardModel(Qwen2RewardBaseModel):
 class Qwen2ForProcessRewardModel(Qwen2RewardBaseModel):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        vllm_config.model_config.hf_config.num_labels = 2
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         pooler_config = vllm_config.model_config.pooler_config
