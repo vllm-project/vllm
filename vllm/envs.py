@@ -131,6 +131,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
+    VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: str = "throughput"
@@ -158,8 +159,10 @@ if TYPE_CHECKING:
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
+    VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
+    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
 
 
@@ -961,6 +964,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_DEEP_GEMM_WARMUP":
     lambda: bool(int(os.getenv("VLLM_SKIP_DEEP_GEMM_WARMUP", "0"))),
 
+    # Whether to use fused grouped_topk used for MoE expert selection.
+    "VLLM_USE_FUSED_MOE_GROUPED_TOPK":
+    lambda: bool(int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))),
+
     # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP8":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))),
@@ -1105,6 +1112,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRTLLM_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
 
+    # If set, it means we pre-downloaded cubin files and flashinfer will
+    # read the cubin files directly.
+    "VLLM_HAS_FLASHINFER_CUBIN":
+    lambda: os.getenv("VLLM_HAS_FLASHINFER_CUBIN", False),
+
     # If set to 1, force the use of TRTLLM FP4 GEMM backend in flashinfer.
     # Otherwise, uses the first available of: flashinfer cutlass GEMM,
     # vllm cutlass GEMM, marlin GEMM.
@@ -1149,6 +1161,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #    never removed from memory until the server terminates.
     "VLLM_ENABLE_RESPONSES_API_STORE":
     lambda: bool(int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))),
+
+    # Whether to use pytorch symmetric memory for allreduce
+    "VLLM_ALLREDUCE_USE_SYMM_MEM":
+    lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))),
 
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER":
@@ -1218,6 +1234,7 @@ def compute_hash() -> str:
         "VLLM_DISABLED_KERNELS",
         "VLLM_USE_DEEP_GEMM",
         "VLLM_USE_TRTLLM_FP4_GEMM",
+        "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
         "VLLM_USE_FLASHINFER_MOE_FP8",
         "VLLM_USE_FLASHINFER_MOE_FP4",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
