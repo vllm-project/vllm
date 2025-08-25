@@ -7,9 +7,10 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm
 
-if not current_platform.has_device_capability(89):
+if not current_platform.has_device_capability(100):
     pytest.skip(
-        reason="FP8 Requires compute capability of 8.9 or above.",
+        reason=
+        "Flashinfer FP8 gemms requires compute capability of 10.0 or above.",
         allow_module_level=True,
     )
 
