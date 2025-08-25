@@ -310,6 +310,7 @@ class EngineArgs:
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
     eplb_log_balancedness: bool = EPLBConfig.log_balancedness
+    eplb_use_async: bool = EPLBConfig.use_async
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
     block_size: Optional[BlockSize] = CacheConfig.block_size
@@ -688,6 +689,12 @@ class EngineArgs:
             action=argparse.BooleanOptionalAction,
             help=
             "[DEPRECATED] --eplb-log-balancedness will be removed in v0.12.0.",
+            deprecated=True)
+        parallel_group.add_argument(
+            "--eplb-use-async",
+            action=argparse.BooleanOptionalAction,
+            help=
+            "[DEPRECATED] --eplb-use-async will be removed in v0.12.0.",
             deprecated=True)
 
         parallel_group.add_argument(
@@ -1268,6 +1275,8 @@ class EngineArgs:
             self.eplb_config.step_interval = self.eplb_step_interval
         if self.eplb_log_balancedness is not None:
             self.eplb_config.log_balancedness = self.eplb_log_balancedness
+        if self.eplb_use_async is not None:
+            self.eplb_config.use_async = self.eplb_use_async
 
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,

@@ -55,6 +55,10 @@ class EPLBConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
+    use_async: bool = False
+    """
+    Whether to use non-blocking EPLB.
+    """
 
 
 @config
@@ -118,6 +122,10 @@ class ParallelConfig:
     """`eplb_log_balancedness` is deprecated and has been replaced with
     `eplb_config.log_balancedness`. This will be removed in v0.12.0.
     Please use `eplb_config.log_balancedness` instead."""
+    eplb_use_async: Optional[bool] = None
+    """`eplb_use_async` is deprecated and has been replaced with
+    `eplb_config.use_async`. This will be removed in v0.12.0.
+    Please use `eplb_config.use_async` instead."""
 
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
@@ -302,6 +310,13 @@ class ParallelConfig:
             logger.warning_once(
                 "eplb_log_balancedness is deprecated and has been replaced "
                 "with eplb_config.log_balancedness. This will be removed "
+                "in v0.12.0. Changing this field after initialization will "
+                "have no effect.")
+        if self.eplb_use_async is not None:
+            self.eplb_config.use_async = self.eplb_use_async
+            logger.warning_once(
+                "eplb_use_async is deprecated and has been replaced "
+                "with eplb_config.use_asnyc. This will be removed "
                 "in v0.12.0. Changing this field after initialization will "
                 "have no effect.")
 
