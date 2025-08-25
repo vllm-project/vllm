@@ -201,22 +201,28 @@ class OpenAISpeechToText(OpenAIServing):
                 async for op in result_generator:
                     text += op.outputs[0].text
 
-            # build usage dict depending on request format
-            # TODO: add usage for verbose_json when supported
-            if request.response_format in ["text", "json"]:
-                usage = {
-                    "type": "duration",
-                    # rounded up as per openAI specs
-                    "seconds": int(math.ceil(duration_s)),
-                }
+            if self.task_type == "transcribe":
+                # add usage in TranscriptionResponse.
+                # TODO: add usage for verbose_json when supported
+                if request.response_format in ["text", "json"]:
+                    usage = {
+                        "type": "duration",
+                        # rounded up as per openAI specs
+                        "seconds": int(math.ceil(duration_s)),
+                    }
+                else:
+                    # e.g.: verbose_json response format
+                    # NOTE: we should never end up here as response_format
+                    # is already validated above
+                    raise NotImplementedError(
+                        f"usage for `{request.response_format}` not supported")
+                final_response = cast(T, response_class(text=text,
+                                                        usage=usage))
             else:
-                # e.g.: verbose_json response format
-                # NOTE: we should never end up here as response_format
-                # is already validated above
-                raise NotImplementedError(
-                    f"usage for `{request.response_format}` not supported")
-
-            return cast(T, response_class(text=text, usage=usage))
+                # no usage in response for translation
+                final_response = cast(
+                    T, response_class(text=text))  # type: ignore[call-arg]
+            return final_response
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
