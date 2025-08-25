@@ -16,14 +16,21 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.parameter import PartitionedLinearWeightParameter
 
+LoadKey = tuple[int, int]
+
 
 class HadamardTransform(torch.nn.Module):
-    transforms: dict[int, TransformTuple]
-    weight: PartitionedLinearWeightParameter
+    """
+    Class which handles weight loading, postprocessing, and application of
+    transforms. Meant to be used with `CompressedTensorsLinearTransformMethod`
+    and attention transforms method (not implemented yet)
+    """
+    transforms: dict[int, TransformTuple]  # info parsed from transforms config
+    weight: PartitionedLinearWeightParameter  # container for shared tensors
 
-    kernel: Callable
-    weight_tensors: dict[tuple[int, int], torch.Tensor] = {}
-    scales: dict[int, float]
+    kernel: Callable  # function used during application
+    weight_tensors: dict[LoadKey, torch.Tensor] = {}  # shared tensors registry
+    scales: dict[int, float]  # hadamard scale, usually sqrt(matrix.size(0))
 
     def __init__(self,
                  transforms: dict[int, TransformTuple],
@@ -104,11 +111,8 @@ class HadamardTransform(torch.nn.Module):
             value.dtype) * scale
 
     def _get_load_key(self, scheme: TransformScheme,
-                      weight_size: int) -> tuple[int, int]:
-        return (
-            id(scheme),
-            weight_size,
-        )
+                      weight_size: int) -> LoadKey:
+        return (id(scheme), weight_size)
 
     def _get_weight_size(self, layer: torch.nn.Module,
                          location: TransformLocation, input_size: int,

@@ -19,6 +19,10 @@ from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils 
 
 
 class CompressedTensorsLinearTransformMethod(LinearMethodBase):
+    """
+    Wraps `CompressedTensorsLinearMethod` or `UnquantizedLinearMethod` and adds
+    input and output transforms to either side of the original apply method
+    """
 
     @classmethod
     def from_schemes(
