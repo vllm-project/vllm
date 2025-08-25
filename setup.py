@@ -643,16 +643,25 @@ if envs.VLLM_USE_PRECOMPILED:
     if wheel_location is not None:
         wheel_url = wheel_location
     else:
+        import platform
+        arch = platform.machine()
+        if arch == "x86_64":
+            wheel_tag = "manylinux1_x86_64"
+        elif arch == "aarch64":
+            wheel_tag = "manylinux2014_aarch64"
+        else:
+            raise ValueError(f"Unsupported architecture: {arch}")
         base_commit = precompiled_wheel_utils.get_base_commit_in_main_branch()
-        wheel_url = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+        wheel_url = f"https://wheels.vllm.ai/{base_commit}/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
+        nightly_wheel_url = f"https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-{wheel_tag}.whl"
         from urllib.request import urlopen
         try:
             with urlopen(wheel_url) as resp:
                 if resp.status != 200:
-                    wheel_url = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+                    wheel_url = nightly_wheel_url
         except Exception as e:
             print(f"[warn] Falling back to nightly wheel: {e}")
-            wheel_url = "https://wheels.vllm.ai/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+            wheel_url = nightly_wheel_url
 
     patch = precompiled_wheel_utils.extract_precompiled_and_patch_package(
         wheel_url)
@@ -685,7 +694,9 @@ setup(
                   "mistral_common[audio]"],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         # FlashInfer should be updated together with the Dockerfile
-        "flashinfer": ["flashinfer-python==0.2.11"],
+        "flashinfer": ["flashinfer-python==0.2.12"],
+        # Optional deps for AMD FP4 quantization support
+        "petit-kernel": ["petit-kernel"],
     },
     cmdclass=cmdclass,
     package_data=package_data,
