@@ -73,7 +73,7 @@ class ChatCompletionContentPartAudioParam(TypedDict, total=False):
 
     type: Required[Literal["audio_url"]]
     """The type of the content part."""
-    uuid: Optional[str] = None
+    uuid: Optional[str]
     """
     User-provided UUID of a media. User must guarantee that it is properly
     generated and unique for different medias.
@@ -89,7 +89,7 @@ class ChatCompletionContentPartImageEmbedsParam(TypedDict, total=False):
     """
     type: Required[Literal["image_embeds"]]
     """The type of the content part."""
-    uuid: Optional[str] = None
+    uuid: Optional[str]
     """
     User-provided UUID of a media. User must guarantee that it is properly
     generated and unique for different medias.
@@ -108,7 +108,7 @@ class ChatCompletionContentPartVideoParam(TypedDict, total=False):
 
     type: Required[Literal["video_url"]]
     """The type of the content part."""
-    uuid: Optional[str] = None
+    uuid: Optional[str]
     """
     User-provided UUID of a media. User must guarantee that it is properly
     generated and unique for different medias.
@@ -131,8 +131,8 @@ class CustomChatCompletionContentPILImageParam(TypedDict, total=False):
         "image_pil": ImageAsset('cherry_blossom').pil_image
     }
     """
-    image_pil: Optional[PILImage]
-    uuid: Optional[str] = None
+    image_pil: Required[PILImage]
+    uuid: Optional[str]
     """
     User-provided UUID of a media. User must guarantee that it is properly
     generated and unique for different medias.
@@ -149,7 +149,7 @@ class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
     }
     """
     image_url: Required[str]
-    uuid: Optional[str] = None
+    uuid: Optional[str]
     """
     User-provided UUID of a media. User must guarantee that it is properly
     generated and unique for different medias.
@@ -176,7 +176,7 @@ class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
     }
     """
     video_url: Required[str]
-    uuid: Optional[str] = None
+    uuid: Optional[str]
     """
     User-provided UUID of a media. User must guarantee that it is properly
     generated and unique for different medias.
@@ -807,7 +807,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             allowed_local_media_path=tracker.allowed_local_media_path
         )
 
-    def parse_image(self, image_url: str) -> None:
+    def parse_image(self, image_url: str, uuid: Optional[str] = None) -> None:
         image_coro = self._connector.fetch_image_async(image_url)
 
         placeholder = self._tracker.add("image", image_coro, uuid)

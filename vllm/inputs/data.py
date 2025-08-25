@@ -31,6 +31,14 @@ class TextPrompt(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
+    multi_modal_uuids: NotRequired["MultiModalUUIDDict"]
+    """
+    Optional user-specified UUIDs for multimodal items, mapped by modality.
+    Lists must match the number of items per modality and may contain `None`.
+    For `None` entries, the hasher will compute IDs automatically; non-None
+    entries override the default hashes for caching.
+    """
+
     cache_salt: NotRequired[str]
     """
     Optional cache salt to be used for prefix caching.
@@ -52,20 +60,20 @@ class TokensPrompt(TypedDict):
     if the model supports it.
     """
 
-    multi_modal_uuids: NotRequired["MultiModalUUIDDict"]
-    """
-    Optional user-specified UUIDs for multimodal items, mapped by modality.
-    Lists must match the number of items per modality and may contain `None`.
-    For `None` entries, the hasher will compute IDs automatically; non-None
-    entries override the default hashes for caching.
-    """
-
     mm_processor_kwargs: NotRequired[dict[str, Any]]
     """
     Optional multi-modal processor kwargs to be forwarded to the
     multimodal input mapper & processor. Note that if multiple modalities
     have registered mappers etc for the model being considered, we attempt
     to pass the mm_processor_kwargs to each of them.
+    """
+
+    multi_modal_uuids: NotRequired["MultiModalUUIDDict"]
+    """
+    Optional user-specified UUIDs for multimodal items, mapped by modality.
+    Lists must match the number of items per modality and may contain `None`.
+    For `None` entries, the hasher will compute IDs automatically; non-None
+    entries override the default hashes for caching.
     """
 
     cache_salt: NotRequired[str]
