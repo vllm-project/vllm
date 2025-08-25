@@ -85,7 +85,8 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
                     gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
-                    sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
+                    maybe_freeze_gc, sanity_check_mm_encoder_outputs,
+                    scatter_mm_placeholders)
 
 if TYPE_CHECKING:
     import xgrammar as xgr
@@ -2630,7 +2631,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.encoder_cache.clear()
         gc.collect()
 
-    def capture_model(self) -> None:
+    def capture_model(self, specific_token_num: Optional[int] = None) -> None:
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
@@ -2644,31 +2645,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         start_time = time.perf_counter()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
-        @contextmanager
-        def freeze_gc():
-            # Optimize garbage collection during CUDA graph capture.
-            # Clean up, then freeze all remaining objects from being included
-            # in future collections.
-            gc.collect()
-            should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
-            if should_freeze:
-                gc.freeze()
-            try:
-                yield
-            finally:
-                if should_freeze:
-                    gc.unfreeze()
-
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
-        set_cudagraph_capturing_enabled(True)
-        with freeze_gc(), graph_capture(device=self.device):
+
+        # clean up if cudagraph capture for all the batch sizes
+        if not specific_token_num:
+            gc.collect()
+
+        set_cudagraph_capturing_enabled(
+            True) if not specific_token_num else None
+        with maybe_freeze_gc(), graph_capture(device=self.device):
             cudagraph_mode = self.compilation_config.cudagraph_mode
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                 cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
 
-                compilation_cases = list(reversed(self.cudagraph_batch_sizes))
+                compilation_cases = [specific_token_num
+                                     ] if specific_token_num else list(
+                                         reversed(self.cudagraph_batch_sizes))
                 self._capture_cudagraphs(
                     compilation_cases,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
@@ -2680,10 +2674,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cudagraph_mode.separate_routine():
                 max_num_tokens = self.scheduler_config.max_num_seqs * \
                         self.uniform_decode_query_len
-                decode_cudagraph_batch_sizes = [
-                    x for x in self.cudagraph_batch_sizes if
-                    x <= max_num_tokens and x >= self.uniform_decode_query_len
-                ]
+                if not specific_token_num:
+                    decode_cudagraph_batch_sizes = [
+                        x for x in self.cudagraph_batch_sizes
+                        if x <= max_num_tokens
+                        and x >= self.uniform_decode_query_len
+                    ]
+                else:
+                    decode_cudagraph_batch_sizes = []
+                    if (specific_token_num <= max_num_tokens
+                            and specific_token_num
+                            >= self.uniform_decode_query_len):
+                        decode_cudagraph_batch_sizes = [specific_token_num]
+
                 compilation_cases_decode = list(
                     reversed(decode_cudagraph_batch_sizes))
                 self._capture_cudagraphs(
@@ -2696,25 +2699,34 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Note: We don't put it into graph_capture context manager because
         # we may doing lazy capturing in future that still allows capturing
         # after here.
-        set_cudagraph_capturing_enabled(False)
+        set_cudagraph_capturing_enabled(
+            False) if not specific_token_num else None
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
         elapsed_time = end_time - start_time
         cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes 5~20 seconds.
-        logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
-                    elapsed_time, cuda_graph_size / (1 << 30))
+        if not specific_token_num:
+            logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
+                        elapsed_time, cuda_graph_size / (1 << 30))
+        else:
+            logger.info(
+                """Graph capturing for %d input tokens
+                        finished in %.3f secs, took %.2f MiB""",
+                specific_token_num, elapsed_time, cuda_graph_size / (1024**2))
 
     def _capture_cudagraphs(self, compilation_cases: list[int],
                             cudagraph_runtime_mode: CUDAGraphMode,
                             uniform_decode: bool):
+        if compilation_cases == []:
+            return
         assert cudagraph_runtime_mode != CUDAGraphMode.NONE and \
             cudagraph_runtime_mode in [CUDAGraphMode.FULL,
                                         CUDAGraphMode.PIECEWISE]
 
         # Only rank 0 should print progress bar during capture
-        if is_global_first_rank():
+        if is_global_first_rank() and len(compilation_cases) > 1:
             compilation_cases = tqdm(
                 compilation_cases,
                 disable=not self.load_config.use_tqdm_on_load,

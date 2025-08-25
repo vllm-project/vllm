@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import torch
 
+import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import ModelConfig, SchedulerConfig
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
@@ -298,3 +301,19 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         # NOTE: Use list because of v0 PP virtual engine.
         forward_context[layer_name].kv_cache = [kv_cache]
+
+
+@contextmanager
+def maybe_freeze_gc(allow_collect: bool = True):
+    # Optimize garbage collection during CUDA graph capture.
+    # Freeze remaining objects from being included
+    # in future collections.
+
+    should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
+    if should_freeze:
+        gc.freeze()
+    try:
+        yield
+    finally:
+        if should_freeze:
+            gc.unfreeze()

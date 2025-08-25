@@ -3640,6 +3640,13 @@ class VllmConfig:
             elif envs.VLLM_USE_V1:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
+            # disable use_delay_cudagraph_capture when enforce eager execution
+            if self.compilation_config.use_delay_cudagraph_capture is True and \
+                    self.model_config.enforce_eager:
+                logger.info(
+                    "Delayed Cudagraph capture disabled under eager mode")
+                self.compilation_config.use_delay_cudagraph_capture = False
+
             self._set_cudagraph_sizes()
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
