@@ -166,9 +166,7 @@ def rocm_aiter_unquantized_gemm(layer: torch.nn.Module,
     return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
 
 
-def dispatch_unquantized_gemm() -> Callable[
-    [torch.nn.Module, torch.Tensor, torch.Tensor, Optional[torch.Tensor]],
-    torch.Tensor]:
+def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
     if (aiter_ops.is_aiter_supported() and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_LINEAR):
         return rocm_aiter_unquantized_gemm

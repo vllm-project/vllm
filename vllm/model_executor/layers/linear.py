@@ -228,7 +228,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-        return self._gemm_func(x, layer.weight, bias)
+        return self._gemm_func(layer, x, layer.weight, bias)
 
 
 class LinearBase(CustomOp):
