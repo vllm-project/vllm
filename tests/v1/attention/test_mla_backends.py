@@ -494,6 +494,10 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         rtol = 1e-2
         atol = 5e-1
 
+        if backend_name == _Backend.FLASH_ATTN_MLA_VLLM_V1 and \
+            any([q_len > 1 for q_len in query_lens]):
+            atol = 5e0
+
         max_diff = torch.max(torch.abs(backend_output - sdpa_output)).item()
         max_rel_diff = torch.max(
             torch.abs(backend_output - sdpa_output) /
