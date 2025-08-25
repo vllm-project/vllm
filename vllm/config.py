@@ -4616,6 +4616,10 @@ class VllmConfig:
                 logger.info("nano batch split is not supported with "
                             "enforce_eager. Disabling nano batch split.")
                 self.model_config.enable_nano_batch_split = False
+            elif self.compilation_config.use_cudagraph:
+                logger.info("nano batch split is currently not supported with "
+                            "cudagraph. Disabling nano batch split.")
+                self.model_config.enable_nano_batch_split = False
             elif self.compilation_config.full_cuda_graph:
                 logger.info("full_cuda_graph is not supported with "
                             "nano batch split. Disabling nano batch split.")

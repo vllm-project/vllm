@@ -549,7 +549,8 @@ class VllmBackend:
         self.graph = graph
         self.configure_post_pass()
 
-        self.split_gm, self.piecewise_graphs = split_graph(graph, self.compilation_config.splitting_ops)
+        self.split_gm, self.piecewise_graphs = split_graph(
+            graph, self.compilation_config.splitting_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
 
