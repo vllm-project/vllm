@@ -416,7 +416,8 @@ class ModelConfig:
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
     enable_nano_batch_split: bool = False
-    """Enable spliting the input batch into nano-batches for intra-device parallelism"""
+    """Enable splitting the input batch into nano-batches for intra-device
+    parallelism"""
     max_num_nano_batches: int = 2
     """Maximum number of nano-batches to split the input batch into"""
     min_nano_split_tokens: int = 1024

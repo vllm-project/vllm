@@ -791,14 +791,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return (attn_metadata, attention_cuda_graphs, logits_indices,
                 spec_decode_metadata, num_scheduled_tokens,
                 spec_decode_common_attn_metadata)
-    
+
     def _prepare_nano_split(self, scheduler_output: "SchedulerOutput"):
         prepare_nano_split_and_set_hooks(
             scheduler_output=scheduler_output,
             input_batch=self.input_batch,
             attn_metadata_builders=self.attn_metadata_builders,
-            kv_cache_config=self.kv_cache_config
-        )
+            kv_cache_config=self.kv_cache_config)
 
     def _compute_cascade_attn_prefix_len(
         self,
