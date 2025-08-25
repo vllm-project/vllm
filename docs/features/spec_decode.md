@@ -15,6 +15,10 @@ Speculative decoding is a technique which improves inter-token latency in memory
 
 The following code configures vLLM in an offline mode to use speculative decoding with a draft model, speculating 5 tokens at a time.
 
+!!! warning
+    In vllm v0.10.0, speculative decoding with a draft model is not supported.
+    If you use the following code, you will get a `NotImplementedError`.
+
 ??? code
 
     ```python
@@ -199,6 +203,7 @@ an [EAGLE (Extrapolation Algorithm for Greater Language-model Efficiency)](https
             "model": "yuhuili/EAGLE-LLaMA3-Instruct-8B",
             "draft_tensor_parallel_size": 1,
             "num_speculative_tokens": 2,
+            "method": "eagle",
         },
     )
 
@@ -226,6 +231,9 @@ A few important things to consider when using the EAGLE based draft models:
 3. When using EAGLE-based speculators with vLLM, the observed speedup is lower than what is
    reported in the reference implementation [here](https://github.com/SafeAILab/EAGLE). This issue is under
    investigation and tracked here: <gh-issue:9565>.
+
+4. When using EAGLE-3 based draft model, option "method" must be set to "eagle3".
+   That is, to specify `"method": "eagle3"` in `speculative_config`.
 
 A variety of EAGLE draft models are available on the Hugging Face hub:
 

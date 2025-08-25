@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, TypedDict
+from typing import Annotated, Any, Literal, Optional
 
 import torch
 from torch import nn
@@ -17,20 +17,22 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 # yapf: disable
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, BoundPromptUpdate,
+                                        BaseProcessingInfo,
+                                        MultiModalPromptUpdates,
+                                        MultiModalPromptUpdatesApplyResult,
                                         PlaceholderFeaturesInfo,
-                                        PromptReplacement, PromptTargetMatch,
-                                        PromptUpdate, PromptUpdateDetails,
-                                        find_mm_placeholders,
+                                        PromptReplacement, PromptUpdate,
+                                        PromptUpdateDetails,
                                         replace_token_matches)
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -42,18 +44,21 @@ from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
 logger = init_logger(__name__)
 
 
-class Gemma3ImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
+class Gemma3ImagePixelInputs(TensorSchema):
     """
-    Shape: `(num_patches_total, num_channels, height, width)`
-
-    `num_patches_total` is the total number of patches
-    over each image over each prompt in the batch.
+    Dimensions:
+        - p: Number of patches total (over each image over each prompt in the
+          batch)
+        - c: Number of channels (3)
+        - h: Height of each patch
+        - w: Width of each patch
+        - bn: Batch size * number of images
     """
+    type: Literal["pixel_values"] = "pixel_values"
 
-    num_patches: torch.Tensor
-    """Shape: `(batch_size * num_images)`"""
+    pixel_values: Annotated[torch.Tensor, TensorShape("p", 3, "h", "w")]
+
+    num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
 
 Gemma3ImageInputs = Gemma3ImagePixelInputs
@@ -307,7 +312,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token = hf_processor.boi_token
@@ -333,14 +338,10 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
     def _apply_token_matches(
         self,
         prompt: list[int],
-        mm_matches: Mapping[str, Sequence[PromptTargetMatch]],
-        mm_item_counts: Mapping[str, int],
-    ) -> list[int]:
-        token_ids = super()._apply_token_matches(
-            prompt,
-            mm_matches,
-            mm_item_counts,
-        )
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[list[int], MultiModalPromptUpdatesApplyResult]:
+        token_ids, res = super()._apply_token_matches(prompt,
+                                                      mm_prompt_updates)
 
         # "\n\n\n" and "\n\n\n\n" are single tokens
         # Since our replacement can insert "\n\n" next to "\n"
@@ -369,13 +370,12 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
             [newline_4],
         )
 
-        return token_ids
+        return token_ids, res
 
     def _find_mm_placeholders(
         self,
-        mm_prompt_updates: Mapping[str, Sequence[BoundPromptUpdate]],
         new_token_ids: list[int],
-        mm_item_counts: Mapping[str, int],
+        mm_prompt_updates: MultiModalPromptUpdates,
     ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
         # We need to detect "\n\n" inside "\n\n\n" and "\n\n\n\n"
         tokenizer = self.info.get_tokenizer()
@@ -400,8 +400,8 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
             repl_token_ids.extend(repl_toks)
             repl_orig_idxs.extend(orig_idx for _ in range(len(repl_toks)))
 
-        repls = find_mm_placeholders(mm_prompt_updates, repl_token_ids,
-                                     mm_item_counts)
+        repls = super()._find_mm_placeholders(repl_token_ids,
+                                              mm_prompt_updates)
 
         return {
             modality: [
@@ -498,8 +498,6 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
-        self.sliding_window = getattr(config.text_config,
-                                      "interleaved_sliding_window", None)
 
         self.vision_tower = SiglipVisionModel(config.vision_config,
                                               quant_config,
@@ -523,15 +521,6 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
     def dtype(self):
         return next(self.parameters()).dtype
 
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        image_size = self.config.vision_config.image_size
-        expected_dims = (3, image_size, image_size)
-        if data.shape[1:] != expected_dims:
-            raise ValueError(
-                "The expected shape of pixel values per image per batch is "
-                f"{expected_dims}. You supplied {tuple(data.shape)}.")
-        return data
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[Gemma3ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -549,14 +538,15 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             raise ValueError("Incorrect type of num_crops. "
                              f"Got type: {type(num_crops)}")
 
-        pixel_values = flatten_bn(pixel_values, concat=True)
-        num_crops = flatten_bn(num_crops, concat=True)
+        image_size = self.config.vision_config.image_size
 
         return Gemma3ImagePixelInputs(
-            type="pixel_values",
-            pixel_values=self._validate_pixel_values(pixel_values),
-            num_patches=num_crops + 1,
-        )
+            pixel_values=flatten_bn(pixel_values, concat=True),
+            num_patches=flatten_bn(num_crops, concat=True) + 1,
+            resolve_bindings={
+                "h": image_size,
+                "w": image_size
+            })
 
     def _image_pixels_to_features(
         self,
@@ -627,7 +617,7 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
 
             inputs_embeds = self.get_input_embeddings(input_ids,
                                                       vision_embeddings)
-            if vision_embeddings is not None:
+            if (vision_embeddings is not None) and len(vision_embeddings) != 0:
                 kwargs = self.prepare_attn_masks(
                     input_ids,
                     positions,
@@ -694,11 +684,11 @@ class Gemma3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
             global_attn_mask = torch.where(img_mask == 2, 0, global_attn_mask)
             global_attn_masks.append(global_attn_mask)
 
-            if self.sliding_window is not None:
+            if (sliding_window := self.config.sliding_window) is not None:
                 # Create a local causal mask with sliding window (1024).
                 local_attn_mask = torch.ones_like(global_attn_mask)
                 local_attn_mask = torch.tril(local_attn_mask,
-                                             diagonal=-self.sliding_window)
+                                             diagonal=-sliding_window)
                 local_attn_mask = torch.where(local_attn_mask == 0,
                                               global_attn_mask, float("-inf"))
                 local_attn_masks.append(local_attn_mask)

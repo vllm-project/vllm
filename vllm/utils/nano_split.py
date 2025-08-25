@@ -9,13 +9,14 @@ import torch
 
 from vllm.compilation.nanoflow import manager as nano_manager
 from vllm.compilation.nanoflow.split_utils import NanoOpInfo
+from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import (ForwardContext, get_forward_context,
                                   override_forward_context)
-from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
-                                              CommonAttentionMetadata)
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu_input_batch import InputBatch
+from vllm.v1.worker.utils import AttentionGroup
 
 
 def _get_cumsum_and_arange(
@@ -32,7 +33,7 @@ def _get_cumsum_and_arange(
 def prepare_nano_split_and_set_hooks(
     scheduler_output: SchedulerOutput,
     input_batch: InputBatch,
-    attn_metadata_builders: list[AttentionMetadataBuilder],
+    attn_groups: list[list[AttentionGroup]],
     kv_cache_config: KVCacheConfig,
 ) -> None:
     prev_forward_context = get_forward_context()
@@ -116,21 +117,23 @@ def prepare_nano_split_and_set_hooks(
                 num_reqs=split_config.batch_sizes[nano_batch_idx],
                 num_actual_tokens=nano_batch_total_tokens,
                 max_query_len=int(max(nano_batch_num_scheduled_tokens)),
+                max_seq_len=int(seq_lens_cpu[start_req_idx:end_req_idx].max()),
                 block_table_tensor=blk_table_tensor,
                 slot_mapping=slot_mapping,
             )
 
-            # NOTE(yi): does not support chunked local attention or cascade
-            # attention
-            common_prefix_len = 0
-            builder = attn_metadata_builders[kv_cache_group_id]
-            attn_metadata_i = builder.build(
-                common_prefix_len=common_prefix_len,
-                common_attn_metadata=common_attn_metadata,
-            )
+            for attn_group in attn_groups[kv_cache_group_id]:
+                # NOTE(yi): does not support chunked local attention or cascade
+                # attention
+                common_prefix_len = 0
+                builder = attn_group.metadata_builder
+                attn_metadata_i = builder.build(
+                    common_prefix_len=common_prefix_len,
+                    common_attn_metadata=common_attn_metadata,
+                )
 
-            for layer_name in kv_cache_group_spec.layer_names:
-                nano_batch_attn_metadata[layer_name] = attn_metadata_i
+                for layer_name in kv_cache_group_spec.layer_names:
+                    nano_batch_attn_metadata[layer_name] = attn_metadata_i
 
         attn_metadatas.append(nano_batch_attn_metadata)
 
@@ -142,7 +145,7 @@ def prepare_nano_split_and_set_hooks(
             attn_metadata=attn_metadata,
             virtual_engine=prev_forward_context.virtual_engine,
             dp_metadata=prev_forward_context.dp_metadata,
-            skip_cuda_graphs=True,
+            cudagraph_runtime_mode=CUDAGraphMode.NONE,
         ) for attn_metadata in attn_metadatas
     ]
 

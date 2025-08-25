@@ -158,14 +158,13 @@ class DeepSeekMTP(nn.Module, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        previous_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids, positions,
-                                   previous_hidden_states, inputs_embeds,
-                                   spec_step_idx)
+        hidden_states = self.model(input_ids, positions, hidden_states,
+                                   inputs_embeds, spec_step_idx)
         return hidden_states
 
     def compute_logits(
@@ -182,6 +181,8 @@ class DeepSeekMTP(nn.Module, SupportsPP):
         stacked_params_mapping = [
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
+            ("fused_qkv_a_proj", "q_a_proj", 0),
+            ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
 
         expert_params_mapping = FusedMoE.make_expert_params_mapping(
@@ -211,7 +212,16 @@ class DeepSeekMTP(nn.Module, SupportsPP):
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if (("mlp.experts." in name) and name not in params_dict):
                     continue
-                name = name.replace(weight_name, param_name)
+                name_mapped = name.replace(weight_name, param_name)
+
+                # QKV fusion is optional, fall back to normal
+                # weight loading if it's not enabled
+                if ((param_name == "fused_qkv_a_proj")
+                        and name_mapped not in params_dict):
+                    continue
+                else:
+                    name = name_mapped
+
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue

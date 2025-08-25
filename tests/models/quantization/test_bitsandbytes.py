@@ -102,7 +102,6 @@ def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
 def test_load_pp_4bit_bnb_model(model_name, description) -> None:
     common_args = [
         "--disable-log-stats",
-        "--disable-log-requests",
         "--dtype",
         "bfloat16",
         "--enable-prefix-caching",
@@ -172,7 +171,7 @@ def test_4bit_bnb_embedding_model(
 
     # Inflight 4bit quantization
     with vllm_runner(model_name,
-                     task="embed",
+                     runner="pooling",
                      dtype=dtype,
                      gpu_memory_utilization=0.5,
                      quantization="bitsandbytes") as vllm_model:

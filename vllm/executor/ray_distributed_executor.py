@@ -58,6 +58,9 @@ class RayDistributedExecutor(DistributedExecutorBase):
         "VLLM_HOST_IP", "VLLM_HOST_PORT", "LOCAL_RANK", "CUDA_VISIBLE_DEVICES"
     }
 
+    # These non-vLLM env vars are copied from the driver to workers
+    ADDITIONAL_ENV_VARS = {"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"}
+
     uses_ray: bool = True
 
     def _init_executor(self) -> None:
@@ -67,8 +70,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
             os.environ["VLLM_USE_RAY_SPMD_WORKER"] = "1"
             os.environ["VLLM_USE_RAY_COMPILED_DAG"] = "1"
 
-            # For TPU, avoid compiling NVIDIA's NCCL
-            if current_platform.is_tpu():
+            # For TPU or XPU, avoid compiling NVIDIA's NCCL
+            if current_platform.is_tpu() or current_platform.is_xpu():
                 os.environ["VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE"] = "shm"
 
         # If the env var is set, it uses the Ray's compiled DAG API
@@ -326,7 +329,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(
             exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
-            additional_vars=set(current_platform.additional_env_vars),
+            additional_vars=set(current_platform.additional_env_vars).union(
+                self.ADDITIONAL_ENV_VARS),
             destination="workers")
 
         # Copy existing env vars to each worker's args
@@ -603,6 +607,21 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     ]
 
             forward_dag = MultiOutputNode(outputs)
+
+        if envs.VLLM_USE_RAY_WRAPPED_PP_COMM:
+            from ray.experimental.channel.accelerator_context import (
+                register_accelerator_context)
+
+            from vllm.distributed.device_communicators.ray_communicator import (
+                RayPPCommunicator)
+            register_accelerator_context(torch_module_name="cuda",
+                                         communicator_cls=RayPPCommunicator)
+            logger.info("Using RayPPCommunicator "
+                        "(which wraps vLLM _PP GroupCoordinator) "
+                        "for Ray Compiled Graph communication.")
+        else:
+            logger.info("Using Ray's NCCL communicator for "
+                        "Ray Compiled Graph communication.")
 
         return forward_dag.experimental_compile(
             enable_asyncio=enable_asyncio,

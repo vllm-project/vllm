@@ -1,27 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+from collections.abc import Set
 from typing import Optional, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
-from typing_extensions import assert_never
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import (Pooler, PoolerHead,
-                                               PoolerNormalize,
+from vllm.model_executor.layers.pooler import (DispatchPooler, Pooler,
+                                               PoolerHead, PoolerNormalize,
                                                PoolingParamsUpdate,
                                                build_output, get_prompt_lens,
                                                get_prompt_token_ids)
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.pooling_params import PoolingTask
 from vllm.sequence import PoolerOutput
+from vllm.tasks import PoolingTask
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
-from .interfaces import SupportsV0Only
+from .interfaces import default_pooling_type
 
 logger = init_logger(__name__)
 
@@ -135,18 +134,11 @@ class GritLMMeanPool(nn.Module):
 
         return instruction_len
 
-    def get_pooling_updates(
-        self,
-        task: PoolingTask,
-    ) -> Optional[PoolingParamsUpdate]:
-        # The equalities are split up to keep mypy happy
-        if task == "encode" or task == "embed":
-            return PoolingParamsUpdate(requires_token_ids=True)
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return {"encode", "embed"}
 
-        if task == "classify" or task == "score":
-            return None
-
-        assert_never(task)
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
+        return PoolingParamsUpdate(requires_token_ids=True)
 
     def forward_one(
         self,
@@ -207,10 +199,10 @@ class GritLMPooler(Pooler):
         self.pooling = GritLMMeanPool(model_config)
         self.head = PoolerHead(PoolerNormalize())
 
-    def get_pooling_updates(
-        self,
-        task: PoolingTask,
-    ) -> Optional[PoolingParamsUpdate]:
+    def get_supported_tasks(self) -> Set[PoolingTask]:
+        return self.pooling.get_supported_tasks()
+
+    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return self.pooling.get_pooling_updates(task)
 
     def forward(
@@ -223,7 +215,8 @@ class GritLMPooler(Pooler):
         return build_output(pooled_data)
 
 
-class GritLM(LlamaForCausalLM, SupportsV0Only):
+@default_pooling_type("MEAN")
+class GritLM(LlamaForCausalLM):
     """This class implements the embedding model for parasail-ai/GritLM-7B-vllm.
 
     The class inherits from LlamaForCausalLM and provides a custom pooling
@@ -249,17 +242,21 @@ class GritLM(LlamaForCausalLM, SupportsV0Only):
         prefix: str = "",
         **kwargs,
     ) -> None:
-        # Use full attention for pooling (this is why V1 is not supported yet)
         if vllm_config.model_config.runner_type == "pooling":
             hf_config = vllm_config.model_config.hf_config
             hf_config.is_causal = False
 
             vllm_config.cache_config.sliding_window = None
 
-            for attr in ("sliding_window", "interleaved_sliding_window"):
-                if hasattr(hf_config, attr):
-                    delattr(hf_config, attr)
+            hf_config.sliding_window = None
 
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
 
-        self.pooler = GritLMPooler(vllm_config.model_config)
+        pooler_config = vllm_config.model_config.pooler_config
+        if pooler_config is not None:
+            self.pooler = DispatchPooler({
+                "encode":
+                Pooler.for_encode(pooler_config),
+                "embed":
+                GritLMPooler(vllm_config.model_config),
+            })

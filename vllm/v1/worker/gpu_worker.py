@@ -4,6 +4,7 @@
 import copy
 import gc
 import os
+from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -20,13 +21,15 @@ from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
-from vllm.pooling_params import PoolingTask
 from vllm.sequence import IntermediateTensors
+from vllm.tasks import SupportedTask
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
+                             ModelRunnerOutput)
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
@@ -69,12 +72,23 @@ class Worker(WorkerBase):
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
+            logger.debug(
+                "Profiler config: record_shapes=%s,"
+                "profile_memory=%s,with_stack=%s,with_flops=%s",
+                envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
+                envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
+                envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
+            )
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
                     torch.profiler.ProfilerActivity.CUDA,
                 ],
-                with_stack=True,
+                record_shapes=envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
+                profile_memory=envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
+                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                with_flops=envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
                     torch_profiler_trace_dir, use_gzip=True))
         else:
@@ -118,6 +132,21 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
+    def _maybe_get_memory_pool_context(self,
+                                       tag: str) -> AbstractContextManager:
+        if self.vllm_config.model_config.enable_sleep_mode:
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            allocator = CuMemAllocator.get_instance()
+            if tag == "weights":
+                assert allocator.get_current_usage() == 0, (
+                    "Sleep mode can only be "
+                    "used for one instance per process.")
+            context = allocator.use_memory_pool(tag=tag)
+        else:
+            context = nullcontext()
+        return context
+
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         self.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -138,7 +167,7 @@ class Worker(WorkerBase):
             self.device = torch.device(f"cuda:{self.local_rank}")
             current_platform.set_device(self.device)
 
-            _check_if_gpu_supports_dtype(self.model_config.dtype)
+            current_platform.check_if_supports_dtype(self.model_config.dtype)
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -179,27 +208,19 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self) -> None:
-        if self.vllm_config.model_config.enable_sleep_mode:
-            from vllm.device_allocator.cumem import CuMemAllocator
-
-            allocator = CuMemAllocator.get_instance()
-            assert allocator.get_current_usage() == 0, (
-                "Sleep mode can only be "
-                "used for one instance per process.")
-            context = allocator.use_memory_pool(tag="weights")
-        else:
-            from contextlib import nullcontext
-            context = nullcontext()
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        with context:
+        with self._maybe_get_memory_pool_context(tag="weights"):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
+    def reload_weights(self) -> None:
+        self.model_runner.reload_weights()
+
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
-        """Profiles the peak memory usage of the model to determine how much 
+        """Profiles the peak memory usage of the model to determine how much
         memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
@@ -236,11 +257,21 @@ class Worker(WorkerBase):
         available_kv_cache_memory = self.requested_memory \
             - profile_result.non_kv_cache_memory
 
+        unrequested_memory = self.init_snapshot.free_memory \
+            - self.requested_memory
         logger.debug(
-            "Initial free memory: %.2f GiB, free memory: %.2f GiB, "
-            "requested GPU memory: %.2f GiB",
-            GiB(self.init_snapshot.free_memory), GiB(free_gpu_memory),
-            GiB(self.requested_memory))
+            "Initial free memory: %.2f GiB; "
+            "Requested memory: %.2f (util), %.2f GiB",
+            GiB(self.init_snapshot.free_memory),
+            self.cache_config.gpu_memory_utilization,
+            GiB(self.requested_memory),
+        )
+        logger.debug(
+            "Free memory after profiling: %.2f GiB (total), "
+            "%.2f GiB (within requested)",
+            GiB(free_gpu_memory),
+            GiB(free_gpu_memory - unrequested_memory),
+        )
         logger.debug(profile_result)
         logger.info("Available KV cache memory: %.2f GiB",
                     GiB(available_kv_cache_memory))
@@ -260,7 +291,6 @@ class Worker(WorkerBase):
             allocator = CuMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
         else:
-            from contextlib import nullcontext
             context = nullcontext()
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
@@ -279,6 +309,7 @@ class Worker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
+
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
 
@@ -303,6 +334,9 @@ class Worker(WorkerBase):
                 self.model_runner._dummy_sampler_run(
                     hidden_states=last_hidden_states)
 
+        # Warmup kernels used during model execution
+        kernel_warmup(self)
+
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
@@ -310,8 +344,8 @@ class Worker(WorkerBase):
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
-    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
-        return self.model_runner.get_supported_pooling_tasks()
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return self.model_runner.get_supported_tasks()
 
     @torch.inference_mode()
     def execute_model(
@@ -334,18 +368,25 @@ class Worker(WorkerBase):
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
 
+            kv_connector_output = output.kv_connector_output
+            if not kv_connector_output:
+                return None
+
             # In case of PP with kv transfer, we need to pass through the
-            # finished_sending and finished_recving buffers.
-            empty_output = EMPTY_MODEL_RUNNER_OUTPUT
-            if output.finished_sending or output.finished_recving:
-                empty_output = copy.copy(empty_output)
-                empty_output.finished_sending = output.finished_sending
-                empty_output.finished_recving = output.finished_recving
-            output = empty_output
+            # kv_connector_output
+            if (not kv_connector_output.finished_sending
+                    and not kv_connector_output.finished_recving):
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+            output.kv_connector_output = kv_connector_output
+            return output
 
         assert isinstance(output, ModelRunnerOutput)
-        # return output only from the driver worker
-        return output if self.is_driver_worker else None
+        return output
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        return self.model_runner.take_draft_token_ids()
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
@@ -472,7 +513,7 @@ class Worker(WorkerBase):
             assert self.model_runner.eplb_state is not None
             new_physical_experts = \
                 self.model_runner.eplb_state.physical_to_logical_map.shape[1]
-            parallel_config.num_redundant_experts = (
+            parallel_config.eplb_config.num_redundant_experts = (
                 new_physical_experts -
                 self.model_runner.eplb_state.logical_replica_count.shape[1])
             global_expert_load = None
@@ -488,7 +529,7 @@ class Worker(WorkerBase):
             assert self.model_runner.eplb_state is not None
             global_expert_load = self.model_runner.eplb_state.rearrange(
                 self.model_runner.model, execute_shuffle=False)
-            parallel_config.num_redundant_experts = (
+            parallel_config.eplb_config.num_redundant_experts = (
                 new_physical_experts - global_expert_load.shape[1])
         prepare_communication_buffer_for_model(self.model_runner.model)
         self.model_runner.model.update_physical_experts_metadata(
@@ -571,23 +612,3 @@ def init_worker_distributed_environment(
                                       parallel_config.pipeline_parallel_size)
 
     ensure_kv_transfer_initialized(vllm_config)
-
-
-def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
-    # Check if the GPU supports the dtype.
-    if torch_dtype == torch.bfloat16:  # noqa: SIM102
-        if not current_platform.has_device_capability(80):
-            capability = current_platform.get_device_capability()
-            gpu_name = current_platform.get_device_name()
-
-            if capability is None:
-                compute_str = "does not have a compute capability"
-            else:
-                version_str = capability.as_version_str()
-                compute_str = f"has compute capability {version_str}"
-
-            raise ValueError(
-                "Bfloat16 is only supported on GPUs with compute capability "
-                f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
-                "You can use float16 instead by explicitly setting the "
-                "`dtype` flag in CLI, for example: --dtype=half.")
