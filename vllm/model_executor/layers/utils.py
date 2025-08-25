@@ -5,9 +5,9 @@ from typing import Callable, Optional
 
 import torch
 
-import vllm._aiter_ops as aiter_ops
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import AiterOps
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
@@ -163,12 +163,11 @@ def rocm_aiter_unquantized_gemm(layer: torch.nn.Module,
                                 x: torch.Tensor,
                                 weight: torch.Tensor,
                                 bias: Optional[torch.Tensor] = None):
-    return aiter_ops.rocm_aiter_tuned_gemm(x, weight, bias)
+    return AiterOps.rocm_aiter_tuned_gemm(x, weight, bias)
 
 
 def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
-    if (aiter_ops.is_aiter_supported() and envs.VLLM_ROCM_USE_AITER
-            and envs.VLLM_ROCM_USE_AITER_LINEAR):
+    if (AiterOps.is_linear_enabled()):
         return rocm_aiter_unquantized_gemm
     if current_platform.is_rocm():
         return rocm_unquantized_gemm

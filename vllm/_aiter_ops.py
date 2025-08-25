@@ -1,24 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+import functools
+from typing import Callable, Optional
 
 import torch
 
+import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 
-def is_aiter_supported() -> bool:
-    """ROCm AITER package is only supported on gfx9 archs"""
+def is_aiter_supported(func: Callable) -> Callable:
+    """Decorator that only executes the function if 
+    ROCm AITER package is supported on gfx9 archs.
+    """
 
-    # checks the platform, device arch and aiter library existance.
-    from importlib.util import find_spec
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        # checks the platform, device arch and aiter library existance.
+        from importlib.util import find_spec
 
-    from vllm.platforms.rocm import on_gfx9
+        from vllm.platforms.rocm import on_gfx9
 
-    current_platform.is_rocm() and \
-    on_gfx9() and \
-    find_spec("aiter")
+        if (current_platform.is_rocm() and on_gfx9()
+                and find_spec("aiter") is not None):
+            return func(*args, **kwargs)
+        else:
+            # Return None or do nothing if not supported
+            return None
+
+    return wrapper
 
 
 def _rocm_aiter_tuned_gemm_impl(
@@ -59,29 +70,51 @@ def _rocm_aiter_tuned_gemm_fake(
     return torch.empty((m, n), dtype=out_dtype, device=input.device)
 
 
-if is_aiter_supported():
-    direct_register_custom_op(
-        op_name="rocm_aiter_tuned_gemm",
-        op_func=_rocm_aiter_tuned_gemm_impl,
-        mutates_args=[],
-        fake_impl=_rocm_aiter_tuned_gemm_fake,
-        dispatch_key=current_platform.dispatch_key,
-    )
+# Global flag to ensure ops are registered only once
+_OPS_REGISTERED = False
 
 
-def rocm_aiter_tuned_gemm(
-        input: torch.Tensor,  # [M, K]
-        weight: torch.Tensor,  # [N, K]
-        bias: Optional[torch.Tensor] = None,
-        out_dtype: Optional[torch.dtype] = None,
-        scale_a: Optional[torch.Tensor] = None,
-        scale_b: Optional[torch.Tensor] = None) -> torch.Tensor:
+class AiterOps:
+    _IS_AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
 
-    return torch.ops.vllm.rocm_aiter_tuned_gemm(
-        input,
-        weight,
-        bias=bias,
-        out_dtype=out_dtype,
-        scale_a=scale_a,
-        scale_b=scale_b,
-    )
+    @classmethod
+    @is_aiter_supported
+    def is_linear_enabled(cls) -> bool:
+        """"Verifies device specs and availability of env variable."""
+        return envs.VLLM_ROCM_USE_AITER_LINEAR and cls._IS_AITER_ENABLED
+
+    @staticmethod
+    @is_aiter_supported
+    def register_ops_once() -> None:
+        global _OPS_REGISTERED
+        if not _OPS_REGISTERED:
+            # register all the custom ops here
+            direct_register_custom_op(
+                op_name="rocm_aiter_tuned_gemm",
+                op_func=_rocm_aiter_tuned_gemm_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_tuned_gemm_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+            _OPS_REGISTERED = True
+
+    @staticmethod
+    def rocm_aiter_tuned_gemm(
+            input: torch.Tensor,  # [M, K]
+            weight: torch.Tensor,  # [N, K]
+            bias: Optional[torch.Tensor] = None,
+            out_dtype: Optional[torch.dtype] = None,
+            scale_a: Optional[torch.Tensor] = None,
+            scale_b: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        return torch.ops.vllm.rocm_aiter_tuned_gemm(
+            input,
+            weight,
+            bias=bias,
+            out_dtype=out_dtype,
+            scale_a=scale_a,
+            scale_b=scale_b,
+        )
+
+
+AiterOps.register_ops_once()
