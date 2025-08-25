@@ -7,7 +7,8 @@ import torch
 from typing_extensions import NotRequired, TypedDict, TypeIs, TypeVar
 
 if TYPE_CHECKING:
-    from vllm.multimodal.inputs import MultiModalDataDict, MultiModalInputs
+    from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalInputs,
+                                        MultiModalUUIDDict)
 
 
 class TextPrompt(TypedDict):
@@ -49,6 +50,14 @@ class TokensPrompt(TypedDict):
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
+    """
+
+    multi_modal_uuids: NotRequired["MultiModalUUIDDict"]
+    """
+    Optional user-specified UUIDs for multimodal items, mapped by modality.
+    Lists must match the number of items per modality and may contain `None`.
+    For `None` entries, the hasher will compute IDs automatically; non-None
+    entries override the default hashes for caching.
     """
 
     mm_processor_kwargs: NotRequired[dict[str, Any]]

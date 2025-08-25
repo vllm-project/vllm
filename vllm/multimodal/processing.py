@@ -16,7 +16,6 @@ from typing_extensions import assert_never
 
 from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
-from vllm.multimodal.inputs import ModalityData
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
 from vllm.utils import flatten_2d_lists, full_groupby
@@ -1345,11 +1344,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for modality, items_or_hashes in mm_cache_items_or_hashes.items()
         }
         mm_missing_data = {
-            modality:
-            ModalityData(
-                items=[mm_data_items[modality][idx] for idx in idxs],
-                uuids=[mm_data_items[modality].get_uuid(idx) for idx in idxs],
-            )
+            modality: [mm_data_items[modality][idx] for idx in idxs]
             for modality, idxs in mm_missing_idxs.items()
         }
 
@@ -1364,25 +1359,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         """Create MM hashes to be returned (only used in V1)."""
         model_id = self.info.model_id
 
-        results = {}
-        for modality, items in mm_items.items():
-            results[modality] = []
-            uuids = items.get_all_uuids()
-            for item, uuid in zip(items, uuids):
-                if uuid:
-                    # If a user-provided uuid is present, skip hashing
-                    # the full mm item to save CPU cycles.
-                    h = MultiModalHasher.hash_kwargs(model_id=model_id,
-                                                     **{"uuid": uuid},
-                                                     **hf_processor_mm_kwargs,
-                                                     **tokenization_kwargs)
-                else:
-                    h = MultiModalHasher.hash_kwargs(model_id=model_id,
-                                                     **{modality: item},
-                                                     **hf_processor_mm_kwargs,
-                                                     **tokenization_kwargs)
-                results[modality].append(h)
-        return results
+        return {
+            modality: [
+                MultiModalHasher.hash_kwargs(model_id=model_id,
+                                             **{modality: item},
+                                             **hf_processor_mm_kwargs,
+                                             **tokenization_kwargs)
+                for item in items
+            ]
+            for modality, items in mm_items.items()
+        }
 
     def _merge_mm_kwargs(
         self,

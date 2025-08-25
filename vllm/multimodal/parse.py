@@ -33,18 +33,15 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
     [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
     """
 
-    def __init__(self, data: _T, modality: str,
-                 uuids: Union[str, list[str]]) -> None:
+    def __init__(self, data: _T, modality: str) -> None:
         super().__init__()
 
         self.data = data
         self.modality = modality
-        self.uuids = uuids
 
     def __repr__(self) -> str:
         return (f"{type(self).__name__}(modality={self.modality!r}, "
-                f"len={len(self)})"
-                f"uuids={self.uuids})")
+                f"len={len(self)})")
 
     def __len__(self) -> int:
         return self.get_count()
@@ -67,19 +64,9 @@ class ModalityDataItems(ABC, Generic[_T, _I]):
         """Get a data item by its index."""
         raise NotImplementedError
 
-    def get_uuid(self, index: int) -> str:
-        """Get the UUID of a data item by its index."""
-        if isinstance(self.uuids, str):
-            return self.uuids
-        return self.uuids[index]
-
     def get_all(self) -> list[_I]:
         """Get all data items."""
         return [self.get(idx) for idx in range(self.get_count())]
-
-    def get_all_uuids(self) -> list[str]:
-        """Get the UUIDs of all data items."""
-        return [self.get_uuid(idx) for idx in range(self.get_count())]
 
     @abstractmethod
     def get_processor_data(self) -> Mapping[str, object]:
@@ -148,11 +135,10 @@ class DictEmbeddingItems(ModalityDataItems[Mapping[str, torch.Tensor],
             [Mapping[str, torch.Tensor]],
             Mapping[str, MultiModalFieldConfig],
         ],
-        uuids: Union[str, list[str]],
     ) -> None:
         from transformers.feature_extraction_utils import BatchFeature
 
-        super().__init__(data, modality, uuids)
+        super().__init__(data, modality)
 
         missing_required_data_keys = required_fields - data.keys()
         if missing_required_data_keys:
@@ -191,9 +177,8 @@ class DictEmbeddingItems(ModalityDataItems[Mapping[str, torch.Tensor],
 
 class AudioProcessorItems(ProcessorBatchItems[HfAudioItem]):
 
-    def __init__(self, data: Sequence[HfAudioItem],
-                 uuids: Union[str, list[str]]) -> None:
-        super().__init__(data, "audio", uuids)
+    def __init__(self, data: Sequence[HfAudioItem]) -> None:
+        super().__init__(data, "audio")
 
     def get_audio_length(self, item_idx: int) -> int:
         audio = self.get(item_idx)
@@ -202,9 +187,8 @@ class AudioProcessorItems(ProcessorBatchItems[HfAudioItem]):
 
 class AudioEmbeddingItems(EmbeddingItems):
 
-    def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]],
-                 uuids: Union[str, list[str]]) -> None:
-        super().__init__(data, "audio", uuids)
+    def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]]) -> None:
+        super().__init__(data, "audio")
 
 
 class ImageSize(NamedTuple):
@@ -214,9 +198,8 @@ class ImageSize(NamedTuple):
 
 class ImageProcessorItems(ProcessorBatchItems[HfImageItem]):
 
-    def __init__(self, data: Sequence[HfImageItem],
-                 uuids: Union[str, list[str]]) -> None:
-        super().__init__(data, "image", uuids)
+    def __init__(self, data: Sequence[HfImageItem]) -> None:
+        super().__init__(data, "image")
 
     def get_image_size(self, item_idx: int) -> ImageSize:
         image = self.get(item_idx)
@@ -232,9 +215,8 @@ class ImageProcessorItems(ProcessorBatchItems[HfImageItem]):
 
 class ImageEmbeddingItems(EmbeddingItems):
 
-    def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]],
-                 uuids: Union[str, list[str]]) -> None:
-        super().__init__(data, "image", uuids)
+    def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]]) -> None:
+        super().__init__(data, "image")
 
 
 class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
@@ -242,11 +224,10 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
     def __init__(
         self,
         data: Sequence[HfVideoItem],
-        uuids: Union[str, list[str]],
         metadata: Optional[Union[dict[str, Any],
                                  list[Optional[dict[str, Any]]]]] = None,
     ) -> None:
-        super().__init__(data, "video", uuids)
+        super().__init__(data, "video")
         self.metadata = metadata
 
     def get_num_frames(self, item_idx: int) -> int:
@@ -266,9 +247,8 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
 
 class VideoEmbeddingItems(EmbeddingItems):
 
-    def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]],
-                 uuids: Union[str, list[str]]) -> None:
-        super().__init__(data, "video", uuids)
+    def __init__(self, data: Union[torch.Tensor, list[torch.Tensor]]) -> None:
+        super().__init__(data, "video")
 
 
 _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
@@ -405,24 +385,23 @@ class MultiModalDataParser:
         self,
         data: ModalityData[AudioItem],
     ) -> Optional[ModalityDataItems[Any, Any]]:
-        input_items = data.items
-        uuids = data.uuids
         # also check single audio item with sampling rate
-        if self._is_empty(input_items) or (isinstance(input_items, tuple)
-                                           and self._is_empty(input_items[0])):
+        if self._is_empty(data) or (isinstance(data, tuple)
+                                    and self._is_empty(data[0])):
             return None
 
-        if self._is_embeddings(input_items):
-            return AudioEmbeddingItems(input_items, uuids)
+        if self._is_embeddings(data):
+            return AudioEmbeddingItems(data)
 
-        if (is_list_of(input_items, float)
-                or isinstance(input_items, (np.ndarray, torch.Tensor))
-                and input_items.ndim == 1 or isinstance(input_items, tuple)):
-            data_items = [input_items]
-        elif isinstance(input_items, (np.ndarray, torch.Tensor)):
-            data_items = [elem for elem in input_items]
+        if (is_list_of(data, float)
+                or isinstance(data,
+                              (np.ndarray, torch.Tensor)) and data.ndim == 1
+                or isinstance(data, tuple)):
+            data_items = [data]
+        elif isinstance(data, (np.ndarray, torch.Tensor)):
+            data_items = [elem for elem in data]
         else:
-            data_items = input_items
+            data_items = data
 
         new_audios = list[np.ndarray]()
         for data_item in data_items:
@@ -435,55 +414,49 @@ class MultiModalDataParser:
 
             new_audios.append(new_audio)
 
-        return AudioProcessorItems(new_audios, uuids)
+        return AudioProcessorItems(new_audios)
 
     def _parse_image_data(
         self,
         data: ModalityData[ImageItem],
     ) -> Optional[ModalityDataItems[Any, Any]]:
-        input_items = data.items
-        uuids = data.uuids
-
-        if self._is_empty(input_items):
+        if self._is_empty(data):
             return None
 
-        if self._is_embeddings(input_items):
-            return ImageEmbeddingItems(input_items, uuids)
+        if self._is_embeddings(data):
+            return ImageEmbeddingItems(data)
 
-        if (isinstance(input_items, PILImage.Image)
-                or isinstance(input_items, (np.ndarray, torch.Tensor))
-                and input_items.ndim == 3):
-            data_items = [input_items]
-        elif isinstance(input_items, (np.ndarray, torch.Tensor)):
-            data_items = [elem for elem in input_items]
+        if (isinstance(data, PILImage.Image)
+                or isinstance(data,
+                              (np.ndarray, torch.Tensor)) and data.ndim == 3):
+            data_items = [data]
+        elif isinstance(data, (np.ndarray, torch.Tensor)):
+            data_items = [elem for elem in data]
         else:
-            data_items = input_items
+            data_items = data
 
-        return ImageProcessorItems(data_items, uuids)
+        return ImageProcessorItems(data_items)
 
     def _parse_video_data(
         self,
         data: ModalityData[VideoItem],
     ) -> Optional[ModalityDataItems[Any, Any]]:
-        input_items = data.items
-        uuids = data.uuids
-
-        if self._is_empty(input_items):
+        if self._is_empty(data):
             return None
 
-        if self._is_embeddings(input_items):
-            return VideoEmbeddingItems(input_items, uuids)
+        if self._is_embeddings(data):
+            return VideoEmbeddingItems(data)
 
-        if (is_list_of(input_items, PILImage.Image)
-                or isinstance(input_items, (np.ndarray, torch.Tensor))
-                and input_items.ndim == 4):
-            data_items = [input_items]
-        elif isinstance(input_items, (np.ndarray, torch.Tensor)):
-            data_items = [elem for elem in input_items]
-        elif isinstance(input_items, tuple) and len(input_items) == 2:
-            data_items = [input_items]
+        if (is_list_of(data, PILImage.Image)
+                or isinstance(data,
+                              (np.ndarray, torch.Tensor)) and data.ndim == 4):
+            data_items = [data]
+        elif isinstance(data, (np.ndarray, torch.Tensor)):
+            data_items = [elem for elem in data]
+        elif isinstance(data, tuple) and len(data) == 2:
+            data_items = [data]
         else:
-            data_items = input_items
+            data_items = data
 
         new_videos = list[tuple[np.ndarray, Optional[dict[str, Any]]]]()
         metadata_lst: list[Optional[dict[str, Any]]] = []
@@ -498,7 +471,7 @@ class MultiModalDataParser:
         if not self.video_needs_metadata:
             metadata = None
 
-        return VideoProcessorItems(new_videos, uuids, metadata=metadata_lst)
+        return VideoProcessorItems(new_videos, metadata=metadata_lst)
 
     def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
         return {

@@ -7,8 +7,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from itertools import accumulate
-from typing import (TYPE_CHECKING, Any, Generic, Literal, Optional, TypedDict,
-                    TypeVar, Union, cast, final)
+from typing import (TYPE_CHECKING, Any, Literal, Optional, TypedDict, TypeVar,
+                    Union, cast, final)
 
 import numpy as np
 from typing_extensions import NotRequired, TypeAlias, deprecated
@@ -84,24 +84,9 @@ which are treated as audio embeddings;
 these are directly passed to the model without HF processing.
 """
 
-
-class ModalityData(Generic[_T]):
-
-    def __init__(self, items: Union[_T, list[_T]], uuids: Union[str,
-                                                                list[str]]):
-        self.items = items
-        self.uuids = uuids
-
-
+ModalityData: TypeAlias = Union[_T, list[_T]]
 """
 Either a single data item, or a list of data items.
-
-If user provided uuids for the data items, they will be stored 
-`uuids` field at corresponding indices. If no user-provided uuid
-exists for an item, we will store an empty string as the placeholder
-to maintain consistent item<>uuid index in their corresponding
-lists. 
-
 The number of data items allowed per modality is restricted by
 `--limit-mm-per-prompt`.
 """
@@ -127,6 +112,15 @@ A dictionary containing an entry for each modality type to input.
 
 The built-in modalities are defined by
 [`MultiModalDataBuiltins`][vllm.multimodal.inputs.MultiModalDataBuiltins].
+"""
+
+MultiModalUUIDDict = dict[str, list[Optional[str]]]
+"""
+A dictionary containing user-provided UUIDs for items in each modality.
+If a UUID for an item is not provided, its entry will be `None` and
+MultiModalHasher will compute a hash for the item.
+The UUID will be used to identify the item for all caching purposes
+(input processing caching, embedding caching, prefix caching, etc).
 """
 
 

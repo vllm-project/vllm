@@ -41,7 +41,8 @@ from typing_extensions import Required, TypeAlias, TypedDict
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
+                             MultiModalUUIDDict)
 from vllm.multimodal.utils import MediaConnector
 # yapf: disable
 from vllm.transformers_utils.chat_templates import (
@@ -560,7 +561,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._model_config = model_config
         self._tokenizer = tokenizer
 
-        self._items_by_modality = defaultdict[str, list[dict[str, Any]]](list)
+        self._items_by_modality = defaultdict[str, list[_T]](list)
+        self._uuids_by_modality = defaultdict[str, list[str]](list)
 
     @property
     def model_config(self) -> ModelConfig:
@@ -594,9 +596,33 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
         self.mm_processor.validate_num_items(input_modality, num_items)
 
-        self._items_by_modality[modality].append({"item": item, "uuid": uuid})
+        self._items_by_modality[modality].append(item)
+        self._uuids_by_modality[modality].append(uuid)
 
         return self.model_cls.get_placeholder_str(modality, num_items)
+    
+    def all_mm_uuids(self) -> Optional[MultiModalUUIDDict]:
+        if not self._items_by_modality:
+            return None
+        mm_uuids = {}
+        uuids_by_modality = dict(self._uuids_by_modality)
+        if "image" in uuids_by_modality and "image_embeds" in uuids_by_modality:
+            raise ValueError(\
+                "Mixing raw image and embedding inputs is not allowed")
+
+        if "image_embeds" in uuids_by_modality:
+            image_embeds_uuids = uuids_by_modality["image_embeds"]
+            if len(image_embeds_uuids) > 1:
+                raise ValueError(\
+                    "Only one message can have {'type': 'image_embeds'}")
+            mm_uuids["image"] = image_embeds_uuids[0]
+        if "image" in uuids_by_modality:
+            mm_uuids["image"] = uuids_by_modality["image"] # UUIDs of images
+        if "audio" in uuids_by_modality:
+            mm_uuids["audio"] = uuids_by_modality["audio"] # UUIDs of audios
+        if "video" in uuids_by_modality:
+            mm_uuids["video"] = uuids_by_modality["video"] # UUIDs of videos
+        return mm_uuids
 
     @abstractmethod
     def create_parser(self) -> "BaseMultiModalContentParser":
@@ -627,7 +653,7 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[object]):
         if "video" in items_by_modality:
             mm_inputs["video"] = items_by_modality["video"] # A list of videos
         return mm_inputs
-
+    
     def create_parser(self) -> "BaseMultiModalContentParser":
         return MultiModalContentParser(self)
 
@@ -1248,7 +1274,7 @@ def parse_chat_messages(
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
     content_format: _ChatTemplateContentFormat,
-) -> tuple[list[ConversationMessage], Optional[MultiModalDataDict]]:
+) -> tuple[list[ConversationMessage], Optional[MultiModalDataDict], Optional[MultiModalUUIDDict]]:
     conversation: list[ConversationMessage] = []
     mm_tracker = MultiModalItemTracker(model_config, tokenizer)
 
@@ -1268,7 +1294,7 @@ def parse_chat_messages(
 
     _postprocess_messages(conversation)
 
-    return conversation, mm_tracker.all_mm_data()
+    return conversation, mm_tracker.all_mm_data(), mm_tracker.all_mm_uuids()
 
 
 def parse_chat_messages_futures(
@@ -1276,7 +1302,7 @@ def parse_chat_messages_futures(
     model_config: ModelConfig,
     tokenizer: AnyTokenizer,
     content_format: _ChatTemplateContentFormat,
-) -> tuple[list[ConversationMessage], Awaitable[Optional[MultiModalDataDict]]]:
+) -> tuple[list[ConversationMessage], Awaitable[Optional[MultiModalDataDict]], Optional[MultiModalUUIDDict]]:
     conversation: list[ConversationMessage] = []
     mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
 
@@ -1296,7 +1322,7 @@ def parse_chat_messages_futures(
 
     _postprocess_messages(conversation)
 
-    return conversation, mm_tracker.all_mm_data()
+    return conversation, mm_tracker.all_mm_data(), mm_tracker.all_mm_uuids()
 
 
 def apply_hf_chat_template(
