@@ -117,10 +117,10 @@ class EncoderCacheManager:
         Args:
             request: The request containing the multimodal input.
             input_id: Index of the multimodal input within the request.
-            encoder_compute_budget: Number of encoder tokens that can be 
-                computed per step.
+            encoder_compute_budget: Number of encoder tokens allowed to be 
+                computed when this method is invoked.
             num_tokens_to_schedule: Number of tokens already scheduled to be 
-                allocated with cache space at the current step.
+                allocated with cache space when this method is invoked.
 
         Returns:
             True if there's enough capacity to hold the encoder output for this
