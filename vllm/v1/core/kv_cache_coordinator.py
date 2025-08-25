@@ -29,6 +29,7 @@ class KVCacheCoordinator(ABC):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
+        self.cache_histograms = None
 
         self.block_pool = BlockPool(kv_cache_config.num_blocks, enable_caching,
                                     enable_kv_cache_events)
@@ -42,6 +43,7 @@ class KVCacheCoordinator(ABC):
                 kv_cache_group_id=i,
             ) for i, kv_cache_group in enumerate(
                 self.kv_cache_config.kv_cache_groups))
+
         if self.enable_caching:
             self.cache_histograms = KVCacheHistograms(self.kv_cache_config)
 
@@ -109,9 +111,12 @@ class KVCacheCoordinator(ABC):
             num_tokens: The total number of tokens that need to be cached 
                 (including tokens that are already cached).
         """
+        cache_threshlod = 0
+        if self.cache_histograms:
+            cache_threshlod = self.cache_histograms.histos_threshold
+
         for manager in self.single_type_managers:
-            manager.cache_blocks(request, num_computed_tokens,
-                                 self.cache_block_threshold)
+            manager.cache_blocks(request, num_computed_tokens, cache_threshlod)
 
     def free(self, request_id: str) -> None:
         """
@@ -196,9 +201,9 @@ class KVCacheHistograms:
         self.histos_count = 0
         self.histos_count_min = 2 << 10
         self.histos_count_max = 2 << 16
-        self.histos_count_threshold = self.histos_count_min
+        self.histos_count_target = self.histos_count_min
         self.histos_array_index = 0
-        self.histos_threshold = None
+        self.histos_threshold = 0
 
     def cal_cache_histograms(self, hit_cache_blocks: tuple[list[KVCacheBlock],
                                                            ...]):
@@ -212,7 +217,7 @@ class KVCacheHistograms:
             self.histos_array[self.histos_array_index][hit_column] += 1
             self.histos_count += 1
 
-        if self.histos_count > self.histos_threshold:
+        if self.histos_count > self.histos_count_target:
             histogram_sum = []
             histogram_sums = 0
             for i in range(16):
@@ -234,13 +239,12 @@ class KVCacheHistograms:
                 self.histos_array[array_index] = [0] * 16
                 self.histos_array_index = array_index
                 self.histos_count = 0
-
                 if pre_threshold == self.histos_threshold:
-                    self.histos_threshold = min(self.histos_count << 2,
-                                                self.histos_count_max)
+                    self.histos_count_target = min(
+                        self.histos_count_target << 2, self.histos_count_max)
                 else:
-                    self.histos_threshold = max(self.histos_count >> 2,
-                                                self.histos_count_min)
+                    self.histos_count_target = max(
+                        self.histos_count_target >> 2, self.histos_count_min)
 
 
 class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
