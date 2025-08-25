@@ -60,11 +60,14 @@ MODELS = [
 ]
 
 RERANK_MODELS = [
-    # classifier_pooling: mean
     CLSPoolingRerankModelInfo(
+        # classifier_pooling: mean
         "Alibaba-NLP/gte-reranker-modernbert-base",
         architecture="ModernBertForSequenceClassification",
         enable_test=True),
+    CLSPoolingRerankModelInfo("Alibaba-NLP/gte-multilingual-reranker-base",
+                              architecture="GteNewForSequenceClassification",
+                              enable_test=True),
 ]
 
 
@@ -102,4 +105,11 @@ def test_embed_models_correctness(hf_runner, vllm_runner,
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 def test_rerank_models_mteb(hf_runner, vllm_runner,
                             model_info: RerankModelInfo) -> None:
-    mteb_test_rerank_models(hf_runner, vllm_runner, model_info)
+    vllm_extra_kwargs: dict[str, Any] = {}
+    if model_info.architecture == "GteNewForSequenceClassification":
+        vllm_extra_kwargs["hf_overrides"] = {
+            "architectures": ["GteNewForSequenceClassification"]
+        }
+
+    mteb_test_rerank_models(hf_runner, vllm_runner, model_info,
+                            vllm_extra_kwargs)
