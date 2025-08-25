@@ -269,7 +269,7 @@ class CoreEngineActorManager:
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
 
-            # Ray XPU issue: dpctl initializes the GPU runtime early, so
+            # Ray XPU known issue: dpctl initializes the GPU runtime early, so
             # setting device env vars in Ray actor's initialization method
             # will not affect device selection. See:
             # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56 # noqa: E501
