@@ -1383,6 +1383,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     if mm_uuid is None or \
                         hf_processor_mm_kwargs or \
                         tokenization_kwargs:
+
+                        # NOTE: use uuid to hash if available for better
+                        # performance.
+                        item = mm_uuid if mm_uuid is not None else item
                         computed.append(
                             MultiModalHasher.hash_kwargs(
                                 model_id=model_id,
