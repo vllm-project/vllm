@@ -117,10 +117,12 @@ The built-in modalities are defined by
 
 MultiModalUUIDDict = dict[str, list[Optional[str]]]
 """
-A user-input dictionary containing user-provided UUIDs for items in each 
-modality.
+A dictionary containing user-provided UUIDs for items in each modality.
 If a UUID for an item is not provided, its entry will be `None` and
 MultiModalHasher will compute a hash for the item.
+
+The UUID will be used to identify the item for all caching purposes
+(input processing caching, embedding caching, prefix caching, etc).
 """
 
 
