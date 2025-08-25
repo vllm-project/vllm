@@ -56,7 +56,6 @@ class MyLLM(LLM):
     def __init__(self, *args, bundle_indices: list[int], **kwargs):
         # Prevent Ray from manipulating the top-level CUDA_VISIBLE_DEVICES variable
         # so that vLLM can its own device placement inside the worker.
-
         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
         # Each worker uses 0.4 GPU so that two instances fit on the same GPUs.
         os.environ["VLLM_RAY_PER_WORKER_GPUS"] = "0.4"
