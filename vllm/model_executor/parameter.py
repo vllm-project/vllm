@@ -237,6 +237,9 @@ class PerTensorScaleParameter(BasevLLMParameter):
     process_weights_after_loading 
     """
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
     # For row parallel layers, no sharding needed
     # load weight into parameter as is
     def load_row_parallel_weight(self, *args, **kwargs):
