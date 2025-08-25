@@ -56,7 +56,6 @@ class DummyLogitsProcessor(LogitsProcessor):
         self.req_info: dict[int, int] = {}
 
     def is_argmax_invariant(self) -> bool:
-        """Never impacts greedy sampling"""
         return False
 
     def update_state(self, batch_update: Optional[BatchUpdate]):
