@@ -254,19 +254,19 @@ class AiterFlashAttentionMetadataBuilder(
         self.aot_sliding_window: Optional[tuple[int, int]] = None
         self.total_tokens: int = 0
 
-    def build_for_cudagraph_capture(
-            self, common_attn_metadata: CommonAttentionMetadata):
-        self.total_tokens = self.model_config.max_model_len \
-            * self.vllm_config.scheduler_config.max_num_partial_prefills
-        res = self.build(common_prefix_len=0,
-                         common_attn_metadata=common_attn_metadata)
-        self.total_tokens = 0
-        return res
-
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> 'AiterFlashAttentionMetadata':
+        # Handle total_tokens for cudagraph capture scenarios
+        is_cudagraph_capture = (common_prefix_len == 0 and 
+                              common_attn_metadata.max_query_len == 1)
+        if is_cudagraph_capture:
+            original_total_tokens = self.total_tokens
+            self.total_tokens = self.model_config.max_model_len \
+                * self.vllm_config.scheduler_config.max_num_partial_prefills
+        else:
+            original_total_tokens = None
 
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -310,6 +310,11 @@ class AiterFlashAttentionMetadataBuilder(
             common_prefix_len=common_prefix_len,
             total_tokens=self.total_tokens,
         )
+        
+        # Restore total_tokens value if this was a cudagraph capture
+        if is_cudagraph_capture:
+            self.total_tokens = original_total_tokens
+        
         return attn_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:

@@ -561,25 +561,17 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             seq_lens=seq_lens,
         )
 
-    def build_for_cudagraph_capture(
-            self, common_attn_metadata: CommonAttentionMetadata) -> M:
-        """
-        This method builds the metadata for full cudagraph capture.
-        Currently, only decode is supported for full cudagraphs with MLA.
-        """
-        m = common_attn_metadata
-        assert m.num_reqs == m.num_actual_tokens, \
-            "MLA only supports decode-only full CUDAGraph capture. " \
-            "Make sure all cudagraph capture sizes <= max_num_seq."
-
-        assert m.max_query_len == 1  # decode-only
-
-        return self.build(0, m)
-
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> M:
+        # For full cudagraph capture, ensure decode-only mode
+        if common_prefix_len == 0 and common_attn_metadata.max_query_len == 1:
+            # This is likely a cudagraph capture scenario
+            assert common_attn_metadata.num_reqs == common_attn_metadata.num_actual_tokens, \
+                "MLA only supports decode-only full CUDAGraph capture. " \
+                "Make sure all cudagraph capture sizes <= max_num_seq."
+
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len

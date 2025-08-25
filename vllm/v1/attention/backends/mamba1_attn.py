@@ -43,6 +43,13 @@ class Mamba1AttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> Mamba1AttentionMetadata:
+        # For full cudagraph capture, ensure decode-only mode
+        if common_prefix_len == 0 and common_attn_metadata.max_query_len == 1:
+            # This is likely a cudagraph capture scenario
+            assert common_attn_metadata.num_reqs == common_attn_metadata.num_actual_tokens, \
+                "Mamba only supports decode-only full CUDAGraph capture. " \
+                "Make sure all cudagraph capture sizes <= max_num_seq."
+
         query_start_loc = common_attn_metadata.query_start_loc
 
         state_indices_tensor = common_attn_metadata.block_table_tensor[:, 0]

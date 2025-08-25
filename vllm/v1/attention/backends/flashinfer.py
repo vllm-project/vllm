@@ -459,6 +459,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
               fast_build: bool = False) -> FlashInferMetadata:
+        # For full cudagraph capture, ensure decode-only mode
+        if common_prefix_len == 0 and common_attn_metadata.max_query_len == 1:
+            # This is likely a cudagraph capture scenario
+            assert common_attn_metadata.num_reqs == common_attn_metadata.num_actual_tokens, \
+                "FlashInfer only supports decode-only full CUDAGraph capture. " \
+                "Make sure all cudagraph capture sizes <= max_num_seq."
+
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens =\
@@ -576,22 +583,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._plan(attn_metadata)
 
         return attn_metadata
-
-    def build_for_cudagraph_capture(
-            self, common_attn_metadata: CommonAttentionMetadata):
-        """
-        This method builds the metadata for full cudagraph capture.
-        Currently, only decode is supported for full cudagraphs with FlashInfer.
-        """
-        m = common_attn_metadata
-
-        assert m.num_reqs == m.num_actual_tokens, \
-            "FlashInfer only supports decode-only full CUDAGraph capture. " \
-            "Make sure all cudagraph capture sizes <= max_num_seq."
-
-        m.max_query_len = 1  # decode-only
-
-        return self.build(0, m)
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:

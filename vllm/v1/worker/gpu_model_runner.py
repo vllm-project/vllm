@@ -2306,7 +2306,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     attn_metadata_i = attn_group.metadata_builder\
-                        .build_for_cudagraph_capture(common_attn_metadata)
+                        .build(common_prefix_len=0,
+                               common_attn_metadata=common_attn_metadata)
                     for layer_name in kv_cache_group_spec.layer_names:
                         attn_metadata[layer_name] = attn_metadata_i
 

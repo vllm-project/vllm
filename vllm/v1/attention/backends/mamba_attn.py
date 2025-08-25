@@ -38,18 +38,3 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             device=device,
         )
 
-    def build_for_cudagraph_capture(
-            self, common_attn_metadata: CommonAttentionMetadata) -> M:
-        """
-        This method builds the metadata for full cudagraph capture.
-        Currently, only decode is supported for full cudagraphs with Mamba.
-        """
-        m = common_attn_metadata
-
-        assert m.num_reqs == m.num_actual_tokens, \
-            "Mamba only supports decode-only full CUDAGraph capture. " \
-            "Make sure all cudagraph capture sizes <= max_num_seq."
-
-        m.max_query_len = 1  # decode-only
-
-        return self.build(0, m)
