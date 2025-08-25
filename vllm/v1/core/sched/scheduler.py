@@ -252,6 +252,7 @@ class Scheduler(SchedulerInterface):
                         preempted_req = self.running.pop()
 
                     self.kv_cache_manager.free(preempted_req)
+                    self.encoder_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
                     if self.log_stats:
@@ -550,7 +551,8 @@ class Scheduler(SchedulerInterface):
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
-            free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
+            free_encoder_mm_hashes=self.encoder_cache_manager.
+            get_freed_mm_hashes(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
@@ -698,7 +700,7 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
-            if self.encoder_cache_manager.has_cache(request, i):
+            if self.encoder_cache_manager.check_and_update_cache(request, i):
                 # The encoder input is already computed and cached.
                 continue
 
@@ -712,8 +714,8 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = start_pos - num_computed_tokens
                 break
 
-            if (not self.encoder_cache_manager.can_allocate(request, i)
-                    or num_encoder_tokens > encoder_budget):
+            if not self.encoder_cache_manager.try_allocate(
+                    request, i, encoder_budget):
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
                 # be processed altogether, as the encoder usually uses
