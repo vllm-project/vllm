@@ -685,6 +685,7 @@ class Scheduler(SchedulerInterface):
         mm_positions = request.mm_positions
         assert mm_positions is not None
         assert len(mm_positions) > 0
+        to_schedule = set()
         for i, pos_info in enumerate(mm_positions):
             start_pos = pos_info.offset
             num_encoder_tokens = pos_info.length
@@ -695,9 +696,14 @@ class Scheduler(SchedulerInterface):
             if start_pos >= num_computed_tokens + num_new_tokens:
                 # The encoder input is not needed in this step.
                 break
+
             if start_pos + num_encoder_tokens <= num_computed_tokens:
                 # The encoder input is already computed and stored
                 # in the decoder's KV cache.
+                continue
+
+            # The same encoder input has already been scheduled.
+            if request.mm_hashes[i] in to_schedule:
                 continue
 
             if self.encoder_cache_manager.check_and_update_cache(request, i):
@@ -734,6 +740,7 @@ class Scheduler(SchedulerInterface):
 
             encoder_budget -= num_encoder_tokens
             encoder_inputs_to_schedule.append(i)
+            to_schedule.add(request.mm_hashes[i])
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
 
     def get_grammar_bitmask(
