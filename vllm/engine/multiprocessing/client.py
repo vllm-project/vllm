@@ -625,7 +625,8 @@ class MQLLMEngineClient(EngineClient):
         request = RPCLoadAdapterRequest(lora_request)
 
         # Create output queue for this request.
-        queue: asyncio.Queue[Union[None, BaseException]] = asyncio.Queue()
+        queue: asyncio.Queue[Union[
+            BaseException, RPCAdapterLoadedResponse]] = asyncio.Queue()
         self.output_queues[request.request_id] = queue
 
         # Send the request
@@ -639,3 +640,4 @@ class MQLLMEngineClient(EngineClient):
         # Raise on error, otherwise happily return None
         if isinstance(request_output, BaseException):
             raise request_output
+        return request_output.lora_loaded

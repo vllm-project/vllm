@@ -120,6 +120,7 @@ class RPCLoadAdapterRequest:
 @dataclass
 class RPCAdapterLoadedResponse:
     request_id: str
+    lora_loaded: bool
 
 
 RPC_REQUEST_T = Union[RPCProcessRequest, RPCAbortRequest, RPCStartupRequest,
