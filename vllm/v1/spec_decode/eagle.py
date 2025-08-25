@@ -21,7 +21,7 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.v1.attention.backends.flashinfer import FlashInferMetadata
+from vllm.v1.attention.backends.flashinfer import FlashInferMetadata, FlashInferMetadataBuilder
 from vllm.v1.attention.backends.rocm_aiter_fa import (
     AiterFlashAttentionMetadata)
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
@@ -173,12 +173,6 @@ class EagleProposer:
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states)
             assert target_hidden_states.shape[-1] == self.hidden_size
-            try:
-                logger.info(
-                    "[EAGLE3 dbg] combined hidden_states shape=%s",  # noqa: G004
-                    tuple(target_hidden_states.shape))
-            except Exception:
-                pass
 
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
@@ -190,13 +184,12 @@ class EagleProposer:
         assert self.runner is not None
 
         # FIXME: need to consider multiple kv_cache_groups
-        attn_metadata = self.runner.attn_groups[0][0].metadata_builder\
-            .build_for_drafting(common_attn_metadata=common_attn_metadata,
-                                draft_index=0)
-
+        builder = self.runner.attn_groups[0][0].metadata_builder
+        new_common = None
         # For FlashInfer first pass, reorder to decode-first contiguous layout
         # so that prefill slice matches num_prefill_tokens.
-        if isinstance(attn_metadata, FlashInferMetadata):
+        if isinstance(builder,
+                      FlashInferMetadataBuilder):
             qsl_cpu = common_attn_metadata.query_start_loc_cpu
             query_lens_cpu = qsl_cpu[1:] - qsl_cpu[:-1]
             decode_req_idxs = torch.nonzero(query_lens_cpu <= 1,
@@ -230,21 +223,23 @@ class EagleProposer:
                 new_qsl_cpu[1:] = torch.cumsum(reordered_query_lens,
                                                dim=0, dtype=qsl_cpu.dtype)
                 new_max_q_len = int(reordered_query_lens.max().item())
-
+                new_seq_lens = common_attn_metadata.seq_lens[req_order].to(
+                        device=common_attn_metadata.seq_lens.device,
+                        non_blocking=True)
+                new_max_seq_len = int(new_seq_lens.max().item())
                 new_common = CommonAttentionMetadata(
                     query_start_loc=new_qsl_cpu.to(
                         device=common_attn_metadata.query_start_loc.device,
                         non_blocking=True),
                     query_start_loc_cpu=new_qsl_cpu,
-                    seq_lens=common_attn_metadata.seq_lens[req_order].to(
-                        device=common_attn_metadata.seq_lens.device,
-                        non_blocking=True),
+                    seq_lens=new_seq_lens,
                     seq_lens_cpu=common_attn_metadata.seq_lens_cpu[req_order],
                     num_computed_tokens_cpu=common_attn_metadata.
                     num_computed_tokens_cpu[req_order],
                     num_reqs=common_attn_metadata.num_reqs,
                     num_actual_tokens=common_attn_metadata.num_actual_tokens,
                     max_query_len=new_max_q_len,
+                    max_seq_len=new_max_seq_len,
                     block_table_tensor=common_attn_metadata.
                     block_table_tensor[req_order],
                     slot_mapping=common_attn_metadata.slot_mapping[
@@ -252,11 +247,6 @@ class EagleProposer:
                             device=common_attn_metadata.slot_mapping.device)],
                     causal=True,
                 )
-
-                # Rebuild FlashInfer metadata on reordered batch
-                builder = self.runner.attn_groups[0][0].metadata_builder
-                attn_metadata = builder.build_for_drafting(
-                    common_attn_metadata=new_common, draft_index=0)
 
                 # Apply new order to inputs
                 token_perm = token_perm_cpu.to(device=target_positions.device,
@@ -275,6 +265,12 @@ class EagleProposer:
                 permuted_input_ids[last_token_indices] = (
                     next_token_ids_reordered)
                 self.input_ids[:num_tokens] = permuted_input_ids
+
+        # Build attention metadata once, using reordered metadata if created
+        attn_metadata = builder.build_for_drafting(
+            common_attn_metadata=new_common if new_common is not None
+            else common_attn_metadata,
+            draft_index=0)
 
 
         # At this moment, we assume all eagle layers belong to the same KV
@@ -319,12 +315,6 @@ class EagleProposer:
                 last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
-        try:
-            logger.info(
-                "[EAGLE3 dbg] first draft pass: last_token_indices[0:4]=%s, logits=%s",  # noqa: G004
-                last_token_indices[:4].tolist(), tuple(logits.shape))
-        except Exception:
-            pass
         positions = target_positions[last_token_indices]
         hidden_states = hidden_states[last_token_indices]
 
@@ -365,7 +355,7 @@ class EagleProposer:
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
 
         # After the first draft forward, switch FlashInfer to decode-only (len=1)
-        if isinstance(attn_metadata, FlashInferMetadata):
+        if isinstance(builder, FlashInferMetadataBuilder):
             qsl_gpu = self.arange[:batch_size + 1]
             qsl_cpu = qsl_gpu.cpu().to(torch.int32)
             seq_lens_gpu = attn_metadata.seq_lens[:batch_size]
@@ -385,12 +375,12 @@ class EagleProposer:
                 num_reqs=batch_size,
                 num_actual_tokens=batch_size,
                 max_query_len=1,
+                max_seq_len=attn_metadata.max_seq_len,
                 block_table_tensor=block_table_tensor[:batch_size],
                 slot_mapping=attn_metadata.slot_mapping,
                 causal=True,
             )
 
-            builder = self.runner.attn_groups[0][0].metadata_builder
             attn_metadata = builder.build_for_drafting(
                 common_attn_metadata=new_common, draft_index=0)
 
@@ -476,6 +466,13 @@ class EagleProposer:
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
+        try:
+            head = draft_token_ids[0, :min(8, draft_token_ids.shape[1])]
+            logger.info(
+                "[EAGLE3 dbg] proposed draft ids (req0) head=%s shape=%s",  # noqa: G004
+                head.tolist(), tuple(draft_token_ids.shape))
+        except Exception:
+            pass
         return draft_token_ids
 
     def propose_tree(
@@ -782,13 +779,18 @@ class EagleProposer:
                 "The EAGLE head's vocab embedding will be loaded separately"
                 " from the target model.")
 
-        # share lm_head with the target model if needed
-        # some model definition do not define lm_head explicitly
-        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.vllm_config.speculative_config.method != "eagle3" and \
-                hasattr(target_language_model, "lm_head"):
-            logger.info("Loading EAGLE LM head weights from the target model.")
+        if (get_pp_group().world_size == 1 and
+                self.model.lm_head.weight.shape ==
+                target_language_model.lm_head.weight.shape):
+            logger.info("Assuming the EAGLE head shares the same lm_head"
+                        " with the target model.")
+            del self.model.lm_head
             self.model.lm_head = target_language_model.lm_head
+        else:
+            logger.info(
+                "The EAGLE head's lm_head will be loaded separately"
+                " from the target model.")
+            
 
     @torch.inference_mode()
     def dummy_run(

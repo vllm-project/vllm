@@ -692,7 +692,11 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.model.layers)
+<<<<<<< HEAD
         return (2, num_layers // 2, num_layers - 3)
+=======
+        return (1, num_layers // 2 - 1, num_layers - 4)
+>>>>>>> 6e09cc3ba (update work)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
