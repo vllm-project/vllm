@@ -3501,12 +3501,26 @@ class VllmConfig:
                                usedforsecurity=False).hexdigest()[:10]
         return hash_str
 
-    def pad_for_cudagraph(self, batch_size: int) -> int:
-        # if batch_size > self.compilation_config.max_capture_size,
+    def pad_for_cudagraph(self,
+                          batch_size: int,
+                          uniform_aligned: bool = False) -> int:
+        """ Get the padded graph size for the batch size. 
+        uniform_aligned: if True, means the padding batch size would be
+        divisible by the uniform_decode_len for the main model. 
+        For drafter, caller should make sure uniform_aligned is False because
+        drafter's uniform_decode_len is 1.
+        """
+
+        # if batch_size > self.compilation_config.max_capture_size when
+        # uniform_aligned is False, or batch_size > self.compilation_config.
+        # max_uniform_capture_size when uniform_aligned is True,
         # it should raise an IndexError.
-        # the caller should make sure the batch_size is within the range,
-        # i.e., batch_size <= self.compilation_config.max_capture_size
-        return self.compilation_config.bs_to_padded_graph_size[batch_size]
+        # the caller should make sure the batch_size is within the range
+        if not uniform_aligned:
+            return self.compilation_config.bs_to_padded_graph_size[batch_size]
+        else:
+            return self.compilation_config.\
+                bs_to_padded_graph_size_uniform[batch_size]
 
     @staticmethod
     def _get_quantization_config(
@@ -3756,14 +3770,24 @@ class VllmConfig:
                     # local attention.
                     self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
-    def update_sizes_for_sequence_parallelism(self,
-                                              possible_sizes: list) -> list:
+    def update_sizes_for_sequence_parallelism(
+        self,
+        possible_sizes: list,
+        uniform_possible_sizes: Optional[list] = None
+    ) -> tuple[list, Optional[list]]:
         # remove the sizes that not multiple of tp_size when
         # enable sequence parallelism
         removed_sizes = [
             size for size in possible_sizes
             if size % self.parallel_config.tensor_parallel_size != 0
         ]
+        removed_uniform_sizes = []
+        if uniform_possible_sizes is not None:
+            removed_uniform_sizes = [
+                size for size in uniform_possible_sizes
+                if size % self.parallel_config.tensor_parallel_size != 0
+            ]
+        removed_sizes = list(set(removed_sizes + removed_uniform_sizes))
         if removed_sizes:
             logger.warning(
                 "Batch sizes %s are removed because they are not "
@@ -3774,7 +3798,10 @@ class VllmConfig:
         return [
             size for size in possible_sizes
             if size % self.parallel_config.tensor_parallel_size == 0
-        ]
+        ], [
+            size for size in uniform_possible_sizes
+            if size % self.parallel_config.tensor_parallel_size == 0
+        ] if uniform_possible_sizes else None
 
     def _set_cudagraph_sizes(self):
         """
@@ -3805,8 +3832,11 @@ class VllmConfig:
         """
 
         # calculate the default `batch_size_capture_list`
+        batch_size_capture_list = []
+        uniform_batch_size_capture_list = []
+        uniform_decode_len = 1 if not self.speculative_config else \
+                    1 + self.speculative_config.num_speculative_tokens
         if not envs.VLLM_USE_V1:
-            batch_size_capture_list = []
             if self.scheduler_config is not None and \
                 self.model_config is not None and \
                     not self.model_config.enforce_eager:
@@ -3814,8 +3844,8 @@ class VllmConfig:
                 possible_sizes = [1, 2, 4] + [8 * i for i in range(1, 1025)]
                 if self.parallel_config.tensor_parallel_size > 1 and \
                     self.compilation_config.pass_config.enable_sequence_parallelism:
-                    possible_sizes = self.update_sizes_for_sequence_parallelism(
-                        possible_sizes)
+                    possible_sizes, _ = \
+                        self.update_sizes_for_sequence_parallelism(possible_sizes)
 
                 # find the minimum size that is larger than max_num_seqs,
                 # which then becomes the max_batchsize_to_capture
@@ -3835,7 +3865,6 @@ class VllmConfig:
                     if size <= max_batchsize_to_capture
                 ]
         else:
-            batch_size_capture_list = []
             if self.model_config is not None and \
                 not self.model_config.enforce_eager:
                 cuda_graph_sizes = self.scheduler_config.cuda_graph_sizes
@@ -3847,18 +3876,41 @@ class VllmConfig:
                     batch_size_capture_list = sorted(cuda_graph_sizes)
                 else:
                     raise TypeError(f"Invalid value for {cuda_graph_sizes=}.")
+
+                # we maintain a separate list of uniform-decode capture sizes,
+                # since for spec-decode, we may need capture sizes being
+                # divisible by uniform_decode_len(>1).
+
+                # Derive uniform-decode capture sizes via projection: for each
+                # non-uniform capture size i, take the max multiple of
+                # uniform_decode_len that is not greater than i.
+                projected_sizes: set[int] = set()
+                for size in batch_size_capture_list:
+                    proj = (size // uniform_decode_len) * uniform_decode_len
+                    if proj >= uniform_decode_len:
+                        projected_sizes.add(proj)
+                uniform_batch_size_capture_list = sorted(projected_sizes)
                 if self.parallel_config.tensor_parallel_size > 1 and \
                     self.compilation_config.pass_config.enable_sequence_parallelism:
-                    batch_size_capture_list = \
-                        self.update_sizes_for_sequence_parallelism(batch_size_capture_list)
+                    batch_size_capture_list, uniform_batch_size_capture_list = \
+                        self.update_sizes_for_sequence_parallelism(
+                            batch_size_capture_list,
+                            uniform_batch_size_capture_list)
                 max_num_tokens = self.scheduler_config.max_num_batched_tokens
                 batch_size_capture_list = [
                     size for size in batch_size_capture_list
                     if size <= max_num_tokens
                 ]
+                max_num_decode_tokens = self.scheduler_config.max_num_seqs * \
+                    uniform_decode_len
+                uniform_batch_size_capture_list = [
+                    size for size in uniform_batch_size_capture_list
+                    if size <= max_num_decode_tokens
+                ]
 
         self.compilation_config.init_with_cudagraph_sizes(
-            batch_size_capture_list)
+            batch_size_capture_list, uniform_batch_size_capture_list,
+            uniform_decode_len)
 
     def recalculate_max_model_len(self, max_model_len: int):
         # Can only be called in try_verify_and_update_config
