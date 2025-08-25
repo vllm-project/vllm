@@ -881,7 +881,9 @@ class FusedMoE(CustomOp):
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
 
+        self.moe_load = None
         if self.enable_eplb:
+            self.moe_load = torch.zeros(self.local_num_experts, dtype=torch.int64)
             from vllm.model_executor.layers.quantization.fp8 import (
                 Fp8MoEMethod)
             if not isinstance(quant_method,
@@ -1573,7 +1575,13 @@ class FusedMoE(CustomOp):
         # TODO: Once the OOM issue for the TPU backend is resolved, we will
         # switch to using the moe_forward custom op.
         if current_platform.is_tpu():
-            return self.forward_impl(hidden_states, router_logits)
+            output = self.forward_impl(hidden_states, router_logits)
+            if isinstance(output, tuple):
+                if self.enable_eplb:
+                    expert_token_num = output[1]
+                    self.moe_load += expert_token_num
+                return output[0]
+            return output
         else:
             return torch.ops.vllm.moe_forward(
                 hidden_states, router_logits,
@@ -1760,6 +1768,19 @@ class FusedMoE(CustomOp):
         s += f", scoring_func='{self.scoring_func}', activation='{self.activation}'"  # noqa: E501
 
         return s
+
+    def update_map(self, new_expert_map):
+        self.expert_map = new_expert_map
+
+    def get_map(self):
+        return self.expert_map
+
+    def get_log2phy_map(self):
+        return self.logical_to_physical_map
+
+    def clear_moe_load(self):
+        if self.moe_load is not None:
+            self.moe_load.zero_()
 
 
 def moe_forward(hidden_states: torch.Tensor, router_logits: torch.Tensor,
