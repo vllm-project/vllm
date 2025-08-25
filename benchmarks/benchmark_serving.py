@@ -5,8 +5,7 @@ r"""Benchmark online serving throughput.
 On the server side, run one of the following commands:
     vLLM OpenAI API server
     vllm serve <your_model> \
-        --swap-space 16 \
-        --disable-log-requests
+        --swap-space 16
 
 On the client side, run:
     python benchmarks/benchmark_serving.py \
@@ -30,7 +29,7 @@ import os
 import random
 import time
 import warnings
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Optional
@@ -38,6 +37,7 @@ from typing import Any, Literal, Optional
 import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
+from typing_extensions import deprecated
 
 from backend_request_func import (
     ASYNC_REQUEST_FUNCS,
@@ -73,6 +73,7 @@ from benchmark_dataset import (
     VisionArenaDataset,
 )
 from benchmark_utils import convert_to_pytorch_benchmark_format, write_to_json
+from vllm.benchmarks.serve import get_request
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -105,101 +106,6 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
-
-
-def _get_current_request_rate(
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]],
-    ramp_up_start_rps: Optional[int],
-    ramp_up_end_rps: Optional[int],
-    request_index: int,
-    total_requests: int,
-    request_rate: float,
-) -> float:
-    if (
-        ramp_up_strategy
-        and ramp_up_start_rps is not None
-        and ramp_up_end_rps is not None
-    ):
-        progress = request_index / max(total_requests - 1, 1)
-        if ramp_up_strategy == "linear":
-            increase = (ramp_up_end_rps - ramp_up_start_rps) * progress
-            return ramp_up_start_rps + increase
-        elif ramp_up_strategy == "exponential":
-            ratio = ramp_up_end_rps / ramp_up_start_rps
-            return ramp_up_start_rps * (ratio**progress)
-        else:
-            raise ValueError(f"Unknown ramp-up strategy: {ramp_up_strategy}")
-    return request_rate
-
-
-async def get_request(
-    input_requests: list[SampleRequest],
-    request_rate: float,
-    burstiness: float = 1.0,
-    ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
-    ramp_up_start_rps: Optional[int] = None,
-    ramp_up_end_rps: Optional[int] = None,
-) -> AsyncGenerator[tuple[SampleRequest, float], None]:
-    """
-    Asynchronously generates requests at a specified rate
-    with OPTIONAL burstiness and OPTIONAL ramp-up strategy.
-
-    Args:
-        input_requests:
-            A list of input requests, each represented as a SampleRequest.
-        request_rate:
-            The rate at which requests are generated (requests/s).
-        burstiness (optional):
-            The burstiness factor of the request generation.
-            Only takes effect when request_rate is not inf.
-            Default value is 1, which follows a Poisson process.
-            Otherwise, the request intervals follow a gamma distribution.
-            A lower burstiness value (0 < burstiness < 1) results
-            in more bursty requests, while a higher burstiness value
-            (burstiness > 1) results in a more uniform arrival of requests.
-         ramp_up_strategy (optional):
-            The ramp-up strategy. Can be "linear" or "exponential".
-            If None, uses constant request rate (specified by request_rate).
-        ramp_up_start_rps (optional):
-            The starting request rate for ramp-up.
-        ramp_up_end_rps (optional):
-            The ending request rate for ramp-up.
-    """
-    assert burstiness > 0, (
-        f"A positive burstiness factor is expected, but given {burstiness}."
-    )
-    # Convert to list to get length for ramp-up calculations
-    if isinstance(input_requests, Iterable) and not isinstance(input_requests, list):
-        input_requests = list(input_requests)
-
-    total_requests = len(input_requests)
-    request_index = 0
-
-    for request in input_requests:
-        current_request_rate = _get_current_request_rate(
-            ramp_up_strategy,
-            ramp_up_start_rps,
-            ramp_up_end_rps,
-            request_index,
-            total_requests,
-            request_rate,
-        )
-
-        yield request, current_request_rate
-
-        request_index += 1
-
-        if current_request_rate == float("inf"):
-            # If the request rate is infinity, then we don't need to wait.
-            continue
-
-        theta = 1.0 / (current_request_rate * burstiness)
-
-        # Sample the request interval from the gamma distribution.
-        # If burstiness is 1, it follows exponential distribution.
-        interval = np.random.gamma(shape=burstiness, scale=theta)
-        # The next request will be sent after the interval.
-        await asyncio.sleep(interval)
 
 
 def calculate_metrics(
@@ -357,7 +263,14 @@ async def benchmark(
         input_requests[0].multi_modal_data,
     )
 
-    assert test_mm_content is None or isinstance(test_mm_content, dict)
+    assert (
+        test_mm_content is None
+        or isinstance(test_mm_content, dict)
+        or (
+            isinstance(test_mm_content, list)
+            and all(isinstance(item, dict) for item in test_mm_content)
+        )
+    ), "multi_modal_data must be a dict or list[dict]"
     test_input = RequestFuncInput(
         model=model_id,
         model_name=model_name,
@@ -489,20 +402,6 @@ async def benchmark(
         tasks.append(asyncio.create_task(task))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
 
-    if profile:
-        print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
-            print("Profiler stopped")
-
     if pbar is not None:
         pbar.close()
 
@@ -520,6 +419,10 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    if max_concurrency is not None:
+        print("{:<40} {:<10}".format("Maximum request concurrency:", max_concurrency))
+    if request_rate != float("inf"):
+        print("{:<40} {:<10.2f}".format("Request rate configured (RPS):", request_rate))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
     print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
@@ -611,6 +514,20 @@ async def benchmark(
 
     print("=" * 50)
 
+    if profile:
+        print("Stopping profiler...")
+        profile_input = RequestFuncInput(
+            model=model_id,
+            prompt=test_prompt,
+            api_url=base_url + "/stop_profile",
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            logprobs=logprobs,
+        )
+        profile_output = await request_func(request_func_input=profile_input)
+        if profile_output.success:
+            print("Profiler stopped")
+
     return result
 
 
@@ -687,6 +604,10 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
+@deprecated(
+    "benchmark_serving.py is deprecated and will be removed in a future "
+    "version. Please use 'vllm bench serve' instead.",
+)
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
@@ -825,6 +746,7 @@ def main(args: argparse.Namespace):
             dataset_subset=args.hf_subset,
             dataset_split=args.hf_split,
             random_seed=args.seed,
+            no_stream=args.no_stream,
         ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
@@ -1032,6 +954,11 @@ def create_argument_parser():
         default=None,
         help="Path to the sharegpt/sonnet dataset. "
         "Or the huggingface dataset ID if using HF dataset.",
+    )
+    parser.add_argument(
+        "--no-stream",
+        action="store_true",
+        help="Do not load the dataset in streaming mode.",
     )
     parser.add_argument(
         "--max-concurrency",

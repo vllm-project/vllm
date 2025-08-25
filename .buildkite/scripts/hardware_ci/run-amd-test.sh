@@ -108,7 +108,6 @@ fi
 if [[ $commands == *" kernels/attention"* ]]; then
   commands="${commands} \
   --ignore=kernels/attention/test_attention_selector.py \
-  --ignore=kernels/attention/test_blocksparse_attention.py \
   --ignore=kernels/attention/test_encoder_decoder_attn.py \
   --ignore=kernels/attention/test_flash_attn.py \
   --ignore=kernels/attention/test_flashinfer.py \
@@ -122,7 +121,6 @@ fi
 if [[ $commands == *" kernels/quantization"* ]]; then
   commands="${commands} \
   --ignore=kernels/quantization/test_int8_quant.py \
-  --ignore=kernels/quantization/test_aqlm.py \
   --ignore=kernels/quantization/test_machete_mm.py \
   --ignore=kernels/quantization/test_block_fp8.py \
   --ignore=kernels/quantization/test_block_int8.py \

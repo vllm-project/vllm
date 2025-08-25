@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import functools
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
@@ -23,11 +22,16 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    apply_flashinfer_per_tensor_scale_fp8, register_moe_scaling_factors,
+    rotate_flashinfer_fp8_moe_weights, swap_w13_to_w31)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    get_col_major_tma_aligned_tensor, requant_weight_ue8m0_inplace)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear, prepare_fp8_layer_for_marlin,
     prepare_moe_fp8_layer_for_marlin)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    is_layer_skipped)
+    GroupShape, is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, all_close_1d, cutlass_block_fp8_supported,
     cutlass_fp8_supported, maybe_create_device_identity,
@@ -40,6 +44,9 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
+from vllm.utils.deep_gemm import (is_blackwell_deep_gemm_e8m0_used,
+                                  is_deep_gemm_supported)
+from vllm.utils.flashinfer import has_flashinfer_moe
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -118,6 +125,10 @@ class Fp8Config(QuantizationConfig):
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         weight_block_size = cls.get_from_keys_or(config, ["weight_block_size"],
                                                  None)
+        if not ignored_layers:
+            ignored_layers = cls.get_from_keys_or(config,
+                                                  ["modules_to_not_convert"],
+                                                  None)
         return cls(is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
                    activation_scheme=activation_scheme,
                    ignored_layers=ignored_layers,
@@ -134,7 +145,7 @@ class Fp8Config(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return Fp8LinearMethod(self)
         elif isinstance(layer, FusedMoE):
-            return Fp8MoEMethod(self)
+            return Fp8MoEMethod(self, layer.moe_config)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
@@ -199,9 +210,17 @@ class Fp8LinearMethod(LinearMethodBase):
                                            and current_platform.is_fp8_fnuz())
 
         self.block_quant = self.quant_config.weight_block_size is not None
+        self.act_q_static = self.quant_config.activation_scheme == "static"
+        # Use per-token quantization for better perf if dynamic and cutlass
+        if not self.act_q_static and cutlass_fp8_supported():
+            self.act_q_group_shape = GroupShape.PER_TOKEN
+        else:
+            self.act_q_group_shape = GroupShape.PER_TENSOR
+
         self.fp8_linear = Fp8LinearOp(
-            # Default to using per_token quantization if cutlass is supported
-            use_per_token_if_dynamic=cutlass_fp8_supported())
+            act_quant_static=self.act_q_static,
+            act_quant_group_shape=self.act_q_group_shape,
+            cutlass_fp8_supported=cutlass_fp8_supported())
 
     def create_weights(
         self,
@@ -240,9 +259,16 @@ class Fp8LinearMethod(LinearMethodBase):
                     f"{input_size_per_partition} is not divisible by "
                     f"weight quantization block_k = {block_k}.")
             # Required by column parallel or enabling merged weights
-            if (tp_size > 1 and output_size // output_size_per_partition
-                    == tp_size) or len(output_partition_sizes) > 1:
-                for output_partition_size in output_partition_sizes:
+            is_tp_split = (tp_size > 1 and
+                           output_size // output_size_per_partition == tp_size)
+            is_merged_gemm = len(output_partition_sizes) > 1
+            if is_tp_split or is_merged_gemm:
+                sizes_to_check = output_partition_sizes
+                if not is_tp_split and is_merged_gemm:
+                    # In case of merged matrices, we allow the last
+                    # matrix to not be a multiple of block size
+                    sizes_to_check = output_partition_sizes[:-1]
+                for output_partition_size in sizes_to_check:
                     if output_partition_size % block_n != 0:
                         raise ValueError(
                             f"Weight output_partition_size = "
@@ -393,6 +419,19 @@ class Fp8LinearMethod(LinearMethodBase):
             # Activations not quantized for marlin.
             del layer.input_scale
 
+        # On B200, if E8M0 for DeepGemm is used, we need to
+        # requantize the weight and input to the specific scale
+        # at the same time.
+        if is_blackwell_deep_gemm_e8m0_used():
+            assert layer.weight_block_size is not None
+            block_sz = tuple(layer.weight_block_size)
+            requant_weight_ue8m0_inplace(
+                layer.weight.data,
+                layer.weight_scale_inv.data if hasattr(
+                    layer, "weight_scale_inv") else layer.weight_scale.data,
+                block_sz,
+            )
+
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
@@ -443,12 +482,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         quant_config: The quantization config.
     """
 
-    def __init__(self, quant_config: Fp8Config):
-
-        from vllm.model_executor.layers.fused_moe import fused_experts
+    def __init__(self, quant_config: Fp8Config, moe: FusedMoEConfig):
+        super().__init__(moe)
         self.quant_config = quant_config
         self.block_quant = self.quant_config.weight_block_size is not None
 
+        self.flashinfer_moe_enabled = False
+        if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
+            logger.info_once(
+                "Using FlashInfer MoE FP8 kernels for Fp8MoEMethod.")
+            self.flashinfer_moe_enabled = True
         # For GPUs that lack FP8 hardware support, we can leverage the Marlin
         # kernel for fast weight-only FP8 quantization
         self.use_marlin = (not current_platform.has_device_capability(89)
@@ -464,9 +507,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 logger.warning_once("Failed to import DeepGemm kernels.")
             elif not self.block_quant:
                 logger.warning_once("Model is not block quantized. Not using "
-                                    " DeepGemm kernels")
-            elif (current_platform.is_cuda()
-                  and current_platform.has_device_capability(90)):
+                                    "DeepGemm kernels")
+            elif (is_deep_gemm_supported()):
                 logger.info_once("Using DeepGemm kernels for Fp8MoEMethod.")
                 self.allow_deep_gemm = True
             else:
@@ -476,10 +518,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # Check for CutlassBlockScaledGroupedGemm support.
         self.allow_cutlass_block_scaled_grouped_gemm = False
         if not self.block_quant:
-            logger.warning_once("Model is not block quantized. Not using "
-                                "CutlassBlockScaledGroupedGemm kernels")
+            logger.debug_once("Model is not block quantized. Not using "
+                              "CutlassBlockScaledGroupedGemm kernels")
         elif (current_platform.is_cuda()
-              and current_platform.has_device_capability(100)):
+              and current_platform.is_device_capability(100)):
             logger.info_once(
                 "Using CutlassBlockScaledGroupedGemm kernels for Fp8MoEMethod."
             )
@@ -488,15 +530,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             logger.warning_once(
                 "CutlassBlockScaledGroupedGemm not supported on the current "
                 "platform.")
-
-        self.topk_indices_dtype = None
-        self.fused_experts = functools.partial(  # type: ignore
-            fused_experts,
-            use_fp8_w8a8=True,
-            block_shape=self.quant_config.weight_block_size,
-            allow_deep_gemm=self.allow_deep_gemm,
-            allow_cutlass_block_scaled_grouped_gemm=(
-                self.allow_cutlass_block_scaled_grouped_gemm))
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
@@ -645,6 +678,17 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     normalize_e4m3fn_to_e4m3fnuz(
                         layer.w2_weight, layer.w2_weight_scale_inv,
                         layer.w2_input_scale)
+            elif self.flashinfer_moe_enabled:
+                # NOTE: weights have to be swapped since the activation is
+                # applied on different half for flashinfer vs vllm
+                w13_weight = swap_w13_to_w31(layer.w13_weight.data)
+                w13_weight_scale_inv = swap_w13_to_w31(
+                    layer.w13_weight_scale_inv.data)
+                w2_weight = layer.w2_weight.data
+                w2_weight_scale_inv = layer.w2_weight_scale_inv.data
+                if not self.block_quant:
+                    register_moe_scaling_factors(layer)
+                    rotate_flashinfer_fp8_moe_weights(w13_weight, w2_weight)
             else:
                 w13_weight = layer.w13_weight.data
                 w13_weight_scale_inv = layer.w13_weight_scale_inv.data
@@ -670,15 +714,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             # DeepGemm scales need to be transposed and aligned.  We try to do
             # it ahead of time for performance reasons.
-            if self.allow_deep_gemm:
+            if self.allow_deep_gemm and not is_blackwell_deep_gemm_e8m0_used():
                 # Lazy import to avoid CUDA initialization problems.
-                import deep_gemm as dg
                 if _is_col_major(layer.w13_weight_scale_inv):
                     layer.w13_weight_scale_inv = \
-                        dg.get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous()
+                        get_col_major_tma_aligned_tensor(layer.w13_weight_scale_inv).contiguous()
                 if _is_col_major(layer.w2_weight_scale_inv):
                     layer.w2_weight_scale_inv = \
-                        dg.get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv).contiguous()
+                        get_col_major_tma_aligned_tensor(layer.w2_weight_scale_inv).contiguous()
 
         # If checkpoint is fp16, quantize in place.
         elif not self.quant_config.is_checkpoint_fp8_serialized:
@@ -797,6 +840,29 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
+        if is_blackwell_deep_gemm_e8m0_used():
+            assert layer.weight_block_size is not None
+            # Re-quantise the expert weights so their scales are UE8M0.
+            block_sz = tuple(layer.weight_block_size)
+            requant_weight_ue8m0_inplace(
+                layer.w13_weight.data,
+                layer.w13_weight_scale_inv.data,
+                block_sz,
+            )
+            requant_weight_ue8m0_inplace(
+                layer.w2_weight.data,
+                layer.w2_weight_scale_inv.data,
+                block_sz,
+            )
+
+            # Ensure column-major TMA alignment expected by DeepGEMM.
+            if _is_col_major(layer.w13_weight_scale_inv):
+                layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(
+                    layer.w13_weight_scale_inv).contiguous()
+            if _is_col_major(layer.w2_weight_scale_inv):
+                layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
+                    layer.w2_weight_scale_inv).contiguous()
+
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
@@ -864,25 +930,25 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert logical_to_physical_map is not None
             assert logical_replica_count is not None
             assert isinstance(layer, FusedMoE)
-
-        topk_weights, topk_ids = FusedMoE.select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            use_grouped_topk=use_grouped_topk,
-            top_k=top_k,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            indices_type=self.topk_indices_dtype,
-            enable_eplb=enable_eplb,
-            expert_map=expert_map,
-            expert_load_view=expert_load_view,
-            logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count,
-        )
+        if not self.flashinfer_moe_enabled:
+            topk_weights, topk_ids = FusedMoE.select_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                use_grouped_topk=use_grouped_topk,
+                top_k=top_k,
+                renormalize=renormalize,
+                topk_group=topk_group,
+                num_expert_group=num_expert_group,
+                custom_routing_function=custom_routing_function,
+                scoring_func=scoring_func,
+                e_score_correction_bias=e_score_correction_bias,
+                indices_type=self.topk_indices_dtype,
+                enable_eplb=enable_eplb,
+                expert_map=expert_map,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
 
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
@@ -911,6 +977,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
+                None,
+                None,
                 layer.w13_weight_scale,
                 layer.w2_weight_scale,
                 router_logits,
@@ -920,7 +988,45 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
-        else:
+        elif self.flashinfer_moe_enabled:
+            assert activation == 'silu'
+            assert scoring_func == 'sigmoid'
+            if self.block_quant:
+                assert (renormalize and use_grouped_topk
+                        and custom_routing_function is None)
+
+                return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
+                    routing_logits=router_logits.to(torch.float32),
+                    routing_bias=e_score_correction_bias,
+                    x=x,
+                    w13_weight=layer.w13_weight,
+                    w13_weight_scale_inv=layer.w13_weight_scale_inv,
+                    w2_weight=layer.w2_weight,
+                    w2_weight_scale_inv=layer.w2_weight_scale_inv,
+                    global_num_experts=global_num_experts,
+                    top_k=top_k,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    intermediate_size=layer.intermediate_size_per_partition,
+                    expert_offset=layer.ep_rank * layer.local_num_experts,
+                    local_num_experts=layer.local_num_experts,
+                    block_shape=self.quant_config.weight_block_size,
+                    routed_scaling=1.0,
+                )
+            else:
+                assert (not renormalize
+                        and custom_routing_function is not None)
+                return apply_flashinfer_per_tensor_scale_fp8(
+                    layer=layer,
+                    hidden_states=x,
+                    router_logits=router_logits,
+                    routing_bias=e_score_correction_bias,
+                    global_num_experts=global_num_experts,
+                    top_k=top_k,
+                    num_expert_group=num_expert_group,
+                    topk_group=topk_group,
+                    apply_router_weight_on_input=apply_router_weight_on_input)
+        elif self.fused_experts is not None:
             return self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -939,6 +1045,30 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 a1_scale=layer.w13_input_scale,
                 a2_scale=layer.w2_input_scale,
             )
+        else:
+            from vllm.model_executor.layers.fused_moe import fused_experts
+            return fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=expert_map,
+                w1_scale=(layer.w13_weight_scale_inv
+                          if self.block_quant else layer.w13_weight_scale),
+                w2_scale=(layer.w2_weight_scale_inv
+                          if self.block_quant else layer.w2_weight_scale),
+                a1_scale=layer.w13_input_scale,
+                a2_scale=layer.w2_input_scale,
+                use_fp8_w8a8=True,
+                block_shape=self.quant_config.weight_block_size,
+                allow_deep_gemm=self.allow_deep_gemm,
+                allow_cutlass_block_scaled_grouped_gemm=(
+                    self.allow_cutlass_block_scaled_grouped_gemm))
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):

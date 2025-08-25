@@ -1,5 +1,5 @@
-ARG NIGHTLY_DATE="20250124"
-ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.10_tpuvm_$NIGHTLY_DATE"
+ARG NIGHTLY_DATE="20250730"
+ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.12_tpuvm_$NIGHTLY_DATE"
 
 FROM $BASE_IMAGE
 WORKDIR /workspace/vllm

@@ -1,7 +1,4 @@
----
-title: AMD Quark
----
-[](){ #quark }
+# AMD Quark
 
 Quantization can effectively reduce memory and bandwidth usage, accelerate computation and improve
 throughput while with minimal accuracy loss. vLLM can leverage [Quark](https://quark.docs.amd.com/latest/),
@@ -42,7 +39,7 @@ The Quark quantization process can be listed for 5 steps as below:
 Quark uses [Transformers](https://huggingface.co/docs/transformers/en/index)
 to fetch model and tokenizer.
 
-??? Code
+??? code
 
     ```python
     from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -65,7 +62,7 @@ Quark uses the [PyTorch Dataloader](https://pytorch.org/tutorials/beginner/basic
 to load calibration data. For more details about how to use calibration datasets efficiently, please refer
 to [Adding Calibration Datasets](https://quark.docs.amd.com/latest/pytorch/calibration_datasets.html).
 
-??? Code
+??? code
 
     ```python
     from datasets import load_dataset
@@ -98,7 +95,7 @@ kv-cache and the quantization algorithm is AutoSmoothQuant.
     AutoSmoothQuant config file for Llama is
     `examples/torch/language_modeling/llm_ptq/models/llama/autosmoothquant_config.json`.
 
-??? Code
+??? code
 
     ```python
     from quark.torch.quantization import (Config, QuantizationConfig,
@@ -145,7 +142,7 @@ HuggingFace `safetensors`, you can refer to
 [HuggingFace format exporting](https://quark.docs.amd.com/latest/pytorch/export/quark_export_hf.html)
 for more exporting format details.
 
-??? Code
+??? code
 
     ```python
     import torch
@@ -176,7 +173,7 @@ for more exporting format details.
 
 Now, you can load and run the Quark quantized model directly through the LLM entrypoint:
 
-??? Code
+??? code
 
     ```python
     from vllm import LLM, SamplingParams
@@ -216,6 +213,7 @@ lm_eval --model vllm \
 ```
 
 ## Quark Quantization Script
+
 In addition to the example of Python API above, Quark also offers a
 [quantization script](https://quark.docs.amd.com/latest/pytorch/example_quark_torch_llm_ptq.html)
 to quantize large language models more conveniently. It supports quantizing models with variety
@@ -231,4 +229,29 @@ python3 quantize_quark.py --model_dir meta-llama/Llama-2-70b-chat-hf \
                           --num_calib_data 512 \
                           --model_export hf_format \
                           --tasks gsm8k
+```
+
+## Using MXFP4 models
+
+vLLM supports loading MXFP4 models quantized offline through AMD Quark, compliant with [Open Compute Project (OCP) specification](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf).
+
+The scheme currently only supports dynamic quantization for activations.
+
+Example usage, after installing the latest AMD Quark release:
+
+```bash
+vllm serve fxmarty/qwen_1.5-moe-a2.7b-mxfp4 --tensor-parallel-size 1
+```
+
+A simulation of the matrix multiplication execution in MXFP4 can be run on devices that do not support MXFP4 operations natively (e.g. AMD Instinct MI325, MI300 and MI250), dequantizing weights from MXFP4 to half precision on the fly, using a fused kernel. This is useful e.g. to evaluate MXFP4 models using vLLM, or alternatively to benefit from the ~4x memory savings (compared to float16 and bfloat16).
+
+To generate offline models quantized using MXFP4 data type, the easiest approach is to use AMD Quark's [quantization script](https://quark.docs.amd.com/latest/pytorch/example_quark_torch_llm_ptq.html), as an example:
+
+```bash
+python quantize_quark.py --model_dir Qwen/Qwen1.5-MoE-A2.7B-Chat \
+    --quant_scheme w_mxfp4_a_mxfp4_sym \
+    --output_dir qwen_1.5-moe-a2.7b-mxfp4 \
+    --skip_evaluation \
+    --model_export hf_format \
+    --group_size 32
 ```

@@ -1,22 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Optional, Union
 
 import pplx_kernels as pplx
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     _validate_scale_shape, moe_kernel_quantize_input)
 from vllm.utils import cdiv, round_up
+
+logger = init_logger(__name__)
 
 
 def pplx_hidden_dim_scale_bytes(
     max_num_tokens: int,
     hidden_dim: int,
     in_dtype: torch.dtype,
-    quant_dtype: Optional[torch.dtype],
+    quant_dtype: Union[torch.dtype, str, None],
     per_act_token_quant: bool,
     block_shape: Optional[list[int]],
 ):
@@ -27,6 +32,7 @@ def pplx_hidden_dim_scale_bytes(
     #   ceil_div(hidden_dim, block_size) * sizeof(float32)
     # For per-token: set to 4 * sizeof(float32) (x4 for alignment)
     if quant_dtype is not None:
+        assert isinstance(quant_dtype, torch.dtype)
         assert quant_dtype.itemsize == 1
         hidden_dim_bytes = hidden_dim * quant_dtype.itemsize
         elem_size = torch.float32.itemsize
@@ -78,7 +84,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         return self.max_num_tokens
 
     def topk_indices_dtype(self) -> Optional[torch.dtype]:
-        return torch.uint32
+        return torch.int32
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -94,13 +100,22 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
+               Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
         num_tokens = a1.size(0)  # M
         hidden_dim = a1.size(-1)  # K
 
         assert topk_ids.size(0) == num_tokens
-        # assert expert_map is None, "NYI"
+        # expert_map should be None because with expert map, -1 id is used for
+        # non-local token; this causes error when casting ids to the
+        # topk_indices_dtype() int32
+        #
+        if expert_map is not None:
+            logger.warning_once(
+                "The PPLX backend does not support expert mapping. "
+                "The provided `expert_map` will be ignored.")
+        expert_map = None  #noqa: F841
 
         # Is this always going to be a1.device?
         device = a1.device
@@ -190,7 +205,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             out_expert_x_scale=expert_x_scale,
             dp_x=a1q,
             dp_x_scale=a1q_scale,
-            indices=topk_ids,
+            indices=topk_ids.view(dtype=torch.uint32),
             bound_m=bound_m,
         )
 
@@ -198,7 +213,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
             assert expert_x_scale.ndim == 3
 
-        return expert_x, expert_x_scale, expert_num_tokens, None, None
+        expert_tokens_meta = mk.ExpertTokensMetadata(
+            expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)
+
+        return expert_x, expert_x_scale, expert_tokens_meta, None, None
 
     def finalize(
         self,
@@ -207,7 +225,12 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
+        assert isinstance(
+            weight_and_reduce_impl, TopKWeightAndReduceDelegate
+        ), ("Weight application and reduction happens in the combine kernel.")
+
         # This argument is optional
         # There's not much point setting this unless it is != topk_ids.size(0)
         bound_m: Optional[torch.Tensor] = None
@@ -227,7 +250,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             topk_weights = torch.ones_like(topk_weights)
 
         self.a2a.combine(out_tokens=output,
-                         indices=topk_ids,
+                         indices=topk_ids.view(dtype=torch.uint32),
                          weights=topk_weights,
                          expert_y=fused_expert_output,
                          bound_m=bound_m)

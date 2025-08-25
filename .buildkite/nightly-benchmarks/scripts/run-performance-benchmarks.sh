@@ -33,7 +33,7 @@ check_gpus() {
 
 check_cpus() {
   # check the number of CPUs and NUMA Node and GPU type.
-  declare -g numa_count=$(python3 -c  "from numa import info;numa_size = info.get_num_configured_nodes(); print(numa_size)")
+  declare -g numa_count=$(lscpu | grep "NUMA node(s):" | awk '{print $3}')
   if [[ $numa_count -gt 0 ]]; then
     echo "NUMA found."
     echo $numa_count
@@ -126,7 +126,8 @@ kill_gpu_processes() {
   ps -aux
   lsof -t -i:8000 | xargs -r kill -9
   pgrep python3 | xargs -r kill -9
-
+  # vLLM now names the process with VLLM prefix after https://github.com/vllm-project/vllm/pull/21445
+  pgrep VLLM | xargs -r kill -9
 
   # wait until GPU memory usage smaller than 1GB
   if command -v nvidia-smi; then
@@ -164,7 +165,7 @@ upload_to_buildkite() {
 }
 
 run_latency_tests() {
-  # run latency tests using `benchmark_latency.py`
+  # run latency tests using `vllm bench latency` command
   # $1: a json file specifying latency test cases
 
   local latency_test_file
@@ -193,9 +194,11 @@ run_latency_tests() {
 
     # check if there is enough GPU to run the test
     tp=$(echo "$latency_params" | jq -r '.tensor_parallel_size')
-    if [ "$ON_CPU" == "1" ];then
-      if [[ $numa_count -lt $tp ]]; then
-        echo "Required tensor-parallel-size $tp but only $numa_count NUMA nodes found. Skip testcase $test_name."
+    if [ "$ON_CPU" == "1" ]; then
+      pp=$(echo "$latency_params" | jq -r '.pipeline_parallel_size')
+      world_size=$(($tp*$pp))
+      if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
+        echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
         continue
       fi
     else
@@ -205,7 +208,7 @@ run_latency_tests() {
       fi
     fi
 
-    latency_command=" $latency_envs python3 benchmark_latency.py \
+    latency_command=" $latency_envs vllm bench latency \
       --output-json $RESULTS_FOLDER/${test_name}.json \
       $latency_args"
 
@@ -231,7 +234,7 @@ run_latency_tests() {
 }
 
 run_throughput_tests() {
-  # run throughput tests using `benchmark_throughput.py`
+  # run throughput tests using `vllm bench throughput`
   # $1: a json file specifying throughput test cases
 
   local throughput_test_file
@@ -260,9 +263,11 @@ run_throughput_tests() {
 
     # check if there is enough GPU to run the test
     tp=$(echo "$throughput_params" | jq -r '.tensor_parallel_size')
-    if [ "$ON_CPU" == "1" ];then
-      if [[ $numa_count -lt $tp ]]; then
-        echo "Required tensor-parallel-size $tp but only $numa_count NUMA nodes found. Skip testcase $test_name."
+    if [ "$ON_CPU" == "1" ]; then
+      pp=$(echo "$throughput_params" | jq -r '.pipeline_parallel_size')
+      world_size=$(($tp*$pp))
+      if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
+        echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
         continue
       fi
     else
@@ -272,7 +277,7 @@ run_throughput_tests() {
       fi
     fi
 
-    throughput_command=" $throughput_envs python3 benchmark_throughput.py \
+    throughput_command=" $throughput_envs vllm bench throughput \
       --output-json $RESULTS_FOLDER/${test_name}.json \
       $throughput_args"
 
@@ -297,7 +302,7 @@ run_throughput_tests() {
 }
 
 run_serving_tests() {
-  # run serving tests using `benchmark_serving.py`
+  # run serving tests using `vllm bench serve` command
   # $1: a json file specifying serving test cases
 
   local serving_test_file
@@ -328,12 +333,21 @@ run_serving_tests() {
     qps_list=$(echo "$params" | jq -r '.qps_list')
     qps_list=$(echo "$qps_list" | jq -r '.[] | @sh')
     echo "Running over qps list $qps_list"
+    max_concurrency_list=$(echo "$params" | jq -r '.max_concurrency_list')
+    if [[ -z "$max_concurrency_list" || "$max_concurrency_list" == "null" ]]; then
+        num_prompts=$(echo "$client_params" | jq -r '.num_prompts')
+        max_concurrency_list="[$num_prompts]"
+    fi
+    max_concurrency_list=$(echo "$max_concurrency_list" | jq -r '.[] | @sh')
+    echo "Running over max concurrency list $max_concurrency_list"
 
     # check if there is enough resources to run the test
     tp=$(echo "$server_params" | jq -r '.tensor_parallel_size')
-    if [ "$ON_CPU" == "1" ];then
-      if [[ $numa_count -lt $tp ]]; then
-        echo "Required tensor-parallel-size $tp but only $numa_count NUMA nodes found. Skip testcase $test_name."
+    if [ "$ON_CPU" == "1" ]; then
+      pp=$(echo "$server_params" | jq -r '.pipeline_parallel_size')
+      world_size=$(($tp*$pp))
+      if [[ $numa_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
+        echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
         continue
       fi
     else
@@ -389,35 +403,39 @@ run_serving_tests() {
         echo "now qps is $qps"
       fi
 
-      new_test_name=$test_name"_qps_"$qps
+      # iterate over different max_concurrency
+      for max_concurrency in $max_concurrency_list; do
+        new_test_name=$test_name"_qps_"$qps"_concurrency_"$max_concurrency
+        echo " new test name $new_test_name"
+        # pass the tensor parallel size to the client so that it can be displayed
+        # on the benchmark dashboard
+        client_command="vllm bench serve \
+          --save-result \
+          --result-dir $RESULTS_FOLDER \
+          --result-filename ${new_test_name}.json \
+          --request-rate $qps \
+          --max-concurrency $max_concurrency \
+          --metadata "tensor_parallel_size=$tp" \
+          $client_args $client_remote_args "
 
-      # pass the tensor parallel size to the client so that it can be displayed
-      # on the benchmark dashboard
-      client_command="python3 benchmark_serving.py \
-        --save-result \
-        --result-dir $RESULTS_FOLDER \
-        --result-filename ${new_test_name}.json \
-        --request-rate $qps \
-        --metadata "tensor_parallel_size=$tp" \
-        $client_args $client_remote_args "
+        echo "Running test case $test_name with qps $qps"
+        echo "Client command: $client_command"
 
-      echo "Running test case $test_name with qps $qps"
-      echo "Client command: $client_command"
+        bash -c "$client_command"
 
-      bash -c "$client_command"
+        # record the benchmarking commands
+        jq_output=$(jq -n \
+          --arg server "$server_command" \
+          --arg client "$client_command" \
+          --arg gpu "$gpu_type" \
+          '{
+            server_command: $server,
+            client_command: $client,
+            gpu_type: $gpu
+          }')
+        echo "$jq_output" >"$RESULTS_FOLDER/${new_test_name}.commands"
 
-      # record the benchmarking commands
-      jq_output=$(jq -n \
-        --arg server "$server_command" \
-        --arg client "$client_command" \
-        --arg gpu "$gpu_type" \
-        '{
-          server_command: $server,
-          client_command: $client,
-          gpu_type: $gpu
-        }')
-      echo "$jq_output" >"$RESULTS_FOLDER/${new_test_name}.commands"
-
+      done
     done
 
     # clean up
@@ -447,7 +465,7 @@ main() {
   (which jq) || (apt-get update && apt-get -y install jq)
   (which lsof) || (apt-get update && apt-get install -y lsof)
 
-  # get the current IP address, required by benchmark_serving.py
+  # get the current IP address, required by `vllm bench serve` command
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
   # turn of the reporting of the status of each request, to clean up the terminal output
   export VLLM_LOGGING_LEVEL="WARNING"

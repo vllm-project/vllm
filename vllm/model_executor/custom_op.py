@@ -5,7 +5,7 @@ from typing import Optional
 
 import torch.nn as nn
 
-from vllm.config import get_current_vllm_config
+from vllm.config import get_cached_compilation_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -73,11 +73,6 @@ class CustomOp(nn.Module):
         # NOTE(woosuk): This is a placeholder for future extensions.
         return self.forward_native(*args, **kwargs)
 
-    def forward_hpu(self, *args, **kwargs):
-        # By default, we assume that Gaudi ops are compatible with the
-        # PyTorch-native implementation.
-        return self.forward_native(*args, **kwargs)
-
     def forward_neuron(self, *args, **kwargs):
         # By default, we assume that Neuron ops are compatible with the
         # PyTorch-native implementation.
@@ -91,7 +86,7 @@ class CustomOp(nn.Module):
     def dispatch_forward(self):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
-        compilation_config = get_current_vllm_config().compilation_config
+        compilation_config = get_cached_compilation_config()
         enabled = self.enabled()
         if enabled:
             compilation_config.enabled_custom_ops.update([self.__class__.name])
@@ -106,8 +101,6 @@ class CustomOp(nn.Module):
             return self.forward_hip
         elif current_platform.is_cpu():
             return self.forward_cpu
-        elif current_platform.is_hpu():
-            return self.forward_hpu
         elif current_platform.is_tpu():
             return self.forward_tpu
         elif current_platform.is_xpu():
@@ -122,7 +115,7 @@ class CustomOp(nn.Module):
     @classmethod
     def enabled(cls) -> bool:
         # if no name, then it was not registered
-        compilation_config = get_current_vllm_config().compilation_config
+        compilation_config = get_cached_compilation_config()
         custom_ops = compilation_config.custom_ops
         if not hasattr(cls, "name"):
             logger.warning_once(
@@ -145,7 +138,7 @@ class CustomOp(nn.Module):
         Specifying 'all' or 'none' in custom_op takes precedence.
         """
         from vllm.config import CompilationLevel
-        compilation_config = get_current_vllm_config().compilation_config
+        compilation_config = get_cached_compilation_config()
         default_on = (compilation_config.level < CompilationLevel.PIECEWISE
                       or not compilation_config.use_inductor)
         count_none = compilation_config.custom_ops.count("none")

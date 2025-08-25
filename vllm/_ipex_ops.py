@@ -271,6 +271,7 @@ class ipex_ops:
         k_descale=None,
         v_descale=None,
         num_splits=0,
+        s_aux: Optional[torch.Tensor] = None,
     ):
         if cu_seqlens_k is None:
             # cu_seqlens_k is not used in ipex kernel.

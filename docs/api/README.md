@@ -1,21 +1,17 @@
 # Summary
 
-[](){ #configuration }
-
 ## Configuration
 
 API documentation for vLLM's configuration classes.
 
 - [vllm.config.ModelConfig][]
 - [vllm.config.CacheConfig][]
-- [vllm.config.TokenizerPoolConfig][]
 - [vllm.config.LoadConfig][]
 - [vllm.config.ParallelConfig][]
 - [vllm.config.SchedulerConfig][]
 - [vllm.config.DeviceConfig][]
 - [vllm.config.SpeculativeConfig][]
 - [vllm.config.LoRAConfig][]
-- [vllm.config.PromptAdapterConfig][]
 - [vllm.config.MultiModalConfig][]
 - [vllm.config.PoolerConfig][]
 - [vllm.config.DecodingConfig][]
@@ -64,7 +60,7 @@ vLLM provides experimental support for multi-modal models through the [vllm.mult
 Multi-modal inputs can be passed alongside text and token prompts to [supported models][supported-mm-models]
 via the `multi_modal_data` field in [vllm.inputs.PromptType][].
 
-Looking to add your own multi-modal model? Please follow the instructions listed [here][supports-multimodal].
+Looking to add your own multi-modal model? Please follow the instructions listed [here](../contributing/model/multimodal.md).
 
 - [vllm.multimodal.MULTIMODAL_REGISTRY][]
 

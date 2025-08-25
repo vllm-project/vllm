@@ -1,7 +1,4 @@
----
-title: Using Docker
----
-[](){ #deployment-docker }
+# Using Docker
 
 [](){ #deployment-docker-pre-built-image }
 
@@ -13,26 +10,26 @@ The image can be used to run OpenAI compatible server and is available on Docker
 ```bash
 docker run --runtime nvidia --gpus all \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
-    --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
+    --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
     -p 8000:8000 \
     --ipc=host \
     vllm/vllm-openai:latest \
-    --model mistralai/Mistral-7B-v0.1
+    --model Qwen/Qwen3-0.6B
 ```
 
 This image can also be used with other container engines such as [Podman](https://podman.io/).
 
 ```bash
-podman run --gpus all \
+podman run --device nvidia.com/gpu=all \
   -v ~/.cache/huggingface:/root/.cache/huggingface \
   --env "HUGGING_FACE_HUB_TOKEN=$HF_TOKEN" \
   -p 8000:8000 \
   --ipc=host \
-  vllm/vllm-openai:latest \
-  --model mistralai/Mistral-7B-v0.1
+  docker.io/vllm/vllm-openai:latest \
+  --model Qwen/Qwen3-0.6B
 ```
 
-You can add any other [engine-args][engine-args] you need after the image tag (`vllm/vllm-openai:latest`).
+You can add any other [engine-args](../configuration/engine_args.md) you need after the image tag (`vllm/vllm-openai:latest`).
 
 !!! note
     You can either use the `ipc=host` flag or `--shm-size` flag to allow the
@@ -97,7 +94,7 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
     flags to speed up build process. However, ensure your `max_jobs` is substantially larger than `nvcc_threads` to get the most benefits.
     Keep an eye on memory usage with parallel jobs as it can be substantial (see example below).
 
-??? Command
+??? console "Command"
 
     ```bash
     # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 6.93GB)
@@ -109,8 +106,7 @@ of PyTorch Nightly and should be considered **experimental**. Using the flag `--
     -t vllm/vllm-gh200-openai:latest \
     --build-arg max_jobs=66 \
     --build-arg nvcc_threads=2 \
-    --build-arg torch_cuda_arch_list="9.0 10.0+PTX" \
-    --build-arg vllm_fa_cmake_gpu_arches="90-real"
+    --build-arg torch_cuda_arch_list="9.0 10.0+PTX"
     ```
 
 !!! note

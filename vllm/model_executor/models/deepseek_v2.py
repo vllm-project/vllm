@@ -29,7 +29,7 @@ from typing import Any, Optional, Union
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import DeepseekV2Config, DeepseekV3Config
 
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -42,6 +42,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
+                                               MergedReplicatedLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -99,7 +100,7 @@ class DeepseekV2MoE(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Union[DeepseekV2Config, DeepseekV3Config],
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
         enable_eplb: bool = False,
@@ -220,7 +221,7 @@ class DeepseekV2Attention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Union[DeepseekV2Config, DeepseekV3Config],
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -336,7 +337,7 @@ class DeepseekV2Attention(nn.Module):
         kv_a, _ = latent_cache.split(
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         latent_cache = latent_cache.unsqueeze(1)
-        kv_a = self.kv_a_layernorm(kv_a.contiguous())
+        kv_a = self.kv_a_layernorm(kv_a)
         kv = self.kv_b_proj(kv_a)[0]
         kv = kv.view(-1, self.num_local_heads,
                      self.qk_nope_head_dim + self.v_head_dim)
@@ -372,7 +373,7 @@ class DeepseekV2MLAAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Union[DeepseekV2Config, DeepseekV3Config],
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -407,14 +408,24 @@ class DeepseekV2MLAAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         if self.q_lora_rank is not None:
-            self.q_a_proj = ReplicatedLinear(self.hidden_size,
-                                             self.q_lora_rank,
-                                             bias=False,
-                                             quant_config=quant_config,
-                                             prefix=f"{prefix}.q_a_proj")
+            self.fused_qkv_a_proj = MergedReplicatedLinear(
+                self.hidden_size,
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.fused_qkv_a_proj")
+        else:
+            self.kv_a_proj_with_mqa = ReplicatedLinear(
+                self.hidden_size,
+                self.kv_lora_rank + self.qk_rope_head_dim,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.kv_a_proj_with_mqa")
+
+        if self.q_lora_rank is not None:
             self.q_a_layernorm = RMSNorm(self.q_lora_rank,
                                          eps=config.rms_norm_eps)
-            self.q_b_proj = ColumnParallelLinear(q_lora_rank,
+            self.q_b_proj = ColumnParallelLinear(self.q_lora_rank,
                                                  self.num_heads *
                                                  self.qk_head_dim,
                                                  bias=False,
@@ -427,13 +438,6 @@ class DeepseekV2MLAAttention(nn.Module):
                                                bias=False,
                                                quant_config=quant_config,
                                                prefix=f"{prefix}.q_proj")
-
-        self.kv_a_proj_with_mqa = ReplicatedLinear(
-            self.hidden_size,
-            self.kv_lora_rank + self.qk_rope_head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.kv_a_proj_with_mqa")
         self.kv_a_layernorm = RMSNorm(self.kv_lora_rank,
                                       eps=config.rms_norm_eps)
         self.kv_b_proj = ColumnParallelLinear(
@@ -495,15 +499,24 @@ class DeepseekV2MLAAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        q_c = None
+        kv_lora = None
+
         if self.q_lora_rank is not None:
-            q_c = self.q_a_proj(hidden_states)[0]
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c, kv_lora = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
             q_c = self.q_a_layernorm(q_c)
             q = self.q_b_proj(q_c)[0]
         else:
+            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
             q = self.q_proj(hidden_states)[0]
-        kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
-            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+
+        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim],
+                                   dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c)
 
         q = q.view(-1, self.num_local_heads, self.qk_head_dim)
         # Add head dim of 1 to k_pe
@@ -525,7 +538,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: Union[DeepseekV2Config, DeepseekV3Config],
         prefix: str,
         model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
@@ -713,6 +726,9 @@ class DeepseekV2Model(nn.Module):
 
 
 class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -720,6 +736,19 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+
+        # `packed_modules_mapping` needs to be modified before
+        # initializing DeepseekV2Model, as it is passed inplace to
+        # quantization config init and may be used to select the
+        # quant_method for relevant layers during initialization.
+        self.fuse_qkv_a_proj = hasattr(
+            config, "q_lora_rank") and config.q_lora_rank is not None
+        if self.fuse_qkv_a_proj:
+            self.packed_modules_mapping["fused_qkv_a_proj"] = [
+                "q_a_proj",
+                "kv_a_proj_with_mqa",
+            ]
+
         self.model = DeepseekV2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
@@ -739,14 +768,20 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         self.num_expert_groups = config.n_group
 
         self.moe_layers: list[FusedMoE] = []
+        example_moe = None
         for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
             assert isinstance(layer, DeepseekV2DecoderLayer)
             if isinstance(layer.mlp, DeepseekV2MoE):
+                # Pick last one layer since the first ones may be dense layers.
+                example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
-        # Pick last one layer since the first ones may be dense layers.
-        example_moe = typing.cast(
-            DeepseekV2MoE, self.model.layers[config.num_hidden_layers - 1].mlp)
+        if example_moe is None:
+            raise RuntimeError("No DeepseekV2MoE layer found in model.layers.")
+
         self.num_logical_experts = example_moe.n_logical_experts
         self.num_physical_experts = example_moe.n_physical_experts
         self.num_local_physical_experts = example_moe.n_local_physical_experts
@@ -769,6 +804,24 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
                 logical_to_physical_map=logical_to_physical_map,
                 logical_replica_count=logical_replica_count,
             )
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = (num_physical_experts -
+                                      self.num_logical_experts)
+        for layer in self.model.layers:
+            if isinstance(layer.mlp, DeepseekV2MoE):
+                moe = layer.mlp
+                moe.n_local_physical_experts = num_local_physical_experts
+                moe.n_physical_experts = num_physical_experts
+                moe.n_redundant_experts = self.num_redundant_experts
+                moe.experts.update_expert_map()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -793,26 +846,14 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
                                        sampling_metadata)
         return logits
 
-    def make_empty_intermediate_tensors(
-            self, batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> IntermediateTensors:
-        return IntermediateTensors({
-            "hidden_states":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-            "residual":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-        })
-
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
+            ("fused_qkv_a_proj", "q_a_proj", 0),
+            ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
 
         # Params for weights, fp8 weight scales, fp8 activation scales
@@ -846,7 +887,16 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
                 # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if (("mlp.experts." in name) and name not in params_dict):
                     continue
-                name = name.replace(weight_name, param_name)
+                name_mapped = name.replace(weight_name, param_name)
+
+                # QKV fusion is optional, fall back to normal
+                # weight loading if it's not enabled
+                # if go with fusion option, then update name
+                if ((param_name == "fused_qkv_a_proj")
+                        and name_mapped not in params_dict):
+                    continue
+                else:
+                    name = name_mapped
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
@@ -923,11 +973,13 @@ class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
     pass
 
 
-def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
+# Compatibility with
+# https://huggingface.co/deepseek-ai/DeepSeek-V3-Base/blob/main/configuration_deepseek.py
+def get_spec_layer_idx_from_weight_name(config: Union[DeepseekV2Config,
+                                                      DeepseekV3Config],
                                         weight_name: str) -> Optional[int]:
-    if hasattr(config,
-               "num_nextn_predict_layers") and (config.num_nextn_predict_layers
-                                                > 0):
+    if (hasattr(config, "num_nextn_predict_layers")
+            and config.num_nextn_predict_layers > 0):
         layer_idx = config.num_hidden_layers
         for i in range(config.num_nextn_predict_layers):
             if weight_name.startswith(f"model.layers.{layer_idx+i}."):

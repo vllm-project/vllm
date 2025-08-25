@@ -7,13 +7,21 @@ import os
 from abc import abstractmethod
 from collections.abc import Sequence
 from functools import cached_property
-from typing import Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage, ResponsesRequest)
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import import_from_path, is_list_of
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                                  DeltaMessage,
+                                                  ResponsesRequest)
+    from vllm.transformers_utils.tokenizer import AnyTokenizer
+else:
+    ChatCompletionRequest = Any
+    DeltaMessage = Any
+    ResponsesRequest = Any
+    AnyTokenizer = Any
 
 logger = init_logger(__name__)
 
@@ -36,7 +44,7 @@ class ReasoningParser:
         return self.model_tokenizer.get_vocab()
 
     @abstractmethod
-    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+    def is_reasoning_end(self, input_ids: list[int]) -> bool:
         """
         Check if the reasoning content ends in the input_ids.
 

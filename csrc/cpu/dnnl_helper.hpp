@@ -57,6 +57,7 @@ class DNNLPrimitiveHelper {
   // Note: Due to the limitation of oneDNN
   // (https://github.com/oneapi-src/oneDNN/issues/1636), the quantized bias is
   // not supported.
+
   template <typename OutputT, typename BiasT>
   static void gemm_s8s8_jit(const int8_t* a, const int8_t* b, OutputT* c,
                             const BiasT* bias, dnnl_dim_t M, dnnl_dim_t N,
@@ -90,6 +91,27 @@ class DNNLPrimitiveHelper {
     }
 
     dnnl::matmul::primitive_desc matmul_pd;
+// Create memory descriptors with format_tag::any for the primitive. This
+// enables the matmul primitive to choose memory layouts for an
+// optimized primitive implementation, and these layouts may differ from the
+// ones provided by the user.
+#ifdef __aarch64__
+    auto mat_src_md = dnnl::memory::desc({M, K}, dnnl::memory::data_type::s8,
+                                         dnnl::memory::format_tag::any);
+    auto mat_weights_md = dnnl::memory::desc(
+        {K, N}, dnnl::memory::data_type::s8, dnnl::memory::format_tag::any);
+    auto mat_dst_md =
+        dnnl::memory::desc({M, N}, OutputType, dnnl::memory::format_tag::any);
+    if (bias) {
+      dnnl::memory::desc bias_md({1, N}, BiasType, {N, 1});
+      matmul_pd = dnnl::matmul::primitive_desc(default_engine(), mat_src_md,
+                                               mat_weights_md, bias_md,
+                                               mat_dst_md, attr);
+    } else {
+      matmul_pd = dnnl::matmul::primitive_desc(
+          default_engine(), mat_src_md, mat_weights_md, mat_dst_md, attr);
+    }
+#else
     if (bias) {
       dnnl::memory::desc bias_md({1, N}, BiasType, {N, 1});
       matmul_pd = dnnl::matmul::primitive_desc(default_engine(), a_md, b_md,
@@ -98,6 +120,7 @@ class DNNLPrimitiveHelper {
       matmul_pd = dnnl::matmul::primitive_desc(default_engine(), a_md, b_md,
                                                c_md, attr);
     }
+#endif
     dnnl::matmul matmul(matmul_pd);
 
     auto& engine = default_engine();
@@ -111,24 +134,34 @@ class DNNLPrimitiveHelper {
                             (void*)b_scales);
 
     auto& stream = default_stream();
+
+    auto mat_src_mem = a_m;
+    auto mat_weights_mem = b_m;
+    auto mat_dst_mem = c_m;
+#ifdef __aarch64__
+    if (matmul_pd.weights_desc() != b_m.get_desc()) {
+      mat_weights_mem = dnnl::memory(matmul_pd.weights_desc(), engine);
+      dnnl::reorder(b_m, mat_weights_mem).execute(stream, b_m, mat_weights_mem);
+    }
+#endif
     if constexpr (InputNoScale) {
       if (bias) {
         dnnl::memory::desc bias_md({N}, BiasType, {1});
         dnnl::memory bias_m(bias_md, engine, (void*)bias);
         matmul.execute(
             stream, {
-                        {DNNL_ARG_SRC, a_m},
-                        {DNNL_ARG_WEIGHTS, b_m},
+                        {DNNL_ARG_SRC, mat_src_mem},
+                        {DNNL_ARG_WEIGHTS, mat_weights_mem},
                         {DNNL_ARG_BIAS, bias_m},
-                        {DNNL_ARG_DST, c_m},
+                        {DNNL_ARG_DST, mat_dst_mem},
                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, b_scales_m},
                     });
       } else {
         matmul.execute(
             stream, {
-                        {DNNL_ARG_SRC, a_m},
-                        {DNNL_ARG_WEIGHTS, b_m},
-                        {DNNL_ARG_DST, c_m},
+                        {DNNL_ARG_SRC, mat_src_mem},
+                        {DNNL_ARG_WEIGHTS, mat_weights_mem},
+                        {DNNL_ARG_DST, mat_dst_mem},
                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, b_scales_m},
                     });
       }
@@ -138,19 +171,19 @@ class DNNLPrimitiveHelper {
         dnnl::memory bias_m(bias_md, engine, (void*)bias);
         matmul.execute(
             stream, {
-                        {DNNL_ARG_SRC, a_m},
-                        {DNNL_ARG_WEIGHTS, b_m},
+                        {DNNL_ARG_SRC, mat_src_mem},
+                        {DNNL_ARG_WEIGHTS, mat_weights_mem},
                         {DNNL_ARG_BIAS, bias_m},
-                        {DNNL_ARG_DST, c_m},
+                        {DNNL_ARG_DST, mat_dst_mem},
                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, a_scales_m},
                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, b_scales_m},
                     });
       } else {
         matmul.execute(
             stream, {
-                        {DNNL_ARG_SRC, a_m},
-                        {DNNL_ARG_WEIGHTS, b_m},
-                        {DNNL_ARG_DST, c_m},
+                        {DNNL_ARG_SRC, mat_src_mem},
+                        {DNNL_ARG_WEIGHTS, mat_weights_mem},
+                        {DNNL_ARG_DST, mat_dst_mem},
                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_SRC, a_scales_m},
                         {DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS, b_scales_m},
                     });
@@ -170,5 +203,4 @@ class DNNLPrimitiveHelper {
     return stream;
   }
 };
-
 #endif

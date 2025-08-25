@@ -28,18 +28,19 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal, Optional
 
+import aiohttp
 import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (SampleRequest, add_dataset_parser,
                                       get_samples)
-from vllm.benchmarks.endpoint_request_func import (ASYNC_REQUEST_FUNCS,
-                                                   OPENAI_COMPATIBLE_BACKENDS,
-                                                   RequestFuncInput,
-                                                   RequestFuncOutput)
-from vllm.benchmarks.utils import (convert_to_pytorch_benchmark_format,
-                                   write_to_json)
+from vllm.benchmarks.lib.endpoint_request_func import (
+    ASYNC_REQUEST_FUNCS, OPENAI_COMPATIBLE_BACKENDS, RequestFuncInput,
+    RequestFuncOutput)
+from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
+from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
+                                       write_to_json)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
@@ -138,31 +139,54 @@ async def get_request(
         input_requests = list(input_requests)
 
     total_requests = len(input_requests)
-    request_index = 0
+    assert total_requests > 0, "No requests provided."
 
-    for request in input_requests:
+    # Precompute delays among requests to minimize request send laggings
+    request_rates = []
+    delay_ts = []
+    for request_index, request in enumerate(input_requests):
         current_request_rate = _get_current_request_rate(ramp_up_strategy,
                                                       ramp_up_start_rps,
                                                       ramp_up_end_rps,
                                                       request_index,
                                                       total_requests,
                                                       request_rate)
-
-        yield request, current_request_rate
-        
-        request_index += 1
-
+        request_rates.append(current_request_rate)
         if current_request_rate == float("inf"):
-            # If the request rate is infinity, then we don't need to wait.
-            continue
+            delay_ts.append(0)
+        else:
+            theta = 1.0 / (current_request_rate * burstiness)
 
-        theta = 1.0 / (current_request_rate * burstiness)
+            # Sample the request interval from the gamma distribution.
+            # If burstiness is 1, it follows exponential distribution.
+            delay_ts.append(np.random.gamma(shape=burstiness, scale=theta))
+    
+    # Calculate the cumulative delay time from the first sent out requests.
+    for i in range(1, len(delay_ts)):
+        delay_ts[i] += delay_ts[i - 1]
+    if ramp_up_strategy is None and delay_ts[-1] != 0:
+        # When ramp_up_strategy is not set, we assume the request rate is fixed
+        # and all requests should be sent in target_total_delay_s, the following
+        # logic would re-scale delay time to ensure the final delay_ts
+        # align with target_total_delay_s.
+        #
+        # NOTE: If we simply accumulate the random delta values 
+        # from the gamma distribution, their sum would have 1-2% gap 
+        # from target_total_delay_s. The purpose of the following logic is to
+        # close the gap for stablizing the throughput data 
+        # from different random seeds. 
+        target_total_delay_s = total_requests / request_rate
+        normalize_factor = target_total_delay_s / delay_ts[-1]
+        delay_ts = [delay * normalize_factor for delay in delay_ts]
 
-        # Sample the request interval from the gamma distribution.
-        # If burstiness is 1, it follows exponential distribution.
-        interval = np.random.gamma(shape=burstiness, scale=theta)
-        # The next request will be sent after the interval.
-        await asyncio.sleep(interval)
+    start_ts = time.time()
+    for request_index, request in enumerate(input_requests):
+        if delay_ts[request_index] > 0:
+            current_ts = time.time()
+            sleep_interval_s = start_ts + delay_ts[request_index] - current_ts
+            if sleep_interval_s > 0:
+                await asyncio.sleep(sleep_interval_s)
+        yield request, request_rates[request_index]
 
 
 def calculate_metrics(
@@ -308,11 +332,30 @@ async def benchmark(
     ramp_up_strategy: Optional[Literal["linear", "exponential"]] = None,
     ramp_up_start_rps: Optional[int] = None,
     ramp_up_end_rps: Optional[int] = None,
+    ready_check_timeout_sec: int = 600,
 ):
     if endpoint_type in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
     else:
         raise ValueError(f"Unknown endpoint_type: {endpoint_type}")
+
+    # Reuses connections across requests to reduce TLS handshake overhead.
+    connector = aiohttp.TCPConnector(
+        limit=max_concurrency or 0,
+        limit_per_host=max_concurrency or 0,
+        ttl_dns_cache=300,
+        use_dns_cache=True,
+        keepalive_timeout=60,
+        enable_cleanup_closed=True,
+        force_close=False,
+        ssl=("https://" in api_url),
+    )
+
+    session = aiohttp.ClientSession(
+        connector=connector,
+        trust_env=True,
+        timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
+    )
 
     print("Starting initial single prompt test run...")
     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
@@ -322,7 +365,14 @@ async def benchmark(
         input_requests[0].multi_modal_data,
     )
 
-    assert test_mm_content is None or isinstance(test_mm_content, dict)
+    assert (
+        test_mm_content is None
+        or isinstance(test_mm_content, dict)
+        or (
+            isinstance(test_mm_content, list)
+            and all(isinstance(item, dict) for item in test_mm_content)
+        )
+    ), "multi_modal_data must be a dict or list[dict]"
     test_input = RequestFuncInput(
         model=model_id,
         model_name=model_name,
@@ -336,7 +386,12 @@ async def benchmark(
         extra_body=extra_body,
     )
 
-    test_output = await request_func(request_func_input=test_input)
+    test_output = await wait_for_endpoint(
+        request_func,
+        test_input,
+        session,
+        timeout_seconds=ready_check_timeout_sec,
+    )
     if not test_output.success:
         raise ValueError(
             "Initial test run failed - Please make sure benchmark arguments "
@@ -361,7 +416,8 @@ async def benchmark(
                                          multi_modal_content=test_mm_content,
                                          ignore_eos=ignore_eos,
                                          extra_body=extra_body)
-        profile_output = await request_func(request_func_input=profile_input)
+        profile_output = await request_func(
+            request_func_input=profile_input, session=session)
         if profile_output.success:
             print("Profiler started")
 
@@ -387,12 +443,14 @@ async def benchmark(
     semaphore = (asyncio.Semaphore(max_concurrency)
                  if max_concurrency else None)
 
-    async def limited_request_func(request_func_input, pbar):
+    async def limited_request_func(request_func_input, session, pbar):
         if semaphore is None:
             return await request_func(request_func_input=request_func_input,
+                                      session=session,
                                       pbar=pbar)
         async with semaphore:
-            return await request_func(request_func_input=request_func_input,
+            return await request_func(request_func_input=request_func_input, 
+                                      session=session,
                                       pbar=pbar)
 
     benchmark_start_time = time.perf_counter()
@@ -444,22 +502,9 @@ async def benchmark(
         tasks.append(
             asyncio.create_task(
                 limited_request_func(request_func_input=request_func_input,
+                                     session=session,
                                      pbar=pbar)))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
-
-    if profile:
-        print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
-            print("Profiler stopped")
 
     if pbar is not None:
         pbar.close()
@@ -477,6 +522,12 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    if max_concurrency is not None:
+        print("{:<40} {:<10}".format("Maximum request concurrency:",
+                                     max_concurrency))
+    if request_rate != float('inf'):
+        print("{:<40} {:<10.2f}".format("Request rate configured (RPS):",
+                                        request_rate ))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):",
                                     benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
@@ -553,6 +604,22 @@ async def benchmark(
 
     print("=" * 50)
 
+    if profile:
+        print("Stopping profiler...")
+        profile_input = RequestFuncInput(
+            model=model_id,
+            prompt=test_prompt,
+            api_url=base_url + "/stop_profile",
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            logprobs=logprobs,
+        )
+        profile_output = await request_func(
+            request_func_input=profile_input, session=session)
+        if profile_output.success:
+            print("Profiler stopped")
+
+    await session.close()
     return result
 
 
@@ -605,7 +672,7 @@ def save_to_pytorch_benchmark_format(args: argparse.Namespace,
     pt_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={k: [results[k]]
-                 for k in metrics},
+                 for k in metrics if k in results},
         extra_info={
             k: results[k]
             for k in results if k not in metrics and k not in ignored_metrics
@@ -879,9 +946,19 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="The ending request rate for ramp-up (RPS). "
         "Needs to be specified when --ramp-up-strategy is used.",
     )
+    parser.add_argument(
+        "--ready-check-timeout-sec",
+        type=int,
+        default=600,
+        help="Maximum time to wait for the endpoint to become ready "
+        "in seconds (default: 600 seconds / 10 minutes).",
+    )
 
 
-def main(args: argparse.Namespace):
+def main(args: argparse.Namespace) -> dict[str, Any]:
+    return asyncio.run(main_async(args))
+
+async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -958,8 +1035,7 @@ def main(args: argparse.Namespace):
     gc.collect()
     gc.freeze()
 
-    benchmark_result = asyncio.run(
-        benchmark(
+    benchmark_result = await benchmark(
             endpoint_type=args.endpoint_type,
             api_url=api_url,
             base_url=base_url,
@@ -984,62 +1060,63 @@ def main(args: argparse.Namespace):
             ramp_up_strategy=args.ramp_up_strategy,
             ramp_up_start_rps=args.ramp_up_start_rps,
             ramp_up_end_rps=args.ramp_up_end_rps,
-        ))
+            ready_check_timeout_sec=args.ready_check_timeout_sec,
+        )
 
     # Save config and results to json
-    if args.save_result or args.append_result:
-        result_json: dict[str, Any] = {}
+    result_json: dict[str, Any] = {}
 
-        # Setup
-        current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
-        result_json["date"] = current_dt
-        result_json["endpoint_type"] = args.endpoint_type
-        result_json["label"] = label
-        result_json["model_id"] = model_id
-        result_json["tokenizer_id"] = tokenizer_id
-        result_json["num_prompts"] = args.num_prompts
+    # Setup
+    current_dt = datetime.now().strftime("%Y%m%d-%H%M%S")
+    result_json["date"] = current_dt
+    result_json["endpoint_type"] = args.endpoint_type
+    result_json["label"] = label
+    result_json["model_id"] = model_id
+    result_json["tokenizer_id"] = tokenizer_id
+    result_json["num_prompts"] = args.num_prompts
 
-        # Metadata
-        if args.metadata:
-            for item in args.metadata:
-                if "=" in item:
-                    kvstring = item.split("=")
-                    result_json[kvstring[0].strip()] = kvstring[1].strip()
-                else:
-                    raise ValueError(
-                        "Invalid metadata format. Please use KEY=VALUE format."
-                    )
+    # Metadata
+    if args.metadata:
+        for item in args.metadata:
+            if "=" in item:
+                kvstring = item.split("=")
+                result_json[kvstring[0].strip()] = kvstring[1].strip()
+            else:
+                raise ValueError(
+                    "Invalid metadata format. Please use KEY=VALUE format."
+                )
 
-        # Traffic
-        result_json["request_rate"] = (args.request_rate if args.request_rate
-                                       < float("inf") else "inf")
-        result_json["burstiness"] = args.burstiness
-        result_json["max_concurrency"] = args.max_concurrency
+    # Traffic
+    result_json["request_rate"] = (args.request_rate if args.request_rate
+                                    < float("inf") else "inf")
+    result_json["burstiness"] = args.burstiness
+    result_json["max_concurrency"] = args.max_concurrency
 
-        if args.ramp_up_strategy is not None:
-            result_json["ramp_up_strategy"] = args.ramp_up_strategy
-            result_json["ramp_up_start_rps"] = args.ramp_up_start_rps
-            result_json["ramp_up_end_rps"] = args.ramp_up_end_rps
+    if args.ramp_up_strategy is not None:
+        result_json["ramp_up_strategy"] = args.ramp_up_strategy
+        result_json["ramp_up_start_rps"] = args.ramp_up_start_rps
+        result_json["ramp_up_end_rps"] = args.ramp_up_end_rps
 
-        # Merge with benchmark result
-        result_json = {**result_json, **benchmark_result}
+    # Merge with benchmark result
+    result_json = {**result_json, **benchmark_result}
 
-        if not args.save_detailed:
-            # Remove fields with too many data points
-            for field in [
-                    "input_lens",
-                    "output_lens",
-                    "ttfts",
-                    "itls",
-                    "generated_texts",
-                    "errors",
-            ]:
-                if field in result_json:
-                    del result_json[field]
-                if field in benchmark_result:
-                    del benchmark_result[field]
+    if not args.save_detailed:
+        # Remove fields with too many data points
+        for field in [
+                "input_lens",
+                "output_lens",
+                "ttfts",
+                "itls",
+                "generated_texts",
+                "errors",
+        ]:
+            if field in result_json:
+                del result_json[field]
+            if field in benchmark_result:
+                del benchmark_result[field]
 
         # Save to file
+    if args.save_result or args.append_result:
         base_model_id = model_id.split("/")[-1]
         max_concurrency_str = (f"-concurrency{args.max_concurrency}"
                                if args.max_concurrency is not None else "")
@@ -1061,3 +1138,5 @@ def main(args: argparse.Namespace):
                 outfile.write("\n")
             json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
+
+    return result_json

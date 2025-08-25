@@ -10,7 +10,7 @@ The list of data collected by the latest version of vLLM can be found here: <gh-
 
 Here is an example as of v0.4.0:
 
-??? Output
+??? console "Output"
 
     ```json
     {

@@ -1,36 +1,45 @@
-First, install recommended compiler. We recommend to use `gcc/g++ >= 12.3.0` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
+First, install the recommended compiler. We recommend using `gcc/g++ >= 12.3.0` as the default compiler to avoid potential problems. For example, on Ubuntu 22.4, you can run:
 
 ```bash
 sudo apt-get update  -y
-sudo apt-get install -y gcc-12 g++-12 libnuma-dev python3-dev
+sudo apt-get install -y --no-install-recommends ccache git curl wget ca-certificates gcc-12 g++-12 libtcmalloc-minimal4 libnuma-dev ffmpeg libsm6 libxext6 libgl1 jq lsof
 sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 ```
 
-Second, clone vLLM project:
+Second, clone the vLLM project:
 
 ```bash
 git clone https://github.com/vllm-project/vllm.git vllm_source
 cd vllm_source
 ```
 
-Third, install Python packages for vLLM CPU backend building:
+Third, install required dependencies:
 
 ```bash
-pip install --upgrade pip
-pip install "cmake>=3.26.1" wheel packaging ninja "setuptools-scm>=8" numpy
-pip install -v -r requirements/cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+uv pip install -r requirements/cpu-build.txt --torch-backend auto
+uv pip install -r requirements/cpu.txt --torch-backend auto
 ```
 
-Finally, build and install vLLM CPU backend:
+??? console "pip"
+    ```bash
+    pip install --upgrade pip
+    pip install -v -r requirements/cpu-build.txt --extra-index-url https://download.pytorch.org/whl/cpu
+    pip install -v -r requirements/cpu.txt --extra-index-url https://download.pytorch.org/whl/cpu
+    ```
+
+Finally, build and install vLLM:
 
 ```bash
 VLLM_TARGET_DEVICE=cpu python setup.py install
 ```
 
-If you want to develop vllm, install it in editable mode instead.
+If you want to develop vLLM, install it in editable mode instead.
 
 ```bash
 VLLM_TARGET_DEVICE=cpu python setup.py develop
 ```
+
+!!! note
+    If you are building vLLM from source and not using the pre-built images, remember to set `LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:$LD_PRELOAD"` on x86 machines before running vLLM.
 
 # --8<-- [end:extra-information]
