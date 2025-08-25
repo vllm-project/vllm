@@ -134,9 +134,9 @@ __device__ __forceinline__ void cp_async_wait<0>() {
 template <typename scalar_t, uint32_t NUM_WARPS, typename Idx_t,
           int GROUP_SIZE = 128>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
-    const scalar_t* __restrict__ input,   // (E, T, 2*H), element strides
-    __nv_fp8_e4m3* __restrict__ y_q,      // (E, T, H)
-    float* __restrict__ y_s,              // (E, T, H//group_size)
+    const scalar_t* __restrict__ _input,  // (E, T, 2*H), element strides
+    __nv_fp8_e4m3* __restrict__ _y_q,     // (E, T, H)
+    float* __restrict__ _y_s,             // (E, T, H//group_size)
     const uint32_t* __restrict__ counts,  // (E)
 
     // sizes
@@ -177,26 +177,30 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   __syncthreads();
 
+  Idx_t gate_off = ((base_i) >> 1u) + tid;
+  Idx_t up_off = ((base_i + H * stride_i_h) >> 1u) + (tid - 64u);
+  Idx_t yq_off = base_yq + tid * stride_yq_h;
+
+  auto gate_ptr =
+      reinterpret_cast<const __nv_bfloat162* __restrict__>(_input) + gate_off;
+  auto up_ptr =
+      reinterpret_cast<const __nv_bfloat162* __restrict__>(_input) + up_off;
+  auto y_q_ptr = _y_q + yq_off;
+  auto y_s_ptr = _y_s + base_ys;
+
+  auto s_ptr = reinterpret_cast<void*>(s_buff + tid);
+
   const Idx_t n_tokens = s_count;
   for (Idx_t t = 0; t < n_tokens; ++t) {
     float gate, upv, y = -std::numeric_limits<float>::max();
 
 #if 1
     if (tid < 64) {
-      Idx_t gate_off = ((base_i + t * stride_i_t) >> 1u) + tid;
-      cp_async1(
-          reinterpret_cast<void*>(s_buff + tid),
-          reinterpret_cast<const void*>(
-              reinterpret_cast<const __nv_bfloat162* __restrict__>(input) +
-              gate_off));
+      cp_async1(s_ptr, reinterpret_cast<const void*>(gate_ptr));
+      gate_ptr += (stride_i_t >> 1u);
     } else {
-      Idx_t up_off =
-          ((base_i + H * stride_i_h + t * stride_i_t) >> 1u) + (tid - 64u);
-      cp_async1(
-          reinterpret_cast<void*>(s_buff + tid),
-          reinterpret_cast<const void*>(
-              reinterpret_cast<const __nv_bfloat162* __restrict__>(input) +
-              up_off));
+      cp_async1(s_ptr, reinterpret_cast<const void*>(up_ptr));
+      up_ptr += (stride_i_t >> 1u);
     }
 
     cp_async_fence();
@@ -239,18 +243,17 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       scale = exp2f(ceilf(log2f(scale)));
     }
 
-    Idx_t yq_off = base_yq + t * stride_yq_t + tid * stride_yq_h;
-
     float q = fminf(fmaxf(y / scale, fp8_min), fp8_max);
 
     __syncthreads();
 
     // Keep writes here - we don't need to wait for them to resolve.
-    y_q[yq_off] = __nv_fp8_e4m3(q);
+    *y_q_ptr = __nv_fp8_e4m3(q);
+    y_q_ptr += stride_yq_t;
     if (tid == 0) {
-      Idx_t ys_off = base_ys + t * stride_ys_t;
-      y_s[ys_off] = scale;  // one scale per (e, t, g)
+      *y_s_ptr = scale;
     }
+    y_s_ptr += stride_ys_t;
   }
 }
 }  // namespace vllm

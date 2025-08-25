@@ -11,7 +11,7 @@ from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
 from vllm.platforms import current_platform
 
 
-def benchmark(E, T, H, G=128, runs=50):
+def benchmark(E, T, H, G=128, runs=100):
     current_platform.seed_everything(42)
     y = torch.randn((E, T, 2 * H), dtype=torch.bfloat16, device="cuda").contiguous()
     tokens_per_expert = torch.randint(
@@ -19,7 +19,7 @@ def benchmark(E, T, H, G=128, runs=50):
     )
 
     # Warmup
-    for _ in range(10):
+    for _ in range(20):
         silu_mul_fp8_quant_deep_gemm_cuda(y, tokens_per_expert, group_size=G)
         torch.cuda.synchronize()
 
