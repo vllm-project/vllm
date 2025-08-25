@@ -1496,6 +1496,9 @@ class ModelConfig:
         num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
         return num_heads // parallel_config.tensor_parallel_size
 
+    # TODO: Remove once https://github.com/huggingface/transformers/pull/40156
+    # is released. Attribute mapping will allow us to simply read
+    # self.hf_text_config.num_experts
     def get_num_experts(self) -> int:
         """Returns the number of experts in the model."""
         num_expert_names = [

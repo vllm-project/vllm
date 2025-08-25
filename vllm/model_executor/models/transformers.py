@@ -679,7 +679,9 @@ class TransformersMoEBase(TransformersBase):
 
         text_config = self.text_config
 
-        # TODO: replace with self.text_config.num_experts,
+        # TODO: Remove once https://github.com/huggingface/transformers/pull/40156
+        # is released. Attribute mapping will allow us to simply read
+        # text_config.num_experts
         num_experts = self.model_config.get_num_experts()
         top_k = text_config.num_experts_per_token
         hidden_size = text_config.hidden_size
