@@ -526,6 +526,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         q_data_type=self.q_data_type,
                         kv_data_type=self.kv_cache_dtype,
                     )
+        return attn_metadata
 
     def build_for_cudagraph_capture(
             self, common_attn_metadata: CommonAttentionMetadata):
