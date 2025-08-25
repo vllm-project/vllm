@@ -208,7 +208,7 @@ class KVCacheHistograms:
         if not hit_cache_blocks:
             return
         for hit_block in hit_cache_blocks:
-            hit_column = len(hit_block) // self.histos_step
+            hit_column = min(len(hit_block) // self.histos_step, 15)
             self.histos_array[self.histos_array_index][hit_column] += 1
             self.histos_count += 1
 
