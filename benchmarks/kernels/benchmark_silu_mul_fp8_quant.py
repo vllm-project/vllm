@@ -6,28 +6,28 @@ import time
 import torch
 
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-    silu_mul_fp8_quant_deep_gemm,
+    silu_mul_fp8_quant_deep_gemm_cuda,
 )
 from vllm.platforms import current_platform
 
 
 def benchmark(E, T, H, G=128, runs=50):
     current_platform.seed_everything(42)
-    y = torch.randn((E, T, 2 * H), dtype=torch.bfloat16, device="cuda")
+    y = torch.randn((E, T, 2 * H), dtype=torch.bfloat16, device="cuda").contiguous()
     tokens_per_expert = torch.randint(
         T // 2, T, size=(E,), dtype=torch.int32, device="cuda"
     )
 
     # Warmup
     for _ in range(10):
-        silu_mul_fp8_quant_deep_gemm(y, tokens_per_expert, group_size=G)
+        silu_mul_fp8_quant_deep_gemm_cuda(y, tokens_per_expert, group_size=G)
         torch.cuda.synchronize()
 
     # Benchmark
     torch.cuda.synchronize()
     start = time.perf_counter()
     for _ in range(runs):
-        silu_mul_fp8_quant_deep_gemm(y, tokens_per_expert, group_size=G)
+        silu_mul_fp8_quant_deep_gemm_cuda(y, tokens_per_expert, group_size=G)
     torch.cuda.synchronize()
 
     avg_time = (time.perf_counter() - start) / runs * 1000
@@ -70,8 +70,5 @@ print(f"{'Config':<20} {'Time(ms)':<10} {'GFLOPS':<10} {'GB/s':<10}")
 print("-" * 50)
 
 for E, T, H in configs:
-    try:
-        time_ms, gflops, gbps = benchmark(E, T, H)
-        print(f"E={E:3d},T={T:4d},H={H:4d} {time_ms:8.3f} {gflops:8.1f} {gbps:8.1f}")
-    except Exception:
-        print(f"E={E:3d},T={T:4d},H={H:4d} FAILED")
+    time_ms, gflops, gbps = benchmark(E, T, H)
+    print(f"E={E:3d},T={T:4d},H={H:4d} {time_ms:8.3f} {gflops:8.1f} {gbps:8.1f}")

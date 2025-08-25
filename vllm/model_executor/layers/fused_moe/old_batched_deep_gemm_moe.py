@@ -19,48 +19,48 @@ logger = init_logger(__name__)
 
 @triton.jit
 def _silu_mul_fp8_quant_deep_gemm(
-        # Pointers ------------------------------------------------------------
-        input_ptr,  # 16-bit activations (E, T, 2*H)
-        y_q_ptr,  # fp8 quantized activations (E, T, H)
-        y_s_ptr,  # 16-bit scales (E, T, G)
-        counts_ptr,  # int32 num tokens per expert (E)
+    # Pointers ------------------------------------------------------------
+    input_ptr,  # 16-bit activations (E, T, 2*H)
+    y_q_ptr,  # fp8 quantized activations (E, T, H)
+    y_s_ptr,  # 16-bit scales (E, T, G)
+    counts_ptr,  # int32 num tokens per expert (E)
 
-        # Sizes ---------------------------------------------------------------
+    # Sizes ---------------------------------------------------------------
     H: tl.constexpr,  # hidden dimension (per output)
-        GROUP_SIZE: tl.constexpr,  # elements per group (usually 128)
+    GROUP_SIZE: tl.constexpr,  # elements per group (usually 128)
 
-        # Strides for input (elements) ---------------------------------------
+    # Strides for input (elements) ---------------------------------------
     stride_i_e,
-        stride_i_t,
-        stride_i_h,
+    stride_i_t,
+    stride_i_h,
 
-        # Strides for y_q (elements) -----------------------------------------
-        stride_yq_e,
-        stride_yq_t,
-        stride_yq_h,
+    # Strides for y_q (elements) -----------------------------------------
+    stride_yq_e,
+    stride_yq_t,
+    stride_yq_h,
 
-        # Strides for y_s (elements) -----------------------------------------
-        stride_ys_e,
-        stride_ys_t,
-        stride_ys_g,
+    # Strides for y_s (elements) -----------------------------------------
+    stride_ys_e,
+    stride_ys_t,
+    stride_ys_g,
 
-        # Stride for counts (elements)
-        stride_counts_e,
+    # Stride for counts (elements)
+    stride_counts_e,
 
-        # Numeric params ------------------------------------------------------
-        eps: tl.constexpr,
-        fp8_min: tl.constexpr,
-        fp8_max: tl.constexpr,
-        use_ue8m0: tl.constexpr,
+    # Numeric params ------------------------------------------------------
+    eps: tl.constexpr,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
+    use_ue8m0: tl.constexpr,
 
-        # Meta ---------------------------------------------------------------
-        BLOCK: tl.constexpr,
-        NUM_STAGES: tl.constexpr,
-        NUM_WARPS: tl.constexpr):
+    # Meta ---------------------------------------------------------------
+    BLOCK: tl.constexpr,
+    NUM_STAGES: tl.constexpr,
+):
     G = H // GROUP_SIZE
 
     # map program id -> (e, g)
-    pid = tl.program_id(axis=0)
+    pid = tl.program_id(0)
     e = pid // G
     g = pid % G
 
@@ -71,8 +71,7 @@ def _silu_mul_fp8_quant_deep_gemm(
     n_tokens = tl.load(counts_ptr + e * stride_counts_e).to(tl.int64)
 
     cols = tl.arange(0, BLOCK).to(tl.int64)
-    load_mask = cols < BLOCK
-    write_mask = cols < BLOCK
+    mask = cols < BLOCK
 
     base_input_offset = e * stride_i_e + g * GROUP_SIZE * stride_i_h
     base_gate_offset = base_input_offset + cols * stride_i_h
@@ -83,10 +82,10 @@ def _silu_mul_fp8_quant_deep_gemm(
 
     for t in tl.range(0, n_tokens, num_stages=NUM_STAGES):
         gate = tl.load(input_ptr + base_gate_offset + t * stride_i_t,
-                       mask=load_mask,
+                       mask=mask,
                        other=0.0).to(tl.float32)
         up = tl.load(input_ptr + base_up_offset + t * stride_i_t,
-                     mask=load_mask,
+                     mask=mask,
                      other=0.0)
 
         gate = gate * (1.0 / (1.0 + tl.exp(-gate)))
@@ -98,58 +97,8 @@ def _silu_mul_fp8_quant_deep_gemm(
 
         y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
 
-        tl.store(y_q_ptr + base_yq_offset + t * stride_yq_t,
-                 y_q,
-                 mask=write_mask)
+        tl.store(y_q_ptr + base_yq_offset + t * stride_yq_t, y_q, mask=mask)
         tl.store(y_s_ptr + base_ys_offset + t * stride_ys_t, y_s)
-
-
-def silu_mul_fp8_quant_deep_gemm_cuda(
-    y: torch.Tensor,  # (E, T, 2*H)
-    tokens_per_expert: torch.Tensor,  # (E,) number of valid tokens per expert
-    group_size: int = 128,
-    eps: float = 1e-10,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    assert y.ndim == 3, "y must be (E, T, 2*H)"
-    E, T, H2 = y.shape
-    assert H2 % 2 == 0, "last dim of y must be even (2*H)"
-    H = H2 // 2
-    G = H // group_size
-    assert H % group_size == 0, "H must be divisible by group_size"
-    assert tokens_per_expert.ndim == 1 and tokens_per_expert.shape[0] == E
-
-    tokens_per_expert = tokens_per_expert.to(device=y.device,
-                                             dtype=torch.int32)
-
-    fp8_dtype = torch.float8_e4m3fn
-    y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device).contiguous()
-
-    stride_ys_e = T * G
-    stride_ys_t = 1
-    stride_ys_g = T
-    y_s = torch.empty_strided((E, T, G),
-                              (stride_ys_e, stride_ys_t, stride_ys_g),
-                              dtype=torch.float32,
-                              device=y.device).contiguous()
-
-    f_info = torch.finfo(fp8_dtype)
-    fp8_max = f_info.max
-    fp8_min = f_info.min
-    use_ue8m0 = is_blackwell_deep_gemm_e8m0_used()
-
-    torch.ops._C.silu_mul_fp8_quant_deep_gemm_cuda(
-        y,
-        tokens_per_expert,
-        y_q,
-        y_s,
-        group_size,
-        eps,
-        fp8_min,
-        fp8_max,
-        use_ue8m0,
-    )
-
-    return y_q, y_s
 
 
 def silu_mul_fp8_quant_deep_gemm(
@@ -197,8 +146,6 @@ def silu_mul_fp8_quant_deep_gemm(
 
     stride_cnt_e = tokens_per_expert.stride()[0]
 
-    num_warps = 4
-
     # Static grid over experts and H-groups.
     # A loop inside the kernel handles the token dim
     grid = (E * G, )
@@ -230,8 +177,7 @@ def silu_mul_fp8_quant_deep_gemm(
         is_blackwell_deep_gemm_e8m0_used(),
         BLOCK=group_size,
         NUM_STAGES=4,
-        NUM_WARPS=num_warps,
-        num_warps=num_warps,
+        num_warps=1,
     )
 
     return y_q, y_s

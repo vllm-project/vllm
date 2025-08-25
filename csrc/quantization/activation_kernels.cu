@@ -9,6 +9,10 @@
 
 #include "quantization/fp8/common.cuh"
 
+#include <cuda_fp8.h>
+
+#include "core/registration.h"
+
 namespace vllm {
 
 template <typename T>
@@ -87,6 +91,115 @@ __global__ void act_and_mul_quant_kernel(
     }
   }
 }
+
+__device__ __forceinline__ float silu(float x) {
+  return x / (1.f + __expf(-x));
+}
+
+// warp-wide max reduction
+__device__ __forceinline__ float warp_max(float v) {
+  unsigned mask = 0xffffffffu;
+  // shuffle-down tree
+  for (int offset = WARP_SIZE / 2; offset > 0; offset >>= 1) {
+    float other = __shfl_down_sync(mask, v, offset);
+    v = fmaxf(v, other);
+  }
+  return v;
+}
+
+template <typename scalar_t, uint32_t NUM_WARPS, typename Idx_t,
+          int GROUP_SIZE = 128>
+__global__ void silu_mul_fp8_quant_deep_gemm_kernel(
+    const scalar_t* __restrict__ input,   // (E, T, 2*H), element strides
+    __nv_fp8_e4m3* __restrict__ y_q,      // (E, T, H)
+    float* __restrict__ y_s,              // (E, T, H//group_size)
+    const uint32_t* __restrict__ counts,  // (E)
+
+    // sizes
+    Idx_t E, Idx_t T, Idx_t H, Idx_t G,
+
+    // strides (in elements)
+    Idx_t stride_i_e, Idx_t stride_i_t, Idx_t stride_i_h, Idx_t stride_yq_e,
+    Idx_t stride_yq_t, Idx_t stride_yq_h, Idx_t stride_ys_e, Idx_t stride_ys_t,
+    Idx_t stride_ys_g, Idx_t stride_counts_e,
+
+    // quant params
+    float eps, float fp8_min, float fp8_max, bool use_ue8m0) {
+  __shared__ float s_warp_max[NUM_WARPS];  // size = numWarpsPerBlock
+  // block handles one (expert e, group g)
+  Idx_t pid = blockIdx.x;
+  Idx_t e = pid / G;
+  Idx_t g = pid % G;
+  if (e >= E) return;
+
+  const Idx_t tid = threadIdx.x;
+  const Idx_t warp_id = tid / WARP_SIZE;
+  const Idx_t lane_id = tid % WARP_SIZE;
+  const Idx_t num_warps = (blockDim.x + WARP_SIZE - 1) / WARP_SIZE;
+
+  // how many tokens for this expert
+  const Idx_t n_tokens = counts[e * stride_counts_e];
+
+  // base offsets (element-based)
+  const Idx_t base_i = e * stride_i_e + g * GROUP_SIZE * stride_i_h;
+  const Idx_t base_yq = e * stride_yq_e + g * GROUP_SIZE * stride_yq_h;
+  const Idx_t base_ys = e * stride_ys_e + g * stride_ys_g;
+
+  for (Idx_t t = 0; t < n_tokens; ++t) {
+    float gate, upv, y = -std::numeric_limits<float>::max();
+    Idx_t gate_off = base_i + t * stride_i_t + tid * stride_i_h;
+    Idx_t up_off = base_i + H * stride_i_h + t * stride_i_t + tid * stride_i_h;
+
+    if (tid < 64) {
+      // load & convert to float
+      gate = static_cast<float>(input[gate_off * 2u]);
+      upv = static_cast<float>(input[up_off * 2u]);
+    }
+    // SiLU * up
+    gate = silu(gate);
+    y = gate * upv;
+
+    // warp-local reduction of abs(y)
+    float v = fabsf(y);
+    v = warp_max(v);
+
+    // write one value per warp
+    if (lane_id == 0) s_warp_max[warp_id] = v;
+
+    __syncthreads();
+
+    // warp 0 reduces the per-warp maxima
+    float absmax = 0.f;
+    if (warp_id == 0) {
+      float m = (lane_id < num_warps) ? s_warp_max[lane_id] : 0.f;
+      m = warp_max(m);
+      if (lane_id == 0) s_warp_max[0] = m;
+    }
+
+    __syncthreads();
+    absmax = s_warp_max[0];
+    absmax = fmaxf(absmax, eps);
+
+    // compute scale (power-of-two if requested)
+    float scale = absmax / fp8_max;
+
+    if (use_ue8m0) {
+      scale = exp2f(ceilf(log2f(scale)));
+    }
+
+    Idx_t yq_off = base_yq + t * stride_yq_t + tid * stride_yq_h;
+
+    float q = fminf(fmaxf(y / scale, fp8_min), fp8_max);
+    y_q[yq_off] = __nv_fp8_e4m3(q);
+
+    if (tid == 0) {
+      Idx_t ys_off = base_ys + t * stride_ys_t;
+      y_s[ys_off] = scale;  // one scale per (e, t, g)
+    }
+
+    __syncthreads();
+  }
+}
 }  // namespace vllm
 
 // Launch activation, gating, and quantize kernel.
@@ -118,4 +231,44 @@ void silu_and_mul_quant(torch::Tensor& out,    // [..., d]
               input.dtype() == torch::kBFloat16);
   TORCH_CHECK(input.size(-1) % 2 == 0);
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::silu_kernel);
+}
+
+void silu_mul_fp8_quant_deep_gemm_cuda(
+    const at::Tensor& input,   // (E, T, 2*H)
+    const at::Tensor& counts,  // (E)
+    at::Tensor& y_q,           // (E, T, H) [OUT]
+    at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
+    int64_t group_size, double eps, double fp8_min, double fp8_max,
+    bool use_ue8m0) {
+  static constexpr int NUM_WARPS = 4;
+
+  using Idx_t = uint32_t;
+
+  Idx_t E = input.size(0);
+  Idx_t T = input.size(1);
+  Idx_t H = input.size(2) / 2;
+  Idx_t G = H / group_size;
+  Idx_t stride_i_e = input.stride(0);
+  Idx_t stride_i_t = input.stride(1);
+  Idx_t stride_i_h = input.stride(2);
+  Idx_t stride_yq_e = y_q.stride(0);
+  Idx_t stride_yq_t = y_q.stride(1);
+  Idx_t stride_yq_h = y_q.stride(2);
+  Idx_t stride_ys_e = y_s.stride(0);
+  Idx_t stride_ys_t = y_s.stride(1);
+  Idx_t stride_ys_g = y_s.stride(2);
+
+  int stride_counts_e = counts.stride(0);
+
+  dim3 grid(E * G);
+  dim3 block(NUM_WARPS * 32);
+  vllm::silu_mul_fp8_quant_deep_gemm_kernel<__nv_bfloat16, NUM_WARPS, Idx_t>
+      <<<grid, block>>>(
+          reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),
+          reinterpret_cast<__nv_fp8_e4m3*>(y_q.data_ptr<at::Float8_e4m3fn>()),
+          y_s.data_ptr<float>(),
+          reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), E, T, H, G,
+          stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t,
+          stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g, stride_counts_e,
+          eps, fp8_min, fp8_max, use_ue8m0);
 }
