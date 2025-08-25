@@ -99,8 +99,8 @@ class EncoderCacheManager:
         self.cached[mm_hash].add(request.request_id)
         return True
 
-    def try_allocate(self, request: Request, input_id: int,
-                     encoder_budget: int) -> bool:
+    def can_allocate(self, request: Request, input_id: int, encoder_budget: int,
+                     accumulate_encoder_token: int) -> bool:
         """Check if there's sufficient cache space for a multimodal input. 
         If there is, return True and update EncoderCacheManager state.
 
@@ -116,6 +116,9 @@ class EncoderCacheManager:
         Args:
             request: The request containing the multimodal input.
             input_id: Index of the multimodal input within the request.
+            encoder_budget: Encoder budget of current scheduler
+            accumulate_encoder_token: Accumulate encoder token to schedule for 
+            current request so far
 
         Returns:
             True if there's enough capacity to hold the encoder output for this
@@ -130,11 +133,12 @@ class EncoderCacheManager:
         # Not enough compute budget
         if num_tokens > encoder_budget:
             return False
+        
+        # Already update encoder token after can_allocate
+        num_tokens += accumulate_encoder_token
 
         # Enough free slots
         if num_tokens <= self.num_free_slots:
-            self.num_free_slots -= num_tokens
-            self.num_freeable_slots -= num_tokens
             return True
 
         # Not enough reclaimable slots
@@ -149,8 +153,6 @@ class EncoderCacheManager:
             del self.cached[mm_hash]
             self.freed.append(mm_hash)
             self.num_free_slots += num_free_token
-        self.num_free_slots -= num_tokens
-        self.num_freeable_slots -= num_tokens
         return True
 
     def allocate(self, request: Request, input_id: int) -> None:
@@ -161,12 +163,11 @@ class EncoderCacheManager:
         the model runner; this method updates the manager's bookkeeping.
 
         Note:
-            This method assumes try_allocate() returned True for the same input.
+            This method assumes can_allocate() returned True for the same input.
         """
-        # Encoder cache space budget should be already updated for the
-        # multimodal input and non-negative after try_allocate() is called.
-        assert self.num_free_slots >= 0
-        assert self.num_freeable_slots >= 0
+        num_encoder_token = request.get_num_encoder_tokens(input_id)
+        assert self.num_free_slots >= num_encoder_token
+        assert self.num_freeable_slots >= num_encoder_token
 
         mm_hash = request.mm_hashes[input_id]
         request_id = request.request_id
@@ -174,6 +175,9 @@ class EncoderCacheManager:
             self.cached[mm_hash] = set()
 
         self.cached[mm_hash].add(request_id)
+
+        self.num_free_slots -= num_encoder_token
+        self.num_freeable_slots -= num_encoder_token
 
     def get_cached_input_ids(self, request: Request) -> set[int]:
         """Get all cached multimodal input IDs for a request.

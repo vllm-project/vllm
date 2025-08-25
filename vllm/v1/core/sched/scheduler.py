@@ -686,6 +686,7 @@ class Scheduler(SchedulerInterface):
         assert mm_positions is not None
         assert len(mm_positions) > 0
         to_schedule = set()
+        accumulate_encoder_token = 0
         for i, pos_info in enumerate(mm_positions):
             start_pos = pos_info.offset
             num_encoder_tokens = pos_info.length
@@ -722,8 +723,8 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = start_pos - num_computed_tokens
                 break
 
-            if not self.encoder_cache_manager.try_allocate(
-                    request, i, encoder_budget):
+            if not self.encoder_cache_manager.can_allocate(
+                    request, i, encoder_budget, accumulate_encoder_token):
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
                 # be processed altogether, as the encoder usually uses
@@ -741,6 +742,7 @@ class Scheduler(SchedulerInterface):
                 break
 
             encoder_budget -= num_encoder_tokens
+            accumulate_encoder_token += num_encoder_tokens
             encoder_inputs_to_schedule.append(i)
             to_schedule.add(request.mm_hashes[i])
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
