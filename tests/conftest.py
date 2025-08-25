@@ -5,7 +5,7 @@ import math
 import os
 import tempfile
 from enum import Enum
-from typing import Any, Callable, Optional, TypedDict, TypeVar, Union
+from typing import Any, Callable, Optional, TypedDict, TypeVar, Union, cast
 
 import numpy as np
 import pytest
@@ -34,6 +34,7 @@ from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
+from vllm.sequence import Logprob
 from vllm.transformers_utils.utils import maybe_model_redirect
 
 logger = init_logger(__name__)
@@ -603,7 +604,7 @@ class HfRunner:
     def _hidden_states_to_logprobs(
         self,
         hidden_states: tuple[tuple[torch.Tensor, ...], ...],
-        num_logprobs: int,
+        num_logprobs: Optional[int],
     ) -> tuple[list[dict[int, float]], int]:
         seq_logprobs = self._hidden_states_to_seq_logprobs(hidden_states)
         output_len = len(hidden_states)
@@ -631,7 +632,7 @@ class HfRunner:
         self,
         prompts: list[str],
         max_tokens: int,
-        num_logprobs: int,
+        num_logprobs: Optional[int],
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[PromptVideoInput] = None,
@@ -678,7 +679,7 @@ class HfRunner:
         self,
         encoder_decoder_prompts: list[ExplicitEncoderDecoderPrompt[str, str]],
         max_tokens: int,
-        num_logprobs: int,
+        num_logprobs: Optional[int],
         images: Optional[PromptImageInput] = None,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs]:
@@ -967,7 +968,7 @@ class VllmRunner:
         self,
         prompts: list[str],
         max_tokens: int,
-        num_logprobs: int,
+        num_logprobs: Optional[int],
         num_prompt_logprobs: Optional[int] = None,
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
@@ -992,11 +993,34 @@ class VllmRunner:
                                         videos=videos,
                                         **kwargs)
 
+    def generate_prompt_perplexity(self, prompts: list[str]) -> list[float]:
+        outputs = self.generate_greedy_logprobs(prompts,
+                                                max_tokens=1,
+                                                num_logprobs=None,
+                                                num_prompt_logprobs=0)
+
+        perplexities = []
+        for output in outputs:
+            output = cast(TokensTextLogprobsPromptLogprobs, output)
+            token_datas = cast(list[Optional[dict[int, Logprob]]], output[3])
+            assert token_datas[0] is None
+            token_log_probs = []
+            for token_data in token_datas[1:]:
+                assert token_data is not None
+                assert len(token_data) == 1
+                token_log_prob = list(token_data.values())[0].logprob
+                token_log_probs.append(token_log_prob)
+
+            perplexity = math.exp(-sum(token_log_probs) / len(token_log_probs))
+            perplexities.append(perplexity)
+
+        return perplexities
+
     def generate_encoder_decoder_greedy_logprobs(
         self,
         encoder_decoder_prompts: list[ExplicitEncoderDecoderPrompt[str, str]],
         max_tokens: int,
-        num_logprobs: int,
+        num_logprobs: Optional[int],
         num_prompt_logprobs: Optional[int] = None,
         skip_special_tokens: bool = True,
     ) -> Union[list[TokensTextLogprobs],
@@ -1219,30 +1243,3 @@ def cli_config_file():
 def cli_config_file_with_model():
     """Return the path to the CLI config file with model."""
     return os.path.join(_TEST_DIR, "config", "test_config_with_model.yaml")
-
-
-def calculate_prompt_perplexity(outputs):
-    """
-    Utility to calculate perplexity from outputs of `generate_greedy_logprobs`
-    
-    Example usage:
-    ```python
-    outputs = llm.generate_greedy_logprobs(
-        [prompt], max_tokens=1, num_logprobs=None, num_prompt_logprobs=0)
-    perplexity = calculate_prompt_perplexity(outputs)[0]
-    ```
-    """
-    perplexities = []
-    for output in outputs:
-        token_log_probs = []
-        assert output[3][0] is None
-        token_datas = output[3][1:]
-        for token_data in token_datas:
-            assert len(token_data) == 1
-            token_log_prob = list(token_data.values())[0].logprob
-            token_log_probs.append(token_log_prob)
-
-        perplexity = math.exp(-sum(token_log_probs) / len(token_log_probs))
-        perplexities.append(perplexity)
-
-    return perplexities
