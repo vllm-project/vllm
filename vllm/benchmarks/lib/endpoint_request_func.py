@@ -9,7 +9,7 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 import aiohttp
 from tqdm.asyncio import tqdm
@@ -28,9 +28,10 @@ class RequestFuncInput:
     model_name: Optional[str] = None
     logprobs: Optional[int] = None
     extra_body: Optional[dict] = None
-    multi_modal_content: Optional[dict] = None
+    multi_modal_content: Optional[Union[dict, list[dict]]] = None
     ignore_eos: bool = False
     language: Optional[str] = None
+    request_id: Optional[str] = None
 
 
 @dataclass
@@ -87,6 +88,8 @@ async def async_request_openai_completions(
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}"
     }
+    if request_func_input.request_id:
+        headers["x-request-id"] = request_func_input.request_id
 
     output = RequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
@@ -172,7 +175,16 @@ async def async_request_openai_chat_completions(
 
     content = [{"type": "text", "text": request_func_input.prompt}]
     if request_func_input.multi_modal_content:
-        content.append(request_func_input.multi_modal_content)
+        mm_content = request_func_input.multi_modal_content
+        if isinstance(mm_content, list):
+            content.extend(mm_content)
+        elif isinstance(mm_content, dict):
+            content.append(mm_content)
+        else:
+            raise TypeError(
+                "multi_modal_content must be a dict or list[dict] "
+                "for openai-chat"
+            )
     payload = {
         "model":
         request_func_input.model_name
@@ -201,6 +213,8 @@ async def async_request_openai_chat_completions(
         "Content-Type": "application/json",
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
     }
+    if request_func_input.request_id:
+        headers["x-request-id"] = request_func_input.request_id
 
     output = RequestFuncOutput()
     output.prompt_len = request_func_input.prompt_len
@@ -302,6 +316,8 @@ async def async_request_openai_audio(
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
     }
+    if request_func_input.request_id:
+        headers["x-request-id"] = request_func_input.request_id
 
     # Send audio file
     def to_bytes(y, sr):
@@ -310,7 +326,10 @@ async def async_request_openai_audio(
         buffer.seek(0)
         return buffer
 
-    with to_bytes(*request_func_input.multi_modal_content["audio"]) as f:
+    mm_audio = request_func_input.multi_modal_content
+    if not isinstance(mm_audio, dict) or "audio" not in mm_audio:
+        raise TypeError("multi_modal_content must be a dict containing 'audio'")
+    with to_bytes(*mm_audio["audio"]) as f:
         form = aiohttp.FormData()
         form.add_field("file", f, content_type="audio/wav")
         for key, value in payload.items():

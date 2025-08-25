@@ -31,9 +31,7 @@ from vllm.utils import PlaceholderModule
 
 try:
     from runai_model_streamer import SafetensorsStreamer
-except (ImportError, OSError):
-    # see https://github.com/run-ai/runai-model-streamer/issues/26
-    # OSError will be raised on arm64 platform
+except ImportError:
     runai_model_streamer = PlaceholderModule(
         "runai_model_streamer")  # type: ignore[assignment]
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
@@ -563,6 +561,18 @@ def get_gguf_extra_tensor_names(
     exact_gguf_keys = set([tensor.name for tensor in reader.tensors])
     extra_keys = expected_gguf_keys - exact_gguf_keys
     return [gguf_to_hf_name_map[key] for key in extra_keys]
+
+
+def get_gguf_weight_type_map(
+        gguf_file: str, gguf_to_hf_name_map: dict[str, str]) -> dict[str, str]:
+    """
+    Return GGUF mapped weight's name and its quant type
+    """
+    reader = gguf.GGUFReader(gguf_file)
+    return {
+        gguf_to_hf_name_map[tensor.name]: tensor.tensor_type.name
+        for tensor in reader.tensors if tensor.name in gguf_to_hf_name_map
+    }
 
 
 def gguf_quant_weights_iterator(

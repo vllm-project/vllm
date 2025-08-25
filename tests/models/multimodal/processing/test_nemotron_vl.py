@@ -23,15 +23,15 @@ def _get_expected_num_patches(
     min_num: int,
     max_num: int,
 ):
-    from vllm.model_executor.models.internvl import (
-        calculate_internvl_targets, get_internvl_target_ratios)
+    from vllm.model_executor.models.nemotron_vl import (
+        calculate_nemotron_vl_targets, get_nemotron_vl_target_ratios)
 
     width, height = image.size
 
-    blocks, _, _ = calculate_internvl_targets(
+    blocks, _, _ = calculate_nemotron_vl_targets(
         orig_width=width,
         orig_height=height,
-        target_ratios=get_internvl_target_ratios(
+        target_ratios=get_nemotron_vl_target_ratios(
             min_num,
             max_num,
         ),
@@ -70,7 +70,8 @@ def _run_check(
     # Ensure we have the right number of placeholders per num_crops size
     image_token_id = tokenizer.convert_tokens_to_ids("<image>")
     img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
-    pixel_shape = processed_inputs["mm_kwargs"]["pixel_values_flat"].shape
+    pixel_shape = processed_inputs["mm_kwargs"].get_data(
+    )["pixel_values_flat"].shape
     print("Image token count:", img_tok_count, "Pixel shape:", pixel_shape)
     assert img_tok_count == 256 * total_expected_num_patches
     assert pixel_shape[0] == total_expected_num_patches

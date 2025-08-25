@@ -18,14 +18,14 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 
 from vllm.benchmarks.datasets import (AIMODataset, BurstGPTDataset,
                                       ConversationDataset,
-                                      InstructCoderDataset, RandomDataset,
-                                      SampleRequest, ShareGPTDataset,
-                                      SonnetDataset, VisionArenaDataset)
+                                      InstructCoderDataset,
+                                      PrefixRepetitionRandomDataset,
+                                      RandomDataset, SampleRequest,
+                                      ShareGPTDataset, SonnetDataset,
+                                      VisionArenaDataset)
 from vllm.benchmarks.lib.utils import (convert_to_pytorch_benchmark_format,
                                        write_to_json)
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
-from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args)
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
@@ -146,6 +146,8 @@ async def run_vllm_async(
     disable_detokenize: bool = False,
 ) -> float:
     from vllm import SamplingParams
+    from vllm.entrypoints.openai.api_server import (
+        build_async_engine_client_from_engine_args)
 
     async with build_async_engine_client_from_engine_args(
         engine_args,
@@ -327,6 +329,12 @@ def get_requests(args, tokenizer):
             dataset_cls = AIMODataset
             common_kwargs['dataset_subset'] = None
             common_kwargs['dataset_split'] = "train"
+    elif args.dataset_name == "prefix_repetition":
+        dataset_cls = PrefixRepetitionRandomDataset
+        sample_kwargs["prefix_len"] = args.prefix_repetition_prefix_len
+        sample_kwargs["suffix_len"] = args.prefix_repetition_suffix_len
+        sample_kwargs["num_prefixes"] = args.prefix_repetition_num_prefixes
+        sample_kwargs["output_len"] = args.prefix_repetition_output_len
     else:
         raise ValueError(f"Unknown dataset name: {args.dataset_name}")
     # Remove None values
@@ -356,7 +364,11 @@ def validate_args(args):
         raise ValueError(f"Unsupported backend: {args.backend}")
 
     # === Dataset Configuration ===
-    if not args.dataset and not args.dataset_path:
+    if (
+        not args.dataset
+        and not args.dataset_path
+        and args.dataset_name not in {"prefix_repetition"}
+    ):
         print(
             "When dataset path is not set, it will default to random dataset")
         args.dataset_name = 'random'
@@ -422,6 +434,14 @@ def validate_args(args):
     if args.backend == "mii" and args.tokenizer != args.model:
         raise ValueError(
             "Tokenizer must be the same as the model for MII backend.")
+    
+    # --data-parallel is not supported currently.
+    # https://github.com/vllm-project/vllm/issues/16222
+    if args.data_parallel_size > 1:
+        raise ValueError(
+            "Data parallel is not supported in offline benchmark, "
+            "please use benchmark serving instead"
+        )
 
 
 def add_cli_args(parser: argparse.ArgumentParser):
@@ -432,7 +452,10 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--dataset-name",
         type=str,
-        choices=["sharegpt", "random", "sonnet", "burstgpt", "hf"],
+        choices=[
+            "sharegpt", "random", "sonnet", "burstgpt", "hf",
+            "prefix_repetition"
+        ],
         help="Name of the dataset to benchmark on.",
         default="sharegpt")
     parser.add_argument(
@@ -520,6 +543,38 @@ def add_cli_args(parser: argparse.ArgumentParser):
                         type=str,
                         default=None,
                         help="Split of the HF dataset.")
+
+    # prefix repetition dataset
+    prefix_repetition_group = parser.add_argument_group(
+        "prefix repetition dataset options")
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-prefix-len",
+        type=int,
+        default=None,
+        help="Number of prefix tokens per request, used only for prefix "
+        "repetition dataset.",
+    )
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-suffix-len",
+        type=int,
+        default=None,
+        help="Number of suffix tokens per request, used only for prefix "
+        "repetition dataset. Total input length is prefix_len + suffix_len.",
+    )
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-num-prefixes",
+        type=int,
+        default=None,
+        help="Number of prefixes to generate, used only for prefix repetition "
+        "dataset. Prompts per prefix is num_requests // num_prefixes.",
+    )
+    prefix_repetition_group.add_argument(
+        "--prefix-repetition-output-len",
+        type=int,
+        default=None,
+        help="Number of output tokens per request, used only for prefix "
+        "repetition dataset.",
+    )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 

@@ -29,7 +29,7 @@ class CPUModelRunner(GPUModelRunner):
         self.use_cuda_graph = False
         self.cascade_attn_enabled = False
 
-        self._postprocess_tenosrs()
+        self._postprocess_tensors()
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -59,7 +59,7 @@ class CPUModelRunner(GPUModelRunner):
         self.attn_groups[0][0].metadata_builder.reorder_batch(
             self.input_batch, scheduler_output)
 
-    def _postprocess_tenosrs(self) -> None:
+    def _postprocess_tensors(self) -> None:
         # Note: replace device tensors with cpu tensors
         def replace_tensor(obj: Any, cpu_attr_name: str,
                            device_attr_name) -> None:

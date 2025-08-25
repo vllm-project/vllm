@@ -42,7 +42,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import merge_async_iterators
+from vllm.utils import as_list, merge_async_iterators
 
 logger = init_logger(__name__)
 
@@ -365,6 +365,11 @@ class OpenAIServingCompletion(OpenAIServing):
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
 
+                    # Useful when request.return_token_ids is True
+                    # Returning prompt token IDs shares the same logic
+                    # with the echo implementation.
+                    prompt_token_ids_to_return: Optional[list[int]] = None
+
                     assert request.max_tokens is not None
                     if request.echo and not has_echoed[i]:
                         assert prompt_token_ids is not None
@@ -385,12 +390,19 @@ class OpenAIServingCompletion(OpenAIServing):
                                 *(prompt_logprobs or []),
                                 *(output.logprobs or []),
                             ]
+                        prompt_token_ids_to_return = prompt_token_ids
                         has_echoed[i] = True
                     else:
                         # return just the delta
                         delta_text = output.text
                         delta_token_ids = output.token_ids
                         out_logprobs = output.logprobs
+
+                        # has_echoed[i] is reused here to indicate whether
+                        # we have already returned the prompt token IDs.
+                        if not has_echoed[i]:
+                            prompt_token_ids_to_return = prompt_token_ids
+                            has_echoed[i] = True
 
                         if (not delta_text and not delta_token_ids
                                 and not previous_num_tokens[i]):
@@ -428,6 +440,9 @@ class OpenAIServingCompletion(OpenAIServing):
                                 logprobs=logprobs,
                                 finish_reason=finish_reason,
                                 stop_reason=stop_reason,
+                                prompt_token_ids=prompt_token_ids_to_return,
+                                token_ids=(as_list(output.token_ids) if
+                                           request.return_token_ids else None),
                             )
                         ],
                     )
@@ -548,6 +563,10 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason=output.finish_reason,
                     stop_reason=output.stop_reason,
                     prompt_logprobs=final_res.prompt_logprobs,
+                    prompt_token_ids=(prompt_token_ids
+                                      if request.return_token_ids else None),
+                    token_ids=(as_list(output.token_ids)
+                               if request.return_token_ids else None),
                 )
                 choices.append(choice_data)
 

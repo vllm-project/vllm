@@ -26,15 +26,12 @@ DEFAULT_ARGS = ["--max-model-len", "4096"]
 MORE_ARGS_LIST = [
     [],  # Default
     ["--enable-chunked-prefill"],  # Chunked
-    ["--num-scheduler-steps", "8"],  # MS
-    ["--num-scheduler-steps", "8", "--multi-step-stream-outputs"]  # MS+Stream
 ]
 MAX_WAIT_SECONDS = None
 
 if current_platform.is_tpu():
     MORE_ARGS_LIST = [
         [],  # Default
-        # ["--num-scheduler-steps", "8"], # Multi-step << currently fails
     ]
     MAX_WAIT_SECONDS = 600
 

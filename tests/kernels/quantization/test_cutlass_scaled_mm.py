@@ -535,7 +535,7 @@ def test_cutlass_fp8_group_gemm(num_experts: int, per_act_token: bool,
 
     expert_offsets = torch.zeros((num_experts + 1),
                                  device=device,
-                                 dtype=torch.int32)
+                                 dtype=torch.int64)
 
     problem_sizes = torch.zeros((num_experts, 3),
                                 device=device,

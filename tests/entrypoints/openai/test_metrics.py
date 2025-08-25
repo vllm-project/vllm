@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import asyncio
 import subprocess
 import sys
 import tempfile
@@ -292,6 +292,99 @@ async def test_metrics_exist(server: RemoteOpenAIServer,
         if (not server.show_hidden_metrics
                 and metric not in HIDDEN_DEPRECATED_METRICS):
             assert metric in response.text
+
+
+@pytest.mark.asyncio
+async def test_abort_metrics_reset(server: RemoteOpenAIServer,
+                                   client: openai.AsyncClient, use_v1: bool):
+
+    running_requests, waiting_requests, kv_cache_usage = (
+        _get_running_metrics_from_api(server))
+
+    # Expect no running requests or kvcache usage
+    assert running_requests == 0
+    assert waiting_requests == 0
+    assert kv_cache_usage == 0.0
+
+    # Start some long-running requests that we can abort
+    tasks = []
+    for _ in range(3):
+        task = asyncio.create_task(
+            client.completions.create(
+                model=MODEL_NAME,
+                prompt=_TOKENIZED_PROMPT,
+                max_tokens=100,  # Long generation to give time to abort
+                temperature=0.0))
+        tasks.append(task)
+
+    # Wait a bit for requests to start processing
+    await asyncio.sleep(0.5)
+
+    # Check that we have running requests
+    running_requests, waiting_requests, kv_cache_usage = (
+        _get_running_metrics_from_api(server))
+
+    # Expect running requests and kvcache usage
+    assert running_requests > 0
+    assert kv_cache_usage > 0
+
+    # Cancel all tasks to abort the requests
+    for task in tasks:
+        task.cancel()
+
+    # Wait for cancellations to be processed
+    await asyncio.sleep(1.0)
+
+    # Check that metrics have reset to zero
+    response = requests.get(server.url_for("metrics"))
+    assert response.status_code == HTTPStatus.OK
+
+    # Verify running and waiting requests counts and KV cache usage are zero
+    running_requests_after, waiting_requests_after, kv_cache_usage_after = (
+        _get_running_metrics_from_api(server))
+
+    assert running_requests_after == 0,\
+        (f"Expected 0 running requests after abort, got "
+         f"{running_requests_after}")
+    assert waiting_requests_after == 0,\
+        (f"Expected 0 waiting requests after abort, got "
+         f"{waiting_requests_after}")
+    assert kv_cache_usage_after == 0,\
+        (f"Expected 0% KV cache usage after abort, got "
+         f"{kv_cache_usage_after}")
+
+
+def _get_running_metrics_from_api(server: RemoteOpenAIServer):
+    """Return (running_count, waiting_count, kv_cache_usage)"""
+
+    response = requests.get(server.url_for("metrics"))
+    assert response.status_code == HTTPStatus.OK
+
+    # Verify running and waiting requests counts and KV cache usage are zero
+    running_requests, waiting_requests, kv_cache_usage = None, None, None
+
+    for family in text_string_to_metric_families(response.text):
+        if family.name == "vllm:num_requests_running":
+            for sample in family.samples:
+                if sample.name == "vllm:num_requests_running":
+                    running_requests = sample.value
+                    break
+        elif family.name == "vllm:num_requests_waiting":
+            for sample in family.samples:
+                if sample.name == "vllm:num_requests_waiting":
+                    waiting_requests = sample.value
+                    break
+        elif family.name == "vllm:gpu_cache_usage_perc":
+            for sample in family.samples:
+                if sample.name == "vllm:gpu_cache_usage_perc":
+                    kv_cache_usage = sample.value
+                    break
+
+    assert running_requests is not None
+    assert waiting_requests is not None
+    assert kv_cache_usage is not None
+
+    return running_requests, waiting_requests, kv_cache_usage
 
 
 def test_metrics_exist_run_batch(use_v1: bool):

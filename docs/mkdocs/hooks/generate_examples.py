@@ -24,7 +24,6 @@ def fix_case(text: str) -> str:
         "llm": "LLM",
         "mae": "MAE",
         "tpu": "TPU",
-        "aqlm": "AQLM",
         "gguf": "GGUF",
         "lora": "LoRA",
         "rlhf": "RLHF",
@@ -105,7 +104,7 @@ class Example:
         return fix_case(self.path.stem.replace("_", " ").title())
 
     def generate(self) -> str:
-        content = f"---\ntitle: {self.title}\n---\n\n"
+        content = f"# {self.title}\n\n"
         content += f"Source <gh-file:{self.path.relative_to(ROOT_DIR)}>.\n\n"
 
         # Use long code fence to avoid issues with

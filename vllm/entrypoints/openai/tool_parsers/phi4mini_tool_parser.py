@@ -8,7 +8,7 @@ from typing import Any, Optional
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.chat_utils import random_tool_call_id
+from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
                                               ExtractedToolCallInformation,
@@ -74,7 +74,7 @@ class Phi4MiniJsonToolParser(ToolParser):
 
             tool_calls: list[ToolCall] = [
                 ToolCall(
-                    id=random_tool_call_id(),
+                    id=make_tool_call_id(),
                     type="function",
                     function=FunctionCall(
                         name=raw_function_call["name"],

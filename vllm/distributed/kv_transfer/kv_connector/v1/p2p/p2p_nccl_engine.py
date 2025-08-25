@@ -62,8 +62,6 @@ class SendQueueItem:
     tensor_id: str
     remote_address: str
     tensor: torch.Tensor
-    slot_mapping: torch.Tensor
-    is_mla: bool
 
 
 class P2pNcclEngine:
@@ -202,8 +200,6 @@ class P2pNcclEngine:
         tensor_id: str,
         tensor: torch.Tensor,
         remote_address: typing.Optional[str] = None,
-        slot_mapping: torch.Tensor = None,
-        is_mla: bool = False,
     ) -> bool:
         if remote_address is None:
             with self.recv_store_cv:
@@ -213,9 +209,7 @@ class P2pNcclEngine:
 
         item = SendQueueItem(tensor_id=tensor_id,
                              remote_address=remote_address,
-                             tensor=tensor,
-                             slot_mapping=slot_mapping,
-                             is_mla=is_mla)
+                             tensor=tensor)
 
         if self.send_type == "PUT":
             return self.send_sync(item)
@@ -433,9 +427,7 @@ class P2pNcclEngine:
         if item.remote_address not in self.socks:
             self.create_connect(item.remote_address)
 
-        with self.send_stream:
-            tensor = self.extract_kv_from_layer(item.is_mla, item.tensor,
-                                                item.slot_mapping)
+        tensor = item.tensor
 
         sock = self.socks[item.remote_address]
         comm, rank = self.comms[item.remote_address]
@@ -548,21 +540,3 @@ class P2pNcclEngine:
             self._send_thread.join()
         if self._ping_thread is not None:
             self._ping_thread.join()
-
-    @staticmethod
-    def extract_kv_from_layer(
-        is_mla: bool,
-        layer: torch.Tensor,
-        slot_mapping: torch.Tensor,
-    ) -> torch.Tensor:
-        """Extract the KV cache from the layer.
-        Assume the shape of the layer is (2, num_pages, page_size, xxx)
-        if MLA is not used, and (num_pages, page_size, xxx) otherwise.
-        """
-        if is_mla:
-            num_pages, page_size = layer.shape[0], layer.shape[1]
-            return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
-
-        num_pages, page_size = layer.shape[1], layer.shape[2]
-        return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping,
-                                                           ...]

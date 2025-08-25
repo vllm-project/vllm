@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import torch
 
 from vllm.pooling_params import PoolingParams
 from vllm.utils import is_pin_memory_available
+from vllm.v1.pool.metadata import PoolingCursor, build_pooling_cursor
 
 
 class PoolingMetadata:
@@ -23,14 +24,15 @@ class PoolingMetadata:
     """
 
     def __init__(
-        self,
-        seq_groups: list[tuple[list[int], PoolingParams]],
-        seq_data: dict[int, Any],  # Specific data related to sequences
-        prompt_lens: list[int],
-    ) -> None:
+            self,
+            seq_groups: list[tuple[list[int], PoolingParams]],
+            seq_data: dict[int, Any],  # Specific data related to sequences
+            prompt_lens: list[int],
+            pooling_cursor: Optional[PoolingCursor] = None) -> None:
         self.seq_groups = seq_groups
         self.seq_data = seq_data
         self.prompt_lens = prompt_lens
+        self.pooling_cursor: Optional[PoolingCursor] = pooling_cursor
 
     def __repr__(self) -> str:
         return ("PoolingMetadata("
@@ -43,7 +45,16 @@ class PoolingMetadata:
             seq_groups=self.seq_groups[indices],
             seq_data=dict(list(self.seq_data.items())[indices]),
             prompt_lens=self.prompt_lens[indices],
+            pooling_cursor=None
+            if self.pooling_cursor is None else self.pooling_cursor[indices],
         )
+
+    def build_pooling_cursor(self, num_scheduled_tokens: list[int],
+                             device: torch.device):
+        prompt_lens = torch.tensor(self.prompt_lens, device="cpu")
+        self.pooling_cursor = build_pooling_cursor(num_scheduled_tokens,
+                                                   prompt_lens,
+                                                   device=device)
 
 
 @dataclass

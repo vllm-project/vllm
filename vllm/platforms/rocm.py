@@ -171,7 +171,7 @@ class RocmPlatform(Platform):
 
     supported_quantization: list[str] = [
         "awq", "gptq", "fp8", "compressed-tensors", "fbgemm_fp8", "gguf",
-        "quark", "ptpc_fp8", "mxfp4"
+        "quark", "ptpc_fp8", "mxfp4", "petit_nvfp4"
     ]
 
     @classmethod
@@ -188,8 +188,8 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
-                             kv_cache_dtype, block_size, use_v1,
-                             use_mla) -> str:
+                             kv_cache_dtype, block_size, use_v1, use_mla,
+                             has_sink) -> str:
         if use_mla:
             from vllm.attention.backends.rocm_aiter_mla import (
                 is_aiter_mla_enabled)
@@ -327,18 +327,8 @@ class RocmPlatform(Platform):
             cache_config.block_size = 16
 
         parallel_config = vllm_config.parallel_config
-        scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
-            if scheduler_config.is_multi_step:
-                if envs.VLLM_USE_V1:
-                    raise NotImplementedError(
-                        "Multi-step scheduling is not supported (and not "
-                        "needed) on vLLM V1. Please launch without "
-                        "--num-scheduler-steps.")
-                else:
-                    parallel_config.worker_cls = \
-                        "vllm.worker.multi_step_worker.MultiStepWorker"
-            elif vllm_config.speculative_config:
+            if vllm_config.speculative_config:
                 if not envs.VLLM_USE_V1:
                     raise NotImplementedError(
                         "Speculative decoding is not supported on vLLM V0.")
@@ -346,7 +336,7 @@ class RocmPlatform(Platform):
             else:
                 if envs.VLLM_USE_V1:
                     parallel_config.worker_cls = \
-                            "vllm.v1.worker.gpu_worker.Worker"
+                        "vllm.v1.worker.gpu_worker.Worker"
                 else:
                     parallel_config.worker_cls = "vllm.worker.worker.Worker"
 
@@ -431,8 +421,8 @@ class RocmPlatform(Platform):
         return 'gfx1' in torch.cuda.get_device_properties(0).gcnArchName
 
     @classmethod
-    def get_piecewise_backend_cls(cls) -> str:
-        return "vllm.compilation.cuda_piecewise_backend.CUDAPiecewiseBackend"  # noqa
+    def get_static_graph_wrapper_cls(cls) -> str:
+        return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
     @classmethod
     def stateless_init_device_torch_dist_pg(
@@ -469,5 +459,26 @@ class RocmPlatform(Platform):
         return cuda_device_count_stateless()
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
         return True
+
+    @classmethod
+    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+            if not cls.has_device_capability(80):
+                capability = cls.get_device_capability()
+                gpu_name = cls.get_device_name()
+
+                if capability is None:
+                    compute_str = "does not have a compute capability"
+                else:
+                    version_str = capability.as_version_str()
+                    compute_str = f"has compute capability {version_str}"
+
+                raise ValueError(
+                    "Bfloat16 is only supported on GPUs "
+                    "with compute capability of at least 8.0. "
+                    f"Your {gpu_name} GPU {compute_str}. "
+                    "You can use float16 instead by explicitly setting the "
+                    "`dtype` flag in CLI, for example: --dtype=half.")
