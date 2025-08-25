@@ -190,10 +190,10 @@ _CROSS_ENCODER_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
     "GteNewForSequenceClassification": ("bert_with_rope",
                                         "GteNewForSequenceClassification"),
-    "RobertaForSequenceClassification": ("roberta",
-                                         "RobertaForSequenceClassification"),
     "ModernBertForSequenceClassification": ("modernbert",
                                             "ModernBertForSequenceClassification"),
+    "RobertaForSequenceClassification": ("roberta",
+                                         "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": ("roberta",
                                             "RobertaForSequenceClassification"),
     # [Auto-converted (see adapters.py)]
