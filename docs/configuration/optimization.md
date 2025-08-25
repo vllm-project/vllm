@@ -172,6 +172,7 @@ The availablilty of batch-level DP is based on model implementation.
 Currently, the following models support `mm_encoder_tp_mode="data"`:
 
 - Llama4 (<gh-pr:18368>)
+- MiniCPM-V-4 (<gh-pr:23327>)
 - Qwen2.5-VL (<gh-pr:22742>)
 - Step3 (<gh-pr:22697>)
 
@@ -194,6 +195,13 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
 
 !!! note
     API server scale-out is only available for online inference.
+
+!!! warning
+    By default, 8 CPU threads are used in each API server to load media items (e.g. images)
+    from request data.
+
+    If you apply API server scale-out, consider adjusting `VLLM_MEDIA_LOADING_THREAD_COUNT`
+    to avoid CPU resource exhaustion.
 
 !!! note
     [Multi-modal processor cache](#processor-cache) is disabled when API server scale-out is enabled
