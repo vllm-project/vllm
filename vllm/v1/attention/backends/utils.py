@@ -774,9 +774,10 @@ def create_fast_prefill_custom_backend(
                                      new_common_attn_metadata, fast_build)
 
             class KVSharingFastPrefillAttentionMetadata(
-                    metadata.__class__, KVSharingFastPrefillMetadata):
+                    metadata.__class__,  #  type: ignore
+                    KVSharingFastPrefillMetadata):
 
-                def __init__(self, metadata, common_attention_metadata):
+                def __init__(self, metadata, common_attn_metadata):
                     # Shallow copy all fields in metadata cls
                     for field in fields(metadata.__class__):
                         setattr(self, field.name,
