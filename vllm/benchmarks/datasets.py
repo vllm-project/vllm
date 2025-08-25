@@ -1044,7 +1044,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         type=int,
         default=256,
         help=
-        "Number of output tokens per request, used only for spec bench dataset.",
+        "Num of output tokens per request, used only for spec bench dataset.",
     )
     spec_bench_group.add_argument(
         "--spec-bench-category",
