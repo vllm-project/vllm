@@ -778,13 +778,53 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         input_ids_list = self.input_ids_cpu[:
                                             total_num_scheduled_tokens].tolist(
                                             )
-        if 400_000 in input_ids_list:
-            self.input_ids[:total_num_scheduled_tokens].copy_(
-                self.prev_output_token_ids.squeeze(0), non_blocking=True)
-        else:
-            self.input_ids[:total_num_scheduled_tokens].copy_(
-                self.input_ids_cpu[:total_num_scheduled_tokens],
-                non_blocking=True)
+
+        torch.cuda.synchronize()
+        self.input_ids[:total_num_scheduled_tokens].copy_(
+            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
+
+        torch.cuda.synchronize()
+
+        # self.input_ids[:total_num_scheduled_tokens] = self.input_ids_cpu[:total_num_scheduled_tokens]
+
+        # if -1 in input_ids_list:
+        #     breakpoint()
+        #     raise ValueError("Input contains -1.")
+        # self.input_ids[:total_num_scheduled_tokens].copy_(
+        #     self.prev_output_token_ids.squeeze(0), non_blocking=True)
+
+        if self.input_batch.prev_sampled_token_ids is not None:
+            # First, calculate which requests in the current batch also exist in the previous cached batch.
+            # And what their indices are in the new batch
+            prev_req_id_to_index = self.input_batch.prev_req_id_to_index
+            current_req_id_to_index = self.input_batch.req_id_to_index
+            common_req_ids = set(prev_req_id_to_index.keys()).intersection(
+                set(current_req_id_to_index.keys()))
+            if common_req_ids:
+                current_common_req_indices = [
+                    current_req_id_to_index[req_id]
+                    for req_id in common_req_ids
+                ]
+                prev_common_req_indices = [
+                    prev_req_id_to_index[req_id] for req_id in common_req_ids
+                ]
+                # Now, for each of these requests, we need to copy the last sampled token from the previous batch
+                # to the correct position in the current input_ids tensor
+
+                # We need to compute the flattened input_ids index of the last token for each of these requests
+                flattened_indices = [
+                    cu_num_tokens[idx] - 1
+                    for idx in current_common_req_indices
+                ]
+                self.input_ids[
+                    flattened_indices] = self.input_batch.prev_sampled_token_ids[
+                        prev_common_req_indices].squeeze(1)
+
+        torch.cuda.synchronize()
+        # if -1 in input_ids_list:
+        #     # Compute indices of values to fill in from the previous cached sampled tokens
+        #     # which has shape (num_reqs, 1)
+
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
@@ -1606,6 +1646,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         cudagraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(batch_descriptor)
 
+        torch.cuda.synchronize()
+
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(
@@ -1763,6 +1805,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # NOTE(woosuk): As an exception, when using PP, the scheduler sends
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
+        self.input_batch.prev_sampled_token_ids = sampled_token_ids_tensor.clone(
+        )
+        self.input_batch.prev_sampled_token_ids_invalid_indices = set(
+            invalid_req_indices)
+        self.input_batch.prev_req_id_to_index = {
+            req_id: i
+            for i, req_id in enumerate(self.input_batch.req_ids)
+            if i not in self.input_batch.prev_sampled_token_ids_invalid_indices
+        }
+
         req_ids = self.input_batch.req_ids
         for req_idx in range(num_sampled_tokens):
             # sampled_ids = valid_sampled_token_ids[req_idx]
@@ -1777,13 +1829,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f"{self.max_model_len}")
 
             self.input_batch.token_ids_cpu[req_idx,
-                                           start_idx:end_idx] = [400_000] * 1
-            self.prev_output_token_ids = sampled_token_ids_tensor
+                                           start_idx:end_idx] = [-1] * 1
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
             req_id = req_ids[req_idx]
             req_state = self.requests[req_id]
-            req_state.output_token_ids.extend([400_000])
+            req_state.output_token_ids.extend([-1])
+
+        torch.cuda.synchronize()
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
