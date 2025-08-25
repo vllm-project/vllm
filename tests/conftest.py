@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+import math
 import os
 import tempfile
 from enum import Enum
@@ -1218,3 +1219,30 @@ def cli_config_file():
 def cli_config_file_with_model():
     """Return the path to the CLI config file with model."""
     return os.path.join(_TEST_DIR, "config", "test_config_with_model.yaml")
+
+
+def calculate_prompt_perplexity(outputs):
+    """
+    Utility to calculate perplexity from outputs of `generate_greedy_logprobs`
+    
+    Example usage:
+    ```python
+    outputs = llm.generate_greedy_logprobs(
+        [prompt], max_tokens=1, num_logprobs=None, num_prompt_logprobs=0)
+    perplexity = calculate_prompt_perplexity(outputs)[0]
+    ```
+    """
+    perplexities = []
+    for output in outputs:
+        token_log_probs = []
+        assert output[3][0] is None
+        token_datas = output[3][1:]
+        for token_data in token_datas:
+            assert len(token_data) == 1
+            token_log_prob = list(token_data.values())[0].logprob
+            token_log_probs.append(token_log_prob)
+
+        perplexity = math.exp(-sum(token_log_probs) / len(token_log_probs))
+        perplexities.append(perplexity)
+
+    return perplexities

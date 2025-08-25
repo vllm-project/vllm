@@ -11,6 +11,7 @@ import pytest
 import torch
 from compressed_tensors.quantization import QuantizationType
 
+from tests.conftest import calculate_prompt_perplexity
 from tests.models.utils import check_logprobs_close
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensors24, CompressedTensorsLinearMethod,
@@ -683,3 +684,27 @@ def test_compressed_tensors_nvfp4(vllm_runner, args):
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         print(output)
         assert output
+
+
+@pytest.mark.parametrize("model,prompt,exp_perplexity", [
+    (
+        "nm-testing/Llama-3.2-1B-Instruct-spinquantR1R2R4-w4a16",
+        "Flat is better than nested.\nSparse is better than dense.",
+        150.0,
+    ),
+    (
+        "nm-testing/Llama-3.2-1B-Instruct-quip-w4a16",
+        "Flat is better than nested.\nSparse is better than dense.",
+        150.0,
+    ),
+])
+def test_compressed_tensors_transforms_perplexity(vllm_runner, model, prompt,
+                                                  exp_perplexity):
+    with vllm_runner(model, enforce_eager=True) as llm:
+        outputs = llm.generate_greedy_logprobs([prompt],
+                                               max_tokens=1,
+                                               num_logprobs=None,
+                                               num_prompt_logprobs=0)
+        perplexity = calculate_prompt_perplexity(outputs)[0]
+        print(perplexity)
+        assert perplexity <= exp_perplexity
