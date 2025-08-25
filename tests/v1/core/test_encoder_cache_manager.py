@@ -144,23 +144,28 @@ def test_get_freed_mm_hashes_clears_freed_list():
     assert manager.get_freed_mm_hashes() == []
 
 
-def test_schedule_request_multi_images():
+def test_schedule_request_multi_images_respect_space_limit():
     manager = EncoderCacheManager(cache_size=10)
     req = MockRequest("reqA", ["a", "b"], [5, 6])
+    compute_budget = 100
 
     num_tokens_to_schedule = 0
-    assert manager.can_allocate(req, 0, int(1e9), num_tokens_to_schedule)
+    assert manager.can_allocate(req, 0, compute_budget, num_tokens_to_schedule)
     num_tokens_to_schedule += req._token_counts[0]
+    compute_budget -= req._token_counts[0]
 
-    assert not manager.can_allocate(req, 1, int(1e9), num_tokens_to_schedule)
+    assert not manager.can_allocate(req, 1, compute_budget,
+                                    num_tokens_to_schedule)
 
 
-def test_schedule_request_multi_images_repeated():
-    manager = EncoderCacheManager(cache_size=10)
-    req = MockRequest("reqA", ["a", "a"], [6, 6])
-
+def test_schedule_request_multi_images_respect_compute_limit():
+    manager = EncoderCacheManager(cache_size=100)
+    req = MockRequest("reqA", ["a", "b"], [5, 6])
+    compute_budget = 10
     num_tokens_to_schedule = 0
-    assert manager.can_allocate(req, 0, int(1e9), num_tokens_to_schedule)
+    assert manager.can_allocate(req, 0, compute_budget, num_tokens_to_schedule)
     num_tokens_to_schedule += req._token_counts[0]
+    compute_budget -= req._token_counts[0]
 
-    assert manager.can_allocate(req, 1, int(1e9), num_tokens_to_schedule)
+    assert not manager.can_allocate(req, 1, compute_budget,
+                                    num_tokens_to_schedule)
