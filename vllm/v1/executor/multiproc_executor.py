@@ -597,7 +597,6 @@ class WorkerProc:
                 # where the second element is the list of invalid req indices
                 tensor, invalid_req_indices = output.sampled_token_ids
                 tensor = cast(torch.Tensor, tensor)
-                # torch.cuda.synchronize()
                 default_stream = torch.cuda.current_stream()
                 with torch.cuda.stream(copy_stream):
                     copy_stream.wait_stream(default_stream)
@@ -607,13 +606,10 @@ class WorkerProc:
                 sampled_token_ids_list = sampled_token_ids_list.tolist()
                 for i in invalid_req_indices:
                     sampled_token_ids_list[i].clear()
-                # print(sampled_token_ids_list)
                 output.sampled_token_ids = sampled_token_ids_list
-                # print("Enqueueing SUCCESS message to worker_response_mq", output.sampled_token_ids)
                 worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.SUCCESS, output))
             else:
-                # print("Enqueueing native SUCCESS message to worker_response_mq", output)
                 worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.SUCCESS, output))
             return
@@ -661,10 +657,3 @@ class WorkerProc:
 
             if output_rank is None or self.rank == output_rank:
                 output_queue.put(output)
-                # if current_thread is not None:
-                #     current_thread.join()
-                # current_thread = Thread(target=process_output,
-                #                 args=(output, self.worker_response_mq, copy_stream),
-                #                 daemon=True)
-                # current_thread.start()
-                # process_output(output, self.worker_response_mq, copy_stream)

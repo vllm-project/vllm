@@ -775,23 +775,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         max_seq_len = self.seq_lens_np[:num_reqs].max().item()
 
         # Copy the tensors to the GPU.
-        input_ids_list = self.input_ids_cpu[:
-                                            total_num_scheduled_tokens].tolist(
-                                            )
-
-        torch.cuda.synchronize()
         self.input_ids[:total_num_scheduled_tokens].copy_(
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
-
-        torch.cuda.synchronize()
-
-        # self.input_ids[:total_num_scheduled_tokens] = self.input_ids_cpu[:total_num_scheduled_tokens]
-
-        # if -1 in input_ids_list:
-        #     breakpoint()
-        #     raise ValueError("Input contains -1.")
-        # self.input_ids[:total_num_scheduled_tokens].copy_(
-        #     self.prev_output_token_ids.squeeze(0), non_blocking=True)
 
         if self.input_batch.prev_sampled_token_ids is not None:
             # First, calculate which requests in the current batch also exist in the previous cached batch.
@@ -816,14 +801,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     cu_num_tokens[idx] - 1
                     for idx in current_common_req_indices
                 ]
-                self.input_ids[
-                    flattened_indices] = self.input_batch.prev_sampled_token_ids[
-                        prev_common_req_indices].squeeze(1)
 
-        torch.cuda.synchronize()
-        # if -1 in input_ids_list:
-        #     # Compute indices of values to fill in from the previous cached sampled tokens
-        #     # which has shape (num_reqs, 1)
+                # Upload the index tensors asynchronously so the scatter can be non-blocking
+                input_ids_index_tensor = torch.tensor(
+                    flattened_indices,
+                    dtype=torch.int64,
+                    pin_memory=self.pin_memory).to(self.device,
+                                                   non_blocking=True)
+                prev_common_req_indices_tensor = torch.tensor(
+                    prev_common_req_indices,
+                    dtype=torch.int64,
+                    pin_memory=self.pin_memory).to(self.device,
+                                                   non_blocking=True)
+                self.input_ids.scatter_(
+                    dim=0,
+                    index=input_ids_index_tensor,
+                    src=self.input_batch.prev_sampled_token_ids[
+                        prev_common_req_indices_tensor].squeeze(1))
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1646,8 +1640,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         cudagraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(batch_descriptor)
 
-        torch.cuda.synchronize()
-
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(
@@ -1836,17 +1828,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend([-1])
 
-        torch.cuda.synchronize()
-
         return ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids,
-            req_id_to_index=self.input_batch.req_id_to_index,
+            req_ids=self.input_batch.req_ids.copy(),
+            req_id_to_index=self.input_batch.req_id_to_index.copy(),
             sampled_token_ids=(sampled_token_ids_tensor, invalid_req_indices),
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[],
             kv_connector_output=kv_connector_output,
-            num_nans_in_logits=num_nans_in_logits,
+            num_nans_in_logits=num_nans_in_logits.copy(),
         )
 
         # if self.speculative_config:
