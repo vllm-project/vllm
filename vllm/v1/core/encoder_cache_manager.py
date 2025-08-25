@@ -173,6 +173,9 @@ class EncoderCacheManager:
             self.cached[mm_hash] = set()
 
         num_encoder_token = request.get_num_encoder_tokens(input_id)
+
+        # NOTE: Encoder cache should always have enough space for encoder inputs
+        # that are scheduled since eviction takes place at can_allocate().
         assert self.num_free_slots >= num_encoder_token
         assert self.num_freeable_slots >= num_encoder_token
 
