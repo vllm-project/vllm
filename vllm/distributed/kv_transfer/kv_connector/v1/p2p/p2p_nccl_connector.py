@@ -121,7 +121,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
             request_id: str,
         ) -> None:
             if (isinstance(attn_metadata, MLACommonMetadata)
-                    or layer.shape[1] == 2): # mla or flashinfer
+                    or layer.shape[1] == 2):  # mla or flashinfer
                 num_block = kv_cache.shape[0]
                 self.check_tensors_except_dim(layer, kv_cache, 0)
                 if len(block_ids) == num_block:
@@ -133,7 +133,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                         "num_block:%d, request_id:%s", len(block_ids),
                         num_block, request_id)
 
-            elif layer.shape[0] == 2: # flash attention
+            elif layer.shape[0] == 2:  # flash attention
                 num_block = kv_cache.shape[1]
                 self.check_tensors_except_dim(layer, kv_cache, 1)
                 if len(block_ids) == num_block:
@@ -171,8 +171,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     request.request_id + "#" + layer_name)
 
                 if kv_cache is None:
-                    logger.warning("🚧kv_cache is None, %s",
-                                   request.request_id)
+                    logger.warning("🚧kv_cache is None, %s", request.request_id)
                     continue
 
                 inject_kv_into_layer(layer, kv_cache, request.block_ids,
@@ -213,10 +212,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
             block_ids: torch.Tensor,
         ) -> torch.Tensor:
             if (isinstance(attn_metadata, MLACommonMetadata)
-                    or layer.shape[1] == 2): # mla or flashinfer
+                    or layer.shape[1] == 2):  # mla or flashinfer
                 return layer[block_ids, ...]
 
-            if layer.shape[0] == 2: # flash attention
+            if layer.shape[0] == 2:  # flash attention
                 return layer[:, block_ids, ...]
 
             return None
