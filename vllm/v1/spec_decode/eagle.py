@@ -295,7 +295,7 @@ class EagleProposer:
                 # NOTE(woosuk): We should handle the case where the draft model
                 # generates tokens beyond the max model length.
                 # Since it is complex to remove such requests from the batch,
-                # we keep them in the batch but adjust the position ids 
+                # we keep them in the batch but adjust the position ids
                 # and slot mappings to avoid the
                 # out-of-range access during the model execution.
                 # The draft tokens generated with this adjustment

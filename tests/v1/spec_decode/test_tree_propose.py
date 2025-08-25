@@ -65,7 +65,7 @@ class MockAttentionGroup:
         self.call_count = 0
 
     def create_mock_metadata(self, common_attn_metadata, draft_index):
-        # Use the query_len encoded in common_attn_metadata 
+        # Use the query_len encoded in common_attn_metadata
         # to make num_actual_tokens consistent
         num_tokens = common_attn_metadata.num_actual_tokens
         mock_attn_metadata = Mock()
