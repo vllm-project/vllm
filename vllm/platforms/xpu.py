@@ -90,13 +90,6 @@ class XPUPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
 
-        # FIXME: Temporarily forcing eager mode
-        # remove after t.compile support stabilizes.
-        if (envs.VLLM_USE_V1 and model_config is not None
-                and not vllm_config.model_config.enforce_eager):
-            from vllm.config import CompilationLevel
-            vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION  # noqa: E501
-
         # Instances created using VllmConfig() typically have model_config as
         # None by default. The modification involves adding a check to prevent
         # potential null exceptions check and update model config.
@@ -113,6 +106,22 @@ class XPUPlatform(Platform):
             logger.info("[XPU] CUDA graph is not supported on XPU, "
                         "disabling cudagraphs.")
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+        # diable cuda graphs since it is not supported on XPU platform
+        compilation_config.use_cudagraph = False
+        compilation_config.cudagraph_capture_sizes = []
+
+        from vllm.config import CompilationLevel
+        if compilation_config.level == CompilationLevel.PIECEWISE:
+            logger.info("Piecewise compilation level is not supported on XPU, "
+                        "switching to Dynamo(DYNAMO_ONECE) compilation with "
+                        "the Inductor backend.")
+            compilation_config.level = CompilationLevel.DYNAMO_ONCE
+            compilation_config.backend = "inductor"
+
+            if compilation_config.use_inductor:
+                # diable all custom ops for piecewise compilation
+                compilation_config.custom_ops = ["none"]
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
