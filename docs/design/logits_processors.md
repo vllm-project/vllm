@@ -20,7 +20,7 @@ In each engine step, the vLLM engine will (1) update each logits processor's int
 
 At the beginning of each engine step, the persistent batch adds, discards and reorders requests in response to the scheduler output. After the persistent batch has reorganized, the vLLM engine invokes each logits processor's `update_state()` method. This is necessary to ensure that logits processors' internal states are reorganized to match the new persistent batch state at the beginning of the engine step.
 
-The pseudocode below shows the process by which the vLLM model runner notifies each logits processor of changes in persistent batch state:
+The pseudocode below shows the process by which the vLLM persistent batch notifies each logits processor of changes in batch state:
 
 ??? code "Model Runner Updates Logits Processor States"
 
@@ -157,7 +157,7 @@ At sampling time, the sampler checks whether all requests in the persistent batc
 
 * A **non-argmax-invariant logits processor** is a logits processor which may modify the argmax. For example, a logits processor which masks all tokens except for EOS after a certain number of steps in order to force decoding to terminate might end up masking the max-logit-value token and therefore change the argmax. Conceptually, these logits processors cannot be skipped for greedy sampling requests.
 
-The vLLM logits processor abstraction requires the engine to apply logits processors at batch granularity; therefore in practice the `apply()` calls to argmax-invariant logits processors can only be skipped when the entire batch uses greedy sampling.
+The vLLM logits processor abstraction requires the engine to apply logits processors at batch granularity; therefore in practice the argmax-invariant logits processors can only be skipped when the entire batch uses greedy sampling.
 
 ## Logits Processor Programming Model
 
@@ -268,11 +268,12 @@ A vLLM logits processor must subclass `LogitsProcessor` and define (at minimum) 
 
 * `update_state(self, batch_update: Optional["BatchUpdate"]) -> None`:
     * Consume a `BatchUpdate` data structure representing persistent batch state changes at the beginning of the current engine step
-    * Batch update data structure may be `None`, signaling no state-change
+    * Use the `BatchUpdate` members to update logits processor internal state
+    * **Note:** batch update data structure may be `None`, signaling no state-change
 
 ### `BatchUpdate` data structure
 
-The `BatchUpdate` abstraction models the persistent batch as a list of requests, supporting the following operations to change batch state (summarized below along with a schematic representation of how the batch is modified by the operation):
+The `BatchUpdate` abstraction models the persistent batch as a list of requests, supporting the following operations to change batch state:
 
 * **Add:** add (or replace existing request with) a new request at index `i`
 
