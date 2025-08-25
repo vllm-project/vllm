@@ -2232,9 +2232,29 @@ class TranscriptionRequest(OpenAIBaseModel):
 
 
 # Transcription response objects
+class TranscriptionUsageAudio(OpenAIBaseModel):
+    type: Literal["duration"] = "duration"
+    seconds: int
+
+
+class AudioTokensDetails(OpenAIBaseModel):
+    audio_tokens: int
+    text_tokens: int
+
+
+class TranscriptionUsageTokens(OpenAIBaseModel):
+    type: Literal["tokens"] = "tokens"
+    input_tokens: int
+    input_tokens_details: AudioTokensDetails
+    output_tokens: int
+    total_tokens: int
+
+
 class TranscriptionResponse(OpenAIBaseModel):
     text: str
     """The transcribed text."""
+    usage: Union[TranscriptionUsageAudio,
+                 TranscriptionUsageTokens] = Field(discriminator='type')
 
 
 class TranscriptionWord(OpenAIBaseModel):
