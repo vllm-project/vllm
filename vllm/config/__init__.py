@@ -3741,12 +3741,6 @@ class VllmConfig:
                     # local attention.
                     self.scheduler_config.disable_hybrid_kv_cache_manager = True
 
-            if self.cache_config.kv_sharing_fast_prefill:
-                # There is an IMA issue currently when using fast prefill with
-                # hybrid kv cache manager (e.g. interleaved sliding window)
-                # TODO(sarckk): investigate and fix
-                self.scheduler_config.disable_hybrid_kv_cache_manager = True
-
     def update_sizes_for_sequence_parallelism(self,
                                               possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
