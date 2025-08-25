@@ -36,7 +36,8 @@ class TextPrompt(TypedDict):
     Optional user-specified UUIDs for multimodal items, mapped by modality.
     Lists must match the number of items per modality and may contain `None`.
     For `None` entries, the hasher will compute IDs automatically; non-None
-    entries override the default hashes for caching.
+    entries override the default hashes for caching, and MUST be unique per
+    multimodal item.
     """
 
     cache_salt: NotRequired[str]
