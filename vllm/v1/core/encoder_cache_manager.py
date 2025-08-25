@@ -110,17 +110,20 @@ class EncoderCacheManager:
         enough space is available, and then this method returns True. 
         Older entries are evicted first.
         
-        Returns False only if the requested number of tokens exceeds both 
-        the free and reclaimable capacities combined.
+        Returns False if the requested number of encoder tokens exceeds the
+        provided compute `encoder_budget`, or if the requested tokens exceed
+        the total of free plus reclaimable cache capacity.
 
         Args:
             request: The request containing the multimodal input.
             input_id: Index of the multimodal input within the request.
+            encoder_budget: Maximum number of encoder tokens permitted to be
+                computed for this scheduling step.
 
         Returns:
-            True if there's enough capacity to hold the encoder output for this
-            input (possibly after reclaiming `freeable` entries); otherwise
-            False.
+            True if budget and capacity suffice to accommodate the encoder
+            output for this input (possibly after reclaiming `freeable`
+            entries); otherwise False.
 
         Note: This method does not allocate physical memory for the encoder 
         output but only the state of EncoderCacheManager.
@@ -197,7 +200,7 @@ class EncoderCacheManager:
         increased by the number of encoder tokens for that input. 
 
         The entry is NOT physically freed until capacity is needed (e.g., by
-        `can_allocate`).
+        `try_allocate`).
         """
         req_id = request.request_id
         mm_hash = request.mm_hashes[input_id]
@@ -215,7 +218,7 @@ class EncoderCacheManager:
 
         For each cached input ID, `free_encoder_input` is invoked.  
         The data stays in memory until eviction is triggered by a future 
-        attempt allocation called by 'can_allocate'.
+        attempt allocation called by 'try_allocate'.
 
         Typically called when a request is finished, cancelled, or aborted.
         """
