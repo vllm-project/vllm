@@ -527,13 +527,20 @@ class Platform:
             " attribute.", self.device_type, key)
             return None
 
-    def get_global_graph_pool(self) -> Any:
+    def get_global_graph_pool(self, enable_sleep_mode: bool = False) -> Any:
         """
         Return the global graph pool for the this platform.
         """
         cls = self.__class__
         if cls._global_graph_pool is None:
-            cls._global_graph_pool = self.graph_pool_handle()
+            if enable_sleep_mode:
+                from vllm.device_allocator.cumem import CuMemAllocator
+
+                allocator = CuMemAllocator.get_instance()
+                with allocator.use_memory_pool(tag="cuda_graph") as mem_pool:
+                    cls._global_graph_pool = mem_pool.id
+            else:
+                cls._global_graph_pool = self.graph_pool_handle()
         return cls._global_graph_pool
 
     @classmethod
