@@ -205,6 +205,7 @@ def _construct_cached_request_state(req_id_suffix: int):
         pooling_params=None,
         mm_kwargs=[],
         mm_positions=[],
+        mm_hashes=[],
         block_ids=([], ),
         generator=None,
         num_computed_tokens=len(output_token_ids),

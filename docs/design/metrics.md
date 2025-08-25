@@ -565,7 +565,7 @@ model and then validate those tokens with the larger model.
 - `vllm:spec_decode_num_emitted_tokens_total` (Counter)
 
 There is a PR under review (<gh-pr:12193>) to add "prompt lookup (ngram)"
-seculative decoding to v1. Other techniques will follow. We should
+speculative decoding to v1. Other techniques will follow. We should
 revisit the v0 metrics in this context.
 
 !!! note

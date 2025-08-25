@@ -37,7 +37,7 @@ ALLOWED_FILES = set([
     'vllm/distributed/utils.py',
     'vllm/distributed/parallel_state.py',
     'vllm/engine/multiprocessing/client.py',
-    'vllm/distributed/device_communicators/custom_all_reduce_utils.py',
+    'vllm/distributed/device_communicators/all_reduce_utils.py',
     'vllm/distributed/device_communicators/shm_broadcast.py',
     'vllm/engine/multiprocessing/engine.py',
     'benchmarks/kernels/graph_machete_bench.py',

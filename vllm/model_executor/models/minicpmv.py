@@ -778,6 +778,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         # and config class
         self.config = config
         self.multimodal_config = multimodal_config
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         self.version = get_version_by_config(self.config)
         self.llm = self.init_llm(vllm_config=vllm_config,
@@ -1325,9 +1326,11 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         prefix: str = "",
     ) -> nn.Module:
         quant_config = self._maybe_ignore_quant_config(quant_config)
-        model = Idefics2VisionTransformer(config.vision_config,
-                                          quant_config=quant_config,
-                                          prefix=prefix)
+        model = Idefics2VisionTransformer(
+            config.vision_config,
+            quant_config=quant_config,
+            prefix=prefix,
+            use_data_parallel=self.use_data_parallel)
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
         return model

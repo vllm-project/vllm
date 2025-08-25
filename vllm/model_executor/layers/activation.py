@@ -422,12 +422,23 @@ _ACTIVATION_REGISTRY = LazyDict({
     lambda: nn.SiLU(),
     "quick_gelu":
     lambda: QuickGELU(),
+    "tanh":
+    lambda: nn.Tanh(),
+    "sigmoid":
+    lambda: nn.Sigmoid(),
 })
 
 
 def get_act_fn(act_fn_name: str) -> nn.Module:
     """Get an activation function by name."""
     act_fn_name = act_fn_name.lower()
+
+    if act_fn_name.startswith("torch.nn.modules."):
+        activation_name = act_fn_name.split(".")[-1]
+        if activation_name == "identity":
+            return nn.Identity()
+        act_fn_name = activation_name
+
     if act_fn_name not in _ACTIVATION_REGISTRY:
         raise ValueError(
             f"Activation function {act_fn_name!r} is not supported.")
