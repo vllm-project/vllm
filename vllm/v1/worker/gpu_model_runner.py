@@ -800,26 +800,35 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 # We need to compute the flattened input_ids index of the last token for each of these requests
                 flattened_indices = [
-                    cu_num_tokens[idx] - 1
+                    int(cu_num_tokens[idx]) - 1
                     for idx in current_common_req_indices
                 ]
-
-                # Upload the index tensors asynchronously so the scatter can be non-blocking
-                input_ids_index_tensor = torch.tensor(
-                    flattened_indices,
-                    dtype=torch.int64,
-                    pin_memory=self.pin_memory).to(self.device,
-                                                   non_blocking=True)
-                prev_common_req_indices_tensor = torch.tensor(
-                    prev_common_req_indices,
-                    dtype=torch.int64,
-                    pin_memory=self.pin_memory).to(self.device,
-                                                   non_blocking=True)
-                self.input_ids.scatter_(
-                    dim=0,
-                    index=input_ids_index_tensor,
-                    src=self.input_batch.prev_sampled_token_ids[
-                        prev_common_req_indices_tensor].squeeze(1))
+                if flattened_indices == prev_common_req_indices and \
+                    set(flattened_indices) == set(range(len(flattened_indices))):
+                    # Common-case optimization: the batch is unchanged
+                    # and no reordering happened.
+                    # The indices are both the same permutation of [0, 1, 2, ..., len - 1]
+                    self.input_ids[:len(flattened_indices)].copy_(
+                        self.input_batch.prev_sampled_token_ids[:len(
+                            flattened_indices)].squeeze(1),
+                        non_blocking=True)
+                else:
+                    # Upload the index tensors asynchronously so the scatter can be non-blocking
+                    input_ids_index_tensor = torch.tensor(
+                        flattened_indices,
+                        dtype=torch.int64,
+                        pin_memory=self.pin_memory).to(self.device,
+                                                       non_blocking=True)
+                    prev_common_req_indices_tensor = torch.tensor(
+                        prev_common_req_indices,
+                        dtype=torch.int64,
+                        pin_memory=self.pin_memory).to(self.device,
+                                                       non_blocking=True)
+                    self.input_ids.scatter_(
+                        dim=0,
+                        index=input_ids_index_tensor,
+                        src=self.input_batch.prev_sampled_token_ids[
+                            prev_common_req_indices_tensor].squeeze(1))
 
         if self.uses_mrope:
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
