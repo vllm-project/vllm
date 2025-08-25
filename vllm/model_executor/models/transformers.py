@@ -714,6 +714,10 @@ class TransformersMoEBase(TransformersBase):
                 qual_name = maybe_prefix(prefix, child_name)
                 if (child_name == "experts"
                         and isinstance(child_module, nn.ModuleList)):
+                    # Get e_score_correction_bias if present
+                    gate = getattr(module, "gate", None)
+                    e_score_correction_bias = getattr(
+                        gate, "e_score_correction_bias", None)
                     # Replace experts module with FusedMoE
                     new_module = FusedMoE(
                         num_experts=num_experts,
@@ -729,7 +733,7 @@ class TransformersMoEBase(TransformersBase):
                         prefix=qual_name,
                         # custom_routing_function
                         # scoring_func
-                        # e_score_correction_bias
+                        e_score_correction_bias=e_score_correction_bias,
                         # apply_router_weight_on_input
                         # activation
                         # enable_eplb
