@@ -644,6 +644,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             raise NotImplementedError(
                 "Expert score correction bias is not supported for TPU.")
         assert activation == "silu", f"{activation} is not supported for TPU."
+        assert routed_scaling_factor == 1.0, \
+            f"routed_scaling_factor {routed_scaling_factor} is not supported " \
+            f"for TPU."
         if enable_eplb is not False or expert_load_view is not None or \
                 logical_to_physical_map is not None or \
                 logical_replica_count is not None:
