@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from collections import defaultdict
 
 import pytest
 from openai_harmony import (HarmonyEncodingName, Message, Role,
@@ -131,48 +130,3 @@ def test_extract_tool_calls_with_reasoning(openai_tool_parser,
     ]
     assert_tool_calls(extracted_info.tool_calls, expected_tool_calls)
     assert extracted_info.content == "The weather is nice."
-
-
-def test_extract_tool_calls_streaming(openai_tool_parser, harmony_encoding):
-    msg1 = Message.from_role_and_content(
-        Role.ASSISTANT, "Thinking...").with_channel("analysis")
-    msg2 = Message.from_role_and_content(
-        Role.ASSISTANT, '{"location": "Tokyo"}').with_channel("commentary"). \
-        with_recipient("functions.get_current_weather").with_content_type("json")
-
-    stop_token = harmony_encoding.token_from_string("<|call|>")
-    token_ids = harmony_encoding.render_message(
-        msg1) + harmony_encoding.render_message(msg2) + [stop_token]
-
-    reasoning_content = ""
-    tool_calls = defaultdict(lambda: {"name": "", "arguments": ""})
-
-    for i in range(len(token_ids)):
-        delta_message = openai_tool_parser.extract_tool_calls_streaming(
-            previous_text="",
-            current_text="",
-            delta_text="",
-            previous_token_ids=token_ids[:i],
-            current_token_ids=token_ids[:i + 1],
-            delta_token_ids=[token_ids[i]],
-            request=None,
-        )
-
-        if delta_message:
-            if delta_message.reasoning_content:
-                reasoning_content += delta_message.reasoning_content
-            if delta_message.tool_calls:
-                for tool_call_delta in delta_message.tool_calls:
-                    if tool_call_delta.function.name:
-                        tool_calls[
-                            tool_call_delta.index]["name"] = \
-                                tool_call_delta.function.name
-                    if tool_call_delta.function.arguments:
-                        tool_calls[
-                            tool_call_delta.index]["arguments"] += \
-                                tool_call_delta.function.arguments
-
-    assert reasoning_content == "Thinking..."
-    assert len(tool_calls) == 1
-    assert tool_calls[0]["name"] == "get_current_weather"
-    assert tool_calls[0]["arguments"] == '{"location": "Tokyo"}'

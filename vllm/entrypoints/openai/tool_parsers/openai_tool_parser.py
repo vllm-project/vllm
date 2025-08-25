@@ -5,11 +5,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.harmony_utils import (
-    get_streamable_parser_for_assistant, parse_output_into_messages)
+from vllm.entrypoints.harmony_utils import parse_output_into_messages
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaFunctionCall, DeltaMessage,
-                                              DeltaToolCall,
+                                              DeltaMessage,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
@@ -76,48 +74,5 @@ class OpenAIToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        stream_parser = get_streamable_parser_for_assistant()
-
-        for token_id in previous_token_ids:
-            stream_parser.process(token_id)
-
-        # Count previously completed tool calls
-        base_index = 0
-        for msg in stream_parser.messages:
-            if (msg.channel == "commentary" and msg.recipient
-                    and msg.recipient.startswith("functions.")):
-                base_index += 1
-
-        prev_recipient = stream_parser.current_recipient
-        for token_id in delta_token_ids:
-            stream_parser.process(token_id)
-
-        delta_message: DeltaMessage | None = None
-        if stream_parser.current_channel == "analysis":
-            if request.include_reasoning:
-                delta_message = DeltaMessage(
-                    reasoning_content=stream_parser.last_content_delta)
-        elif stream_parser.current_channel == "final":
-            delta_message = DeltaMessage(
-                content=stream_parser.last_content_delta)
-        elif (stream_parser.current_channel == "commentary"
-              and stream_parser.current_recipient
-              and stream_parser.current_recipient.startswith("functions.")):
-            current_recipient = stream_parser.current_recipient
-            if current_recipient != prev_recipient:
-                tool_name = current_recipient.split("functions.")[1]
-                delta_message = DeltaMessage(tool_calls=[
-                    DeltaToolCall(index=base_index,
-                                  type="function",
-                                  function=DeltaFunctionCall(name=tool_name,
-                                                             arguments=""))
-                ])
-            elif stream_parser.last_content_delta:
-                delta_message = DeltaMessage(tool_calls=[
-                    DeltaToolCall(
-                        index=base_index,
-                        function=DeltaFunctionCall(
-                            arguments=stream_parser.last_content_delta))
-                ])
-
-        return delta_message
+        raise NotImplementedError(
+            "Not being used, manual parsing in serving_chat.py")

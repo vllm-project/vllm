@@ -68,10 +68,10 @@ class MinimaxToolParser(ToolParser):
     def preprocess_model_output(self, model_output: str) -> str:
         """
         Preprocess model output by removing tool calls from thinking tags.
-        
+
         Args:
             model_output: Raw model output string
-            
+
         Returns:
             Preprocessed model output with tool calls removed from thinking tags
         """
@@ -92,10 +92,10 @@ class MinimaxToolParser(ToolParser):
     def _clean_duplicate_braces(self, args_text: str) -> str:
         """
         Clean duplicate closing braces from arguments text.
-        
+
         Args:
             args_text: Raw arguments text
-            
+
         Returns:
             Cleaned arguments text with proper JSON formatting
         """
@@ -122,10 +122,10 @@ class MinimaxToolParser(ToolParser):
     def _clean_delta_braces(self, delta_text: str) -> str:
         """
         Clean delta text by removing excessive closing braces.
-        
+
         Args:
             delta_text: Delta text to clean
-            
+
         Returns:
             Cleaned delta text
         """
@@ -145,14 +145,15 @@ class MinimaxToolParser(ToolParser):
         self,
         model_output: str,
         request: ChatCompletionRequest,
+        token_ids: Optional[Sequence[int]] = None,
     ) -> ExtractedToolCallInformation:
         """
         Extract tool calls from model output for non-streaming mode.
-        
+
         Args:
             model_output: Complete model output
             request: Chat completion request
-            
+
         Returns:
             ExtractedToolCallInformation containing tool calls and content
         """
@@ -228,7 +229,7 @@ class MinimaxToolParser(ToolParser):
     def _update_thinking_state(self, text: str) -> None:
         """
         Update the thinking tag state based on text content.
-        
+
         Args:
             text: Text to analyze for thinking tags
         """
@@ -240,10 +241,10 @@ class MinimaxToolParser(ToolParser):
     def _is_potential_tag_start(self, text: str) -> bool:
         """
         Check if text might be the start of a tool call tag.
-        
+
         Args:
             text: Text to check
-            
+
         Returns:
             True if text could be the start of a tool call tag
         """
@@ -257,10 +258,10 @@ class MinimaxToolParser(ToolParser):
     def _should_buffer_content(self, delta_text: str) -> bool:
         """
         Determine if content should be buffered for later processing.
-        
+
         Args:
             delta_text: Delta text to check
-            
+
         Returns:
             True if content should be buffered
         """
@@ -274,10 +275,10 @@ class MinimaxToolParser(ToolParser):
     def _split_content_for_buffering(self, delta_text: str) -> tuple[str, str]:
         """
         Split delta text into safe content and potential tag content.
-        
+
         Args:
             delta_text: Delta text to split
-            
+
         Returns:
             Tuple of (safe_content, potential_tag_content)
         """
@@ -295,10 +296,10 @@ class MinimaxToolParser(ToolParser):
     def _process_buffer(self, new_content: str) -> str:
         """
         Process buffered content and return output content.
-        
+
         Args:
             new_content: New content to add to buffer
-            
+
         Returns:
             Processed output content
         """
@@ -346,7 +347,7 @@ class MinimaxToolParser(ToolParser):
     def _set_current_tool_index(self, index: int) -> None:
         """
         Set the current tool index.
-        
+
         Args:
             index: Tool index to set
         """
@@ -355,7 +356,7 @@ class MinimaxToolParser(ToolParser):
     def _get_current_tool_index(self) -> int:
         """
         Get the current tool index.
-        
+
         Returns:
             Current tool index
         """
@@ -364,10 +365,10 @@ class MinimaxToolParser(ToolParser):
     def _get_next_unsent_tool_index(self, tool_count: int) -> int:
         """
         Get the index of the next unsent tool.
-        
+
         Args:
             tool_count: Total number of tools
-            
+
         Returns:
             Index of next unsent tool, or -1 if all tools sent
         """
@@ -383,7 +384,7 @@ class MinimaxToolParser(ToolParser):
     def _ensure_state_arrays(self, tool_count: int) -> None:
         """
         Ensure state arrays have sufficient capacity for tool_count tools.
-        
+
         Args:
             tool_count: Number of tools to prepare for
         """
@@ -406,10 +407,10 @@ class MinimaxToolParser(ToolParser):
     def _detect_tools_in_text(self, text: str) -> int:
         """
         Detect the number of tools in text by counting name patterns.
-        
+
         Args:
             text: Text to analyze
-            
+
         Returns:
             Number of tools detected
         """
@@ -419,10 +420,10 @@ class MinimaxToolParser(ToolParser):
     def _find_tool_boundaries(self, text: str) -> list[tuple[int, int]]:
         """
         Find the boundaries of tool calls in text.
-        
+
         Args:
             text: Text to analyze
-            
+
         Returns:
             List of (start, end) positions for tool calls
         """
@@ -464,11 +465,11 @@ class MinimaxToolParser(ToolParser):
     def _extract_tool_args(self, tool_content: str, args_match) -> str:
         """
         Extract tool arguments from tool content.
-        
+
         Args:
             tool_content: Tool call content
             args_match: Regex match for arguments pattern
-            
+
         Returns:
             Extracted arguments as string
         """
@@ -496,11 +497,11 @@ class MinimaxToolParser(ToolParser):
             tool_index: int) -> tuple[Optional[str], Optional[str]]:
         """
         Get the content of a specific tool by index.
-        
+
         Args:
             text: Text containing tool calls
             tool_index: Index of tool to extract
-            
+
         Returns:
             Tuple of (tool_name, tool_arguments) or (None, None) if not found
         """
@@ -532,11 +533,11 @@ class MinimaxToolParser(ToolParser):
             tool_count: int) -> Union[DeltaMessage, None]:
         """
         Handle streaming of tool names.
-        
+
         Args:
             tool_content: Content containing tool calls
             tool_count: Total number of tools
-            
+
         Returns:
             DeltaMessage with tool name or None if no tool to stream
         """
@@ -577,11 +578,11 @@ class MinimaxToolParser(ToolParser):
             tool_count: int) -> Union[DeltaMessage, None]:
         """
         Handle streaming of tool arguments.
-        
+
         Args:
             tool_content: Content containing tool calls
             tool_count: Total number of tools
-            
+
         Returns:
             DeltaMessage with tool arguments or None if no arguments to stream
         """
@@ -749,10 +750,10 @@ class MinimaxToolParser(ToolParser):
                                           current_text: str) -> Optional[int]:
         """
         Find the start position of tool calls outside of thinking tags.
-        
+
         Args:
             current_text: Current text to search
-            
+
         Returns:
             Position of tool call start or None if not found
         """
@@ -776,12 +777,12 @@ class MinimaxToolParser(ToolParser):
                                       tool_start: int) -> Optional[str]:
         """
         Extract content that appears before tool calls.
-        
+
         Args:
             current_text: Current text
             delta_text: Delta text
             tool_start: Start position of tools
-            
+
         Returns:
             Content before tools or None
         """
@@ -797,11 +798,11 @@ class MinimaxToolParser(ToolParser):
     def _extract_tool_content(self, current_text: str, tool_start: int) -> str:
         """
         Extract tool content from current text starting at tool_start.
-        
+
         Args:
             current_text: Current text
             tool_start: Start position of tool calls
-            
+
         Returns:
             Extracted tool content
         """

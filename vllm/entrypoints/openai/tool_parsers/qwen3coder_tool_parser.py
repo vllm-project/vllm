@@ -265,6 +265,7 @@ class Qwen3CoderToolParser(ToolParser):
         self,
         model_output: str,
         request: ChatCompletionRequest,
+        token_ids: Optional[Sequence[int]] = None,
     ) -> ExtractedToolCallInformation:
         # Quick check to avoid unnecessary processing
         if self.tool_call_prefix not in model_output:

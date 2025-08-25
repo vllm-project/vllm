@@ -46,8 +46,11 @@ class ToolParser:
         return request
 
     def extract_tool_calls(
-            self, model_output: str,
-            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+        token_ids: Optional[Sequence[int]] = None,
+    ) -> ExtractedToolCallInformation:
         """
         Static method that should be implemented for extracting tool calls from
         a complete model-generated string.
@@ -123,7 +126,7 @@ class ToolParserManager:
             module: Union[type, None] = None) -> Union[type, Callable]:
         """
         Register module with the given name or name list. it can be used as a
-        decoder(with module as None) or normal function(with module as not 
+        decoder(with module as None) or normal function(with module as not
         None).
         """
         if not isinstance(force, bool):

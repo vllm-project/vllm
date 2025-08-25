@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Callable, Final, Optional, Union
+from typing import TYPE_CHECKING, Callable, Final, Optional, Union
 
 import jinja2
 import partial_json_parser
@@ -1171,6 +1171,8 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs = None
 
             if self.use_harmony:
+                if TYPE_CHECKING:
+                    assert self.tool_parser is not None
                 tool_parser = self.tool_parser(tokenizer)
                 reasoning_parser = self.reasoning_parser(tokenizer)
                 # NOTE: We use token_ids for openai tool parser

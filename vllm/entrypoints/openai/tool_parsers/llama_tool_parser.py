@@ -3,7 +3,7 @@
 
 import json
 from collections.abc import Sequence
-from typing import Union
+from typing import Optional, Union
 
 import partial_json_parser
 import regex as re
@@ -33,7 +33,7 @@ class Llama3JsonToolParser(ToolParser):
     Tool call parser for Llama 3.x and 4 models intended for use with the
     examples/tool_chat_template_llama.jinja template.
 
-    Used when --enable-auto-tool-choice --tool-call-parser llama3_json or 
+    Used when --enable-auto-tool-choice --tool-call-parser llama3_json or
     llama4_json are set.
     """
 
@@ -57,8 +57,11 @@ class Llama3JsonToolParser(ToolParser):
             re.DOTALL)
 
     def extract_tool_calls(
-            self, model_output: str,
-            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+        token_ids: Optional[Sequence[int]] = None,
+    ) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
         Only extracts JSON content and ignores any surrounding plain text.
