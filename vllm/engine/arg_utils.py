@@ -9,6 +9,7 @@ import functools
 import json
 import sys
 from dataclasses import MISSING, dataclass, fields, is_dataclass
+from enum import Enum
 from itertools import permutations
 from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
                     Literal, Optional, Type, TypeVar, Union, cast, get_args,
@@ -127,6 +128,20 @@ def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
             f"Got {options} with types {[type(c) for c in options]}")
     kwarg = "metavar" if contains_type(type_hints, str) else "choices"
     return {"type": option_type, kwarg: sorted(options)}
+
+
+def enum_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
+    """Get the `type` and `choices` from a `Enum` type hint in `type_hints`.
+
+    If `type_hints` also contains `str`, we use `metavar` instead of `choices`
+    and `str` instead of constructing the `Enum` member.
+    """
+    type_hint = get_type(type_hints, Enum)
+    options = [f.value for f in type_hint]
+    could_be_string = contains_type(type_hints, str)
+    kwarg = "metavar" if could_be_string else "choices"
+    type = str if could_be_string else type_hint
+    return {"type": type, kwarg: sorted(options)}
 
 
 def is_not_builtin(type_hint: TypeHint) -> bool:
