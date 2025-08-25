@@ -12,11 +12,11 @@ from openai.types.responses.response_function_web_search import (
     ActionFind, ActionOpenPage, ActionSearch, ResponseFunctionWebSearch)
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent)
-from openai.types.responses.tool import Tool
+from openai.types.responses.tool import Tool, FunctionTool
 from openai_harmony import (Author, Conversation, DeveloperContent,
                             HarmonyEncodingName, Message, ReasoningEffort,
                             Role, StreamableParser, SystemContent, TextContent,
-                            ToolDescription, load_harmony_encoding)
+                            ToolDescription, ToolNamespaceConfig, load_harmony_encoding)
 
 from vllm.entrypoints.openai.protocol import ResponseInputOutputItem
 from vllm.utils import random_uuid
@@ -26,6 +26,8 @@ REASONING_EFFORT = {
     "medium": ReasoningEffort.MEDIUM,
     "low": ReasoningEffort.LOW,
 }
+
+FUNCTION_TOOLS_PREFIX = "functions."
 
 _harmony_encoding = None
 
@@ -62,6 +64,25 @@ def get_system_message(
     sys_msg = Message.from_role_and_content(Role.SYSTEM, sys_msg_content)
     return sys_msg
 
+def get_harmony_tools(tools: Optional[list] = None) -> Optional[list[Tool]]:
+    if not tools:
+        return None
+    harmony_tools = []
+    for tool in tools:
+        tool = tool.function
+        ft = FunctionTool(
+            name=tool.name,
+            description=tool.description,
+            parameters=tool.parameters,
+            type="function",
+        )
+        harmony_tools.append(ft)
+    return harmony_tools
+
+def trim_function_tool_prefix(tool_name: Optional[str]):
+    if tool_name and tool_name.startswith(FUNCTION_TOOLS_PREFIX):
+        return tool_name[len(FUNCTION_TOOLS_PREFIX):]
+    return tool_name
 
 def get_developer_message(instructions: Optional[str] = None,
                           tools: Optional[list[Tool]] = None) -> Message:
@@ -146,6 +167,35 @@ def parse_response_input(
     else:
         raise ValueError(f"Unknown input type: {response_msg['type']}")
     return msg
+
+
+def parse_regular_messages(chat_msgs):
+    tool_calls_map = {}
+    msgs = []
+    for chat_msg in chat_msgs:
+        role = chat_msg["role"]
+        content = chat_msg["content"]
+        if isinstance(content, str):
+            contents = [TextContent(text=content)]
+        else:
+            # TODO: Support refusal.
+            contents = [TextContent(text=c["text"]) for c in content]
+
+        if role == Role.ASSISTANT and "tool_calls" in chat_msg:
+            tool_calls = list(chat_msg["tool_calls"] or [])
+            assert len(tool_calls) == 1
+            tool_call = tool_calls[0]
+            tool_call_name = f"functions.{tool_call["function"]["name"]}"
+            tool_call_arguemtns = tool_call["function"]["arguments"]
+            tool_calls_map[tool_call["id"]] = tool_call_name
+            msg = Message.from_role_and_content(role, tool_call_arguemtns).with_channel("commentary").with_recipient(tool_call_name)            
+        elif role == Role.TOOL:
+            assert "tool_call_id" in chat_msg and chat_msg["tool_call_id"] in tool_calls_map
+            msg = Message.from_author_and_content(Author.new(Role.TOOL, tool_calls_map[chat_msg["tool_call_id"]]), content).with_channel("commentary")
+        else:
+            msg = Message.from_role_and_contents(role, contents)
+        msgs.append(msg)
+    return msgs
 
 
 def parse_chat_input(chat_msg) -> Message:

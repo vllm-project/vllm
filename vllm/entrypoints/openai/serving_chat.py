@@ -24,7 +24,8 @@ from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
 from vllm.entrypoints.harmony_utils import (
     get_developer_message, get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant, get_system_message, parse_chat_input,
-    parse_chat_output, render_for_completion)
+    parse_chat_output, render_for_completion, get_harmony_tools, trim_function_tool_prefix,
+    parse_regular_messages)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
@@ -665,6 +666,9 @@ class OpenAIServingChat(OpenAIServing):
                             harmony_parser.process(token_id)
                         is_reasoning = \
                             harmony_parser.current_channel == "analysis"
+                        # Only return the tool call if the tools are provided.
+                        is_harmony_tool = (harmony_parser.current_channel == "commentary" and request.tools)
+                        harmony_tool = trim_function_tool_prefix(harmony_parser.current_recipient)
                         if not request.include_reasoning and is_reasoning:
                             # Skip the reasoning content.
                             continue
@@ -698,6 +702,15 @@ class OpenAIServingChat(OpenAIServing):
                         if is_reasoning:
                             delta_message = DeltaMessage(
                                 reasoning_content=delta_text)
+                        elif is_harmony_tool:
+                            delta_tool_call = DeltaToolCall(
+                                id=make_tool_call_id(),
+                                type="function",
+                                function=DeltaFunctionCall(
+                                    name=harmony_tool,
+                                    arguments=delta_text),
+                                index=i)
+                            delta_message = DeltaMessage(tool_calls=[delta_tool_call])
                         else:
                             delta_message = DeltaMessage(content=delta_text)
                     # handle streaming deltas for tools with named tool_choice
@@ -1501,12 +1514,11 @@ class OpenAIServingChat(OpenAIServing):
         messages.append(sys_msg)
 
         # Add developer message.
-        dev_msg = get_developer_message()
+        dev_msg = get_developer_message(tools=get_harmony_tools(request.tools))
         messages.append(dev_msg)
 
         # Add user message.
-        for chat_msg in request.messages:
-            messages.append(parse_chat_input(chat_msg))
+        messages.extend(parse_regular_messages(request.messages))
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
