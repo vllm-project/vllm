@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, PoolerConfig
+from vllm.logger import init_logger
 from vllm.model_executor.pooling_metadata import (  # noqa: E501
     PoolingMetadata as V0PoolingMetadata)
 from vllm.model_executor.pooling_metadata import PoolingTensors
@@ -22,6 +23,8 @@ from vllm.tasks import PoolingTask
 from vllm.utils import current_stream, resolve_obj_by_qualname
 from vllm.v1.pool.metadata import PoolingCursor
 from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
+
+logger = init_logger(__name__)
 
 PoolingMetadata = Union[V0PoolingMetadata, V1PoolingMetadata]
 PoolingFn = Callable[
@@ -396,6 +399,10 @@ class PoolerClassify(PoolerActivation):
         vllm_config = get_current_vllm_config()
         self.num_labels = getattr(vllm_config.model_config.hf_config,
                                   "num_labels", 0)
+        if self.num_labels == 0:
+            logger.warning("It's hard to imagine num_labels == 0, "
+                           "falling back to softmax. "
+                           "Please check if the configuration is correct.")
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         if self.num_labels == 1:
@@ -413,6 +420,11 @@ class PoolerScore(PoolerActivation):
         vllm_config = get_current_vllm_config()
         self.num_labels = getattr(vllm_config.model_config.hf_config,
                                   "num_labels", 0)
+
+        if self.num_labels == 0:
+            logger.warning("It's hard to imagine num_labels == 0, "
+                           "falling back to softmax. "
+                           "Please check if the configuration is correct.")
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         if self.num_labels == 1:
