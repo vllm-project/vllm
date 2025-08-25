@@ -452,7 +452,8 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         )
 
         if cached_update.modality == "image":
-            image_tokens: list[str] = self.info.image_tokens  # type: ignore
+            hf_processor = self.info.get_hf_processor()
+            image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
             new_update = new_update.with_target(image_tokens[new_item_idx])
 
         return new_update
