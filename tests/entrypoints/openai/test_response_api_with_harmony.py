@@ -11,10 +11,7 @@ from openai import BadRequestError, NotFoundError, OpenAI
 
 from ...utils import RemoteOpenAIServer
 
-pytest.skip(allow_module_level=True, reason="gpt-oss can't run on CI yet.")
-
 MODEL_NAME = "openai/gpt-oss-20b"
-DTYPE = "bfloat16"
 
 
 @pytest.fixture(scope="module")
@@ -269,10 +266,11 @@ async def test_stateful_multi_turn(client: OpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_streaming(client: OpenAI, model_name: str):
+    # TODO: Add back when web search and code interpreter are available in CI
     prompts = [
         "tell me a story about a cat in 20 words",
-        "What is 13 * 24? Use python to calculate the result.",
-        "When did Jensen found NVIDIA? Search it and answer the year only.",
+        # "What is 13 * 24? Use python to calculate the result.",
+        # "When did Jensen found NVIDIA? Search it and answer the year only.",
     ]
 
     for prompt in prompts:
@@ -281,15 +279,15 @@ async def test_streaming(client: OpenAI, model_name: str):
             input=prompt,
             reasoning={"effort": "low"},
             tools=[
-                {
-                    "type": "web_search_preview"
-                },
-                {
-                    "type": "code_interpreter",
-                    "container": {
-                        "type": "auto"
-                    }
-                },
+                # {
+                #     "type": "web_search_preview"
+                # },
+                # {
+                #     "type": "code_interpreter",
+                #     "container": {
+                #         "type": "auto"
+                #     }
+                # },
             ],
             stream=True,
         )
@@ -317,6 +315,7 @@ async def test_streaming(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.skip(reason="Web search tool is not available in CI yet.")
 async def test_web_search(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
@@ -331,6 +330,7 @@ async def test_web_search(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.skip(reason="Code interpreter tool is not available in CI yet.")
 async def test_code_interpreter(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
@@ -436,6 +436,7 @@ async def test_function_calling(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.flaky(reruns=5)
 async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
     tools = [
         {
