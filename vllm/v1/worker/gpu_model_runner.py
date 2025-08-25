@@ -1292,16 +1292,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 and "encode" in supported_tasks):
             supported_tasks.remove("encode")
 
-            logger.info_once("Chunked prefill is not supported with "
-                             "encode task which using ALL pooling. "
-                             "Please turn off chunked prefill by "
-                             "`--no-enable-chunked-prefill` before using it.")
+            logger.debug_once("Chunked prefill is not supported with "
+                              "encode task which using ALL pooling. "
+                              "Please turn off chunked prefill by "
+                              "`--no-enable-chunked-prefill` before using it.")
 
         if "score" in supported_tasks:
             num_labels = getattr(self.model_config.hf_config, "num_labels", 0)
             if num_labels != 1:
                 supported_tasks.remove("score")
-                logger.info_once(
+                logger.debug_once(
                     "Score API is only enabled for num_labels == 1.")
 
         return supported_tasks
