@@ -15,11 +15,21 @@ MODEL_NAME = "openai/gpt-oss-20b"
 
 
 @pytest.fixture(scope="module")
-def server():
+def monkeypatch_module():
+    from _pytest.monkeypatch import MonkeyPatch
+    mpatch = MonkeyPatch()
+    yield mpatch
+    mpatch.undo()
+
+
+@pytest.fixture(scope="module")
+def server(monkeypatch_module: pytest.MonkeyPatch):
     args = ["--enforce-eager", "--tool-server", "demo"]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-        yield remote_server
+    with monkeypatch_module.context() as m:
+        m.setenv("VLLM_ENABLE_RESPONSES_API_STORE", "1")
+        with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+            yield remote_server
 
 
 @pytest_asyncio.fixture
