@@ -690,6 +690,9 @@ class PlaceholderFeaturesInfo:
         )
 
 
+_MatchToApply = tuple[tuple[str, int], tuple[PromptTargetMatch, int]]
+
+
 def _find_matches(
     prompt: _S,
     mm_prompt_updates: "MultiModalPromptUpdates",
@@ -697,7 +700,7 @@ def _find_matches(
     *,
     prev_end_idx: int = 0,
     current_result: "MultiModalPromptUpdatesApplyResult",
-):
+) -> tuple[Optional[UpdateMode], list[_MatchToApply]]:
     mode: Optional[UpdateMode] = None
     mm_matches = dict[tuple[str, int], tuple[PromptTargetMatch, int]]()
 
@@ -729,8 +732,7 @@ def _find_matches(
 
     # To avoid conflicts, only replace one non-empty item at a time
     if mode == UpdateMode.REPLACE:
-        matches_to_apply_ = list[tuple[tuple[str, int],
-                                       tuple[PromptTargetMatch, int]]]()
+        matches_to_apply_ = list[_MatchToApply]()
         has_non_empty_matches = False
 
         for item in matches_to_apply:
