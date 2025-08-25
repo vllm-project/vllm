@@ -493,9 +493,6 @@ def _interleave_scales_lastdim_by4(scales: torch.Tensor) -> torch.Tensor:
     return permuted.reshape(s_shape[0], s_shape[-1] // 4, s_shape[1] * 4)
 
 
- 
-
-
 @pytest.mark.parametrize("topk", [1, 4])
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("num_tokens", [1, 128])
@@ -520,29 +517,44 @@ def test_flashinfer_cutlass_mxfp4_fused_moe(
     device = "cuda:0"
 
     # Inputs
-    hidden_states = torch.randn(num_tokens, hidden_size,
+    hidden_states = torch.randn(num_tokens,
+                                hidden_size,
                                 device=device,
                                 dtype=torch.bfloat16)
     # Random MXFP4 weights and scales (uint8), contiguous [w1; w3]
-    w13_q = torch.randint(0, 256, (num_experts, 2 * intermediate_size, hidden_size // 2),
-                          device=device, dtype=torch.uint8)
-    w13_scale = torch.randint(118, 123, (num_experts, 2 * intermediate_size, hidden_size // 32),
-                              device=device, dtype=torch.uint8)
+    w13_q = torch.randint(
+        0,
+        256, (num_experts, 2 * intermediate_size, hidden_size // 2),
+        device=device,
+        dtype=torch.uint8)
+    w13_scale = torch.randint(
+        118,
+        123, (num_experts, 2 * intermediate_size, hidden_size // 32),
+        device=device,
+        dtype=torch.uint8)
 
-    w2_q = torch.randint(0, 256, (num_experts, hidden_size, intermediate_size // 2),
-                         device=device, dtype=torch.uint8)
-    w2_scale = torch.randint(118, 123, (num_experts, hidden_size, intermediate_size // 32),
-                             device=device, dtype=torch.uint8)
+    w2_q = torch.randint(0,
+                         256,
+                         (num_experts, hidden_size, intermediate_size // 2),
+                         device=device,
+                         dtype=torch.uint8)
+    w2_scale = torch.randint(
+        118,
+        123, (num_experts, hidden_size, intermediate_size // 32),
+        device=device,
+        dtype=torch.uint8)
     # Bias contiguous [b1; b3]
-    bias13 = (torch.randn(num_experts, 2 * intermediate_size, device=device,
+    bias13 = (torch.randn(num_experts,
+                          2 * intermediate_size,
+                          device=device,
                           dtype=torch.bfloat16) * 10)
-    bias2 = (torch.randn(num_experts, hidden_size, device=device,
-                         dtype=torch.bfloat16) * 10)
-    router_logits = torch.rand(num_tokens, num_experts,
+    bias2 = (torch.randn(
+        num_experts, hidden_size, device=device, dtype=torch.bfloat16) * 10)
+    router_logits = torch.rand(num_tokens,
+                               num_experts,
                                dtype=torch.float32,
                                device=device)
 
-    # Reference: dequantize MXFP4 weights back to fp32 using the same packed layout
     w13_ref = mxfp4_dequantize(w13_q.clone(), w13_scale.clone()).reshape(
         num_experts, 2 * intermediate_size, hidden_size)
     w2_ref = mxfp4_dequantize(w2_q.clone(), w2_scale.clone()).reshape(
@@ -552,7 +564,6 @@ def test_flashinfer_cutlass_mxfp4_fused_moe(
                         bias13.to(torch.float32), w2_ref,
                         bias2.to(torch.float32), alpha, beta, limit, 'bf16')
 
-    # FlashInfer (BF16 Hopper) path (inline)
     from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
 
     # Swap halves to arrange as [w3; w1] (kernel expectation)
