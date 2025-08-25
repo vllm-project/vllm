@@ -336,7 +336,7 @@ class Fp8LinearOp:
 
         # AITER is only supported on ROCm and only for FP8_FNUZ
         # and at the moment are MI300 series
-        self.use_aiter_and_is_supported = (current_platform.is_rocm()
+        self.use_aiter_and_is_supported = (aiter_ops.is_aiter_supported()
                                            and envs.VLLM_ROCM_USE_AITER
                                            and envs.VLLM_ROCM_USE_AITER_LINEAR
                                            and current_platform.is_fp8_fnuz())

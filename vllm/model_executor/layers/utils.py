@@ -116,8 +116,8 @@ def rocm_unquantized_gemm(layer: torch.nn.Module,
     from vllm.platforms.rocm import on_gfx9
     ON_MI300 = on_gfx9()
     use_skinny = envs.VLLM_ROCM_USE_SKINNY_GEMM and ON_MI300
-    use_aiter = (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
-                 and ON_MI300)
+    use_aiter = (aiter_ops.is_aiter_supported() and envs.VLLM_ROCM_USE_AITER
+                 and envs.VLLM_ROCM_USE_AITER_LINEAR)
 
     k = weight.shape[1]
     _use_skinny = (use_skinny and \

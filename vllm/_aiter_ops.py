@@ -8,7 +8,20 @@ from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
 
 
-def rocm_aiter_tuned_gemm_impl(
+def is_aiter_supported() -> bool:
+    """ROCm AITER package is only supported on gfx9 archs"""
+
+    # checks the platform, device arch and aiter library existance.
+    from importlib.util import find_spec
+
+    from vllm.platforms.rocm import on_gfx9
+
+    current_platform.is_rocm() and \
+    on_gfx9() and \
+    find_spec("aiter")
+
+
+def _rocm_aiter_tuned_gemm_impl(
         input: torch.Tensor,
         weight: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
@@ -31,7 +44,7 @@ def rocm_aiter_tuned_gemm_impl(
                           bias=bias)
 
 
-def rocm_aiter_tuned_gemm_fake(
+def _rocm_aiter_tuned_gemm_fake(
         input: torch.Tensor,
         weight: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
@@ -46,12 +59,12 @@ def rocm_aiter_tuned_gemm_fake(
     return torch.empty((m, n), dtype=out_dtype, device=input.device)
 
 
-if current_platform.is_rocm():
+if is_aiter_supported():
     direct_register_custom_op(
         op_name="rocm_aiter_tuned_gemm",
-        op_func=rocm_aiter_tuned_gemm_impl,
+        op_func=_rocm_aiter_tuned_gemm_impl,
         mutates_args=[],
-        fake_impl=rocm_aiter_tuned_gemm_fake,
+        fake_impl=_rocm_aiter_tuned_gemm_fake,
         dispatch_key=current_platform.dispatch_key,
     )
 
