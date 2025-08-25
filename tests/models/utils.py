@@ -3,7 +3,8 @@
 
 import warnings
 from collections.abc import Sequence
-from typing import Any, NamedTuple, Optional, Union
+from dataclasses import dataclass
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -339,7 +340,8 @@ def softmax(data):
         return F.softmax(data, dim=-1)
 
 
-class ModelInfo(NamedTuple):
+@dataclass
+class ModelInfo:
     name: str
     architecture: str = ""
     dtype: str = "auto"
@@ -348,27 +350,33 @@ class ModelInfo(NamedTuple):
     enable_test: bool = True
 
 
+@dataclass
 class EmbedModelInfo(ModelInfo):
     is_matryoshka: bool = False
     matryoshka_dimensions: Optional[list[int]] = None
 
 
+@dataclass
 class CLSPoolingEmbedModelInfo(EmbedModelInfo):
     default_pooling_type: str = "CLS"
 
 
+@dataclass
 class LASTPoolingEmbedModelInfo(EmbedModelInfo):
     default_pooling_type: str = "LAST"
 
 
+@dataclass
 class RerankModelInfo(ModelInfo):
     pass
 
 
+@dataclass
 class CLSPoolingRerankModelInfo(RerankModelInfo):
     default_pooling_type: str = "CLS"
 
 
+@dataclass
 class LASTPoolingRerankModelInfo(RerankModelInfo):
     default_pooling_type: str = "LAST"
 
