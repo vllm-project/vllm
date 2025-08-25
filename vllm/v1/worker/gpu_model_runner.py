@@ -229,6 +229,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             is_pooling_model=self.is_pooling_model,
         )
 
+        self.use_async_scheduling = self.scheduler_config.async_scheduling
+
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
         # self.cudagraph_batch_sizes sorts in ascending order.
@@ -1759,57 +1761,60 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
-        # logprobs_tensors = sampler_output.logprobs_tensors
-        # logprobs_lists = logprobs_tensors.tolists() \
-        #     if logprobs_tensors is not None else None
+        logprobs_tensors = sampler_output.logprobs_tensors
+        logprobs_lists = logprobs_tensors.tolists() \
+            if logprobs_tensors is not None else None
 
         # Compute prompt logprobs if needed.
-        # prompt_logprobs_dict = self._get_prompt_logprobs_dict(
-        #     hidden_states[:num_scheduled_tokens],
-        #     scheduler_output.num_scheduled_tokens,
-        # )
+        prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+            hidden_states[:num_scheduled_tokens],
+            scheduler_output.num_scheduled_tokens,
+        )
 
-        sampled_token_ids_tensor = sampler_output.sampled_token_ids
-        invalid_req_indices = list(discard_sampled_tokens_req_indices)
-        assert sampled_token_ids_tensor.shape[-1] == 1
-        num_sampled_tokens = sampled_token_ids_tensor.shape[0]
+        num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
+        if not self.use_async_scheduling:
+            # Get the valid generated tokens.
+            sampled_token_ids = sampler_output.sampled_token_ids
+            max_gen_len = sampled_token_ids.shape[-1]
+            if max_gen_len == 1:
+                # No spec decode tokens.
+                valid_sampled_token_ids = sampled_token_ids.tolist()
+            else:
+                # Includes spec decode tokens.
+                valid_sampled_token_ids = self.rejection_sampler.parse_output(
+                    sampled_token_ids,
+                    self.input_batch.vocab_size,
+                )
+            # Mask out the sampled tokens that should not be sampled.
+            for i in discard_sampled_tokens_req_indices:
+                valid_sampled_token_ids[i].clear()
+        else:
+            valid_sampled_token_ids = None
+            sampled_token_ids_tensor = sampler_output.sampled_token_ids
+            invalid_req_indices = list(discard_sampled_tokens_req_indices)
+            invalid_req_indices_set = set(invalid_req_indices)
+            assert sampled_token_ids_tensor.shape[-1] == 1
 
-        # valid_sampled_token_ids = sampled_token_ids_tensor.tolist()
-
-        # Get the valid generated tokens.
-        # sampled_token_ids = sampler_output.sampled_token_ids
-        # max_gen_len = sampled_token_ids.shape[-1]
-        # if max_gen_len == 1:
-        #     # No spec decode tokens.
-        #     valid_sampled_token_ids = sampled_token_ids.tolist()
-        # else:
-        #     # Includes spec decode tokens.
-        #     valid_sampled_token_ids = self.rejection_sampler.parse_output(
-        #         sampled_token_ids,
-        #         self.input_batch.vocab_size,
-        #     )
-        # Mask out the sampled tokens that should not be sampled.
-        # for i in discard_sampled_tokens_req_indices:
-        #     valid_sampled_token_ids[i].clear()
+            # Cache the sampled tokens on the GPU and avoid CPU sync.
+            # These will be copied into input_ids in the next step
+            # when preparing inputs.
+            self.input_batch.prev_sampled_token_ids = \
+                sampled_token_ids_tensor.clone()
+            self.input_batch.prev_sampled_token_ids_invalid_indices = \
+                invalid_req_indices_set
+            self.input_batch.prev_req_id_to_index = {
+                req_id: i
+                for i, req_id in enumerate(self.input_batch.req_ids)
+                if i not in invalid_req_indices_set
+            }
 
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
         # NOTE(woosuk): As an exception, when using PP, the scheduler sends
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
-        self.input_batch.prev_sampled_token_ids = sampled_token_ids_tensor.clone(
-        )
-        self.input_batch.prev_sampled_token_ids_invalid_indices = set(
-            invalid_req_indices)
-        self.input_batch.prev_req_id_to_index = {
-            req_id: i
-            for i, req_id in enumerate(self.input_batch.req_ids)
-            if i not in self.input_batch.prev_sampled_token_ids_invalid_indices
-        }
-
         req_ids = self.input_batch.req_ids
         for req_idx in range(num_sampled_tokens):
-            # sampled_ids = valid_sampled_token_ids[req_idx]
             if req_idx in discard_sampled_tokens_req_indices:
                 continue
 
@@ -1820,39 +1825,51 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 f"Total number of tokens: {end_idx} > max_model_len: "
                 f"{self.max_model_len}")
 
-            self.input_batch.token_ids_cpu[req_idx,
-                                           start_idx:end_idx] = [-1] * 1
             self.input_batch.num_tokens_no_spec[req_idx] = end_idx
             self.input_batch.num_tokens[req_idx] = end_idx
+
+            if self.use_async_scheduling:
+                sampled_ids = [-1] * 1
+            else:
+                sampled_ids = valid_sampled_token_ids[req_idx]
+
             req_id = req_ids[req_idx]
             req_state = self.requests[req_id]
-            req_state.output_token_ids.extend([-1])
+            self.input_batch.token_ids_cpu[req_idx,
+                                           start_idx:end_idx] = sampled_ids
+            req_state.output_token_ids.extend(sampled_ids)
 
-        return ModelRunnerOutput(
+        if self.speculative_config:
+            assert spec_decode_common_attn_metadata is not None
+            self._draft_token_ids = self.propose_draft_token_ids(
+                scheduler_output,
+                valid_sampled_token_ids,
+                sampling_metadata,
+                hidden_states,
+                sample_hidden_states,
+                aux_hidden_states,
+                spec_decode_metadata,
+                spec_decode_common_attn_metadata,
+            )
+
+        self.eplb_step()
+
+        output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids.copy(),
             req_id_to_index=self.input_batch.req_id_to_index.copy(),
-            sampled_token_ids=(sampled_token_ids_tensor, invalid_req_indices),
-            logprobs=None,
-            prompt_logprobs_dict={},
+            sampled_token_ids=valid_sampled_token_ids,
+            logprobs=logprobs_lists,
+            prompt_logprobs_dict=prompt_logprobs_dict,
             pooler_output=[],
             kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits.copy(),
         )
 
-        # if self.speculative_config:
-        #     assert spec_decode_common_attn_metadata is not None
-        #     self._draft_token_ids = self.propose_draft_token_ids(
-        #         scheduler_output,
-        #         valid_sampled_token_ids,
-        #         sampling_metadata,
-        #         hidden_states,
-        #         sample_hidden_states,
-        #         aux_hidden_states,
-        #         spec_decode_metadata,
-        #         spec_decode_common_attn_metadata,
-        #     )
+        if self.use_async_scheduling:
+            output.sampled_token_ids = (sampled_token_ids_tensor,
+                                        invalid_req_indices)
 
-        # self.eplb_step()
+        return output
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         if self._draft_token_ids is None:
