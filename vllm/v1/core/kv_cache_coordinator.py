@@ -185,6 +185,7 @@ class KVCacheCoordinator(ABC):
         and update the cache block threshold after reaching the statistical 
         threshold."""
         if self.enable_caching:
+            assert self.cache_histograms is not None
             self.cache_histograms.cal_cache_histograms(hit_cache_blocks)
 
 
