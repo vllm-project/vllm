@@ -691,12 +691,6 @@ class TransformersMoEBase(TransformersBase):
         reduce_results = getattr(text_config, "num_experts_shared", 0) == 0
         renormalize = getattr(text_config, "norm_topk_prob", top_k > 1)
 
-        # Grouped topk kwargs. If either config is set, enable grouped topk
-        # and let FusedMoE handle any errors from misconfiguration
-        num_expert_group = getattr(text_config, "n_group", None)
-        topk_group = getattr(text_config, "topk_group", None)
-        use_grouped_topk = bool(num_expert_group or topk_group)
-
         def reduce_results_hook(module, _, output):
             """Forward hook that performs all-reduce on a nn.Module's output if
             tensor parallel or expert parallel is enabled. This is used for
@@ -704,6 +698,12 @@ class TransformersMoEBase(TransformersBase):
             shared experts have been added to the hidden state."""
             if (experts := module.experts).tp_size > 1 or experts.ep_size > 1:
                 return experts.maybe_all_reduce_tensor_model_parallel(output)
+
+        # Grouped topk kwargs. If either config is set, enable grouped topk
+        # and let FusedMoE handle any errors from misconfiguration
+        num_expert_group = getattr(text_config, "n_group", None)
+        topk_group = getattr(text_config, "topk_group", None)
+        use_grouped_topk = bool(num_expert_group or topk_group)
 
         if self.parallel_config.enable_eplb:
             raise NotImplementedError(
