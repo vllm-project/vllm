@@ -17,7 +17,7 @@ Latest reproduction guilde: [github issue link](https://github.com/vllm-project/
     - SGLang: `lmsysorg/sglang:v0.3.2-cu121`
     - LMDeploy: `openmmlab/lmdeploy:v0.6.1-cu12`
     - TensorRT-LLM: `nvcr.io/nvidia/tritonserver:24.07-trtllm-python-py3`
-        - *NOTE: we uses r24.07 as the current implementation only works for this version. We are going to bump this up.*
+        - *NOTE: we use r24.07 as the current implementation only works for this version. We are going to bump this up.*
     - Check [nightly-pipeline.yaml](nightly-pipeline.yaml) for the concrete docker images, specs and commands we use for the benchmark.
 - Hardware
     - 8x Nvidia A100 GPUs
