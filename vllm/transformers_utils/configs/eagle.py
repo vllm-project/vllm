@@ -61,8 +61,8 @@ class EAGLEConfig(PretrainedConfig):
                 else f"Eagle3{arch}" for arch in self.model.architectures
             ]
         else:
-            raise ValueError(f"Invalid method {method}. \
-                Supported methods are eagle and eagle3.")
+            raise ValueError(f"Invalid method {method}. "
+                             "Supported methods are eagle and eagle3.")
 
         super().__init__(**kwargs)
 
