@@ -254,6 +254,7 @@ _MULTIMODAL_MODELS = {
     # [Encoder-decoder]
     "DonutForConditionalGeneration": ("donut", "DonutForConditionalGeneration"),
     "Florence2ForConditionalGeneration": ("florence2", "Florence2ForConditionalGeneration"),  # noqa: E501
+    "LiteWhisperForConditionalGeneration": ("lite_whisper", "LiteWhisperForConditionalGeneration"),  # noqa: E501
     "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),  # noqa: E501
     "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),

@@ -201,6 +201,12 @@ def get_tokenizer(
             FutureWarning,
             stacklevel=2)
 
+    # Special handling for LiteWhisper models - use standard Whisper tokenizer
+    is_lite_whisper = "lite-whisper" in str(tokenizer_name).lower()
+    if is_lite_whisper:
+        logger.info(f"LiteWhisper model detected, using openai/whisper-large-v3 tokenizer instead of {tokenizer_name}")
+        tokenizer_name = "openai/whisper-large-v3"
+
     tokenizer: AnyTokenizer
     if tokenizer_mode == "mistral":
         tokenizer = MistralTokenizer.from_pretrained(str(tokenizer_name),

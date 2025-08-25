@@ -89,6 +89,13 @@ def get_processor(
     if revision is None:
         revision = "main"
 
+    # Global fallback for LiteWhisper models
+    if processor_name == "efficient-speech/lite-whisper-large-v3":
+        try:
+            processor_name = "openai/whisper-large-v3"
+        except Exception:
+            pass  # Continue with original logic if fallback fails
+
     try:
         if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
             processor = AutoProcessor.from_pretrained(
