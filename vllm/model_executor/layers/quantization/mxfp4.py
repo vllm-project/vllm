@@ -114,7 +114,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.topk_indices_dtype = None
         self.moe = moe
         self.use_marlin = self._should_use_marlin()
-        self.max_captute_size = get_current_vllm_config(
+        self.max_capture_size = get_current_vllm_config(
         ).compilation_config.max_capture_size
 
         if current_platform.is_device_capability(100) and not has_flashinfer():
