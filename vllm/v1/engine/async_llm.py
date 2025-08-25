@@ -338,7 +338,9 @@ class AsyncLLM(EngineClient):
         if (self.vllm_config.cache_config.kv_sharing_fast_prefill
                 and sampling_params.prompt_logprobs):
             raise ValueError(
-                "Fast prefill produces incorrect logprobs for prompt tokens")
+                "--kv-sharing-fast-prefill produces incorrect logprobs for "
+                "prompt tokens, please disable it when the requests need "
+                "prompt logprobs")
 
         try:
             # We start the output_handler on the first call to generate() so

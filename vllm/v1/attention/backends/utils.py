@@ -4,7 +4,6 @@ import abc
 import enum
 import functools
 from abc import abstractmethod
-from collections.abc import Hashable
 from dataclasses import dataclass, fields, make_dataclass
 from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Optional, Protocol,
                     TypeVar)
@@ -67,10 +66,11 @@ class CommonAttentionMetadata:
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
 
+    causal: bool = True
+
+    # Needed by FastPrefillAttentionBuilder
     logits_indices_padded: Optional[torch.Tensor] = None
     num_logits_indices: Optional[int] = None
-
-    causal: bool = True
 
 
 @dataclass
@@ -557,9 +557,8 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
         # Skip computing fast prefill path
         return common_attn_metadata
 
-    if (common_attn_metadata.logits_indices_padded is None
-            or common_attn_metadata.num_logits_indices is None):
-        return common_attn_metadata
+    assert common_attn_metadata.logits_indices_padded is not None
+    assert common_attn_metadata.num_logits_indices is not None
 
     logits_indices_padded = common_attn_metadata.logits_indices_padded
     num_logits_indices = common_attn_metadata.num_logits_indices
@@ -750,57 +749,10 @@ def subclass_attention_metadata(
     return Wrapped
 
 
-@functools.lru_cache
-def make_kv_sharing_fast_prefill_attention_metadata(
-    metadata_cls: Hashable, ) -> Any:
-    """
-    Return a new subclass of `metadata_cls` for fast prefill
-    """
-    attn_metadata_dataclass = subclass_attention_metadata(
-        name_prefix="KVSharingFastPrefill",
-        metadata_cls=metadata_cls,
-        fields=KV_SHARING_FAST_PREFILL_METADATA_FIELDS,
-    )
-    # Make attention metadata type inherit
-    # KVSharingFastPrefillAttentionMetadata type
-    fast_prefill_metadata_type = type(
-        attn_metadata_dataclass.__name__,
-        (
-            attn_metadata_dataclass,
-            KVSharingFastPrefillAttentionMetadata,
-        ),
-        {},
-    )
-    return fast_prefill_metadata_type
-
-
 @runtime_checkable
-class KVSharingFastPrefillAttentionMetadata(Protocol):
+class KVSharingFastPrefillMetadata(Protocol):
     logits_indices_padded: torch.Tensor
     num_logits_indices: int
-
-
-def create_kv_sharing_fast_prefill_attn_metadata_subclass(
-    metadata: Any,
-    common_attn_metadata: CommonAttentionMetadata,
-) -> Any:
-    # Dynamically create a a dataclass type that inherits
-    # from attention metadata type but includes additional
-    # fields logits_indices_padded and num_logits_indices
-    # which are required for prefill truncation
-    fast_prefill_metadata_type = (
-        make_kv_sharing_fast_prefill_attention_metadata(
-            metadata_cls=type(metadata), ))  # type: ignore
-    # Avoid deepcopy caused by dict.asdict
-    attn_metadata_fields = {}
-    for field in fields(metadata.__class__):
-        attn_metadata_fields[field.name] = getattr(metadata, field.name)
-    attn_metadata_i = fast_prefill_metadata_type(
-        **attn_metadata_fields,
-        logits_indices_padded=common_attn_metadata.logits_indices_padded,
-        num_logits_indices=common_attn_metadata.num_logits_indices,
-    )
-    return attn_metadata_i
 
 
 def create_fast_prefill_custom_backend(
@@ -820,7 +772,27 @@ def create_fast_prefill_custom_backend(
             make_kv_sharing_fast_prefill_common_attn_metadata(common_attn_metadata)
             metadata = super().build(common_prefix_len,
                                      new_common_attn_metadata, fast_build)
-            return create_kv_sharing_fast_prefill_attn_metadata_subclass(
+
+            class KVSharingFastPrefillAttentionMetadata(
+                    metadata.__class__, KVSharingFastPrefillMetadata):
+
+                def __init__(self, metadata, common_attention_metadata):
+                    # Shallow copy all fields in metadata cls
+                    for field in fields(metadata.__class__):
+                        setattr(self, field.name,
+                                getattr(metadata, field.name))
+
+                    # Set additional fields that will be used in model code
+                    assert (common_attn_metadata.logits_indices_padded
+                            is not None
+                            and common_attn_metadata.num_logits_indices
+                            is not None)
+                    self.logits_indices_padded = \
+                        common_attn_metadata.logits_indices_padded
+                    self.num_logits_indices = \
+                        common_attn_metadata.num_logits_indices
+
+            return KVSharingFastPrefillAttentionMetadata(
                 metadata, common_attn_metadata)
 
     attn_backend = subclass_attention_backend(

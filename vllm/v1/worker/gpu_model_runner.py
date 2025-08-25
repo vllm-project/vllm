@@ -1465,6 +1465,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return self.kv_connector_no_forward(scheduler_output,
                                                 self.vllm_config)
 
+        if self.cache_config.kv_sharing_fast_prefill:
+            assert not self.input_batch.num_prompt_logprobs, (
+                "--kv-sharing-fast-prefill produces incorrect logprobs for "
+                "prompt tokens, tokens, please disable it when the requests "
+                "need prompt logprobs")
+
         # Prepare the decoder inputs.
         (attn_metadata, logits_indices, spec_decode_metadata,
          num_scheduled_tokens_np, spec_decode_common_attn_metadata,
@@ -3089,6 +3095,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.runner_only_attn_layers,
         )
 
+        if self.cache_config.kv_sharing_fast_prefill:
+            # In You Only Cache Once (https://arxiv.org/abs/2405.05254) or other
+            # similar KV sharing setups, only the layers that generate KV caches
+            # are involved in the prefill phase, enabling prefill to early exit.
+            attn_layers = get_layers_from_vllm_config(self.vllm_config,
+                                                      Attention)
+            for layer_name in reversed(attn_layers):
+                if layer_name in self.shared_kv_cache_layers:
+                    self.kv_sharing_fast_prefill_eligible_layers.add(
+                        layer_name)
+                else:
+                    break
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -3097,8 +3116,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             cache size of each layer
         """
         kv_cache_config = deepcopy(kv_cache_config)
-        attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
-        self.maybe_add_kv_sharing_fast_prefill_layers(attn_layers)
         self.kv_cache_config = kv_cache_config
         self.may_reinitialize_input_batch(kv_cache_config)
         self.may_add_encoder_only_layers_to_kv_cache_config()
@@ -3141,26 +3158,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             spec, layer_names = encoder_only_attn_specs.popitem()
             self.kv_cache_config.kv_cache_groups.append(
                 KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec))
-
-    def maybe_add_kv_sharing_fast_prefill_layers(self,
-                                                 attn_layers: dict[str,
-                                                                   Attention]):
-        """
-        In You Only Cache Once (https://arxiv.org/abs/2405.05254), or other 
-        similar KV sharing setups, the layers that re-use the shared KV cache 
-        (cross-decoder layers) can skip prefill, as only the earlier layers 
-        that generate KV caches are involved in the prefill phase.
-        """
-        if not self.cache_config.kv_sharing_fast_prefill:
-            # Optimization disabled, return
-            return
-
-        # Iterate in reversed order and add layers that re-use KV cache
-        for layer_name in reversed(attn_layers):
-            if layer_name in self.shared_kv_cache_layers:
-                self.kv_sharing_fast_prefill_eligible_layers.add(layer_name)
-            else:
-                break
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """

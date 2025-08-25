@@ -47,8 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.v1.attention.backends.utils import (
-    KVSharingFastPrefillAttentionMetadata)
+from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 
 from .interfaces import SupportsQuant
 from .utils import (AutoWeightsLoader, extract_layer_index,
@@ -866,8 +865,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
             # Last layer is a KV sharing layer
             layer_attn_metadata = attn_metadata[
                 self.layers[-1].self_attn.attn.layer_name]
-            if (isinstance(layer_attn_metadata,
-                           KVSharingFastPrefillAttentionMetadata)):
+            if (isinstance(layer_attn_metadata, KVSharingFastPrefillMetadata)):
                 logits_indices_padded = (
                     layer_attn_metadata.logits_indices_padded)
                 num_logits_indices = layer_attn_metadata.num_logits_indices
