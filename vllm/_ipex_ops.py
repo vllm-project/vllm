@@ -386,7 +386,6 @@ class ipex_ops:
         # This code assumes batch_dim and num_tokens are flattened
         assert (input.ndim == 2)
         shape: Union[tuple[int, int], torch.Size] = input.shape
-        # For ROCm on MI300, the output fp8 dtype is torch.float_e3m3fnuz
         out_dtype: torch.dtype = current_platform.fp8_dtype()
         if num_token_padding:
             shape = (max(num_token_padding, input.shape[0]), shape[1])
