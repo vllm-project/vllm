@@ -470,9 +470,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                             extras={"1.6-llama": "AIDC-AI/Ovis1.6-Llama3.2-3B",
                                     "1.6-gemma": "AIDC-AI/Ovis1.6-Gemma2-9B"}),  # noqa: E501
     "Ovis2_5": _HfExamplesInfo("AIDC-AI/Ovis2.5-2B",
-                               trust_remote_code=True,
-                               max_transformers_version="4.53",
-                               transformers_version_reason="HF model is not compatible"),  # noqa: E501
+                               trust_remote_code=True),
     "PaliGemmaForConditionalGeneration": _HfExamplesInfo("google/paligemma-3b-mix-224",  # noqa: E501
                                                          extras={"v2": "google/paligemma2-3b-ft-docci-448"}),  # noqa: E501
     "Phi3VForCausalLM": _HfExamplesInfo("microsoft/Phi-3-vision-128k-instruct",
@@ -517,6 +515,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     # [Encoder-decoder]
+    "DonutForConditionalGeneration": _HfExamplesInfo("naver-clova-ix/donut-base-finetuned-docvqa",  # noqa: E501
+                                                    hf_overrides={"architectures": ["DonutForConditionalGeneration"], "model_type": "donut"},  # noqa: E501
+                                                    extras={"dolphin": "ByteDance/Dolphin"}),  # noqa: E501
     # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
     # Therefore, we borrow the BartTokenizer from the original Bart model
     "Florence2ForConditionalGeneration": _HfExamplesInfo("microsoft/Florence-2-base",  # noqa: E501
