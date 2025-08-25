@@ -600,7 +600,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._uuids_by_modality[modality].append(uuid)
 
         return self.model_cls.get_placeholder_str(modality, num_items)
-    
+
     def all_mm_uuids(self) -> Optional[MultiModalUUIDDict]:
         if not self._items_by_modality:
             return None
@@ -653,7 +653,7 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[object]):
         if "video" in items_by_modality:
             mm_inputs["video"] = items_by_modality["video"] # A list of videos
         return mm_inputs
-    
+
     def create_parser(self) -> "BaseMultiModalContentParser":
         return MultiModalContentParser(self)
 
@@ -1166,11 +1166,8 @@ def _parse_chat_message_content_part(
             return str_content
 
     # For media items, if a user has provided one, use it. Otherwise, insert
-    # a placeholder empty uuid. 
+    # a placeholder empty uuid.
     uuid = part.get("uuid")
-    logger.error(f"===abc _parse_chat_message_content_part {type(part.keys())=}")
-    logger.error(f"===abc _parse_chat_message_content_part {part.get("type")=}")
-    logger.error(f"===abc _parse_chat_message_content_part {part.get("uuid")=}")
 
     modality = None
     if part_type == "image_pil":
