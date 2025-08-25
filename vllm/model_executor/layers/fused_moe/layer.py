@@ -285,6 +285,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         else:
             self.rocm_aiter_fused_experts = None  # type: ignore
 
+    def maybe_make_prepare_finalize(
+            self) -> Optional[FusedMoEPrepareAndFinalize]:
+        if self.rocm_aiter_moe_enabled:
+            return None
+        else:
+            return super().maybe_make_prepare_finalize()
+
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
@@ -508,6 +515,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             logical_replica_count=logical_replica_count)
 
         if self.rocm_aiter_moe_enabled:
+            assert self.fused_experts is None
             return self.rocm_aiter_fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,

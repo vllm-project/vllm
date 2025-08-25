@@ -517,8 +517,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptFp8MoEMethod` yet.")
 
-        if (self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
-                and self.fused_experts is None):
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
+            assert self.fused_experts is None
             assert activation == 'silu', (
                 f"Expected 'silu' activation but got {activation}")
             assert not renormalize
@@ -549,8 +549,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             indices_type=self.topk_indices_dtype,
         )
 
-        # If present, self.fused_experts always needs to take precendence
-        # over other methods.
+        #
+        # Note: the order here is important. self.fused_experts can override
+        # cutlass or fused_experts.
+        #
         if self.fused_experts is not None:
             return self.fused_experts(
                 x,
@@ -1046,8 +1048,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def maybe_make_prepare_finalize(
             self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
-        if (self.use_marlin or self.flashinfer_moe_backend
-                == FlashinferMoeBackend.TENSORRT_LLM):
+        if (self.use_marlin
+                or (self.allow_flashinfer and self.flashinfer_moe_backend
+                    == FlashinferMoeBackend.TENSORRT_LLM)):
             return None
         elif (self.allow_flashinfer
               and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS):
@@ -1410,12 +1413,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 "EPLB not supported for `ModelOptNvFp4FusedMoE` yet.")
         assert activation == "silu", "Only SiLU activation is supported."
 
-        if (self.fused_experts is None and self.allow_flashinfer
-                and self.flashinfer_moe_backend
+        if (self.allow_flashinfer and self.flashinfer_moe_backend
                 == FlashinferMoeBackend.TENSORRT_LLM):
             import flashinfer
 
             from vllm.model_executor.models.llama4 import Llama4MoE
+
+            assert self.fused_experts is None
 
             a1_gscale = layer.w13_input_scale_quant
             (hidden_states_fp4,
@@ -1480,9 +1484,32 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
 
-        # If present, self.fused_experts always needs to take precendence
-        # over other methods.
-        if self.fused_experts is not None:
+        #
+        # Note: the order here is important. self.fused_experts can override
+        # flashinfer cutlass, cutlass fp4 or fused_experts but not marlin or
+        # trtllm.
+        #
+        if self.use_marlin:
+            assert self.fused_experts is None
+            return torch.ops.vllm.fused_marlin_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                None,
+                None,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                global_scale1=layer.w13_weight_scale_2,
+                global_scale2=layer.w2_weight_scale_2,
+                quant_type_id=scalar_types.float4_e2m1f.id,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map)
+
+        elif self.fused_experts is not None:
             assert self.allow_flashinfer and \
                self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
 
@@ -1502,24 +1529,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 expert_map=expert_map,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
-        elif self.use_marlin:
-            return torch.ops.vllm.fused_marlin_moe(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                None,
-                None,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                router_logits,
-                topk_weights,
-                topk_ids,
-                global_scale1=layer.w13_weight_scale_2,
-                global_scale2=layer.w2_weight_scale_2,
-                quant_type_id=scalar_types.float4_e2m1f.id,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map)
 
         elif (self.allow_flashinfer
               and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS):

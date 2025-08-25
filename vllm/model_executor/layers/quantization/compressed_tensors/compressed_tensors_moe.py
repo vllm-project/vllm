@@ -371,8 +371,6 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        assert self.fused_experts is None
-
         if enable_eplb:
             raise NotImplementedError("EPLB not supported for "
                                       "`CompressedTensorsW4A4MoeMethod` yet.")
@@ -393,27 +391,12 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             indices_type=self.topk_indices_dtype,
         )
 
-        # If present, self.fused_experts always needs to take precendence
-        # over other methods.
-        # FlashInfer fused experts path
-        if self.fused_experts is not None:
-            assert is_valid_flashinfer_cutlass_fused_moe(
-                x, layer.w13_weight, layer.w2_weight), (
-                    "Flashinfer CUTLASS Fused MoE not applicable!")
-
-            return self.fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=False,  # TODO(shuw): fix later, now output is high prec
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
-        elif self.use_marlin:
+        #
+        # Note: the order here is important. self.fused_experts can override
+        # flashinfer cutlass, cutlass fp4 or fused_experts but not marlin.
+        #
+        if self.use_marlin:
+            assert self.fused_experts is None
             return torch.ops.vllm.fused_marlin_moe(
                 x,
                 layer.w13_weight,
@@ -432,6 +415,25 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map)
 
+        elif self.fused_experts is not None:
+            assert is_valid_flashinfer_cutlass_fused_moe(
+                x, layer.w13_weight, layer.w2_weight), (
+                    "Flashinfer CUTLASS Fused MoE not applicable!")
+
+            return self.fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=False,  # TODO(shuw): fix later, now output is high prec
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+
+        # FlashInfer fused experts path
         elif self.allow_flashinfer:
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 flashinfer_cutlass_moe_fp4)
@@ -730,7 +732,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
     def maybe_make_prepare_finalize(
             self) -> Optional[mk.FusedMoEPrepareAndFinalize]:
-        if self.use_marlin:
+        if self.use_marlin or self.rocm_aiter_moe_enabled:
             return None
         else:
             return super().maybe_make_prepare_finalize()
@@ -869,9 +871,49 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         per_channel_quant = (
             self.weight_quant.strategy == QuantizationStrategy.CHANNEL)
 
-        # If present, self.fused_experts always needs to take precendence
-        # over other methods.
-        if self.fused_experts is not None:
+        #
+        # Note: the order here is important. self.fused_experts can override
+        # cutlass fp8 or fused_experts but not marlin or rocm.
+        #
+        if self.use_marlin:
+            assert activation == "silu", (
+                f"{activation} not supported for Marlin MoE.")
+            assert self.fused_experts is None
+            return torch.ops.vllm.fused_marlin_moe(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                None,
+                None,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                router_logits,
+                topk_weights,
+                topk_ids,
+                quant_type_id=scalar_types.float8_e4m3fn.id,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map)
+
+        elif self.rocm_aiter_moe_enabled:
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
+                rocm_aiter_fused_experts)
+            assert per_act_token == per_channel_quant
+            assert self.moe_quant_config is not None
+            assert self.fused_experts is None
+            return rocm_aiter_fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                expert_map=expert_map,
+                quant_config=self.moe_quant_config,
+            )
+
+        elif self.fused_experts is not None:
             return self.fused_experts(
                 x,
                 layer.w13_weight,
@@ -924,43 +966,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                     c_strides1=self.c_strides1,
                     c_strides2=self.ab_strides1_c_strides2,
                 )
-
-        elif self.rocm_aiter_moe_enabled:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
-                rocm_aiter_fused_experts)
-            assert per_act_token == per_channel_quant
-            assert self.moe_quant_config is not None
-            return rocm_aiter_fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                expert_map=expert_map,
-                quant_config=self.moe_quant_config,
-            )
-
-        elif self.use_marlin:
-            assert activation == "silu", (
-                f"{activation} not supported for Marlin MoE.")
-            return torch.ops.vllm.fused_marlin_moe(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                None,
-                None,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                router_logits,
-                topk_weights,
-                topk_ids,
-                quant_type_id=scalar_types.float8_e4m3fn.id,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                workspace=layer.workspace)
 
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
