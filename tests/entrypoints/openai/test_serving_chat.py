@@ -4,10 +4,11 @@
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 from unittest.mock import MagicMock
 
 import pytest
+import pytest_asyncio
 
 from vllm.config import MultiModalConfig
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
@@ -16,6 +17,79 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.transformers_utils.tokenizer import get_tokenizer
+
+from ...utils import RemoteOpenAIServer
+
+if TYPE_CHECKING:
+    from openai import OpenAI
+
+GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
+
+
+@pytest.fixture(scope="module")
+def gptoss_server():
+    args = ["--enforce-eager"]
+    with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def gptoss_client(gptoss_server):
+    async with gptoss_server.get_async_client() as async_client:
+        yield async_client
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip(reason="gpt-oss can't run on CI yet.")
+async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI):
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "get_current_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string"
+                    },
+                    "state": {
+                        "type": "string"
+                    },
+                    "unit": {
+                        "type": "string",
+                        "enum": ["celsius", "fahrenheit"],
+                    },
+                },
+                "required": ["city", "state", "unit"],
+            },
+        },
+    }]
+
+    messages = [
+        {
+            "role": "user",
+            "content": "What is the weather in Dallas, TX?"
+        },
+    ]
+
+    stream = await gptoss_client.chat.completions.create(
+        model=GPT_OSS_MODEL_NAME, messages=messages, tools=tools, stream=True)
+
+    name = None
+    args_buf = ""
+    async for chunk in stream:
+        delta = chunk.choices[0].delta
+        if delta.tool_calls:
+            tc = delta.tool_calls[0]
+            if tc.function and tc.function.name:
+                name = tc.function.name
+            if tc.function and tc.function.arguments:
+                args_buf += tc.function.arguments
+
+    assert name is not None
+    assert len(args_buf) > 0
+
 
 MODEL_NAME = "openai-community/gpt2"
 CHAT_TEMPLATE = "Dummy chat template for testing {}"
