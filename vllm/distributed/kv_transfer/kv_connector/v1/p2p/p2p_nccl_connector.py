@@ -144,7 +144,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 None. The function modifies `layer` in-place.
             """
             if (isinstance(attn_metadata, MLACommonMetadata)
-                    or layer.shape[1] == 2):  # mla or flashinfer
+                    or layer.shape[1] == 2):  # MLA or FlashInfer
                 num_block = kv_cache.shape[0]
                 self.check_tensors_except_dim(layer, kv_cache, 0)
                 if len(block_ids) == num_block:
@@ -156,7 +156,7 @@ class P2pNcclConnector(KVConnectorBase_V1):
                         "num_block:%d, request_id:%s", len(block_ids),
                         num_block, request_id)
 
-            elif layer.shape[0] == 2:  # flash attention
+            elif layer.shape[0] == 2:  # FlashAttention
                 num_block = kv_cache.shape[1]
                 self.check_tensors_except_dim(layer, kv_cache, 1)
                 if len(block_ids) == num_block:
@@ -244,18 +244,18 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 dimension.
 
             Args:
-                layer (torch.Tensor): The KV cache tensor from the attention
-                layer. block_ids (torch.Tensor): Indices of blocks to extract.
+                layer (torch.Tensor): The KV cache from the attention layer.
+                block_ids (torch.Tensor): Indices of blocks to extract.
 
             Returns:
                 torch.Tensor: A tensor containing the extracted KV slices.
                 Returns None if the layout is unsupported.
             """
             if (isinstance(attn_metadata, MLACommonMetadata)
-                    or layer.shape[1] == 2):  # mla or flashinfer
+                    or layer.shape[1] == 2):  # MLA or FlashInfer
                 return layer[block_ids, ...]
 
-            if layer.shape[0] == 2:  # flash attention
+            if layer.shape[0] == 2:  # FlashAttention
                 return layer[:, block_ids, ...]
 
             return None
