@@ -84,15 +84,15 @@ class CudagraphDispatcher:
             f"Invalid uniform_query_lens: {uniform_query_lens}"
         self.uniform_query_lens = uniform_query_lens
 
-        # we only have compilation_config.cudagraph_capture_sizes_uniform
+        # we only have compilation_config.uniform_cudagraph_capture_sizes
         # being aligned with one uniform_query_len that greater than 1, not
         # multiple of them. Should verify this here.
         for uniform_query_len in self.uniform_query_lens:
             if uniform_query_len > 1 and \
-                self.compilation_config.cudagraph_capture_sizes_uniform:
+                self.compilation_config.uniform_cudagraph_capture_sizes:
                 assert all(x % uniform_query_len == 0 for x in
                            self.compilation_config.\
-                            cudagraph_capture_sizes_uniform), \
+                            uniform_cudagraph_capture_sizes), \
                     f"Invalid uniform_query_lens: {uniform_query_len}"
 
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
@@ -117,7 +117,7 @@ class CudagraphDispatcher:
                 candidate_sizes = self.compilation_config.\
                     cudagraph_capture_sizes \
                     if uniform_query_len == 1 else \
-                    self.compilation_config.cudagraph_capture_sizes_uniform
+                    self.compilation_config.uniform_cudagraph_capture_sizes
                 cudagraph_capture_sizes_for_decode = [
                     x for x in candidate_sizes
                     if x <= max_num_tokens and x >= uniform_query_len
