@@ -207,6 +207,10 @@ class RayDistributedExecutor(DistributedExecutorBase):
         worker_metadata: List[RayWorkerMetaData] = []
         driver_ip = get_ip()
 
+        # Explicitly set the device visibility for XPU in the Ray runtime env.
+        # This is required because vllm uses ZE_AFFINITY_MASK
+        # for XPU (not ONEAPI_DEVICE_SELECTOR) and we have removed the latter
+        # to avoid conflicts.
         if current_platform.is_xpu():
             bundle_indices_str = ",".join(map(str, bundle_indices))
             env_vars = {
