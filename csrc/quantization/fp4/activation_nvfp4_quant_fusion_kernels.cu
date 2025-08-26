@@ -333,32 +333,6 @@ silu_and_cvt_fp16_to_fp4(
 
 }  // namespace vllm
 
-// Launch activation, gating, and quantize kernel.
-#define LAUNCH_ACTIVATION_GATE_KERNEL()                                        \
-  int multiProcessorCount =                                                    \
-      get_device_attribute(cudaDevAttrMultiProcessorCount, -1);                \
-  auto input_sf_ptr = static_cast<float const*>(input_sf.data_ptr());          \
-  auto sf_out = static_cast<int32_t*>(output_sf.data_ptr());                   \
-  auto output_ptr = static_cast<int64_t*>(output.data_ptr());                  \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));            \
-  auto stream = at::cuda::getCurrentCUDAStream(input.get_device());            \
-  dim3 block(std::min(int(n / ELTS_PER_THREAD), 1024));                        \
-  int const numBlocksPerSM = 2048 / block.x;                                   \
-  dim3 grid(std::min(int(m), multiProcessorCount* numBlocksPerSM));            \
-  VLLM_DISPATCH_HALF_TYPES(                                                    \
-      input.scalar_type(), "act_and_mul_quant_kernel", [&] {                   \
-        auto input_ptr = reinterpret_cast<scalar_t const*>(input.data_ptr());  \
-        VLLM_DISPATCH_BYTE_TYPES(                                              \
-            output.scalar_type(), "fused_act_and_mul_quant_kernel_nvfp4_type", \
-            [&] {                                                              \
-              vllm::silu_and_cvt_fp16_to_fp4<scalar_t>                         \
-                  <<<grid, block, 0, stream>>>(                                \
-                      m, n, input_ptr, input_sf_ptr,                           \
-                      reinterpret_cast<uint32_t*>(output_ptr),                 \
-                      reinterpret_cast<uint32_t*>(sf_out));                    \
-            });                                                                \
-      });
-
 void silu_and_mul_nvfp4_quant(torch::Tensor& output,  // [..., d]
                               torch::Tensor& output_sf,
                               torch::Tensor& input,  // [..., 2 * d]
@@ -368,5 +342,27 @@ void silu_and_mul_nvfp4_quant(torch::Tensor& output,  // [..., d]
   int32_t m = input.size(0);
   int32_t n = input.size(1) / 2;
   TORCH_CHECK(n % 16 == 0, "The N dimension must be multiple of 16.");
-  LAUNCH_ACTIVATION_GATE_KERNEL();
+  int multiProcessorCount =
+      get_device_attribute(cudaDevAttrMultiProcessorCount, -1);
+  auto input_sf_ptr = static_cast<float const*>(input_sf.data_ptr());
+  auto sf_out = static_cast<int32_t*>(output_sf.data_ptr());
+  auto output_ptr = static_cast<int64_t*>(output.data_ptr());
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
+  dim3 block(std::min(int(n / ELTS_PER_THREAD), 1024));
+  int const numBlocksPerSM = 2048 / block.x;
+  dim3 grid(std::min(int(m), multiProcessorCount * numBlocksPerSM));
+  VLLM_DISPATCH_HALF_TYPES(
+      input.scalar_type(), "act_and_mul_quant_kernel", [&] {
+        auto input_ptr = reinterpret_cast<scalar_t const*>(input.data_ptr());
+        VLLM_DISPATCH_BYTE_TYPES(
+            output.scalar_type(), "fused_act_and_mul_quant_kernel_nvfp4_type",
+            [&] {
+              vllm::silu_and_cvt_fp16_to_fp4<scalar_t>
+                  <<<grid, block, 0, stream>>>(
+                      m, n, input_ptr, input_sf_ptr,
+                      reinterpret_cast<uint32_t*>(output_ptr),
+                      reinterpret_cast<uint32_t*>(sf_out));
+            });
+      });
 }
