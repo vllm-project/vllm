@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 from tqdm import tqdm
@@ -230,24 +230,11 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
-        extra_expert_args: Optional[dict[str, Any]],
     ):
         assert self.block_shape is not None
         assert a1q_scale is not None
         assert w1_scale is not None
         assert w2_scale is not None
-
-        if not env.VLLM_SKIP_DEEP_GEMM_WARMUP:
-            # DeepGemm JITs the grouped-gemm kernels. We don't want the JIT'ing
-            # to happen during actual model-inference. The
-            # `warmup_deepgemm_kernels` function is a `run_once` decorated
-            # function that executes during the model profile run. This warmup
-            # should create all the required JITs for the current model.
-            warmup_deepgemm_gg_contiguous_kernels(w1,
-                                                  w2,
-                                                  w1_scale,
-                                                  w2_scale,
-                                                  num_topk=topk_ids.size(1))
 
         a1q = hidden_states
         _, N, K = w1.size()
