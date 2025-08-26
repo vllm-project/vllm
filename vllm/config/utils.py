@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING, Callable, TypeVar
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -27,6 +27,7 @@ def config(cls: ConfigT) -> ConfigT:
     script, which is invoked during the pre-commit checks.
     """
     return cls
+
 
 # Canonicalize common value types used in config hashing.
 # Keeps imports light at module load; heavier bits are imported inside.
@@ -80,13 +81,14 @@ def canon_value(x):
     # Unsupported type
     try:
         from vllm.logger import init_logger
-        init_logger(__name__).debug(
-            "canon_value: unsupported type '%s'", type(x).__name__)
+        init_logger(__name__).debug("canon_value: unsupported type '%s'",
+                                    type(x).__name__)
     except Exception:
         try:
             import logging
             logging.getLogger(__name__).debug(
-                "canon_value: unsupported type '%s'", type(x).__name__)
+                "canon_value: unsupported type '%s'",
+                type(x).__name__)
         except Exception:
             pass
     raise TypeError
@@ -176,4 +178,4 @@ def build_opt_items_override(
             with suppress(Exception):
                 logger.debug("Hash skip: unsupported type for key '%s'", key)
             continue
-    return item
+    return items
