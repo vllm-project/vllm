@@ -284,6 +284,25 @@ def machete_create_bench_fn(
     )
 
 
+def cutlass_w4a8_create_bench_fn(
+    bt: BenchmarkTensors, out_type=torch.dtype, schedule=None
+) -> Callable:
+    w_q = bt.w_q.t().contiguous().t()  # make col major
+    w_q = ops.cutlass_encode_and_reorder_int4b(w_q)
+    # expects fp8 scales
+    w_s = ops.cutlass_pack_scale_fp8(bt.w_g_s.to(torch.float8_e4m3fn))
+
+    return lambda: ops.cutlass_w4a8_mm(
+        a=bt.a,
+        b_q=w_q,
+        b_group_scales=w_s,
+        b_group_size=bt.group_size,
+        b_channel_scales=bt.w_ch_s,
+        a_token_scales=bt.w_tok_s,
+        maybe_schedule=schedule,
+    )
+
+
 # impl
 
 # bench
@@ -384,6 +403,20 @@ def bench(
             ],
         )
     )
+
+    # cutlass w4a8
+    if types.act_type == torch.float8_e4m3fn and group_size == 128:
+        timers.append(
+            bench_fns(
+                label,
+                sub_label,
+                f"cutlass w4a8 ({name_type_string})",
+                [
+                    cutlass_w4a8_create_bench_fn(bt, out_type=types.output_type)
+                    for bt in benchmark_tensors
+                ],
+            )
+        )
 
     if sweep_schedules:
         global _SWEEP_SCHEDULES_RESULTS

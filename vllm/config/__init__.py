@@ -1119,9 +1119,20 @@ class ModelConfig:
     def _verify_quantization(self) -> None:
         supported_quantization = me_quant.QUANTIZATION_METHODS
         optimized_quantization_methods = [
-            "fp8", "modelopt", "gptq_marlin_24", "gptq_marlin", "awq_marlin",
-            "fbgemm_fp8", "compressed-tensors", "experts_int8", "quark",
-            "modelopt_fp4", "bitblas", "gptq_bitblas", "inc"
+            "fp8",
+            "modelopt",
+            "gptq_marlin_24",
+            "gptq_marlin",
+            "awq_marlin",
+            "fbgemm_fp8",
+            "compressed-tensors",
+            "experts_int8",
+            "quark",
+            "modelopt_fp4",
+            "bitblas",
+            "gptq_bitblas",
+            "inc",
+            "petit_nvfp4",
         ]
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods,
@@ -1153,6 +1164,7 @@ class ModelConfig:
                 "moe_wna16",
                 "modelopt",
                 "modelopt_fp4",
+                "petit_nvfp4",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
@@ -1684,15 +1696,6 @@ class ModelConfig:
     @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
-
-    @property
-    def processor_return_mm_hashes(self) -> bool:
-        """Whether the multi-modal processor should output hashes."""
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return False
-
-        return mm_config.mm_processor_cache_gb > 0
 
     @property
     def enable_mm_processor_cache(self) -> bool:
@@ -3054,7 +3057,8 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
-GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines"]
+GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines",
+                                "lm-format-enforcer"]
 
 
 @config
