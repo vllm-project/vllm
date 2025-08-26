@@ -881,8 +881,8 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
                     # quant_out, allreduce_output
                     return allreduce[4], allreduce[1]
 
-            pm.register_replacement(pattern_2, replacement_2, get_inputs(),
-                                    pm.fwd_only, pm_pass)
+                pm.register_replacement(pattern_2, replacement_2, get_inputs(),
+                                        pm.fwd_only, pm_pass)
         else:
             # fp8 quant custom op
             if not self.is_custom_rms_norm:
@@ -925,6 +925,7 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
                         **self.allreduce_params.
                         get_trtllm_fused_allreduce_kwargs(),
                     )
+
                     # quant_out, allreduce_output
                     return allreduce[4], allreduce[1]
 
