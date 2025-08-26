@@ -229,9 +229,11 @@ class Processor:
         request_id: str,
         prompt: PromptType,
     ) -> Optional[dict[str, list[str]]]:
-        """Build per-item multimodal hash overrides when enabled.
+        """Build per-item multimodal hash overrides when enabled. In this case,
+        multimodal data items are identified by their request id, modality and
+        index rather than their content.
 
-        Returns a mapping modality -> list[str] of overrides, or None if
+        Returns a dictionary of modality -> list[str] of overrides, or None if
         disabled or no multimodal data is present.
         """
 
