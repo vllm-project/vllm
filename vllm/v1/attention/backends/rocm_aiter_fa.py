@@ -254,15 +254,6 @@ class AiterFlashAttentionMetadataBuilder(
         self.aot_sliding_window: Optional[tuple[int, int]] = None
         self.total_tokens: int = 0
 
-    def build_for_cudagraph_capture(
-            self, common_attn_metadata: CommonAttentionMetadata):
-        self.total_tokens = self.model_config.max_model_len \
-            * self.vllm_config.scheduler_config.max_num_partial_prefills
-        res = self.build(common_prefix_len=0,
-                         common_attn_metadata=common_attn_metadata)
-        self.total_tokens = 0
-        return res
-
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
