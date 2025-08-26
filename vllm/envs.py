@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -1045,6 +1046,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This is used to prevent the kernel from running out of memory.
     "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE":
     lambda: int(os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")),
+
+    # Specifies the thresholds of the communicated tensor sizes under which
+    # vllm should use flashinfer fused allreduce. The variable should be a
+    # JSON with the following format:
+    #     { <world size>: <max size in mb> }
+    # Unspecified world sizes will fallback to
+    #     { 2: 64, 4: 1, <everything else>: 0.5 }
+    "VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB":
+    lambda: json.loads(os.getenv(
+        "VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB", "{}")),
 
     # MoE routing strategy selector.
     # See `RoutingSimulator.get_available_strategies()` # for available
