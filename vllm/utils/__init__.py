@@ -516,8 +516,8 @@ def random_uuid() -> str:
 class AsyncMicrobatchTokenizer:
     """Asynchronous tokenizer with micro-batching.
 
-    Pulls pending encode/decode requests from a queue and batches them 
-    up to reduce overhead. A single-thread ThreadPoolExecutor is used 
+    Pulls pending encode/decode requests from a queue and batches them
+    up to reduce overhead. A single-thread ThreadPoolExecutor is used
     so the event loop stays responsive.
     """
 
@@ -664,18 +664,18 @@ class AsyncMicrobatchTokenizer:
     def _queue_key(self, op: str, kwargs: dict) -> tuple:
         """
         Return a normalized key describing operation + kwargs.
-        
+
         - `add_special_tokens`: {True/False}
         - `truncation`: {True/False}
-          - If `truncation` is False (`max_length` is None), 
+          - If `truncation` is False (`max_length` is None),
             returns a key for a can_batch queue.
           - If `truncation` is True and `max_length` is None or equals
             `tokenizer.model_max_length`, returns a key for a can_batch queue.
           - Otherwise, returns a key for a cannot_batch queue.
-        
+
         Examples:
           - Decode: ("decode",)
-          - Encode typical: 
+          - Encode typical:
             ("encode", add_special_tokens, bool_truncation, max_length_label)
           - Fallback: ("encode", "other")
         """
@@ -938,6 +938,14 @@ def get_open_port() -> int:
             if candidate_port not in reserved_port_range:
                 return candidate_port
     return _get_open_port()
+
+
+def get_open_ports_list(count: int = 5) -> list[int]:
+    """Get a list of open ports."""
+    ports = set()
+    while len(ports) < count:
+        ports.add(get_open_port())
+    return list(ports)
 
 
 def _get_open_port() -> int:
@@ -1432,6 +1440,12 @@ def _patched_set_stream(stream: torch.cuda.Stream) -> None:
 torch.cuda.set_stream = _patched_set_stream
 
 
+class _StreamPlaceholder:
+
+    def __init__(self):
+        self.synchronize = lambda: None
+
+
 def current_stream() -> torch.cuda.Stream:
     """
     replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
@@ -1451,8 +1465,18 @@ def current_stream() -> torch.cuda.Stream:
         # On ROCm using the default 0 stream in combination with RCCL
         # is hurting performance. Therefore creating a dedicated stream
         # per process
-        _current_stream_tls.value = torch.cuda.Stream(
-        ) if current_platform.is_rocm() else torch.cuda.current_stream()
+        if current_platform.is_rocm():
+            _current_stream_tls.value = torch.cuda.Stream()
+        elif current_platform.is_cpu():
+            _current_stream_tls.value = _StreamPlaceholder()
+        else:
+            current_stream = current_platform.current_stream
+            if current_stream is not None:
+                _current_stream_tls.value = current_stream()
+            else:
+                raise ValueError(
+                    "Fail to set current stream, current platform "
+                    "may not support current_stream with torch API")
     return _current_stream_tls.value
 
 
@@ -2458,7 +2482,7 @@ class PlaceholderModule(_PlaceholderBase):
     A placeholder object to use when a module does not exist.
 
     This enables more informative errors when trying to access attributes
-    of a module that does not exists.
+    of a module that does not exist.
     """
 
     def __init__(self, name: str) -> None:
@@ -3085,7 +3109,7 @@ class LazyLoader(types.ModuleType):
     """
     LazyLoader module borrowed from Tensorflow
     https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py
-    with a addition of "module caching".
+    with an addition of "module caching".
 
     Lazily import a module, mainly to avoid pulling in large dependencies.
     Modules such as `xgrammar` might do additional side effects, so we

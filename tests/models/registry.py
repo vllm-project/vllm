@@ -292,6 +292,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b"),
+    "SeedOssForCausalLM": _HfExamplesInfo("ByteDance-Seed/Seed-OSS-36B-Instruct", # noqa: E501
+                                          trust_remote_code=True,
+                                          is_available_online=False),
     "SmolLM3ForCausalLM": _HfExamplesInfo("HuggingFaceTB/SmolLM3-3B"),
     "StableLMEpochForCausalLM": _HfExamplesInfo("stabilityai/stablelm-zephyr-3b"),  # noqa: E501
     "StableLmForCausalLM": _HfExamplesInfo("stabilityai/stablelm-3b-4e1t"),
@@ -413,8 +416,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo("HuggingFaceM4/Idefics3-8B-Llama3",  # noqa: E501
                                                         {"tiny": "HuggingFaceTB/SmolVLM-256M-Instruct"},    # noqa: E501
-                                                        min_transformers_version="4.55.1",
-                                                        transformers_version_reason="HF model broken in 4.55.0"),  # noqa: E501
+                                                        min_transformers_version="4.56",
+                                                        transformers_version_reason="HF model broken in 4.55"),  # noqa: E501
     "InternS1ForConditionalGeneration": _HfExamplesInfo("internlm/Intern-S1",
                                                         trust_remote_code=True),  # noqa: E501
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
@@ -465,9 +468,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                             extras={"1.6-llama": "AIDC-AI/Ovis1.6-Llama3.2-3B",
                                     "1.6-gemma": "AIDC-AI/Ovis1.6-Gemma2-9B"}),  # noqa: E501
     "Ovis2_5": _HfExamplesInfo("AIDC-AI/Ovis2.5-2B",
-                               trust_remote_code=True,
-                               max_transformers_version="4.53",
-                               transformers_version_reason="HF model is not compatible"),  # noqa: E501
+                               trust_remote_code=True),
     "PaliGemmaForConditionalGeneration": _HfExamplesInfo("google/paligemma-3b-mix-224",  # noqa: E501
                                                          extras={"v2": "google/paligemma2-3b-ft-docci-448"}),  # noqa: E501
     "Phi3VForCausalLM": _HfExamplesInfo("microsoft/Phi-3-vision-128k-instruct",
@@ -496,8 +497,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "SkyworkR1VChatModel": _HfExamplesInfo("Skywork/Skywork-R1V-38B",
                                            trust_remote_code=True),
     "SmolVLMForConditionalGeneration": _HfExamplesInfo("HuggingFaceTB/SmolVLM2-2.2B-Instruct",  # noqa: E501
-                                                       min_transformers_version="4.55.1",
-                                                       transformers_version_reason="HF model broken in 4.55.0"),  # noqa: E501
+                                                       min_transformers_version="4.56",
+                                                       transformers_version_reason="HF model broken in 4.55"),  # noqa: E501
     "Step3VLForConditionalGeneration": _HfExamplesInfo("stepfun-ai/step3",
                                                         trust_remote_code=True),
     "UltravoxModel": _HfExamplesInfo("fixie-ai/ultravox-v0_5-llama-3_2-1b",  # noqa: E501
@@ -512,6 +513,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         is_available_online=False,
     ),
     # [Encoder-decoder]
+    "DonutForConditionalGeneration": _HfExamplesInfo("naver-clova-ix/donut-base-finetuned-docvqa",  # noqa: E501
+                                                    hf_overrides={"architectures": ["DonutForConditionalGeneration"], "model_type": "donut"},  # noqa: E501
+                                                    extras={"dolphin": "ByteDance/Dolphin"}),  # noqa: E501
     # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
     # Therefore, we borrow the BartTokenizer from the original Bart model
     "Florence2ForConditionalGeneration": _HfExamplesInfo("microsoft/Florence-2-base",  # noqa: E501
