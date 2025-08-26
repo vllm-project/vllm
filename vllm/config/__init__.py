@@ -2438,9 +2438,9 @@ class LoRAConfig:
     `max_loras`."""
     lora_dtype: Union[torch.dtype, LoRADType] = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
-    lora_extra_vocab_size: int = 256
-    """Maximum size of extra vocabulary that can be present in a LoRA adapter
-    (added to the base model vocabulary)."""
+    lora_extra_vocab_size: int = 0
+    """(Deprecating) Maximum size of extra vocabulary that can be present in a 
+    LoRA adapter. Set to 0 to disable. Will be removed in a future release."""
     lora_vocab_padding_size: ClassVar[int] = current_platform\
         .get_lora_vocab_padding_size()
 
@@ -2482,10 +2482,19 @@ class LoRAConfig:
         return hash_str
 
     def __post_init__(self):
+        # Deprecation warning for lora_extra_vocab_size
+        if self.lora_extra_vocab_size != 0:
+            logger.warning(
+                "`lora_extra_vocab_size` is deprecated and will be removed "
+                "in a future release. Additional vocabulary support for "
+                "LoRA adapters is being phased out."
+            )
+        
         # Setting the maximum rank to 512 should be able to satisfy the vast
         # majority of applications.
         possible_max_ranks = (8, 16, 32, 64, 128, 256, 320, 512)
-        possible_lora_extra_vocab_size = (256, 512)
+        # Include 0 to allow users to disable the deprecated feature
+        possible_lora_extra_vocab_size = (0, 256, 512)
         if self.max_lora_rank not in possible_max_ranks:
             raise ValueError(
                 f"max_lora_rank ({self.max_lora_rank}) must be one of "
