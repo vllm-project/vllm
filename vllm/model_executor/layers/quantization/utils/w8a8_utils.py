@@ -8,7 +8,7 @@ from packaging import version
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import AiterOps
+from vllm._aiter_ops import aiter_ops
 from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -166,12 +166,12 @@ def rocm_aiter_per_tensor_w8a8_scaled_mm(qinput: torch.Tensor,
                                          input_2d: torch.Tensor,
                                          output_shape: list) -> torch.Tensor:
 
-    output = AiterOps.rocm_aiter_tuned_gemm(qinput,
-                                            weight.t(),
-                                            out_dtype=out_dtype,
-                                            scale_a=scale_a,
-                                            scale_b=scale_b,
-                                            bias=bias)
+    output = aiter_ops.rocm_aiter_tuned_gemm(qinput,
+                                             weight.t(),
+                                             out_dtype=out_dtype,
+                                             scale_a=scale_a,
+                                             scale_b=scale_b,
+                                             bias=bias)
 
     return torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
 
@@ -336,7 +336,7 @@ class Fp8LinearOp:
 
         # AITER is only supported on ROCm and only for FP8_FNUZ
         # and at the moment are MI300 series
-        self.use_aiter_and_is_supported = (AiterOps.is_linear_enabled()
+        self.use_aiter_and_is_supported = (aiter_ops.is_linear_enabled()
                                            and current_platform.is_fp8_fnuz())
 
         # Note: we pad the input because torch._scaled_mm is more performant

@@ -74,7 +74,7 @@ def _rocm_aiter_tuned_gemm_fake(
 _OPS_REGISTERED = False
 
 
-class AiterOps:
+class aiter_ops:
     _IS_AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
 
     @classmethod
@@ -117,4 +117,4 @@ class AiterOps:
         )
 
 
-AiterOps.register_ops_once()
+aiter_ops.register_ops_once()
