@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ast
 import json
 import uuid
 from collections.abc import Sequence
@@ -188,10 +189,14 @@ class Qwen3CoderToolParser(ToolParser):
                         "parsed with json.loads in tool '%s', will try "
                         "other methods to parse it.", param_value, param_name,
                         func_name)
-            logger.warning(
-                "Parsed value '%s' of parameter '%s' cannot be "
-                "converted to '%s' in tool '%s', degenerating to string.",
-                param_value, param_name, param_type, func_name)
+            try:
+                param_value = ast.literal_eval(param_value)  # safer
+            except (ValueError, SyntaxError, TypeError):
+                logger.warning(
+                    "Parsed value '%s' of parameter '%s' cannot be "
+                    "converted via Python `ast.literal_eval()` in tool "
+                    "'%s', degenerating to string.", param_value, param_name,
+                    func_name)
             return param_value
 
     def _parse_xml_function_call(
