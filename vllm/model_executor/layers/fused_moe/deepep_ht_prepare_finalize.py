@@ -56,7 +56,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def _get_combine_config(self) -> Optional[deep_ep.Config]:
         if self.dp_size not in self.available_rank_configs:
             return None
-        return deep_ep.Buffer.get_combine_config(self.dp_size)
+        return deep_ep.Buffer.get_combine_config(self.num_dispatchers_)
 
     def _do_dispatch(
         self,
