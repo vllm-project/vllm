@@ -14,7 +14,8 @@ from vllm.model_executor.models.interfaces_base import VllmModelForPooling
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MultiModalKwargs
 from vllm.pooling_params import PoolingParams
-from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
+from vllm.pooler_output import PoolerOutput
+from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
 from vllm.worker.model_runner import (GPUModelRunnerBase, ModelInputForGPU,
                                       ModelInputForGPUBuilder)
