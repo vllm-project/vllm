@@ -975,6 +975,7 @@ def _get_kv_cache_config_uniform_page_size(
             )
         for i in range(0, len(layers), group_size):
             grouped_layers.append(layers[i:i + group_size])
+
     kv_cache_groups = create_kv_cache_group_specs(kv_cache_spec,
                                                   grouped_layers)
 
