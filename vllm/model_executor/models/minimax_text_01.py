@@ -476,7 +476,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
 
     def forward(self, hidden_states: torch.Tensor, output: torch.Tensor,
                 positions: torch.Tensor,
-                kv_caches: MinimaxCacheParams) -> torch.Tensor:
+                kv_caches: MinimaxCacheParams) -> None:
         if not envs.VLLM_USE_V1:
             self._forward(hidden_states, output, positions, kv_caches)
         else:
@@ -489,7 +489,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
 
     def _forward(self, hidden_states: torch.Tensor, output: torch.Tensor,
                  positions: torch.Tensor,
-                 kv_caches: MinimaxCacheParams) -> torch.Tensor:
+                 kv_caches: Optional[MinimaxCacheParams]) -> None:
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
         if envs.VLLM_USE_V1 and attn_metadata is not None:
