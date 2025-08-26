@@ -3,6 +3,7 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 
+from vllm.utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -28,6 +29,7 @@ class KVCacheCoordinator(ABC):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
+        self.cache_histograms = None
 
         self.block_pool = BlockPool(kv_cache_config.num_blocks, enable_caching,
                                     enable_kv_cache_events)
@@ -41,6 +43,9 @@ class KVCacheCoordinator(ABC):
                 kv_cache_group_id=i,
             ) for i, kv_cache_group in enumerate(
                 self.kv_cache_config.kv_cache_groups))
+
+        if self.enable_caching:
+            self.cache_histograms = KVCacheHistograms(self.kv_cache_config)
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
@@ -106,8 +111,12 @@ class KVCacheCoordinator(ABC):
             num_tokens: The total number of tokens that need to be cached 
                 (including tokens that are already cached).
         """
+        cache_threshlod = 0
+        if self.cache_histograms:
+            cache_threshlod = self.cache_histograms.histos_threshold
+
         for manager in self.single_type_managers:
-            manager.cache_blocks(request, num_computed_tokens)
+            manager.cache_blocks(request, num_computed_tokens, cache_threshlod)
 
     def free(self, request_id: str) -> None:
         """
@@ -169,6 +178,74 @@ class KVCacheCoordinator(ABC):
         max_cache_hit_length: int,
     ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
         pass
+
+    def cal_cache_histograms(self, hit_cache_blocks: tuple[list[KVCacheBlock],
+                                                           ...]):
+        """Count the number of cache blocks hit by requests, 
+        and update the cache block threshold after reaching the statistical 
+        threshold."""
+        if self.enable_caching:
+            assert self.cache_histograms is not None
+            self.cache_histograms.cal_cache_histograms(hit_cache_blocks)
+
+
+class KVCacheHistograms:
+    """99th percentile of histogram-based dynamic statistics for 
+    cache block reuse"""
+
+    def __init__(self, kv_cache_config: KVCacheConfig):
+
+        self.kv_cache_config = kv_cache_config
+
+        self.histos_step = cdiv(self.kv_cache_config.num_blocks, 16)
+        self.histos_array = [[0 for _ in range(16)] for _ in range(3)]
+        self.histos_count = 0
+        self.histos_count_min = 2 << 10
+        self.histos_count_max = 2 << 16
+        self.histos_count_target = self.histos_count_min
+        self.histos_array_index = 0
+        self.histos_threshold = 0
+
+    def cal_cache_histograms(self, hit_cache_blocks: tuple[list[KVCacheBlock],
+                                                           ...]):
+        """Count the number of cache blocks hit by requests, 
+        and update the cache block threshold after reaching the statistical 
+        threshold."""
+        if not hit_cache_blocks:
+            return
+        for hit_block in hit_cache_blocks:
+            hit_column = min(len(hit_block) // self.histos_step, 15)
+            self.histos_array[self.histos_array_index][hit_column] += 1
+            self.histos_count += 1
+
+        if self.histos_count > self.histos_count_target:
+            histogram_sum = []
+            histogram_sums = 0
+            for i in range(16):
+                histogram_sum.append(self.histos_array[0][i] +
+                                     self.histos_array[1][i] +
+                                     self.histos_array[2][i])
+                histogram_sums += histogram_sum[i]
+
+                targetPercentile = int(histogram_sums * 0.99)
+                pre_threshold = self.histos_threshold
+                for i in range(15, -1, -1):
+                    histogram_sums -= histogram_sum[i]
+                    if histogram_sums < targetPercentile:
+                        self.histos_threshold = histogram_sum[
+                            i] + self.histos_step
+                        break
+
+                array_index = (self.histos_array_index + 1) % 3
+                self.histos_array[array_index] = [0] * 16
+                self.histos_array_index = array_index
+                self.histos_count = 0
+                if pre_threshold == self.histos_threshold:
+                    self.histos_count_target = min(
+                        self.histos_count_target << 2, self.histos_count_max)
+                else:
+                    self.histos_count_target = max(
+                        self.histos_count_target >> 2, self.histos_count_min)
 
 
 class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):

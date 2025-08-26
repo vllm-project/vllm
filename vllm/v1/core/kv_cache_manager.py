@@ -177,6 +177,8 @@ class KVCacheManager:
             self.prefix_cache_stats.queries += request.num_tokens
             self.prefix_cache_stats.hits += num_new_computed_tokens
 
+        self.coordinator.cal_cache_histograms(computed_blocks)
+
         return KVCacheBlocks(computed_blocks), num_new_computed_tokens
 
     def allocate_slots(
