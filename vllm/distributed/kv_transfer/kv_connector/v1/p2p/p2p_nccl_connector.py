@@ -8,7 +8,6 @@ import regex as re
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1 import kv_connector_manager
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.p2p_nccl_engine import (
@@ -73,7 +72,6 @@ class P2pNcclConnectorMetadata(KVConnectorMetadata):
             ReqMeta.make_meta(request_id, token_ids, block_ids, block_size))
 
 
-@kv_connector_manager.register(names=["P2pNcclConnector"])
 class P2pNcclConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):

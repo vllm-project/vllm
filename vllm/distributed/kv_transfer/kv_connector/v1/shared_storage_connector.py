@@ -9,7 +9,6 @@ import safetensors
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1 import kv_connector_manager
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
@@ -74,7 +73,6 @@ class SharedStorageConnectorMetadata(KVConnectorMetadata):
                               mm_hashes))
 
 
-@kv_connector_manager.register(names=["SharedStorageConnector"])
 class SharedStorageConnector(KVConnectorBase_V1):
     # NOTE: This is Simple debug implementation of the KV connector.
     # It save / load the KV cache to / from the disk.

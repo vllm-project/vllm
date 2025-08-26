@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING, Any, Optional
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1 import kv_connector_manager
+from vllm.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.logger import init_logger
@@ -29,7 +30,6 @@ class MultiKVConnectorMetadata(KVConnectorMetadata):
     extra_async_saves: Optional[dict[str, int]] = None
 
 
-@kv_connector_manager.register(names=["MultiConnector"])
 class MultiConnector(KVConnectorBase_V1):
     """
     A wrapper for using multiple KVConnectors at the same time.
@@ -52,21 +52,8 @@ class MultiConnector(KVConnectorBase_V1):
                                 vllm_config.kv_transfer_config.engine_id)
             temp_config.kv_transfer_config = KVTransferConfig(
                 **ktc, engine_id=engine_id)
-
-            name = temp_config.kv_transfer_config.kv_connector
-            if name is None:
-                # With ExtensionManager, we no longer do on-the-fly imports,
-                # as extensions must be registered via
-                # register(...) decorator.
-                raise ValueError(
-                    "KV connector name must be set in KVTransferConfig")
-
             self._connectors.append(
-                kv_connector_manager.create_or_import(
-                    name=name,
-                    extension_path=temp_config.kv_transfer_config.
-                    kv_connector_module_path,
-                    role=role))
+                KVConnectorFactory.create_connector(temp_config, role))
 
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
@@ -241,16 +228,8 @@ class MultiConnector(KVConnectorBase_V1):
         for ktc in ktcs:
             kv_transfer_config = KVTransferConfig(**ktc)
             temp_vllm_config.kv_transfer_config = kv_transfer_config
-
-            name = kv_transfer_config.kv_connector
-            if name is None:
-                # With ExtensionManager, we no longer do on-the-fly imports,
-                # as extensions must be registered via
-                # register(...) decorator.
-                raise ValueError(
-                    "KV connector name must be set in KVTransferConfig")
-            connector_cls = kv_connector_manager.get_extension_class(name=name)
-
+            connector_cls = KVConnectorFactory.get_connector_class(
+                kv_transfer_config)
             required_kvcache_layout = (
                 connector_cls.get_required_kvcache_layout(temp_vllm_config))
             if required_kvcache_layout is not None:

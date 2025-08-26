@@ -39,7 +39,6 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 import torch
 
 from vllm.logger import init_logger
-from vllm.plugins.extension_manager import ExtensionManager
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -132,8 +131,8 @@ class KVConnectorBase_V1(ABC):
         Initialize with the KV caches. Useful for pre-registering the
         KV Caches in the KVConnector (e.g. for NIXL).
 
-        Args: kv_caches:
-            dictionary of layer names, kv cache
+        Args: 
+            kv_caches: dictionary of layer names, kv cache
         """
         return
 
@@ -331,6 +330,3 @@ class KVConnectorBase_V1(ABC):
             raise TypeError("get_required_kvcache_layout should not be called "
                             "on the abstract base class")
         return None
-
-
-kv_connector_manager = ExtensionManager(base_cls=KVConnectorBase_V1)

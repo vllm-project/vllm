@@ -3,8 +3,9 @@
 from typing import TYPE_CHECKING, Optional
 
 from vllm import envs
-from vllm.distributed.kv_transfer.kv_connector.base import (
-    KVConnectorBaseType, kv_connector_manager)
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
+from vllm.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 
@@ -59,19 +60,7 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
     if (vllm_config.kv_transfer_config.is_kv_transfer_instance
             and _KV_CONNECTOR_AGENT is None):
         if envs.VLLM_USE_V1:
-            name = vllm_config.kv_transfer_config.kv_connector
-            if name is None:
-                # With ExtensionManager, we no longer do on-the-fly imports,
-                # as extensions must be registered via
-                # register(...) decorator.
-                raise ValueError(
-                    "KV connector name must be set in KVTransferConfig")
-
-            _KV_CONNECTOR_AGENT = kv_connector_manager.create_or_import(
-                name=name,
-                extension_path=vllm_config.kv_transfer_config.
-                kv_connector_module_path,
-                vllm_config=vllm_config,
-                role=KVConnectorRole.WORKER)
+            _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
+                config=vllm_config, role=KVConnectorRole.WORKER)
         else:
             raise ValueError("V0 is no longer supported")

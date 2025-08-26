@@ -64,6 +64,8 @@ class VideoLoader:
 
 
 video_loader_manager = ExtensionManager(base_cls=VideoLoader)
+# Kept for legacy import compatibility
+VIDEO_LOADER_REGISTRY = video_loader_manager
 
 
 @video_loader_manager.register(names=["opencv"])
