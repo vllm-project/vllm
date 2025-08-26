@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib
 import logging
 import sys
 from argparse import SUPPRESS, HelpFormatter
@@ -7,25 +8,52 @@ from pathlib import Path
 from typing import Literal
 from unittest.mock import MagicMock, patch
 
+from pydantic_core import core_schema
+
+logger = logging.getLogger("mkdocs")
+
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
 ARGPARSE_DOC_DIR = ROOT_DIR / "docs/argparse"
 
 sys.path.insert(0, str(ROOT_DIR))
-sys.modules["aiohttp"] = MagicMock()
-sys.modules["blake3"] = MagicMock()
 sys.modules["vllm._C"] = MagicMock()
 
-from vllm.benchmarks import latency  # noqa: E402
-from vllm.benchmarks import serve  # noqa: E402
-from vllm.benchmarks import throughput  # noqa: E402
-from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs  # noqa: E402
-from vllm.entrypoints.cli.openai import ChatCommand  # noqa: E402
-from vllm.entrypoints.cli.openai import CompleteCommand  # noqa: E402
-from vllm.entrypoints.openai import cli_args  # noqa: E402
-from vllm.entrypoints.openai import run_batch  # noqa: E402
-from vllm.utils import FlexibleArgumentParser  # noqa: E402
 
-logger = logging.getLogger("mkdocs")
+class PydanticMagicMock(MagicMock):
+    """`MagicMock` that's able to generate pydantic-core schemas."""
+
+    def __get_pydantic_core_schema__(self, source_type, handler):
+        return core_schema.any_schema()
+
+
+def auto_mock(module, attr, max_mocks=50):
+    """Function that automatically mocks missing modules during imports."""
+    logger.info("Importing %s from %s", attr, module)
+    for _ in range(max_mocks):
+        try:
+            # First treat attr as an attr, then as a submodule
+            return getattr(importlib.import_module(module), attr,
+                           importlib.import_module(f"{module}.{attr}"))
+        except importlib.metadata.PackageNotFoundError as e:
+            raise e
+        except ModuleNotFoundError as e:
+            logger.info("Mocking %s for argparse doc generation", e.name)
+            sys.modules[e.name] = PydanticMagicMock()
+
+    raise ImportError(
+        f"Failed to import {module}.{attr} after mocking {max_mocks} imports")
+
+
+latency = auto_mock("vllm.benchmarks", "latency")
+serve = auto_mock("vllm.benchmarks", "serve")
+throughput = auto_mock("vllm.benchmarks", "throughput")
+AsyncEngineArgs = auto_mock("vllm.engine.arg_utils", "AsyncEngineArgs")
+EngineArgs = auto_mock("vllm.engine.arg_utils", "EngineArgs")
+ChatCommand = auto_mock("vllm.entrypoints.cli.openai", "ChatCommand")
+CompleteCommand = auto_mock("vllm.entrypoints.cli.openai", "CompleteCommand")
+cli_args = auto_mock("vllm.entrypoints.openai", "cli_args")
+run_batch = auto_mock("vllm.entrypoints.openai", "run_batch")
+FlexibleArgumentParser = auto_mock("vllm.utils", "FlexibleArgumentParser")
 
 
 class MarkdownFormatter(HelpFormatter):
