@@ -177,14 +177,6 @@ class Scheduler(SchedulerInterface):
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
 
-        # NOTE: structured_output_request_ids maps
-        # a request's (request that uses structured output)
-        # request_id to the running request index.
-        # This will helps us determine to slice the grammar bitmask
-        # and only applies valid mask for requests that
-        # uses structured decoding.
-        structured_output_request_ids: dict[str, int] = {}
-
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
@@ -260,6 +252,7 @@ class Scheduler(SchedulerInterface):
                         preempted_req = self.running.pop()
 
                     self.kv_cache_manager.free(preempted_req)
+                    self.encoder_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
                     if self.log_stats:
@@ -282,12 +275,6 @@ class Scheduler(SchedulerInterface):
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
-            if request.use_structured_output:
-                # PERF: in case of chunked prefill,
-                # request might not include any new tokens.
-                # Therefore, we might introduce some additional
-                # cycle to fill in the bitmask, which could be a big no-op.
-                structured_output_request_ids[request.request_id] = req_index
             req_to_new_blocks[request.request_id] = new_blocks
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
@@ -477,9 +464,6 @@ class Scheduler(SchedulerInterface):
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     continue
 
-                if request.use_structured_output:
-                    structured_output_request_ids[request.request_id] = (
-                        req_index)
                 req_index += 1
                 self.running.append(request)
                 if self.log_stats:
@@ -538,11 +522,6 @@ class Scheduler(SchedulerInterface):
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
 
-        grammar_bitmask = self.structured_output_manager.grammar_bitmask(
-            self.requests,
-            structured_output_request_ids,
-            scheduled_spec_decode_tokens,
-        )
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(
@@ -556,6 +535,9 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens,
             req_to_new_blocks,
         )
+        structured_output_request_ids, grammar_bitmask = (
+            self.get_grammar_bitmask(self.running,
+                                     scheduled_spec_decode_tokens))
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -569,7 +551,8 @@ class Scheduler(SchedulerInterface):
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
-            free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
+            free_encoder_mm_hashes=self.encoder_cache_manager.
+            get_freed_mm_hashes(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
         )
@@ -717,7 +700,7 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
-            if self.encoder_cache_manager.has_cache(request, i):
+            if self.encoder_cache_manager.check_and_update_cache(request, i):
                 # The encoder input is already computed and cached.
                 continue
 
@@ -731,8 +714,8 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = start_pos - num_computed_tokens
                 break
 
-            if (not self.encoder_cache_manager.can_allocate(request, i)
-                    or num_encoder_tokens > encoder_budget):
+            if not self.encoder_cache_manager.try_allocate(
+                    request, i, encoder_budget):
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
                 # be processed altogether, as the encoder usually uses
@@ -752,6 +735,36 @@ class Scheduler(SchedulerInterface):
             encoder_budget -= num_encoder_tokens
             encoder_inputs_to_schedule.append(i)
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
+
+    def get_grammar_bitmask(
+        self,
+        requests: list[Request],
+        scheduled_spec_decode_tokens: dict[str, list[int]],
+    ):
+        # NOTE: structured_output_request_ids maps
+        # a request's (request that uses structured output)
+        # request_id to its index in the batch.
+        # This will helps us determine to slice the grammar bitmask
+        # and only applies valid mask for requests that
+        # uses structured decoding.
+        structured_output_request_ids: dict[str, int] = {}
+        for i, req in enumerate(requests):
+            if req.use_structured_output:
+                # PERF: in case of chunked prefill,
+                # request might not include any new tokens.
+                # Therefore, we might introduce some additional
+                # cycle to fill in the bitmask, which could be a big no-op.
+                structured_output_request_ids[req.request_id] = i
+
+        if not structured_output_request_ids:
+            bitmask = None
+        else:
+            bitmask = self.structured_output_manager.grammar_bitmask(
+                self.requests,
+                structured_output_request_ids,
+                scheduled_spec_decode_tokens,
+            )
+        return structured_output_request_ids, bitmask
 
     def update_from_output(
         self,
