@@ -18,8 +18,8 @@ def config(cls: ConfigT) -> ConfigT:
     A decorator that ensures all fields in a dataclass have default values
     and that each field has a docstring.
 
-    If a `ConfigT` is used as a CLI argument itself, the `type` keyword
-    argument provided by `get_kwargs` will be
+    If a `ConfigT` is used as a CLI argument itself, the `type` keyword argument
+    provided by `get_kwargs` will be
     `pydantic.TypeAdapter(ConfigT).validate_json(cli_arg)` which treats the
     `cli_arg` as a JSON string which gets validated by `pydantic`.
 
@@ -28,14 +28,13 @@ def config(cls: ConfigT) -> ConfigT:
     """
     return cls
 
-
 # Canonicalize common value types used in config hashing.
 # Keeps imports light at module load; heavier bits are imported inside.
 def canon_value(x):
     """Return a stable, JSON-serializable canonical form for hashing.
 
-    Fast path primitives first, then special types (Enum, callable, torch dtype
-    and Path), then generic containers (Mapping/Set/Sequence) with recursion.
+    Order: primitives, special types (Enum, callable, torch.dtype, Path), then
+    generic containers (Mapping/Set/Sequence) with recursion.
     """
     import enum
     import pathlib
@@ -81,14 +80,13 @@ def canon_value(x):
     # Unsupported type
     try:
         from vllm.logger import init_logger
-        init_logger(__name__).debug("canon_value: unsupported type '%s'",
-                                    type(x).__name__)
+        init_logger(__name__).debug(
+            "canon_value: unsupported type '%s'", type(x).__name__)
     except Exception:
         try:
             import logging
             logging.getLogger(__name__).debug(
-                "canon_value: unsupported type '%s'",
-                type(x).__name__)
+                "canon_value: unsupported type '%s'", type(x).__name__)
         except Exception:
             pass
     raise TypeError
@@ -121,6 +119,7 @@ def build_opt_out_items(cfg, exclude: set[str]) -> list[tuple[str, object]]:
     """
     import logging
     from contextlib import suppress
+
     logger = logging.getLogger(__name__)
     items: list[tuple[str, object]] = []
     for key in sorted(get_declared_field_names(cfg)):
@@ -141,13 +140,14 @@ def build_opt_out_items(cfg, exclude: set[str]) -> list[tuple[str, object]]:
 def hash_items_sha256(items: list[tuple[str, object]]) -> str:
     """Return a SHA-256 hex digest of the canonical items structure."""
     import hashlib
+
     return hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
 
 
 def build_opt_items_override(
     cfg,
     exclude: set[str],
-    overrides: dict[str, "callable"],
+    overrides: dict[str, Callable[[object], object]],
 ) -> list[tuple[str, object]]:
     """Opt-out items with targeted per-field overrides.
 
@@ -157,6 +157,7 @@ def build_opt_items_override(
     """
     import logging
     from contextlib import suppress
+
     logger = logging.getLogger(__name__)
     items: list[tuple[str, object]] = []
     for key in sorted(get_declared_field_names(cfg)):
@@ -175,4 +176,4 @@ def build_opt_items_override(
             with suppress(Exception):
                 logger.debug("Hash skip: unsupported type for key '%s'", key)
             continue
-    return items
+    return item
