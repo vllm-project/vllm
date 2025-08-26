@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.platforms import current_platform
 from vllm.utils import round_up
 
+from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
 
 requires_pplx = pytest.mark.skipif(
@@ -452,6 +453,7 @@ def _pplx_prepare_finalize(
 @pytest.mark.parametrize("use_internode", [False])
 @pytest.mark.optional
 @requires_pplx
+@multi_gpu_test(num_gpus=2)
 def test_pplx_prepare_finalize_slow(
     mnk: tuple[int, int, int],
     e: int,
@@ -740,6 +742,7 @@ def _pplx_moe(
 @pytest.mark.parametrize("use_internode", [False])
 @pytest.mark.optional
 @requires_pplx
+@multi_gpu_test(num_gpus=2)
 def test_pplx_moe_slow(
     mnk: tuple[int, int, int],
     e: int,
@@ -880,6 +883,7 @@ def _pplx_test_loop(pgi: ProcessGroupInfo, dp_size: int, use_internode: bool,
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
+@multi_gpu_test(num_gpus=2)
 def test_pplx_prepare_finalize(
     world_dp_size: tuple[int, int],
     use_internode: bool,
@@ -893,6 +897,7 @@ def test_pplx_prepare_finalize(
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])
 @pytest.mark.parametrize("use_internode", [False])
 @requires_pplx
+@multi_gpu_test(num_gpus=2)
 def test_pplx_moe(
     world_dp_size: tuple[int, int],
     use_internode: bool,

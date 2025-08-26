@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.platforms import current_platform
 from vllm.utils import cdiv
 
+from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
 
 try:
@@ -247,6 +248,7 @@ def _pplx_moe(
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])  #, [4, 2]])
 @pytest.mark.parametrize("use_internode", [False])
+@multi_gpu_test(num_gpus=2)
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
         current_platform.get_device_capability()),
