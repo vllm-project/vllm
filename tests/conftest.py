@@ -13,6 +13,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from PIL import Image
+from requests import utils as request_utils
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, BatchFeature)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
@@ -1218,3 +1219,14 @@ def cli_config_file():
 def cli_config_file_with_model():
     """Return the path to the CLI config file with model."""
     return os.path.join(_TEST_DIR, "config", "test_config_with_model.yaml")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def set_user_agent():
+    """
+    Set user agent in conformance with wikimedia policy
+    to avoid 403 errors (see https://w.wiki/4wJS)
+    """
+
+    request_utils.default_user_agent = \
+            lambda: 'vLLM tests (https://github.com/vllm-project/vllm)'
