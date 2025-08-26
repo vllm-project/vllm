@@ -899,16 +899,13 @@ class MiniMaxText01DecoderLayer(nn.Module):
 @support_torch_compile
 class MiniMaxText01Model(nn.Module):
 
-    def __init__(
-        self,
-        config: MiniMaxConfig,
-        model_config: Optional[ModelConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        scheduler_config=None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config: MiniMaxConfig = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        quant_config = vllm_config.quant_config
+        cache_config = vllm_config.cache_config
+        scheduler_config = vllm_config.scheduler_config
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -1138,7 +1135,6 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
         super().__init__()
         config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         self.config = config
         self.lora_config = lora_config
@@ -1151,13 +1147,8 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         self.unpadded_vocab_size = self.config.vocab_size
         if hasattr(vllm_config.model_config, "max_model_len"):
             self.config.max_model_len = vllm_config.model_config.max_model_len
-        self.model = MiniMaxText01Model(
-            self.config,
-            model_config=vllm_config.model_config,
-            cache_config=vllm_config.cache_config,
-            quant_config=quant_config,
-            scheduler_config=vllm_config.scheduler_config,
-            prefix=maybe_prefix(prefix, "model"))
+        self.model = MiniMaxText01Model(vllm_config=vllm_config,
+                                        prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
