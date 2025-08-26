@@ -299,7 +299,10 @@ class Scheduler(SchedulerInterface):
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
-
+                # Record the encoder scheduled event.
+                if self.log_stats:
+                    request.record_event(EngineCoreEventType.ENCODER_SCHEDULED,
+                                         scheduled_timestamp)
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
         if self.lora_config:
@@ -496,7 +499,11 @@ class Scheduler(SchedulerInterface):
                     for i in encoder_inputs_to_schedule:
                         self.encoder_cache_manager.allocate(request, i)
                     encoder_budget = new_encoder_budget
-
+                    # Record the encoder scheduled event.
+                    if self.log_stats:
+                        request.record_event(
+                            EngineCoreEventType.ENCODER_SCHEDULED,
+                            scheduled_timestamp)
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
             self.waiting.prepend_requests(skipped_waiting_requests)

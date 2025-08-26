@@ -75,6 +75,7 @@ class EngineCoreEventType(enum.IntEnum):
     QUEUED = 1
     SCHEDULED = 2
     PREEMPTED = 3
+    ENCODER_SCHEDULED = 4
 
 
 class EngineCoreEvent(msgspec.Struct):

@@ -65,6 +65,8 @@ class RequestStateStats:
     # These are engine core timestamps (monotonic)
     queued_ts: float = 0.0
     scheduled_ts: float = 0.0
+    # First time encoder work was scheduled for this request (if any)
+    encoder_scheduled_ts: float = 0.0
     first_token_ts: float = 0.0
     last_token_ts: float = 0.0
 
@@ -96,6 +98,9 @@ class IterationStats:
         self.max_num_generation_tokens_iter: list[int] = []
         self.n_params_iter: list[int] = []
         self.time_to_first_tokens_iter: list[float] = []
+        # For multimodal requests only: time from encoder scheduled
+        # to the first token emitted
+        self.encoder_to_first_tokens_iter: list[float] = []
         self.time_per_output_tokens_iter: list[float] = []
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
@@ -116,6 +121,11 @@ class IterationStats:
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
+            # Encoder-to-first-token latency (only if encoder was scheduled)
+            if req_stats.encoder_scheduled_ts > 0.0:
+                enc_to_first = (engine_core_timestamp -
+                                req_stats.encoder_scheduled_ts)
+                self.encoder_to_first_tokens_iter.append(enc_to_first)
 
         req_stats.num_generation_tokens += num_new_generation_tokens
 
@@ -150,6 +160,10 @@ class IterationStats:
             elif event.type == EngineCoreEventType.PREEMPTED:
                 self.num_preempted_reqs += 1
                 LoRARequestStates.preempted_request(lora_stats, req_id)
+            elif event.type == EngineCoreEventType.ENCODER_SCHEDULED:
+                # Record the first encoder scheduling time only once
+                if req_stats.encoder_scheduled_ts == 0.0:
+                    req_stats.encoder_scheduled_ts = event.timestamp
 
     def update_from_finished_request(self, finish_reason: "FinishReason",
                                      num_prompt_tokens: int,
