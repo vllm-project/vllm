@@ -27,8 +27,8 @@ import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Any, Callable, Literal, Optional, Union
 from itertools import chain
+from typing import Annotated, Any, Callable, Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -229,7 +229,7 @@ class Resampler4_5(Resampler2_5):
                  kv_dim: Optional[int] = None,
                  norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
                  max_size: tuple[int, int] = (70, 70),
-                max_temporal_size: int = 36000,
+                 max_temporal_size: int = 36000,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "") -> None:
         super().__init__(num_queries,
@@ -246,9 +246,7 @@ class Resampler4_5(Resampler2_5):
         self._set_temporal_pos_cache(self.max_temporal_size)
         self.apply(self._init_weights)
 
-
-    def get_1d_sincos_pos_embed_from_temporal_size(self,
-                                                   embed_dim : int,
+    def get_1d_sincos_pos_embed_from_temporal_size(self, embed_dim: int,
                                                    pos: np.ndarray):
         """
         embed_dim: output dimension for each position
@@ -263,22 +261,19 @@ class Resampler4_5(Resampler2_5):
         pos = pos.reshape(-1)  # (M,)
         out = np.einsum('m,d->md', pos, omega)  # (M, D/2), outer product
 
-        emb_sin = np.sin(out) # (M, D/2)
-        emb_cos = np.cos(out) # (M, D/2)
+        emb_sin = np.sin(out)  # (M, D/2)
+        emb_cos = np.cos(out)  # (M, D/2)
 
         emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
         return emb
-    
 
-    
     def _set_temporal_pos_cache(self,
                                 max_temporal_size: int,
                                 device: torch.types.Device = "cpu") -> None:
         temporal_size = np.arange(max_temporal_size, dtype=np.float32)
-        pos_embed = torch.from_numpy(self.get_1d_sincos_pos_embed_from_temporal_size(
-            self.embed_dim,
-            temporal_size
-        )).float().to(device)
+        pos_embed = torch.from_numpy(
+            self.get_1d_sincos_pos_embed_from_temporal_size(
+                self.embed_dim, temporal_size)).float().to(device)
         self.register_buffer("temporal_pos_embed", pos_embed, persistent=False)
 
     def _adjust_temporal_pos_cache(self,
@@ -287,9 +282,8 @@ class Resampler4_5(Resampler2_5):
         if max_temporal_size > self.max_temporal_size:
             self.max_temporal_size = max_temporal_size
             self._set_temporal_pos_cache(self.max_temporal_size, device)
-    
-    def _init_weights(self,
-                     m: Union[nn.Linear, nn.LayerNorm]):
+
+    def _init_weights(self, m: Union[nn.Linear, nn.LayerNorm]):
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
@@ -298,7 +292,8 @@ class Resampler4_5(Resampler2_5):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self, x: torch.Tensor,
+    def forward(self,
+                x: torch.Tensor,
                 tgt_sizes: torch.Tensor,
                 temporal_ids=None) -> torch.Tensor:
         assert x.shape[0] == tgt_sizes.shape[0]
@@ -339,19 +334,23 @@ class Resampler4_5(Resampler2_5):
             tgt_h, tgt_w = tgt_sizes[i]
             if temporal_pos_emb:
                 if temporal_ids_flatten[i] == -1:
-                    pos_embed_temporal.append(torch.zeros(self.embed_dim, dtype=dtype, device=device))
+                    pos_embed_temporal.append(
+                        torch.zeros(self.embed_dim, dtype=dtype,
+                                    device=device))
                 else:
-                    pos_embed_temporal.append(self.temporal_pos_embed[temporal_ids_flatten[i]].to(dtype)) # D
+                    pos_embed_temporal.append(self.temporal_pos_embed[
+                        temporal_ids_flatten[i]].to(dtype))  # D
 
-            pos_embed_2d.append(self.pos_embed[:tgt_h, :tgt_w, :].reshape((tgt_h * tgt_w, -1)).to(dtype))  # patches * D
+            pos_embed_2d.append(self.pos_embed[:tgt_h, :tgt_w, :].reshape(
+                (tgt_h * tgt_w, -1)).to(dtype))  # patches * D
             key_padding_mask[i, patch_len[i]:] = True
 
         pos_embed_2d = torch.nn.utils.rnn.pad_sequence(
-            pos_embed_2d, batch_first=True, padding_value=0.0).permute(1, 0, 2)  # BLD => L * B * D
-        
+            pos_embed_2d, batch_first=True,
+            padding_value=0.0).permute(1, 0, 2)  # BLD => L * B * D
+
         k = x
         v = x + pos_embed_2d
-        
         if pos_embed_temporal:
             k += torch.stack(pos_embed_temporal, dim=0)
             bs = len(temporal_ids)
@@ -363,16 +362,26 @@ class Resampler4_5(Resampler2_5):
             for tp in temporal_ids:
                 end = start + len(tp)
                 # # L * (end-start) * D -> (end-start) * L * D -> 1 * L*(end-start) * D
-                merge_k.append(k[:, start: end, :].permute(1, 0, 2).reshape(-1, self.embed_dim))
-                merge_v.append(v[:, start: end, :].permute(1, 0, 2).reshape(-1, self.embed_dim))
-                merge_key_padding_mask.append(key_padding_mask[start: end, :].reshape(-1, 1))
+                merge_k.append(k[:, start:end, :].permute(1, 0, 2).reshape(
+                    -1, self.embed_dim))
+                merge_v.append(v[:, start:end, :].permute(1, 0, 2).reshape(
+                    -1, self.embed_dim))
+                merge_key_padding_mask.append(
+                    key_padding_mask[start:end, :].reshape(-1, 1))
 
                 start = end
-                            
-            k = torch.nn.utils.rnn.pad_sequence(merge_k, batch_first=True, padding_value=0.0).permute(1, 0, 2)  # L*(end-start)
-            v = torch.nn.utils.rnn.pad_sequence(merge_v, batch_first=True, padding_value=0.0).permute(1, 0, 2)  # L*(end-start)
-            key_padding_mask = torch.nn.utils.rnn.pad_sequence(merge_key_padding_mask, batch_first=True, padding_value=True).squeeze(-1)
-        
+
+            k = torch.nn.utils.rnn.pad_sequence(merge_k,
+                                                batch_first=True,
+                                                padding_value=0.0).permute(
+                                                    1, 0, 2)  # L*(end-start)
+            v = torch.nn.utils.rnn.pad_sequence(merge_v,
+                                                batch_first=True,
+                                                padding_value=0.0).permute(
+                                                    1, 0, 2)  # L*(end-start)
+            key_padding_mask = torch.nn.utils.rnn.pad_sequence(
+                merge_key_padding_mask, batch_first=True,
+                padding_value=True).squeeze(-1)
 
         out = self.attn(
             self._repeat(q, bs),  # Q * B * D
@@ -524,7 +533,7 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         mm_limits = {"image": None}
-        if self.get_model_version()in {(2, 6), (4, 0), (4, 5)}:
+        if self.get_model_version() in {(2, 6), (4, 0), (4, 5)}:
             mm_limits["video"] = None
 
         return mm_limits
@@ -1562,6 +1571,7 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
                                    skip_prefixes=["apm.", "audio", "tts"])
         return loader.load_weights(weights)
 
+
 class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -1645,7 +1655,6 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
             all_temporal_ids = []
             for t in temporal_ids:
                 all_temporal_ids.extend(t)
-                
         for i, pixel_values_item in enumerate(pixel_values):
             L_item = pixel_values_item.shape[-1]
             all_pixel_values[i, ..., :L_item] = pixel_values_item

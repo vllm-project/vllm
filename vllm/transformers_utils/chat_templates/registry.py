@@ -25,7 +25,7 @@ def _get_minicpmv_chat_template_fallback(
     # MiniCPM-V-4.5 version uses a dedicated template
     if "4.5" in tokenizer_name_or_path or "4_5" in tokenizer_name_or_path:
         return CHAT_TEMPLATES_DIR / "template_minicpmv45.jinja"
-    
+
     # Other versions use chatml template
     return CHAT_TEMPLATES_DIR / "template_chatml.jinja"
 
