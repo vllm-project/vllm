@@ -20,6 +20,7 @@ parent module (__init__.py).
 
 import os
 import tempfile
+from pathlib import Path
 from typing import Optional
 
 
@@ -37,18 +38,41 @@ CMAKE_BUILD_TYPE: Optional[str] = None
 VERBOSE: bool = False
 
 # Configuration and cache paths
-VLLM_CONFIG_ROOT: str = os.path.expanduser("~/.config/vllm")
-VLLM_CACHE_ROOT: str = os.path.expanduser("~/.cache/vllm")
+VLLM_CONFIG_ROOT: Path = Path.home() / ".config" / "vllm"
+"""Root directory for vLLM configuration files.
+
+Note that this not only affects how vllm finds its configuration files
+during runtime, but also affects how vllm installs its configuration
+files during **installation**.
+"""
+
+VLLM_CACHE_ROOT: Path = Path.home() / ".cache" / "vllm"
+"""Root directory for vLLM cache files.
+
+Defaults to `~/.cache/vllm` unless `XDG_CACHE_HOME` is set.
+"""
 
 # Runtime Environment Variables
 VLLM_HOST_IP: str = ""
 VLLM_PORT: Optional[int] = None
-VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
+VLLM_RPC_BASE_PATH: Path = Path(tempfile.gettempdir())
+"""Base path for RPC temporary files."""
 VLLM_USE_MODELSCOPE: bool = False
 VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
 CUDA_HOME: Optional[str] = None
-VLLM_NCCL_SO_PATH: Optional[str] = None
-LD_LIBRARY_PATH: Optional[str] = None
+VLLM_NCCL_SO_PATH: Optional[Path] = None
+"""Path to the NCCL shared object library.
+
+When `VLLM_NCCL_SO_PATH` is not set, vllm will try to find the nccl
+library file in the locations specified by `LD_LIBRARY_PATH`.
+"""
+
+LD_LIBRARY_PATH: Optional[Path] = None
+"""Path for dynamic library loading.
+
+When `VLLM_NCCL_SO_PATH` is not set, vllm will try to find the nccl
+library file in the locations specified by `LD_LIBRARY_PATH`.
+"""
 
 # Attention and kernel settings
 VLLM_USE_TRITON_FLASH_ATTN: bool = True
@@ -84,7 +108,8 @@ VLLM_USAGE_SOURCE: str = "production"
 
 # Logging configuration
 VLLM_CONFIGURE_LOGGING: int = 1
-VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
+VLLM_LOGGING_CONFIG_PATH: Optional[Path] = None
+"""Path to custom logging configuration file."""
 VLLM_LOGGING_LEVEL: str = "INFO"
 VLLM_LOGGING_PREFIX: str = ""
 VLLM_LOGITS_PROCESSOR_THREADS: Optional[int] = None
@@ -96,13 +121,28 @@ VLLM_PP_LAYER_PARTITION: Optional[str] = None
 
 # CPU backend settings  
 VLLM_CPU_KVCACHE_SPACE: Optional[int] = None
+"""(CPU backend only) KV cache space size in MB."""
+
 VLLM_CPU_OMP_THREADS_BIND: str = "auto"
+"""(CPU backend only) CPU core ids bound by OpenMP threads.
+
+Examples: "0-31", "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
+"""
+
 VLLM_CPU_NUM_OF_RESERVED_CPU: Optional[int] = None
+"""(CPU backend only) CPU cores not used by OMP threads.
+
+Those CPU cores will not be used by OMP threads of a rank.
+"""
 VLLM_CPU_MOE_PREPACK: bool = True
 VLLM_CPU_SGL_KERNEL: bool = False
 
 # XLA settings
-VLLM_XLA_CACHE_PATH: str = os.path.join(os.path.expanduser("~/.cache/vllm"), "xla_cache")
+VLLM_XLA_CACHE_PATH: Path = Path.home() / ".cache" / "vllm" / "xla_cache"
+"""Path to the XLA persistent cache directory.
+
+Only used for XLA devices such as TPUs.
+"""
 VLLM_XLA_CHECK_RECOMPILATION: bool = False
 VLLM_XLA_USE_SPMD: bool = False
 
@@ -119,7 +159,8 @@ VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
 VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
 
 # Multimodal settings
-VLLM_ASSETS_CACHE: str = os.path.join(os.path.expanduser("~/.cache/vllm"), "assets")
+VLLM_ASSETS_CACHE: Path = Path.home() / ".cache" / "vllm" / "assets"
+"""Path to the cache for storing downloaded assets."""
 VLLM_IMAGE_FETCH_TIMEOUT: int = 5
 VLLM_VIDEO_FETCH_TIMEOUT: int = 30
 VLLM_AUDIO_FETCH_TIMEOUT: int = 10
@@ -140,10 +181,18 @@ VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
 
 # Plugin system
 VLLM_PLUGINS: Optional[list[str]] = None
-VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
+"""List of enabled plugins."""
+
+VLLM_LORA_RESOLVER_CACHE_DIR: Optional[Path] = None
+"""Directory for LoRA resolver cache."""
 
 # Profiling
-VLLM_TORCH_PROFILER_DIR: Optional[str] = None
+VLLM_TORCH_PROFILER_DIR: Optional[Path] = None
+"""Directory for torch profiler output.
+
+Both AsyncLLM's CPU traces as well as workers' traces (CPU & GPU) will be 
+saved under this directory. Note that it must be an absolute path.
+"""
 VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
 VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
 VLLM_TORCH_PROFILER_WITH_STACK: bool = True
@@ -194,7 +243,8 @@ VLLM_RAY_PER_WORKER_GPUS: float = 1.0
 VLLM_RAY_BUNDLE_INDICES: str = ""
 
 # CUDA settings
-VLLM_CUDART_SO_PATH: Optional[str] = None
+VLLM_CUDART_SO_PATH: Optional[Path] = None
+"""Path to the CUDA runtime shared object library."""
 
 # Data parallel settings  
 VLLM_DP_RANK: int = 0
@@ -209,7 +259,8 @@ VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
 VLLM_CI_USE_S3: bool = False
 
 # Model redirection and quantization
-VLLM_MODEL_REDIRECT_PATH: Optional[str] = None
+VLLM_MODEL_REDIRECT_PATH: Optional[Path] = None
+"""Path for model redirection."""
 VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
 VLLM_MXFP4_USE_MARLIN: Optional[bool] = None
 
@@ -280,7 +331,8 @@ VLLM_ENABLE_RESPONSES_API_STORE: bool = False
 VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
 
 # Configuration folder
-VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
+VLLM_TUNED_CONFIG_FOLDER: Optional[Path] = None
+"""Allows vllm to find tuned config under customized folder."""
 
 
 # Create a dictionary of all defaults for easy access

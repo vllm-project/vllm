@@ -30,6 +30,7 @@ Usage:
 import hashlib
 import os
 import tempfile
+from pathlib import Path
 from typing import TYPE_CHECKING, get_type_hints, Type, Union, get_origin, get_args, Optional
 from urllib.parse import urlparse
 
@@ -112,39 +113,39 @@ def __getattr__(name: str):
     
     # Handle variables that need path expansion
     if name == "VLLM_CONFIG_ROOT":
-        return os.path.expanduser(
+        return Path(os.path.expanduser(
             os.getenv(
                 "VLLM_CONFIG_ROOT",
                 os.path.join(get_default_config_root(), "vllm"),
             )
-        )
+        )).resolve()
     
     if name == "VLLM_CACHE_ROOT":
-        return os.path.expanduser(
+        return Path(os.path.expanduser(
             os.getenv(
                 "VLLM_CACHE_ROOT",
                 os.path.join(get_default_cache_root(), "vllm"),
             )
-        )
+        )).resolve()
     
     if name == "VLLM_ASSETS_CACHE":
-        return os.path.expanduser(
+        return Path(os.path.expanduser(
             os.getenv(
                 "VLLM_ASSETS_CACHE",
                 os.path.join(get_default_cache_root(), "vllm", "assets"),
             )
-        )
+        )).resolve()
     
     if name == "VLLM_XLA_CACHE_PATH":
-        return os.path.expanduser(
+        return Path(os.path.expanduser(
             os.getenv(
                 "VLLM_XLA_CACHE_PATH",
                 os.path.join(get_default_cache_root(), "vllm", "xla_cache"),
             )
-        )
+        )).resolve()
     
     if name == "VLLM_RPC_BASE_PATH":
-        return os.getenv('VLLM_RPC_BASE_PATH', tempfile.gettempdir())
+        return Path(os.getenv('VLLM_RPC_BASE_PATH', tempfile.gettempdir())).resolve()
     
     # Handle special cases for compound logic
     if name == "VLLM_USE_PRECOMPILED":
@@ -163,7 +164,7 @@ def __getattr__(name: str):
     
     if name == "VLLM_TORCH_PROFILER_DIR":
         value = os.getenv("VLLM_TORCH_PROFILER_DIR", None)
-        return None if value is None else os.path.abspath(os.path.expanduser(value))
+        return None if value is None else Path(os.path.abspath(os.path.expanduser(value)))
 
     # Get environment value
     env_value = os.getenv(name)
@@ -186,6 +187,11 @@ def __getattr__(name: str):
         if name == "VLLM_MOE_ROUTING_SIMULATION_STRATEGY":
             return env_value.lower()
         return env_value
+    
+    if var_type is Path:
+        # Parse path with expansion and absolute path conversion
+        expanded_path = os.path.expanduser(env_value)
+        return Path(os.path.abspath(expanded_path))
     
     if var_type is bool:
         return env_value.lower() in ("1", "true")
