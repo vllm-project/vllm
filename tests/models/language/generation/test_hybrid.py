@@ -110,9 +110,6 @@ def test_models(
     if model in V1_SUPPORTED_MODELS:
         with monkeypatch.context() as m:
             m.setenv("VLLM_USE_V1", "1")
-            if model in HYBRID_MODELS:
-                # required due to reorder_batch behaviour
-                m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
                              enable_prefix_caching=False) as vllm_model:
