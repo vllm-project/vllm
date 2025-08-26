@@ -35,7 +35,8 @@ from vllm.utils import (decorate_logs, get_distributed_init_method,
                         get_loopback_ip, get_mp_context, get_open_port,
                         set_process_title)
 from vllm.v1.executor.abstract import Executor, FailureCallback
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import (AsyncModelRunnerOutput, DraftTokenIds,
+                             ModelRunnerOutput)
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -590,28 +591,23 @@ class WorkerProc:
         """Main busy loop for Multiprocessing Workers"""
 
         def process_output(output: Any, worker_response_mq: MessageQueue,
-                           copy_stream: torch.cuda.Stream):
-            if isinstance(output, ModelRunnerOutput) and isinstance(
-                    output.sampled_token_ids, tuple):
-                # sampled_token_ids is a tuple of (Tensor, list[int])
-                # where the second element is the list of invalid req indices
-                tensor, invalid_req_indices = output.sampled_token_ids
-                tensor = cast(torch.Tensor, tensor)
+                           copy_stream: torch.cuda.Stream) -> None:
+            if isinstance(output, AsyncModelRunnerOutput):
+                # Serialize the sampled token ids before sending the output
                 default_stream = torch.cuda.current_stream()
                 with torch.cuda.stream(copy_stream):
                     copy_stream.wait_stream(default_stream)
-                    sampled_token_ids_list = tensor.to('cpu',
-                                                       non_blocking=True)
+                    sampled_token_ids_list = output.sampled_token_ids_tensor.to(
+                        'cpu', non_blocking=True)
                 copy_stream.synchronize()
                 sampled_token_ids_list = sampled_token_ids_list.tolist()
-                for i in invalid_req_indices:
+                for i in output.invalid_req_indices:
                     sampled_token_ids_list[i].clear()
+                output = output.model_runner_output
                 output.sampled_token_ids = sampled_token_ids_list
-                worker_response_mq.enqueue(
-                    (WorkerProc.ResponseStatus.SUCCESS, output))
-            else:
-                worker_response_mq.enqueue(
-                    (WorkerProc.ResponseStatus.SUCCESS, output))
+
+            worker_response_mq.enqueue(
+                (WorkerProc.ResponseStatus.SUCCESS, output))
             return
 
         def _output_processor_loop(input_queue: queue.Queue,

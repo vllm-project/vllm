@@ -114,6 +114,19 @@ class ModelRunnerOutput:
     num_nans_in_logits: Optional[dict[str, int]] = None
 
 
+# Subclass of ModelRunnerOutput for async scheduling.
+# Contains GPU tensors which must be serialized before sending
+# to the scheduler process.
+@dataclass
+class AsyncModelRunnerOutput:
+    model_runner_output: ModelRunnerOutput
+
+    # [num_reqs, max_num_generated_tokens]
+    sampled_token_ids_tensor: torch.Tensor
+
+    invalid_req_indices: list[int]
+
+
 @dataclass
 class DraftTokenIds:
 

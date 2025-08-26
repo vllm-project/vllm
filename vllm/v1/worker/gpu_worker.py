@@ -5,7 +5,7 @@ import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 import torch.distributed
@@ -28,8 +28,8 @@ from vllm.tasks import SupportedTask
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
-                             ModelRunnerOutput)
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, AsyncModelRunnerOutput,
+                             DraftTokenIds, ModelRunnerOutput)
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
@@ -352,7 +352,7 @@ class Worker(WorkerBase):
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
-    ) -> Optional[ModelRunnerOutput]:
+    ) -> Optional[Union[ModelRunnerOutput, AsyncModelRunnerOutput]]:
         intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
@@ -383,7 +383,7 @@ class Worker(WorkerBase):
             output.kv_connector_output = kv_connector_output
             return output
 
-        assert isinstance(output, ModelRunnerOutput)
+        assert isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput))
         return output
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
