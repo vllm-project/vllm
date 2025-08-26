@@ -919,10 +919,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         slot_mapping,
                     )
                 else:
-                    attn_metadata_i = (builder.build(
+                    attn_metadata_i = builder.build(
                         common_prefix_len=common_prefix_len,
                         common_attn_metadata=common_attn_metadata,
-                    ))
+                    )
                     attn_metadata_cache[cache_key] = attn_metadata_i
 
                 fast_prefill_metadata = attn_metadata_i
