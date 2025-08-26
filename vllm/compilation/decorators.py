@@ -143,10 +143,11 @@ def support_torch_compile(
     conditions are met.
 
     If `no_weak_ref_output` is set to `True`, the output of the last graph
-    of each compiled nn.Module will not be converted to a weakref (which saves
-    some memory) in piecewise cudagraph mode. This conversion is only safe when
-    the output of the last graph is not used by any subsequent CUDA graphs in
-    the model forward. 
+    of each compiled nn.Module will not be converted to a weakref.
+    This conversion saves memory but is only safe when the output of the last
+    graph is not used by any subsequent CUDA graphs in the model forward.
+    In full cudagraph mode, this is ignored as full cudagraphs are always
+    captured for the full model.
     
     This defaults to `True`, because in most cases the entire model is being
     compiled, so the assumption that there is no other cuda graph after the last
