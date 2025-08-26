@@ -5,27 +5,27 @@ import sys
 from argparse import SUPPRESS, HelpFormatter
 from pathlib import Path
 from typing import Literal
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
+
+logger = logging.getLogger("mkdocs")
 
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
 ARGPARSE_DOC_DIR = ROOT_DIR / "docs/argparse"
 
 sys.path.insert(0, str(ROOT_DIR))
-sys.modules["aiohttp"] = MagicMock()
-sys.modules["blake3"] = MagicMock()
-sys.modules["vllm._C"] = MagicMock()
 
-from vllm.benchmarks import latency  # noqa: E402
-from vllm.benchmarks import serve  # noqa: E402
-from vllm.benchmarks import throughput  # noqa: E402
-from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs  # noqa: E402
-from vllm.entrypoints.cli.openai import ChatCommand  # noqa: E402
-from vllm.entrypoints.cli.openai import CompleteCommand  # noqa: E402
-from vllm.entrypoints.openai import cli_args  # noqa: E402
-from vllm.entrypoints.openai import run_batch  # noqa: E402
-from vllm.utils import FlexibleArgumentParser  # noqa: E402
+from docs.mkdocs.hooks.mocking import auto_mock  # noqa: E402
 
-logger = logging.getLogger("mkdocs")
+latency = auto_mock("vllm.benchmarks", "latency")
+serve = auto_mock("vllm.benchmarks", "serve")
+throughput = auto_mock("vllm.benchmarks", "throughput")
+AsyncEngineArgs = auto_mock("vllm.engine.arg_utils", "AsyncEngineArgs")
+EngineArgs = auto_mock("vllm.engine.arg_utils", "EngineArgs")
+ChatCommand = auto_mock("vllm.entrypoints.cli.openai", "ChatCommand")
+CompleteCommand = auto_mock("vllm.entrypoints.cli.openai", "CompleteCommand")
+cli_args = auto_mock("vllm.entrypoints.openai", "cli_args")
+run_batch = auto_mock("vllm.entrypoints.openai", "run_batch")
+FlexibleArgumentParser = auto_mock("vllm.utils", "FlexibleArgumentParser")
 
 
 class MarkdownFormatter(HelpFormatter):
