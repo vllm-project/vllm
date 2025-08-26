@@ -104,8 +104,7 @@ class TestQuantModel(torch.nn.Module):
         # Initialize weights
         torch.nn.init.normal_(self.gate_proj, std=0.02)
 
-        self.fp8_linear = Fp8LinearOp(cutlass_fp8_supported=True,
-                                      use_per_token_if_dynamic=False)
+        self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=False)
 
         self.scale = torch.rand(1, dtype=torch.float32)
         # Create a weight that is compatible with torch._scaled_mm,

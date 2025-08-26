@@ -655,6 +655,7 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
     - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
