@@ -73,7 +73,7 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: Union[str, list[str], Any]
+    prompt: Union[str, list[str]]
     prompt_len: int
     expected_output_len: int
     multi_modal_data: Optional[
