@@ -474,6 +474,30 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         return torch.empty_like(b_q_weight,
                                 memory_format=torch.contiguous_format)
 
+    @register_fake("_C::cutlass_w4a8_mm")
+    def cutlass_w4a8_mm_fake(
+            a: torch.Tensor,
+            # b_q Should be the tensor returned by cutlass_encode_and_reorder_int4b
+            b_q: torch.Tensor,
+            b_group_scales: torch.Tensor,
+            b_group_size: int,
+            b_channel_scales: torch.Tensor,
+            a_token_scales: torch.Tensor,
+            out_type: Optional[torch.dtype] = None,
+            maybe_schedule: Optional[str] = None) -> torch.Tensor:
+        m = a.size(0)
+        n = b_q.size(1)
+        out_dtype = out_type if out_type is not None else torch.bfloat16
+        return torch.empty((m, n), device=a.device, dtype=out_dtype)
+
+    @register_fake("_C::cutlass_pack_scale_fp8")
+    def cutlass_pack_scale_fp8_fake(scales: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(scales, memory_format=torch.contiguous_format)
+
+    @register_fake("_C::cutlass_encode_and_reorder_int4b")
+    def cutlass_encode_and_reorder_int4b_fake(b: torch.Tensor) -> torch.Tensor:
+        return torch.empty_like(b, memory_format=torch.contiguous_format)
+
 
 if hasattr(torch.ops._C, "allspark_w8a16_gemm"):
 
@@ -1032,6 +1056,30 @@ def machete_prepack_B(
                                           group_scales_type)
 
 
+# CUTLASS W4A8
+def cutlass_w4a8_mm(
+        a: torch.Tensor,
+        # b_q Should be the tensor returned by cutlass_encode_and_reorder_int4b
+        b_q: torch.Tensor,
+        b_group_scales: torch.Tensor,
+        b_group_size: int,
+        b_channel_scales: torch.Tensor,
+        a_token_scales: torch.Tensor,
+        out_type: Optional[torch.dtype] = None,
+        maybe_schedule: Optional[str] = None) -> torch.Tensor:
+    return torch.ops._C.cutlass_w4a8_mm(a, b_q, b_group_scales, b_group_size,
+                                        b_channel_scales, a_token_scales,
+                                        out_type, maybe_schedule)
+
+
+def cutlass_pack_scale_fp8(scales: torch.Tensor) -> torch.Tensor:
+    return torch.ops._C.cutlass_pack_scale_fp8(scales)
+
+
+def cutlass_encode_and_reorder_int4b(b: torch.Tensor) -> torch.Tensor:
+    return torch.ops._C.cutlass_encode_and_reorder_int4b(b)
+
+
 if hasattr(torch.ops._C, "permute_cols"):
 
     @register_fake("_C::permute_cols")
@@ -1454,6 +1502,17 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                                   gating_output)
 
 
+def grouped_topk(scores: torch.Tensor, scores_with_bias: torch.Tensor,
+                 num_expert_group: int, topk_group: int, topk: int,
+                 renormalize: bool, routed_scaling_factor: float):
+    if not current_platform.is_cuda():
+        raise NotImplementedError("The fused grouped_topk kernel is only "
+                                  "available on CUDA platforms")
+    return torch.ops._moe_C.grouped_topk(scores, scores_with_bias,
+                                         num_expert_group, topk_group, topk,
+                                         renormalize, routed_scaling_factor)
+
+
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           b_qweight: torch.Tensor,
                           b_bias: Optional[torch.Tensor],
@@ -1589,14 +1648,18 @@ def convert_fp8(output: torch.Tensor,
     torch.ops._C_cache_ops.convert_fp8(output, input, scale, kv_dtype)
 
 
-def gather_cache(src_cache: torch.Tensor,
-                 dst: torch.Tensor,
-                 block_table: torch.Tensor,
-                 cu_seq_lens: torch.Tensor,
-                 batch_size: int,
-                 seq_starts: Optional[torch.Tensor] = None) -> None:
-    torch.ops._C_cache_ops.gather_cache(src_cache, dst, block_table,
-                                        cu_seq_lens, batch_size, seq_starts)
+def gather_and_maybe_dequant_cache(
+        src_cache: torch.Tensor,
+        dst: torch.Tensor,
+        block_table: torch.Tensor,
+        cu_seq_lens: torch.Tensor,
+        batch_size: int,
+        kv_cache_dtype: str,
+        scale: torch.Tensor,
+        seq_starts: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C_cache_ops.gather_and_maybe_dequant_cache(
+        src_cache, dst, block_table, cu_seq_lens, batch_size, kv_cache_dtype,
+        scale, seq_starts)
 
 
 def get_device_attribute(attribute: int, device: int) -> int:
@@ -1827,3 +1890,86 @@ if hasattr(torch.ops._C, "int8_scaled_mm_with_quant"):
         M = mat1.size(0)
         N = mat2.size(0)
         return torch.empty((M, N), dtype=out_dtype)
+
+
+class CPUDNNLGEMMHandler:
+
+    def __init__(self) -> None:
+        self.handler: Optional[int] = None
+        self.n = -1
+        self.k = -1
+
+    def __del__(self):
+        if self.handler is not None:
+            torch.ops._C.release_dnnl_matmul_handler(self.handler)
+
+
+def create_onednn_scaled_mm(
+    weight: torch.Tensor,  # [K, N]
+    weight_scales: torch.Tensor,
+    output_type: torch.dtype,
+    dynamic_quant: bool,
+    use_azp: bool,
+    primitive_cache_size: int = 128,
+) -> CPUDNNLGEMMHandler:
+    handler = CPUDNNLGEMMHandler()
+    handler.k, handler.n = weight.size()
+    handler.handler = torch.ops._C.create_onednn_scaled_mm_handler(
+        weight, weight_scales, output_type, dynamic_quant, use_azp,
+        primitive_cache_size)
+    return handler
+
+
+def onednn_scaled_int8_quant(input: torch.Tensor,
+                             scale: Optional[torch.Tensor] = None,
+                             azp: Optional[torch.Tensor] = None,
+                             symmetric: bool = True):
+    """
+    Quantize the input tensor to int8 and return the quantized tensor and scale, and maybe azp.
+
+    Args:
+        input: The input tensor to be quantized to int8.
+        scale: Optional scaling factor for the int8 quantization.
+            When not provided, we invoke dynamic-per-token quantization.
+        azp: Optional zero-point for the int8 quantization.
+            Must be provided for asymmetric quantization if `scale` is provided.
+        symmetric: Whether to use symmetric quantization (scale only, azp ignored).
+
+    Returns:
+      tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]] : Output int8 tensor, scales, and optionally azp.
+    """
+    output = torch.empty_like(input, dtype=torch.int8)
+    token_num = input.numel() // input.shape[-1]
+    input = input.view((token_num, input.shape[-1]))
+    if scale is not None:
+        # static-per-tensor quantization.
+        assert symmetric == (
+            azp
+            is None), "azp must only be provided for asymmetric quantization."
+        torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
+        return output, scale, azp
+
+    # dynamic-per-token quantization.
+    input_scales = torch.empty((token_num, 1),
+                               device=input.device,
+                               dtype=torch.float32)
+    input_azp = None if symmetric else torch.empty_like(input_scales,
+                                                        dtype=torch.int32)
+    torch.ops._C.dynamic_scaled_int8_quant(output, input, input_scales,
+                                           input_azp)
+    return output, input_scales, input_azp
+
+
+def onednn_scaled_mm(
+    dnnl_handler: CPUDNNLGEMMHandler,
+    x: torch.Tensor,
+    output: torch.Tensor,
+    input_scale: Optional[torch.Tensor],
+    input_zp: Optional[torch.Tensor],
+    input_zp_adj: Optional[torch.Tensor],
+    bias: Optional[torch.Tensor],
+) -> torch.Tensor:
+    torch.ops._C.onednn_scaled_mm(output, x, input_scale, input_zp,
+                                  input_zp_adj, bias, dnnl_handler.handler)
+
+    return output
