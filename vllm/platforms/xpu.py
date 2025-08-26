@@ -181,3 +181,7 @@ class XPUPlatform(Platform):
         Currently xpu does NOT support Graph model.
         """
         raise NotImplementedError("XPU does not support Graph model.")
+
+    @classmethod
+    def opaque_attention_op(cls) -> bool:
+        return True
