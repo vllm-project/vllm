@@ -240,8 +240,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.cudagraph_batch_sizes = list(
             reversed(self.compilation_config.cudagraph_capture_sizes))
         
-        self.cudagraphs = {}  # type: ignore
-
         # Cache the device properties.
         self._init_device_properties()
 
@@ -1745,15 +1743,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         cudagraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(batch_descriptor)
 
-        # Run the model.
-        # Use persistent buffers for CUDA graphs.
-        # when DBO is enabled, `num_tokens_after_padding`
-        # represents the per-ubatch DP token count.
-        # dp_tokens_for_forward = num_tokens_after_padding
-        # if ubatch_slices is not None and num_tokens_after_padding is not None:
-        #     dp_tokens_for_forward = num_tokens_after_padding * len(
-        #         ubatch_slices)
-
         if self.supports_mm_inputs:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
@@ -1798,16 +1787,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                 num_input_tokens, intermediate_tensors, True)
-        # with set_forward_context(attn_metadata,
-        #                          vllm_config=self.vllm_config,
-        #                          num_tokens=num_input_tokens or 1,
-        #                          num_tokens_across_dp=dp_tokens_for_forward,
-        #                          skip_cuda_graphs=skip_cuda_graphs):
-        #     self.maybe_setup_kv_connector(scheduler_output)
         kv_connector_output = None
         if ubatch_slices is not None:
             num_input_tokens = num_input_tokens // 2
-        # logger.debug(f"NUM TOKENS FOR BATCH {num_input_tokens}")
         with set_forward_context(attn_metadata,
                                     vllm_config=self.vllm_config,
                                     num_tokens=num_input_tokens or 1,
@@ -1822,9 +1804,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
                 **model_kwargs
             )
-        # self.maybe_wait_for_kv_save()
-        # finished_sending, finished_recving = (
-        #     self.get_finished_kv_transfers(scheduler_output))
 
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
@@ -3001,8 +2980,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # We skip EPLB here since we don't want to record dummy metrics
         if enable_microbatching and uniform_decode:
             for num_tokens in compilation_cases:
+                # If the number of tokens is greater than the microbatching threshold,
+                # don't generate a microbatched cudagraph
                 if num_tokens < self.parallel_config.microbatching_token_threshold:
-                    logger.debug(f"{num_tokens} IS OVER THE THRESHOLD FOR GRAPH CAPTURE {self.parallel_config.microbatching_token_threshold}")
                     continue
                 for _ in range(self.compilation_config.cudagraph_num_of_warmups):
                     force_attention = (
@@ -3072,20 +3052,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
             for attn_backend, layer_names in attn_backends_map.items():
-                attn_metadata_builder_i = attn_backend.get_builder_cls()(
+                attn_metadata_builders = []
+                attn_metadata_builders.append(attn_backend.get_builder_cls()(
                     kv_cache_spec,
                     layer_names,
                     self.vllm_config,
                     self.device,
-                )
-                attn_metadata_builder_2 = attn_backend.get_builder_cls()(
-                    kv_cache_spec,
-                    layer_names,
-                    self.vllm_config,
-                    self.device,
-                )
+                ))
+                if self.parallel_config.enable_microbatching:
+                    attn_metadata_builders.append(attn_backend.get_builder_cls()(
+                        kv_cache_spec,
+                        layer_names,
+                        self.vllm_config,
+                        self.device,
+                    ))
                 attn_group = AttentionGroup(attn_backend,
-                                            [attn_metadata_builder_i, attn_metadata_builder_2],
+                                            attn_metadata_builders,
                                             layer_names)
                 attn_groups.append(attn_group)
             return attn_groups
