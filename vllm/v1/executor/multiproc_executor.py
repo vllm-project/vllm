@@ -298,6 +298,7 @@ class MultiprocExecutor(Executor):
                     if w.death_writer is not None:
                         w.death_writer.close()
                         w.death_writer = None
+                    w.worker_response_mq.close()
                     w.worker_response_mq = None
                 self._ensure_worker_termination([w.proc for w in workers])
 
