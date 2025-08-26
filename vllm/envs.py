@@ -130,6 +130,7 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
+    VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: str = "throughput"
@@ -961,6 +962,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Set `VLLM_SKIP_DEEP_GEMM_WARMUP` to disable the warmup.
     "VLLM_SKIP_DEEP_GEMM_WARMUP":
     lambda: bool(int(os.getenv("VLLM_SKIP_DEEP_GEMM_WARMUP", "0"))),
+
+    # Whether to use fused grouped_topk used for MoE expert selection.
+    "VLLM_USE_FUSED_MOE_GROUPED_TOPK":
+    lambda: bool(int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))),
 
     # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP8":
