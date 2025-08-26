@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
@@ -27,7 +27,8 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsQuant
+from vllm.model_executor.models.interfaces import (SupportsQuant,
+                                                   default_pooling_type)
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -118,14 +119,13 @@ class BertWithRopeAttention(nn.Module):
 
         self.rotary_emb = get_rope(**rotary_kwargs)
 
-        self.attn = Attention(num_heads=self.num_heads,
-                              head_size=self.head_dim,
-                              scale=self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn",
-                              attn_type=AttentionType.ENCODER_ONLY)
+        self.attn = EncoderOnlyAttention(num_heads=self.num_heads,
+                                         head_size=self.head_dim,
+                                         scale=self.scaling,
+                                         num_kv_heads=self.num_kv_heads,
+                                         cache_config=cache_config,
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.attn")
 
         self.out_proj = RowParallelLinear(input_size=hidden_size,
                                           output_size=hidden_size,
@@ -401,6 +401,7 @@ class BertWithRopeEncoder(nn.Module):
 
 
 @support_torch_compile
+@default_pooling_type("CLS")
 class BertWithRope(nn.Module, SupportsQuant):
     hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
 
