@@ -774,12 +774,6 @@ class LLM:
         )
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
-        # If provided at call-site, forward enable_thinking into template kwargs
-        if "enable_thinking" not in _chat_template_kwargs:
-            _chat_template_kwargs.update({
-                "enable_thinking": False
-            })
-
         prompts: list[Union[TokensPrompt, TextPrompt]] = []
 
         for msgs in list_of_messages:

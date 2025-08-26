@@ -361,7 +361,8 @@ class Resampler4_5(Resampler2_5):
             start = 0
             for tp in temporal_ids:
                 end = start + len(tp)
-                # # L * (end-start) * D -> (end-start) * L * D -> 1 * L*(end-start) * D
+                # L * (end-start) * D -> (end-start) * L * D
+                # -> 1 * L*(end-start) * D
                 merge_k.append(k[:, start:end, :].permute(1, 0, 2).reshape(
                     -1, self.embed_dim))
                 merge_v.append(v[:, start:end, :].permute(1, 0, 2).reshape(
