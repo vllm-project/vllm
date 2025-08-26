@@ -59,7 +59,7 @@ from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails,
-                                        ResolvedPromptUpdate)
+                                        ResolvedPromptUpdate, _seq2text)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -756,10 +756,11 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         )
 
         if cached_update.modality == "image":
+            tokenizer = self.info.get_tokenizer()
             image_processor = self.info.get_image_processor()
             version = self.info.get_model_version()
 
-            text = cached_update.content.full.text
+            text = _seq2text(tokenizer, cached_update.content.full)
             prev_item_idx = cached_update.item_idx
 
             if version == (2, 0) or version == (2, 5):

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, cast
+from typing import Optional
 
 import numpy as np
 import pytest
@@ -18,7 +18,6 @@ from vllm.multimodal.inputs import (MultiModalFieldElem, MultiModalKwargsItem,
                                     MultiModalSharedField)
 from vllm.multimodal.processing import PromptInsertion
 from vllm.multimodal.registry import MultiModalRegistry
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 def _dummy_elem(
@@ -81,10 +80,8 @@ def test_cache_item_size(item, expected_size):
     cache[""] = item
     assert cache.currsize == expected_size
 
-    # Should not be used since there is nothing to convert to text
-    mock_tokenizer = cast(AnyTokenizer, object())
     prompt_update = PromptInsertion("dummy", "target", "insertion") \
-        .resolve(mock_tokenizer, 0)
+        .resolve(0)
 
     cache[""] = MultiModalProcessorCacheItem(item, [prompt_update])
     assert cache.currsize == expected_size
