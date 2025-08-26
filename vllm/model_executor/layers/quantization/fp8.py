@@ -223,8 +223,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         self.fp8_linear = Fp8LinearOp(
             act_quant_static=self.act_q_static,
-            act_quant_group_shape=self.act_q_group_shape,
-            cutlass_fp8_supported=cutlass_fp8_supported())
+            act_quant_group_shape=self.act_q_group_shape)
 
     def create_weights(
         self,
@@ -376,6 +375,8 @@ class Fp8LinearMethod(LinearMethodBase):
             # Update the layer with the new values.
             layer.weight = Parameter(qweight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+            # layer.input_scale is None indicates dynamic quant and scale is
+            # computed from input.
             layer.input_scale = None
 
         # If checkpoint is fp8, handle that there are N scales for N
@@ -1099,8 +1100,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     apply_router_weight_on_input=apply_router_weight_on_input,
                 )
         else:
-            from vllm.model_executor.layers.fused_moe import fused_experts
-            return fused_experts(
+            common_kwargs = dict(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
@@ -1117,11 +1117,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                           if self.block_quant else layer.w2_weight_scale),
                 a1_scale=layer.w13_input_scale,
                 a2_scale=layer.w2_input_scale,
-                use_fp8_w8a8=True,
-                block_shape=self.quant_config.weight_block_size,
-                allow_deep_gemm=self.allow_deep_gemm,
-                allow_cutlass_block_scaled_grouped_gemm=(
-                    self.allow_cutlass_block_scaled_grouped_gemm))
+            )
+
+            if self.fused_experts is not None:
+                return self.fused_experts(**common_kwargs)
+            else:
+                from vllm.model_executor.layers.fused_moe import fused_experts
+                return fused_experts(
+                    **common_kwargs,
+                    use_fp8_w8a8=True,
+                    block_shape=self.quant_config.weight_block_size,
+                    allow_deep_gemm=self.allow_deep_gemm,
+                    allow_cutlass_block_scaled_grouped_gemm=(
+                        self.allow_cutlass_block_scaled_grouped_gemm),
+                )
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
