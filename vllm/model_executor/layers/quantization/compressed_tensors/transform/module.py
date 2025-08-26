@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from typing import Callable, Optional
+from weakref import ReferenceType, ref
 
 import torch
 from compressed_tensors.transform import TransformLocation, TransformScheme
+from torch import Tensor
 
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size)
@@ -29,7 +31,7 @@ class HadamardTransform(torch.nn.Module):
     weight: PartitionedLinearWeightParameter  # container for shared tensors
 
     kernel: Callable  # function used during application
-    weight_tensors: dict[LoadKey, torch.Tensor] = {}  # shared tensors registry
+    weight_tensors: dict[LoadKey, ReferenceType[Tensor]] = {}  # shared tensors
     scales: dict[int, float]  # hadamard scale, usually sqrt(matrix.size(0))
 
     def __init__(self,
@@ -61,14 +63,15 @@ class HadamardTransform(torch.nn.Module):
                                                 input_size, output_size)
 
             load_key = self._get_load_key(scheme, weight_size)
-            if load_key not in self.weight_tensors:
-                self.weight_tensors[load_key] = torch.zeros(
-                    (weight_size, weight_size),
-                    dtype=scheme.precision,
-                )
+            if load_key in self.weight_tensors and self.weight_tensors[
+                    load_key]() is not None:
+                weight = self.weight_tensors[load_key]()
+            else:
+                weight = torch.empty((weight_size, weight_size),
+                                     dtype=scheme.precision)
+                self.weight_tensors[load_key] = ref(weight)
 
-            self.weight.add_partition(part_index,
-                                      self.weight_tensors[load_key])
+            self.weight.add_partition(part_index, weight)
 
         # validate that shared tensors and schemes are correct
         self._validate_input_transforms()
@@ -99,7 +102,7 @@ class HadamardTransform(torch.nn.Module):
             # do not fold into weight in order to utilize FWHT
             self.scales[part_id] = 1 / math.sqrt(data.size(0))
 
-    def forward(self, value: torch.Tensor, part_id: int = 0) -> torch.Tensor:
+    def forward(self, value: Tensor, part_id: int = 0) -> Tensor:
         if part_id not in self.weight.partitions:
             return value
 
