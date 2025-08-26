@@ -8,7 +8,7 @@ from torch.nn import functional as F
 from vllm import envs
 
 
-def SiluAndMul(x: torch.Tensor) -> torch.Tensor:
+def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
     d = x.shape[-1] // 2
     return F.silu(x[..., :d]) * x[..., d:]
 
@@ -156,14 +156,6 @@ class SGLFusedMOE:
     def __init__(self, layer: torch.nn.Module) -> None:
         pass
 
-    @staticmethod
-    def _grouped_topk(*args, **kwargs):
-        return grouped_topk(*args, **kwargs)
-
-    @staticmethod
-    def _select_experts(*args, **kwargs):
-        return select_experts(*args, **kwargs)
-
     def __call__(
         self,
         layer: torch.nn.Module,
@@ -184,7 +176,7 @@ class SGLFusedMOE:
     ) -> torch.Tensor:
         assert activation == "silu", f"{activation} is not supported."
         assert not apply_router_weight_on_input
-        topk_weights, topk_ids = SGLFusedMOE._select_experts(
+        topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -221,14 +213,6 @@ class CPUFusedMOE:
     def __init__(self, layer: torch.nn.Module) -> None:
         pass
 
-    @staticmethod
-    def _grouped_topk(*args, **kwargs):
-        return grouped_topk(*args, **kwargs)
-
-    @staticmethod
-    def _select_experts(*args, **kwargs):
-        return select_experts(*args, **kwargs)
-
     def __call__(
         self,
         layer: torch.nn.Module,
@@ -249,7 +233,7 @@ class CPUFusedMOE:
     ) -> torch.Tensor:
         assert activation == "silu", f"{activation} is not supported."
         assert not apply_router_weight_on_input
-        topk_weights, topk_ids = CPUFusedMOE._select_experts(
+        topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -285,7 +269,7 @@ class CPUFusedMOE:
             layer_w2_weight = layer.w2_weight[i]
 
             gate_up = F.linear(tokens_for_this_expert, layer_w13_weight)
-            gate_up = SiluAndMul(gate_up)
+            gate_up = silu_and_mul(gate_up)
             expert_out = F.linear(gate_up, layer_w2_weight)
             outputs.append(expert_out)
             start_idx = end_idx
