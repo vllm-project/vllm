@@ -66,8 +66,8 @@ class PiecewiseBackend:
             if s in self.compile_sizes:
                 self.compile_ranges.append((s, s))
         self.compile_ranges = sorted(self.compile_ranges)
-        logger.debug_once("PiecewiseBackend: compile_ranges: %s",
-                          self.compile_ranges)
+        log_string = f"PiecewiseBackend: compile_ranges: {self.compile_ranges}"
+        logger.debug_once(log_string)
 
         self.is_in_range = lambda x, range: range[0] <= x < range[1] if range[
             0] < range[1] else x == range[0]
