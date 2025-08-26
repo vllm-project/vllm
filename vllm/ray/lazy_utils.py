@@ -6,13 +6,8 @@ def is_ray_initialized():
     """Check if Ray is initialized."""
     try:
         import ray
-        if hasattr(ray, 'is_initialized'):
-            return ray.is_initialized()
-        else:
-            # Fallback for older Ray versions or import issues
-            return hasattr(
-                ray, '_global_state') and ray._global_state.is_initialized
-    except (ImportError, AttributeError):
+        return ray.is_initialized()
+    except ImportError:
         return False
 
 
@@ -21,14 +16,7 @@ def is_in_ray_actor():
 
     try:
         import ray
-        if hasattr(ray, 'is_initialized'):
-            ray_initialized = ray.is_initialized()
-        else:
-            # Fallback for older Ray versions or import issues
-            ray_initialized = hasattr(
-                ray, '_global_state') and ray._global_state.is_initialized
-
-        return (ray_initialized
+        return (ray.is_initialized()
                 and ray.get_runtime_context().get_actor_id() is not None)
-    except (ImportError, AttributeError):
+    except ImportError:
         return False
