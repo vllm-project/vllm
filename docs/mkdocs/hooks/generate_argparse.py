@@ -26,9 +26,10 @@ class PydanticMagicMock(MagicMock):
         return core_schema.any_schema()
 
 
-def auto_mock(module, attr, max_tries=50):
+def auto_mock(module, attr, max_mocks=50):
     """Function that automatically mocks missing modules during imports."""
-    for _ in range(max_tries):
+    logger.info("Importing %s from %s", attr, module)
+    for _ in range(max_mocks):
         try:
             # First treat attr as an attr, then as a submodule
             return getattr(importlib.import_module(module), attr,
@@ -38,9 +39,9 @@ def auto_mock(module, attr, max_tries=50):
         except ModuleNotFoundError as e:
             logger.info("Mocking %s for argparse doc generation", e.name)
             sys.modules[e.name] = PydanticMagicMock()
-    else:
-        raise ImportError(
-            f"Failed to import {module}.{attr} after {max_tries} attempts")
+
+    raise ImportError(
+        f"Failed to import {module}.{attr} after mocking {max_mocks} imports")
 
 
 latency = auto_mock("vllm.benchmarks", "latency")
