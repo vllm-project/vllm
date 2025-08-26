@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     VLLM_LOGGING_LEVEL: str = "INFO"
     VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
+    VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
     VLLM_LOGITS_PROCESSOR_THREADS: Optional[int] = None
     VLLM_LOG_STATS_INTERVAL: float = 10.
     VLLM_TRACE_FUNCTION: int = 0
@@ -44,13 +45,13 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: Optional[int] = 0
-    VLLM_CPU_OMP_THREADS_BIND: str = ""
+    VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: Optional[int] = None
     VLLM_CPU_MOE_PREPACK: bool = True
     VLLM_CPU_SGL_KERNEL: bool = False
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
-    VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
+    VLLM_FUSED_MOE_CHUNK_SIZE: int = 32768
     VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
     VLLM_USE_RAY_SPMD_WORKER: bool = False
     VLLM_USE_RAY_COMPILED_DAG: bool = False
@@ -73,8 +74,12 @@ if TYPE_CHECKING:
     VLLM_USE_PRECOMPILED: bool = False
     VLLM_DOCKER_BUILD_CONTEXT: bool = False
     VLLM_TEST_USE_PRECOMPILED_NIGHTLY_WHEEL: bool = False
+    VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE: bool = True
+    VLLM_TEST_FORCE_FP8_MARLIN: bool = False
+    VLLM_TEST_FORCE_LOAD_FORMAT: str = "dummy"
     VLLM_KEEP_ALIVE_ON_ENGINE_DEATH: bool = False
     CMAKE_BUILD_TYPE: Optional[str] = None
+    CUDA_HOME: Optional[str] = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_RPC_TIMEOUT: int = 10000  # ms
@@ -134,8 +139,10 @@ if TYPE_CHECKING:
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
+    VLLM_USE_STANDALONE_COMPILE: bool = True
+    VLLM_USE_TRTLLM_FP4_GEMM: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: str = "throughput"
-    VLLM_XGRAMMAR_CACHE_MB: int = 0
+    VLLM_XGRAMMAR_CACHE_MB: int = 512
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
@@ -164,6 +171,9 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
+    VLLM_CI_USE_S3: bool = False
+    VLLM_MOE_ROUTING_SIMULATION_STRATEGY: str = ""
+    VLLM_PROCESS_NAME_PREFIX: str = "VLLM"
 
 
 def get_default_cache_root():
