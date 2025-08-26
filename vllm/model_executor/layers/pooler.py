@@ -440,10 +440,12 @@ class EmbeddingPoolerHead(PoolerHead):
         from vllm.model_executor.models.adapters import _load_st_projector
 
         vllm_config = get_current_vllm_config()
-        # Only attempt to load ST projector if this is likely an embedding model
+        # Only attempt to load ST projector for embed pooling models
         self.projector = None
-        if (vllm_config and hasattr(vllm_config.model_config, 'task')
-                and vllm_config.model_config.task == "embedding"):
+        if (vllm_config and hasattr(vllm_config.model_config, 'runner_type')
+                and hasattr(vllm_config.model_config, 'convert_type')
+                and vllm_config.model_config.runner_type == "pooling"
+                and vllm_config.model_config.convert_type == "embed"):
             self.projector = _load_st_projector(vllm_config.model_config)
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
