@@ -14,7 +14,7 @@ from huggingface_hub import get_safetensors_metadata, hf_hub_download
 from huggingface_hub import list_repo_files as hf_list_repo_files
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
-                                   HFValidationError, LocalEntryNotFoundError,
+                                   LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
                                    RevisionNotFoundError)
 from transformers import GenerationConfig, PretrainedConfig
@@ -32,11 +32,10 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
                                              EAGLEConfig, JAISConfig,
                                              KimiVLConfig, MedusaConfig,
-                                             MllamaConfig, MLPSpeculatorConfig,
+                                             MLPSpeculatorConfig,
                                              Nemotron_Nano_VL_Config,
-                                             NemotronConfig, NVLM_D_Config,
-                                             OvisConfig, RWConfig,
-                                             SpeculatorsConfig,
+                                             NemotronConfig, OvisConfig,
+                                             RWConfig, SpeculatorsConfig,
                                              Step3TextConfig, Step3VLConfig,
                                              UltravoxConfig)
 # yapf: enable
@@ -68,10 +67,6 @@ def _get_hf_token() -> Optional[str]:
     return None
 
 
-_CONFIG_REGISTRY_OVERRIDE_HF: dict[str, type[PretrainedConfig]] = {
-    "mllama": MllamaConfig
-}
-
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "chatglm": ChatGLMConfig,
     "deepseek_vl_v2": DeepseekVLV2Config,
@@ -85,16 +80,28 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
     "eagle": EAGLEConfig,
     "speculators": SpeculatorsConfig,
     "nemotron": NemotronConfig,
-    "NVLM_D": NVLM_D_Config,
     "ovis": OvisConfig,
     "ultravox": UltravoxConfig,
     "step3_vl": Step3VLConfig,
     "step3_text": Step3TextConfig,
-    **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
+}
+
+_AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
+    "internvl_chat": {
+        "has_no_defaults_at_init": True
+    },
+    # transformers regards mllama as is_encoder_decoder=False
+    # vllm needs is_encoder_decoder=True to enable cross-attention
+    "mllama": {
+        "is_encoder_decoder": True
+    },
+    "NVLM_D": {
+        "has_no_defaults_at_init": True
+    },
 }
 
 
@@ -273,11 +280,12 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
     """Detect if the model with this config is used as an encoder/decoder."""
-    text_config = getattr(config, "text_config", None)
-    if text_config is not None:
-        return is_encoder_decoder(text_config)
 
-    return getattr(config, "is_encoder_decoder", False)
+    def _is_encoder_decoder(config: PretrainedConfig) -> bool:
+        return getattr(config, "is_encoder_decoder", False)
+
+    return (_is_encoder_decoder(config)
+            or _is_encoder_decoder(config.get_text_config()))
 
 
 def is_interleaved(config: PretrainedConfig) -> bool:
@@ -291,13 +299,21 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     return False
 
 
+def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
+    """
+    Update kwargs for AutoConfig initialization based on model_type
+    """
+    if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:
+        kwargs.update(_AUTO_CONFIG_KWARGS_OVERRIDES[model_type])
+    return kwargs
+
+
 def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
     """Remap config attributes to match the expected names."""
     for old_attr, new_attr in _CONFIG_ATTRS_MAPPING.items():
         if hasattr(config, old_attr):
             if not hasattr(config, new_attr):
                 config.update({new_attr: getattr(config, old_attr)})
-            delattr(config, old_attr)
             logger.debug("Remapped config attribute '%s' to '%s'", old_attr,
                          new_attr)
     return config
@@ -319,6 +335,7 @@ def maybe_override_with_speculators_target_model(
         gguf_model_repo = Path(model).parent
     else:
         gguf_model_repo = None
+    kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
     config_dict, _ = PretrainedConfig.get_config_dict(
         model if gguf_model_repo is None else gguf_model_repo,
         revision=revision,
@@ -384,6 +401,7 @@ def get_config(
             raise ValueError(error_message) from e
 
     if config_format == ConfigFormat.HF:
+        kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
         config_dict, _ = PretrainedConfig.get_config_dict(
             model,
             revision=revision,
@@ -408,15 +426,14 @@ def get_config(
             )
         else:
             try:
+                kwargs = _maybe_update_auto_config_kwargs(
+                    kwargs, model_type=model_type)
                 config = AutoConfig.from_pretrained(
                     model,
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
                     token=_get_hf_token(),
-                    # some old custom model's config needs
-                    # `has_no_defaults_at_init=True` to work.
-                    has_no_defaults_at_init=trust_remote_code,
                     **kwargs,
                 )
             except ValueError as e:
@@ -433,23 +450,6 @@ def get_config(
                 else:
                     raise e
         config = _maybe_remap_hf_config_attrs(config)
-
-        # Phi4Flash misuses this config as list[int]. Convert it to int and add
-        # the layer_types list[str] to make it HF compatible
-        if (config.model_type == "phi4flash"):
-            # TODO: Remove after the following PR is merged:
-            # https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning/discussions/6
-            if not hasattr(config, "layer_types"):
-                config.layer_types = [
-                    "sliding_attention" if i < config.num_hidden_layers // 2
-                    and i % 2 == 1 else "full_attention"
-                    for i in range(config.num_hidden_layers)
-                ]
-            # TODO: Remove after the following PR is merged:
-            # https://huggingface.co/microsoft/Phi-4-mini-flash-reasoning/discussions/7
-            if isinstance(config.sliding_window, list):
-                config.sliding_window = next(
-                    filter(None, config.sliding_window), None)
 
     elif config_format == ConfigFormat.MISTRAL:
         # This function loads a params.json config which
@@ -534,7 +534,7 @@ def try_get_local_file(model: Union[str, Path],
                                                      revision=revision)
             if isinstance(cached_filepath, str):
                 return Path(cached_filepath)
-        except HFValidationError:
+        except ValueError:
             ...
     return None
 
@@ -910,3 +910,42 @@ def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
             exc_info=e)
 
     return max_position_embeddings
+
+
+def get_model_path(model: Union[str, Path], revision: Optional[str] = None):
+    if os.path.exists(model):
+        return model
+    assert huggingface_hub.constants.HF_HUB_OFFLINE
+    common_kwargs = {
+        "local_files_only": huggingface_hub.constants.HF_HUB_OFFLINE,
+        "revision": revision,
+    }
+
+    if envs.VLLM_USE_MODELSCOPE:
+        from modelscope.hub.snapshot_download import snapshot_download
+        return snapshot_download(model_id=model, **common_kwargs)
+
+    from huggingface_hub import snapshot_download
+    return snapshot_download(repo_id=model, **common_kwargs)
+
+
+def get_hf_file_bytes(file_name: str,
+                      model: Union[str, Path],
+                      revision: Optional[str] = 'main') -> Optional[bytes]:
+    """Get file contents from HuggingFace repository as bytes."""
+    file_path = try_get_local_file(model=model,
+                                   file_name=file_name,
+                                   revision=revision)
+
+    if file_path is None:
+        hf_hub_file = hf_hub_download(model,
+                                      file_name,
+                                      revision=revision,
+                                      token=_get_hf_token())
+        file_path = Path(hf_hub_file)
+
+    if file_path is not None and file_path.is_file():
+        with open(file_path, 'rb') as file:
+            return file.read()
+
+    return None
