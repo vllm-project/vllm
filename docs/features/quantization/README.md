@@ -24,9 +24,22 @@ Contents:
 The table below shows the compatibility of various quantization implementations with different hardware platforms in vLLM:
 
 <style>
-th {
+td:not(:first-child) {
+  text-align: center !important;
+}
+td {
+  padding: 0.5rem !important;
   white-space: nowrap;
+}
+
+th {
+  padding: 0.5rem !important;
   min-width: 0 !important;
+}
+
+th:not(:first-child) {
+  writing-mode: vertical-lr;
+  transform: rotate(180deg)
 }
 </style>
 
