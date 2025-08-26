@@ -6,6 +6,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import envs
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
@@ -116,6 +117,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.moe = moe
         self.use_marlin = self._should_use_marlin()
         self.flashinfer_autotune = True
+        self.max_capture_size = get_current_vllm_config(
+        ).compilation_config.max_capture_size
 
         if current_platform.is_device_capability(100) and not has_flashinfer():
             logger.warning_once(
@@ -639,7 +642,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 x_scale = None
             else:
                 x_quant, x_scale = mxfp8_quantize(x, False)  # to mxfp8
-                x_scale = x_scale.view(torch.float8_e4m3fn).reshape(-1)
+                x_scale = x_scale.view(torch.float8_e4m3fn).reshape(
+                    *x.shape[:-1], -1)
             trtllm_gen_output = trtllm_fp4_block_scale_moe(
                 router_logits.to(torch.bfloat16),
                 None,  # routing_bias
@@ -668,6 +672,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 self._get_tile_tokens_dim(x, top_k),
                 1 if renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
+                tune_max_num_tokens=self.max_capture_size,
             )[0]
             return trtllm_gen_output
         elif should_use_flashinfer_mxfp4_bf16(
@@ -716,6 +721,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     ep_size=self.moe.ep_size,
                     ep_rank=self.moe.ep_rank,
                     use_w4_group_scaling=True,
+                    tune_max_num_tokens=self.max_capture_size,
                 )
 
             self.flashinfer_autotune = False
