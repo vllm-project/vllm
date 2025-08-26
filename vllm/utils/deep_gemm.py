@@ -27,7 +27,7 @@ def is_deep_gemm_supported() -> bool:
     is_supported_arch = current_platform.is_cuda() and (
         current_platform.is_device_capability(90)
         or current_platform.is_device_capability(100))
-    return has_deep_gemm() and is_supported_arch
+    return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
 
 
 @functools.cache
@@ -35,12 +35,9 @@ def is_blackwell_deep_gemm_e8m0_used() -> bool:
     """Return ``True`` if vLLM is configured to use DeepGEMM "
     "E8M0 scale on a Blackwell-class GPU.
     """
-    if not (envs.VLLM_USE_DEEP_GEMM):
-        logger.debug_once("DeepGEMM E8M0 disabled: VLLM_USE_DEEP_GEMM=0.")
-        return False
-
-    if not has_deep_gemm():
-        logger.debug_once("DeepGEMM E8M0 disabled: DeepGEMM backend missing.")
+    if not is_deep_gemm_supported():
+        logger.debug_once(
+            "DeepGEMM E8M0 disabled: DeepGEMM not supported on this system.")
         return False
 
     if not envs.VLLM_USE_DEEP_GEMM_E8M0:
