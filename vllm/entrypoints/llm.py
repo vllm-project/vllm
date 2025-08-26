@@ -692,7 +692,6 @@ class LLM:
         tools: Optional[list[dict[str, Any]]] = None,
         chat_template_kwargs: Optional[dict[str, Any]] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
-        enable_thinking: Optional[bool] = None,
     ) -> list[RequestOutput]:
         """
         Generate responses for a chat conversation.
@@ -776,8 +775,10 @@ class LLM:
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
         # If provided at call-site, forward enable_thinking into template kwargs
-        if enable_thinking is not None and "enable_thinking" not in _chat_template_kwargs:
-            _chat_template_kwargs["enable_thinking"] = enable_thinking
+        if "enable_thinking" not in _chat_template_kwargs:
+            _chat_template_kwargs.update({
+                "enable_thinking": False
+            })
 
         prompts: list[Union[TokensPrompt, TextPrompt]] = []
 
