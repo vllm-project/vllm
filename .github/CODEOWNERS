@@ -79,4 +79,10 @@ mkdocs.yaml @hmellor
 /vllm/attention/ops/chunked_prefill_paged_decode.py @tdoublep
 /vllm/attention/ops/triton_unified_attention.py @tdoublep
 
+# ROCm related: specify owner with write access to notify AMD folks for careful code review
+/docker/Dockerfile.rocm* @gshtras
+/vllm/v1/attention/backends/rocm*.py @gshtras
+/vllm/v1/attention/backends/mla/rocm*.py @gshtras
+/vllm/attention/ops/rocm*.py @gshtras
+/vllm/model_executor/layers/fused_moe/rocm*.py @gshtras
 
