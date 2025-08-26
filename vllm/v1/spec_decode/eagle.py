@@ -19,7 +19,7 @@ from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.flash_attn import (FlashAttentionMetadata, FlashAttentionMetadataBuilder, TreeMetadata)
 from vllm.v1.attention.backends.rocm_aiter_fa import (
     AiterFlashAttentionMetadata)
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
@@ -203,7 +203,7 @@ class EagleProposer:
         positions = target_positions[last_token_indices]
         hidden_states = hidden_states[last_token_indices]
 
-        if isinstance(attn_metadata, TreeAttentionMetadata):
+        if isinstance(attn_metadata, (TreeAttentionMetadata, FlashAttentionMetadata)):
             # Draft using tree attention.
             draft_token_ids_list = self.propose_tree(
                 batch_size=batch_size,
@@ -339,7 +339,7 @@ class EagleProposer:
         tree_attn_metadata_builder = \
             self.runner.attn_groups[0][0].metadata_builder
         assert isinstance(tree_attn_metadata_builder,
-                          TreeAttentionMetadataBuilder)
+                          (TreeAttentionMetadataBuilder, FlashAttentionMetadataBuilder))
 
         total_num_drafts = self.cu_drafts_per_level[0]
         level_num_drafts = total_num_drafts
@@ -409,10 +409,28 @@ class EagleProposer:
                 num_actual_tokens=batch_size * query_len,
                 max_query_len=query_len,
             )
-            attn_metadata = tree_attn_metadata_builder.build_for_drafting(
-                common_attn_metadata=common_attn_metadata,
-                draft_index=level + 1,
-            )
+            if isinstance(tree_attn_metadata_builder, TreeAttentionMetadataBuilder):
+                attn_metadata = tree_attn_metadata_builder.build_for_drafting(
+                    common_attn_metadata=common_attn_metadata,
+                    draft_index=level + 1,
+                )
+            elif isinstance(tree_attn_metadata_builder, FlashAttentionMetadataBuilder):
+                attn_metadata = tree_attn_metadata_builder.build(
+                    0,
+                    common_attn_metadata=common_attn_metadata,
+                    tree_metadata=TreeMetadata(
+                        mask=torch.tensor(
+                            [1 << i for i in range(level_num_drafts)]*batch_size,
+                            dtype=torch.uint64,
+                            device=common_attn_metadata.query_start_loc.device,
+                        ),
+                        lens=torch.tensor(
+                            [i * level_num_drafts for i in range(batch_size+1)],
+                            dtype=torch.int32,
+                            device=common_attn_metadata.query_start_loc.device,
+                        ),
+                    ),
+                )
 
             # Apply new attention metadata to all layers.
             per_layer_attn_metadata = {}

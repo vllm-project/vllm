@@ -18,6 +18,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.eagle import EagleProposer
+import time
 
 model_dir = "meta-llama/Llama-3.1-8B-Instruct"
 eagle_dir = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
@@ -237,7 +238,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
         pytest.skip("TRITON_ATTN_VLLM_V1 does not support "
                     "multi-token eagle spec decode on current platform")
 
-    if (attn_backend == "TREE_ATTN"):
+    if (attn_backend in ("TREE_ATTN", "FLASH_ATTN_VLLM_V1")):
         pytest.skip("TREE_ATTN is tested separately in test_propose_tree"
                     "because it requires special input mocking.")
 
@@ -394,7 +395,9 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     # Verify all tokens match our expectations
     assert torch.equal(result, expected_tokens)
 
-
+@pytest.mark.parametrize(
+    "backend", [_Backend.TREE_ATTN, _Backend.FLASH_ATTN_VLLM_V1]
+)
 @pytest.mark.parametrize(
     "spec_token_tree",
     [
@@ -404,7 +407,7 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
         [(0, ), (1, ), (2, ), (0, 0), (0, 1), (1, 0), (1, 1), (2, 0),
          (2, 1)],  # Tree
     ])
-def test_propose_tree(spec_token_tree):
+def test_propose_tree(spec_token_tree, backend):
     # Get GPU device.
     device = torch.device(current_platform.device_type)
 
@@ -477,7 +480,7 @@ def test_propose_tree(spec_token_tree):
     proposer.attn_layer_names = ["layer.0"]
 
     # Get the tree attention metadata builder.
-    attn_metadata_builder_cls, _ = get_attention_backend(_Backend.TREE_ATTN)
+    attn_metadata_builder_cls, _ = get_attention_backend(backend)
     attn_metadata_builder = attn_metadata_builder_cls(
         kv_cache_spec=create_standard_kv_cache_spec(proposer.vllm_config),
         layer_names=proposer.attn_layer_names,
@@ -517,6 +520,7 @@ def test_propose_tree(spec_token_tree):
     sampling_metadata = mock.MagicMock()
 
     # Propose draft tokens.
+    start = time.perf_counter()
     result = proposer.propose(target_token_ids=target_token_ids,
                               target_positions=target_positions,
                               target_hidden_states=target_hidden_states,
@@ -524,7 +528,7 @@ def test_propose_tree(spec_token_tree):
                               common_attn_metadata=common_attn_metadata,
                               sampling_metadata=sampling_metadata)
     assert result.shape == (batch_size, num_speculative_tokens)
-
+    print(f"backend {backend} took {time.perf_counter()-start}")
     # The tokens are expected to be consecutive integers starting
     # from the base token IDs.
     expected_tokens = base_token_ids[:, None] + torch.arange(
