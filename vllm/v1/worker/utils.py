@@ -12,7 +12,7 @@ from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
-from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
+from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
 if TYPE_CHECKING:
@@ -27,9 +27,6 @@ class MultiModalBudget:
         model_config: ModelConfig,
         scheduler_config: SchedulerConfig,
         mm_registry: MultiModalRegistry,
-        *,
-        max_model_len: int,
-        max_num_reqs: int,
     ) -> None:
         super().__init__()
 
@@ -37,24 +34,24 @@ class MultiModalBudget:
         self.scheduler_config = scheduler_config
         self.mm_registry = mm_registry
 
-        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
-            model_config=model_config,
-            scheduler_config=scheduler_config,
-            mm_registry=mm_registry,
-        )
-
-        self.max_num_encoder_input_tokens = encoder_compute_budget
-        self.encoder_cache_size = encoder_cache_size
-        self.max_model_len = max_model_len
-        self.max_num_reqs = max_num_reqs
+        self.max_model_len = model_config.max_model_len
+        self.max_num_reqs = scheduler_config.max_num_seqs
 
         self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config)
 
-        max_items_per_prompt_by_modality = dict[str, int]()
-        max_items_per_batch_by_modality = dict[str, int]()
-
         max_tokens_by_modality = mm_registry \
             .get_max_tokens_per_item_by_nonzero_modality(model_config)
+
+        encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
+            scheduler_config,
+            max_tokens_by_modality,
+        )
+
+        self.encoder_compute_budget = encoder_compute_budget
+        self.encoder_cache_size = encoder_cache_size
+
+        max_items_per_prompt_by_modality = dict[str, int]()
+        max_items_per_batch_by_modality = dict[str, int]()
 
         for modality, max_tokens in max_tokens_by_modality.items():
             (
@@ -69,15 +66,14 @@ class MultiModalBudget:
         self.max_items_per_prompt_by_modality = max_items_per_prompt_by_modality
         self.max_items_per_batch_by_modality = max_items_per_batch_by_modality
 
-    def get_modality_with_max_tokens(self) -> tuple[str, int]:
+    def get_modality_with_max_tokens(self) -> str:
         max_tokens_by_modality = self.max_tokens_by_modality
-        modality, max_tokens = max(max_tokens_by_modality.items(),
-                                   key=lambda item: item[1])
+        modality, _ = max(max_tokens_by_modality.items(), key=lambda x: x[1])
 
-        return modality, max_tokens
+        return modality
 
     def get_encoder_budget(self) -> int:
-        return min(self.max_num_encoder_input_tokens, self.encoder_cache_size)
+        return min(self.encoder_compute_budget, self.encoder_cache_size)
 
     def get_max_items(
         self,
@@ -208,6 +204,7 @@ def initialize_kv_cache_for_kv_sharing(
     kv_caches: dict[str, torch.Tensor],
     # Optional for now to avoid breaking TPU
     attn_groups: Optional[list[list[AttentionGroup]]] = None,
+    runner_only_attn_layers: Optional[set[str]] = None,
 ) -> None:
     """
     Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
@@ -254,6 +251,9 @@ def initialize_kv_cache_for_kv_sharing(
             attn_groups[kv_cache_group_idx][attn_group_idx].layer_names.append(
                 layer_name)
 
+        if runner_only_attn_layers is not None:
+            runner_only_attn_layers.add(layer_name)
+
 
 def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
@@ -298,3 +298,32 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         # NOTE: Use list because of v0 PP virtual engine.
         forward_context[layer_name].kv_cache = [kv_cache]
+
+
+class CpuGpuBuffer:
+
+    def __init__(
+        self,
+        *args,
+        dtype: torch.dtype,
+        device: torch.device,
+        pin_memory: bool,
+    ):
+        self.cpu = torch.zeros(*args,
+                               dtype=dtype,
+                               device="cpu",
+                               pin_memory=pin_memory)
+        self.np = self.cpu.numpy()
+        self.gpu = self.cpu.to(device)
+
+    def copy_to_gpu(self, n: Optional[int] = None) -> None:
+        if n is None:
+            return self.gpu.copy_(self.cpu, non_blocking=True)
+        return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
+
+    def copy_to_cpu(self, n: Optional[int] = None) -> None:
+        """NOTE: Because this method is non-blocking, explicit synchronization
+        is needed to ensure the data is copied to CPU."""
+        if n is None:
+            return self.cpu.copy_(self.gpu, non_blocking=True)
+        return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
