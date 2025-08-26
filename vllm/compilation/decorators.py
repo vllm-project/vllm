@@ -21,6 +21,7 @@ from .monitor import start_monitoring_torch_compile
 logger = init_logger(__name__)
 
 IGNORE_COMPILE_KEY = "_ignore_compile_vllm"
+LAST_PIECEWISE_GRAPH_WEAKREF_KEY = "_last_graph_weakref_vllm"
 
 _T = TypeVar("_T", bound=type[nn.Module])
 
@@ -231,6 +232,9 @@ def _support_torch_compile(
 
     setattr(cls, IGNORE_COMPILE_KEY, False)
 
+    # setting as attribute on cls ensures child class will override parent class
+    setattr(cls, LAST_PIECEWISE_GRAPH_WEAKREF_KEY, no_weak_ref_output)
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
         self.vllm_config = vllm_config
@@ -244,6 +248,9 @@ def _support_torch_compile(
             self.__class__) or not enable_compile
         if self.do_not_compile:
             return
+        
+        no_weak_ref_output =\
+            getattr(cls, LAST_PIECEWISE_GRAPH_WEAKREF_KEY, False)
 
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
