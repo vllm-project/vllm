@@ -294,9 +294,10 @@ def torch_channelwise_w8a8_scaled_mm(qinput: torch.Tensor,
 
 
 def dispatch_w8a8_scaled_mm(
-        cutlass_fp8_supported: bool, use_aiter_and_is_supported: bool,
-        per_tensor_weights: bool, per_tensor_activations: bool,
-        use_per_token_if_dynamic: Optional[bool]
+    cutlass_fp8_supported: bool,
+    use_aiter_and_is_supported: bool,
+    per_tensor_weights: bool,
+    per_tensor_activations: bool,
 ) -> Callable[..., torch.Tensor]:
 
     # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
