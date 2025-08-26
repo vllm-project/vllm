@@ -30,6 +30,8 @@ The class provides the following primitives:
 
         get_finished() - called with ids of finished requests, returns
             ids of requests that have completed async sending/recving.
+        get_failure_requests() - called with scheduler output, returns
+            ids of requests that have failed async transfer.
 """
 
 import enum
@@ -221,6 +223,21 @@ class KVConnectorBase_V1(ABC):
             call to this method (this call or a prior one).
         """
         return None, None
+
+    def get_failure_requests(
+            self, scheduler_output: "SchedulerOutput") -> Optional[set[str]]:
+        """
+        Notifies scheduler-side connector ids of requests that have
+        failed during async transfer on the worker.
+        The scheduler process will use this output to track which 
+        requests have failed.
+
+        Returns:
+            ids of requests that have failed asynchronous transfer
+            The failed req ids must belong to a set provided in a
+            call to get_finished().
+        """
+        return None
 
     # ==============================
     # Scheduler-side methods

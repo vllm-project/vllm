@@ -1047,6 +1047,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.maybe_wait_for_kv_save()
         finished_sending, finished_recving = (
             self.get_finished_kv_transfers(scheduler_output))
+        failure_request = self.get_failure_requests(scheduler_output)
 
         selected_token_ids = torch.cat(combined_selected_tokens, dim=0)
         if tpu_sampling_metadata.logprobs:
@@ -1135,10 +1136,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 req_state.output_token_ids.extend(valid_sampled_token_ids[i])
 
         kv_connector_output = None if (
-            finished_sending is None
-            and finished_recving is None) else KVConnectorOutput(
+            finished_sending is None and finished_recving is None
+            and failure_request is None) else KVConnectorOutput(
                 finished_sending=finished_sending,
                 finished_recving=finished_recving,
+                failure_request=failure_request,
             )
 
         model_runner_output = ModelRunnerOutput(
