@@ -97,8 +97,6 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
 def test_can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch):
     if model_arch == "Lfm2ForCausalLM":
         pytest.skip("Skipping until test supports V1-only models")
-    if model_arch == "Ernie4_5_VLMoeForConditionalGeneration":
-        pytest.skip("Skipping until transformers supports the model")
     can_initialize(model_arch, monkeypatch, HF_EXAMPLE_MODELS)
 
 
