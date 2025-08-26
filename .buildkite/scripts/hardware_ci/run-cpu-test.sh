@@ -46,6 +46,11 @@ function cpu_tests() {
     set -e
     python3 examples/offline_inference/basic/generate.py --model facebook/opt-125m"
 
+  # Run kernel tests
+  docker exec cpu-test-"$NUMA_NODE" bash -c "
+    set -e
+    pytest -v -s tests/kernels/test_onednn.py"
+
   # Run basic model test
   docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
@@ -78,6 +83,12 @@ function cpu_tests() {
   #   VLLM_USE_V1=0 pytest -s -v \
   #   tests/quantization/test_ipex_quant.py"
 
+  # Run multi-lora tests
+  docker exec cpu-test-"$NUMA_NODE" bash -c "
+    set -e
+    pytest -s -v \
+    tests/lora/test_qwen2vl.py"
+
   # online serving
   docker exec cpu-test-"$NUMA_NODE" bash -c '
     set -e
@@ -89,14 +100,8 @@ function cpu_tests() {
       --model meta-llama/Llama-3.2-3B-Instruct \
       --num-prompts 20 \
       --endpoint /v1/completions'
-
-  # Run multi-lora tests
-  docker exec cpu-test-"$NUMA_NODE" bash -c "
-    set -e
-    pytest -s -v \
-    tests/lora/test_qwen2vl.py"
 }
 
 # All of CPU tests are expected to be finished less than 40 mins.
 export -f cpu_tests
-timeout 1.5h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
+timeout 2h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"

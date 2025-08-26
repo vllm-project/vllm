@@ -19,8 +19,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv, direct_register_custom_op, has_deep_gemm
-from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
+from vllm.utils import cdiv, direct_register_custom_op
+from vllm.utils.deep_gemm import (is_blackwell_deep_gemm_e8m0_used,
+                                  should_use_deepgemm_for_fp8_linear)
 
 logger = init_logger(__name__)
 
@@ -82,6 +83,13 @@ if current_platform.is_rocm():
         fake_impl=rocm_aiter_gemm_w8a8_blockscale_fake,
         dispatch_key=current_platform.dispatch_key,
     )
+    if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
+            and current_platform.is_fp8_fnuz()):
+
+        import aiter as rocm_aiter
+        from aiter import get_hip_quant
+
+        aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
 
 
 def dispatch_w8a8_blockscale_func(
@@ -99,19 +107,6 @@ def dispatch_w8a8_blockscale_func(
     if (use_aiter_and_is_supported):
         return torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale
     return w8a8_block_fp8_matmul
-
-
-def should_use_deepgemm(output_dtype: torch.dtype, weight: torch.Tensor):
-    """
-    Check if DeepGEMM should be used based on the output dtype and weight shape.
-    DeepGEMM is only supported for bfloat16 output dtype and weights with shape
-    divisible by 128.
-    """
-
-    return (current_platform.is_cuda()
-            and current_platform.is_device_capability(90) and has_deep_gemm()
-            and envs.VLLM_USE_DEEP_GEMM and output_dtype == torch.bfloat16
-            and weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
 
 
 # TODO fix ROCm->Triton custom path:
@@ -132,7 +127,7 @@ def apply_w8a8_block_fp8_linear(
     output_shape = [*input.shape[:-1], weight.shape[0]]
     output_dtype = input.dtype
 
-    if should_use_deepgemm(output_dtype, weight):
+    if should_use_deepgemm_for_fp8_linear(output_dtype, weight):
 
         input_2d = input.view(-1, input.shape[-1])
         output_shape = [*input.shape[:-1], weight.shape[0]]
@@ -143,7 +138,9 @@ def apply_w8a8_block_fp8_linear(
             column_major_scales=True,
         )
 
+        # ensure DeepGEMM-backed custom op is registered before use
         import vllm.model_executor.layers.quantization.deepgemm  # noqa: F401
+
         output = torch.ops.vllm.w8a8_block_fp8_matmul_deepgemm(
             q_input,
             weight,
@@ -178,8 +175,12 @@ def apply_w8a8_block_fp8_linear(
                                       block_size, input.dtype)
 
     else:
-        q_input, x_scale = per_token_group_quant_fp8(
-            input_2d, block_size[1], column_major_scales=use_cutlass)
+        if use_aiter_and_is_supported:
+            q_input, x_scale = aiter_per1x128_quant(
+                input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8)
+        else:
+            q_input, x_scale = per_token_group_quant_fp8(
+                input_2d, block_size[1], column_major_scales=use_cutlass)
 
         output = w8a8_blockscale_func(q_input, weight, x_scale, weight_scale,
                                       block_size, input.dtype)
@@ -383,10 +384,8 @@ def per_token_group_quant_fp8(
         tuple[torch.Tensor, torch.Tensor]: The quantized tensor and the
         scaling factor.
     """
-    # TODO(wentao): refactor this
-    # use_ue8m0 should be a global flag that could be set by user
     if use_ue8m0 is None:
-        use_ue8m0 = is_blackwell_deep_gemm_used()
+        use_ue8m0 = is_blackwell_deep_gemm_e8m0_used()
     dtype = current_platform.fp8_dtype() if dtype is None else dtype
     assert (x.shape[-1] % group_size == 0), (
         f"the last dimension of `x` {x.shape[-1]} must be divisible "
@@ -788,7 +787,8 @@ def requant_weight_ue8m0_inplace(
         s_exp = s_exp[:m_cur, :k_cur]
         w_dq = w_q.to(torch.float32) * s_exp
         # Re-quantise using power-of-two scaling (UE8M0).
-        w_requant, s_requant = per_block_cast_to_fp8(w_dq, [block_m, block_k])
+        w_requant, s_requant = per_block_cast_to_fp8(w_dq, [block_m, block_k],
+                                                     use_ue8m0=True)
 
         # Write back the results in-place.
         w_q.copy_(w_requant)

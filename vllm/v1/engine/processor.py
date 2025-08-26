@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any, Literal, Optional, Union
 
 from vllm.config import VllmConfig
@@ -10,18 +10,19 @@ from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
-                             MultiModalRegistry)
-from vllm.multimodal.inputs import PlaceholderRange
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.multimodal.processing import EncDecMultiModalProcessor
-from vllm.multimodal.utils import merge_and_sort_multimodal_metadata
+from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.mm_input_cache import MirroredProcessingCache
+from vllm.v1.engine.mm_input_cache import MultiModalInputCacheClient
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
+from vllm.v1.structured_output.backend_lm_format_enforcer import (
+    validate_structured_output_request_lm_format_enforcer)
 from vllm.v1.structured_output.backend_outlines import (
     validate_structured_output_request_outlines)
 from vllm.v1.structured_output.backend_xgrammar import (
@@ -50,11 +51,8 @@ class Processor:
                                                     self.tokenizer,
                                                     mm_registry)
 
-        self.mm_input_cache_client = MirroredProcessingCache(self.model_config)
-
-        # Multi-modal hasher (for images)
-        self.use_hash = self.mm_input_cache_client.use_cache or \
-            self.cache_config.enable_prefix_caching
+        self.mm_input_cache_client = MultiModalInputCacheClient(
+            self.model_config, mm_registry)
 
     @property
     def mm_registry(self):
@@ -65,8 +63,11 @@ class Processor:
         params: SamplingParams,
     ) -> None:
         max_logprobs = self.model_config.max_logprobs
+        if max_logprobs == -1:
+            return
         # Validate sample logprobs.
-        if params.logprobs and params.logprobs > max_logprobs:
+        if params.logprobs and (params.logprobs == -1
+                                or params.logprobs > max_logprobs):
             raise ValueError(
                 f"Requested sample logprobs of {params.logprobs}, "
                 f"which is greater than max allowed: {max_logprobs}")
@@ -89,6 +90,10 @@ class Processor:
             return
         if not params.allowed_token_ids:
             raise ValueError("allowed_token_ids is not None and empty!")
+        if self.tokenizer is None:
+            # When skip_tokenizer_init=True, we can't validate token IDs
+            # Skip validation and let the model handle invalid tokens
+            return
         tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
         vocab_size = len(tokenizer)
         if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
@@ -197,6 +202,9 @@ class Processor:
         elif engine_level_backend == "outlines":
             # outlines backend
             validate_structured_output_request_outlines(params)
+        elif engine_level_backend == "lm-format-enforcer":
+            # lm format enforcer backend
+            validate_structured_output_request_lm_format_enforcer(params)
         else:
             # NOTE: engine_level_backend must be "auto" here, because we have
             # checked supported_backends above.
@@ -253,7 +261,6 @@ class Processor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
-            return_mm_hashes=self.use_hash,
         )
         from vllm.platforms import current_platform
         current_platform.validate_request(
@@ -283,63 +290,48 @@ class Processor:
                     len(decoder_inputs["prompt_token_ids"]))
             sampling_params.update_from_generation_config(
                 self.generation_config_fields, eos_token_id)
-            sampling_params.update_from_tokenizer(
-                self.tokenizer.get_lora_tokenizer(lora_request))
+            if self.tokenizer is not None:
+                sampling_params.update_from_tokenizer(
+                    self.tokenizer.get_lora_tokenizer(lora_request))
         else:
             pooling_params = params.clone()
 
         # Multimodal related.
-        sorted_mm_inputs: Optional[Sequence[Optional[MultiModalKwargs]]] = None
+        sorted_mm_inputs: Optional[list[Optional[MultiModalKwargsItem]]] = None
         sorted_mm_positions: Optional[list[PlaceholderRange]] = None
         sorted_mm_hashes: Optional[list[str]] = None
         if decoder_inputs["type"] == "multimodal":
             decoder_mm_inputs = decoder_inputs["mm_kwargs"]
+            decoder_mm_positions = decoder_inputs["mm_placeholders"]
+            decoder_mm_hashes = decoder_inputs["mm_hashes"]
 
             # Merge and flatten multimodal placeholders, hashes and inputs
             # from dictionaries to lists, and sort them by each item's position
             # in the input sequence.
-            (
-                sorted_item_modalities,
-                sorted_mm_positions,
+            sorted_mm_idxs = argsort_mm_positions(decoder_mm_positions)
+
+            orig_sorted_mm_inputs = [
+                decoder_mm_inputs[modality][idx]
+                for modality, idx in sorted_mm_idxs
+            ]
+            sorted_mm_positions = [
+                decoder_mm_positions[modality][idx]
+                for modality, idx in sorted_mm_idxs
+            ]
+            sorted_mm_hashes = [
+                decoder_mm_hashes[modality][idx]
+                for modality, idx in sorted_mm_idxs
+            ]
+
+            sorted_mm_inputs = self.mm_input_cache_client.get_and_update(
+                orig_sorted_mm_inputs,
                 sorted_mm_hashes,
-            ) = merge_and_sort_multimodal_metadata(
-                decoder_inputs["mm_placeholders"],
-                decoder_inputs["mm_hashes"] if self.use_hash else None,
             )
-
-            # The output of merged multi-modal processor (`decoder_mm_inputs`)
-            # is a single MultiModalKwargs for all items from all modalities.
-            # This code flattens kwargs for individual items in a list and
-            # sorts them by each item's position in the input sequence if there
-            # are multiple modalities.
-            unique_modalities = set(sorted_item_modalities)
-            if len(unique_modalities) > 1:
-                orig_sorted_mm_inputs = []
-                used_indices = {modality: 0 for modality in unique_modalities}
-
-                for modality in sorted_item_modalities:
-                    items = decoder_mm_inputs.get_items(modality)
-                    item = items[used_indices[modality]]
-
-                    orig_sorted_mm_inputs.append(
-                        MultiModalKwargs.from_items([item]))
-                    used_indices[modality] += 1
-            else:
-                orig_sorted_mm_inputs = [
-                    MultiModalKwargs.from_items([item]) for item in
-                    decoder_mm_inputs.get_items(sorted_item_modalities[0])
-                ]
-
-            if sorted_mm_hashes is not None:
-                sorted_mm_inputs = self.mm_input_cache_client.get_and_update_p0(
-                    orig_sorted_mm_inputs, sorted_mm_hashes)
-            else:
-                sorted_mm_inputs = orig_sorted_mm_inputs
 
         return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=decoder_inputs["prompt_token_ids"],
-            mm_inputs=sorted_mm_inputs,
+            mm_kwargs=sorted_mm_inputs,
             mm_hashes=sorted_mm_hashes,
             mm_placeholders=sorted_mm_positions,
             sampling_params=sampling_params,
@@ -402,7 +394,7 @@ class Processor:
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)
 
                 if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check for Whisper
+                    return  # Skip encoder length check for Whisper and Donut
 
             if model_config.is_multimodal_model:
                 suggestion = (

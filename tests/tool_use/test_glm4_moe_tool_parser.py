@@ -12,7 +12,7 @@ from vllm.transformers_utils.tokenizer import get_tokenizer
 
 pytest.skip("skip glm4_moe parser test", allow_module_level=True)
 # Use a common model that is likely to be available
-MODEL = "THUDM/GLM-4.5"
+MODEL = "zai-org/GLM-4.5"
 
 
 @pytest.fixture(scope="module")

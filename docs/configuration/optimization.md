@@ -2,6 +2,9 @@
 
 This guide covers optimization strategies and performance tuning for vLLM V1.
 
+!!! tip
+    Running out of memory? Consult [this guide](./conserving_memory.md) on how to conserve memory.
+
 ## Preemption
 
 Due to the auto-regressive nature of transformer architecture, there are times when KV cache space is insufficient to handle all batched requests.
@@ -45,7 +48,7 @@ You can tune the performance by adjusting `max_num_batched_tokens`:
 
 - Smaller values (e.g., 2048) achieve better inter-token latency (ITL) because there are fewer prefills slowing down decodes.
 - Higher values achieve better time to first token (TTFT) as you can process more prefill tokens in a batch.
-- For optimal throughput, we recommend setting `max_num_batched_tokens > 8096` especially for smaller models on large GPUs.
+- For optimal throughput, we recommend setting `max_num_batched_tokens > 8192` especially for smaller models on large GPUs.
 - If `max_num_batched_tokens` is the same as `max_model_len`, that's almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).
 
 ```python
@@ -126,62 +129,104 @@ Data parallelism replicates the entire model across multiple GPU sets and proces
 Data parallelism can be combined with the other parallelism strategies and is set by `data_parallel_size=N`.
 Note that MoE layers will be sharded according to the product of the tensor parallel size and data parallel size.
 
-## Reducing Memory Usage
+### Batch-level DP for Multi-Modal Encoders
 
-If you encounter out-of-memory issues, consider these strategies:
+By default, TP is used to shard the weights of multi-modal encoders just like for language decoders,
+in order to reduce the memory and compute load on each GPU.
 
-### Context Length and Batch Size
+However, since the size of multi-modal encoders is very small compared to language decoders,
+there is relatively little gain from TP. On the other hand, TP incurs significant communication
+overhead because of all-reduce being performed after every layer.
 
-You can reduce memory usage by limiting the context length and batch size:
+Given this, it may be advantageous to instead shard the batched input data using TP, essentially
+performing batch-level DP. This has been shown to improve the throughput by around 10% for
+`tensor_parallel_size=8`. For vision encoders that use hardware-unoptimized Conv3D operations,
+batch-level DP can provide another 40% increase to throughput compared to regular TP.
+
+Nevertheless, since the weights of the multi-modal encoder are replicated across each TP rank,
+there will be a minor increase in memory consumption and may cause OOM if you can barely fit the model already.
+
+You can enable batch-level DP by setting `mm_encoder_tp_mode="data"`, for example:
 
 ```python
 from vllm import LLM
 
 llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    max_model_len=2048,  # Limit context window
-    max_num_seqs=4       # Limit batch size
+    model="Qwen/Qwen2.5-VL-72B-Instruct",
+    tensor_parallel_size=4,
+    # When mm_encoder_tp_mode="data",
+    # the vision encoder uses TP=4 (not DP=1) to shard the input data,
+    # so the TP size becomes the effective DP size.
+    # Note that this is independent of the DP size for language decoder which is used in expert parallel setting.
+    mm_encoder_tp_mode="data",
+    # The language decoder uses TP=4 to shard the weights regardless
+    # of the setting of mm_encoder_tp_mode
 )
 ```
 
-### Adjust CUDA Graph Compilation
+!! important
+    Batch-level DP is not to be confused with API request-level DP
+    (which is instead controlled by `data_parallel_size`).
 
-CUDA graph compilation in V1 uses more memory than in V0. You can reduce memory usage by adjusting the compilation level:
+The availability of batch-level DP is based on model implementation.
+Currently, the following models support `mm_encoder_tp_mode="data"`:
 
-```python
-from vllm import LLM
-from vllm.config import CompilationConfig, CompilationLevel
+- Llama4 (<gh-pr:18368>)
+- MiniCPM-V-4 (<gh-pr:23327>)
+- Qwen2.5-VL (<gh-pr:22742>)
+- Step3 (<gh-pr:22697>)
 
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    compilation_config=CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
-        cudagraph_capture_sizes=[1, 2, 4, 8]  # Capture fewer batch sizes
-    )
-)
+## Input Processing
+
+### Parallel Processing
+
+You can run input processing in parallel via [API server scale-out](../serving/data_parallel_deployment.md#internal-load-balancing).
+This is useful when input processing (which is run inside the API server)
+becomes a bottleneck compared to model execution (which is run inside engine core)
+and you have excess CPU capacity.
+
+```console
+# Run 4 API processes and 1 engine core process
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4
+
+# Run 4 API processes and 2 engine core processes
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
 ```
 
-Or, if you are not concerned about latency or overall performance, disable CUDA graph compilation entirely with `enforce_eager=True`:
+!!! note
+    API server scale-out is only available for online inference.
+
+!!! warning
+    By default, 8 CPU threads are used in each API server to load media items (e.g. images)
+    from request data.
+
+    If you apply API server scale-out, consider adjusting `VLLM_MEDIA_LOADING_THREAD_COUNT`
+    to avoid CPU resource exhaustion.
+
+!!! note
+    [Multi-modal processor cache](#processor-cache) is disabled when API server scale-out is enabled
+    because it requires a one-to-one correspondence between API and engine core processes.
+
+## Multi-Modal Caching
+
+### Processor Cache
+
+By default, the multi-modal processor cache is enabled to avoid repeatedly processing
+the same multi-modal inputs via Hugging Face `AutoProcessor`,
+which commonly occurs in multi-turn conversations.
+
+You can adjust the size of the cache by setting the value of `mm_processor_cache_gb`
+(default 4 GiB per API process + 4 GiB per engine core process).
+If you do not benefit much from the cache, you can disable it completely via `mm_processor_cache_gb=0`.
+
+Examples:
 
 ```python
-from vllm import LLM
+# Use a larger cache
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          mm_processor_cache_gb=8)
 
-llm = LLM(
-    model="meta-llama/Llama-3.1-8B-Instruct",
-    enforce_eager=True  # Disable CUDA graph compilation
-)
-```
-
-### Multimodal Models
-
-For multi-modal models, you can reduce memory usage by limiting the number of images/videos per request:
-
-```python
-from vllm import LLM
-
-# Accept up to 2 images per prompt
-llm = LLM(
-    model="Qwen/Qwen2.5-VL-3B-Instruct",
-    limit_mm_per_prompt={"image": 2}
-)
+# Disable the cache
+llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct",
+          mm_processor_cache_gb=0)
 ```

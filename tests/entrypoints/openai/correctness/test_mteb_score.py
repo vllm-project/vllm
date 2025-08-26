@@ -21,7 +21,8 @@ MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task", "score", "--enforce-eager", "--disable-uvicorn-access-log"
+        "--runner", "pooling", "--enforce-eager",
+        "--disable-uvicorn-access-log"
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

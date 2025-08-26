@@ -16,19 +16,20 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
-from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
-                                          has_kv_transfer_group)
+from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils import GiB_bytes, MemorySnapshot, memory_profiling
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, DraftTokenIds,
+                             ModelRunnerOutput)
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.worker_base import WorkerBase
@@ -71,12 +72,23 @@ class Worker(WorkerBase):
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
+            logger.debug(
+                "Profiler config: record_shapes=%s,"
+                "profile_memory=%s,with_stack=%s,with_flops=%s",
+                envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
+                envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
+                envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
+            )
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
                     torch.profiler.ProfilerActivity.CUDA,
                 ],
-                with_stack=True,
+                record_shapes=envs.VLLM_TORCH_PROFILER_RECORD_SHAPES,
+                profile_memory=envs.VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY,
+                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                with_flops=envs.VLLM_TORCH_PROFILER_WITH_FLOPS,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
                     torch_profiler_trace_dir, use_gzip=True))
         else:
@@ -155,7 +167,7 @@ class Worker(WorkerBase):
             self.device = torch.device(f"cuda:{self.local_rank}")
             current_platform.set_device(self.device)
 
-            _check_if_gpu_supports_dtype(self.model_config.dtype)
+            current_platform.check_if_supports_dtype(self.model_config.dtype)
             gc.collect()
             torch.cuda.empty_cache()
 
@@ -204,12 +216,11 @@ class Worker(WorkerBase):
         self.model_runner.update_config(overrides)
 
     def reload_weights(self) -> None:
-        with self._maybe_get_memory_pool_context(tag="weights"):
-            self.model_runner.reload_weights()
+        self.model_runner.reload_weights()
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
-        """Profiles the peak memory usage of the model to determine how much 
+        """Profiles the peak memory usage of the model to determine how much
         memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
@@ -280,7 +291,6 @@ class Worker(WorkerBase):
             allocator = CuMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
         else:
-            from contextlib import nullcontext
             context = nullcontext()
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
@@ -299,6 +309,11 @@ class Worker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size, skip_eplb=True)
+
+        # Warmup and tune the kernels used during model execution before
+        # cuda graph capture.
+        kernel_warmup(self)
+
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
 
@@ -353,20 +368,26 @@ class Worker(WorkerBase):
             assert isinstance(output, IntermediateTensors)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
-            if not has_kv_transfer_group():
+
+            kv_connector_output = output.kv_connector_output
+            if not kv_connector_output:
                 return None
 
             # In case of PP with kv transfer, we need to pass through the
-            # finished_sending and finished_recving buffers.
-            new_output = EMPTY_MODEL_RUNNER_OUTPUT
-            if output.finished_sending or output.finished_recving:
-                new_output = copy.copy(new_output)
-                new_output.finished_sending = output.finished_sending
-                new_output.finished_recving = output.finished_recving
-            output = new_output
+            # kv_connector_output
+            if (not kv_connector_output.finished_sending
+                    and not kv_connector_output.finished_recving):
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+            output.kv_connector_output = kv_connector_output
+            return output
 
         assert isinstance(output, ModelRunnerOutput)
         return output
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        return self.model_runner.take_draft_token_ids()
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
@@ -493,7 +514,7 @@ class Worker(WorkerBase):
             assert self.model_runner.eplb_state is not None
             new_physical_experts = \
                 self.model_runner.eplb_state.physical_to_logical_map.shape[1]
-            parallel_config.num_redundant_experts = (
+            parallel_config.eplb_config.num_redundant_experts = (
                 new_physical_experts -
                 self.model_runner.eplb_state.logical_replica_count.shape[1])
             global_expert_load = None
@@ -509,7 +530,7 @@ class Worker(WorkerBase):
             assert self.model_runner.eplb_state is not None
             global_expert_load = self.model_runner.eplb_state.rearrange(
                 self.model_runner.model, execute_shuffle=False)
-            parallel_config.num_redundant_experts = (
+            parallel_config.eplb_config.num_redundant_experts = (
                 new_physical_experts - global_expert_load.shape[1])
         prepare_communication_buffer_for_model(self.model_runner.model)
         self.model_runner.model.update_physical_experts_metadata(
@@ -592,23 +613,3 @@ def init_worker_distributed_environment(
                                       parallel_config.pipeline_parallel_size)
 
     ensure_kv_transfer_initialized(vllm_config)
-
-
-def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
-    # Check if the GPU supports the dtype.
-    if torch_dtype == torch.bfloat16:  # noqa: SIM102
-        if not current_platform.has_device_capability(80):
-            capability = current_platform.get_device_capability()
-            gpu_name = current_platform.get_device_name()
-
-            if capability is None:
-                compute_str = "does not have a compute capability"
-            else:
-                version_str = capability.as_version_str()
-                compute_str = f"has compute capability {version_str}"
-
-            raise ValueError(
-                "Bfloat16 is only supported on GPUs with compute capability "
-                f"of at least 8.0. Your {gpu_name} GPU {compute_str}. "
-                "You can use float16 instead by explicitly setting the "
-                "`dtype` flag in CLI, for example: --dtype=half.")

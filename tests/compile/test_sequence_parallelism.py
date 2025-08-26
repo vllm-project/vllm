@@ -104,8 +104,7 @@ class TestQuantModel(torch.nn.Module):
         # Initialize weights
         torch.nn.init.normal_(self.gate_proj, std=0.02)
 
-        self.fp8_linear = Fp8LinearOp(cutlass_fp8_supported=True,
-                                      use_per_token_if_dynamic=False)
+        self.fp8_linear = Fp8LinearOp(use_per_token_if_dynamic=False)
 
         self.scale = torch.rand(1, dtype=torch.float32)
         # Create a weight that is compatible with torch._scaled_mm,
@@ -250,9 +249,6 @@ def sequence_parallelism_pass_on_test_model(
     # in the vllm_config, it's not really used.
     model_name = "nm-testing/TinyLlama-1.1B-Chat-v1.0-FP8-e2e"
     vllm_config.model_config = ModelConfig(model=model_name,
-                                           task="auto",
-                                           tokenizer=model_name,
-                                           tokenizer_mode="auto",
                                            trust_remote_code=True,
                                            dtype=dtype,
                                            seed=42)

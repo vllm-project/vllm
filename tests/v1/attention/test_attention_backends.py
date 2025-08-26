@@ -10,14 +10,15 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_standard_kv_cache_spec,
                                       create_vllm_config,
                                       get_attention_backend)
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               set_kv_cache_layout)
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
     _Backend.FLASH_ATTN_VLLM_V1, _Backend.FLASHINFER_VLLM_V1,
-    _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN_VLLM_V1
+    _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN_VLLM_V1, _Backend.TREE_ATTN,
+    "FLEX_ATTENTION_SLOW"
 ]
 
 # Remove flashinfer from the list if it's not available
@@ -97,7 +98,7 @@ def create_and_prepopulate_kv_cache(
         common_attn_metadata: CommonAttentionMetadata,
         randomize_blocks: bool = True) -> torch.Tensor:
     """Create and prepopulate a KV cache with context data.
-    
+
     Args:
         k_contexts: List of key context tensors for each sequence
         v_contexts: List of value context tensors for each sequence
@@ -109,9 +110,9 @@ def create_and_prepopulate_kv_cache(
         device: Device to create the cache on
         num_blocks: Total number of blocks in the cache
         block_table: Block table tensor to populate
-        randomize_blocks: Whether to randomly permute blocks 
+        randomize_blocks: Whether to randomly permute blocks
                           or use sequential order
-        
+
     Returns:
         Tuple of (kv_cache, updated_block_table)
     """
@@ -150,15 +151,15 @@ def create_and_prepopulate_kv_cache(
 
     # Permute the context blocks (excluding block 0 which is null)
     if randomize_blocks:
-        perm = torch.randperm(
-            blocks_end - 1) + 1  # Random permutation starting from block 1
+        # Random permutation starting from block 1
+        perm = torch.randperm(blocks_end - 1) + 1
     else:
-        perm = torch.arange(
-            1, blocks_end)  # Sequential order starting from block 1
+        # Sequential order starting from block 1
+        perm = torch.arange(1, blocks_end)
 
     inv_perm = torch.zeros(blocks_end, dtype=torch.long, device=device)
-    inv_perm[1:] = torch.argsort(
-        perm) + 1  # Add 1 to account for starting from block 1
+    # Add 1 to account for starting from block 1
+    inv_perm[1:] = torch.argsort(perm) + 1
     kv_cache[:, 1:blocks_end, ...] = kv_cache[:, perm, ...]
 
     # Construct the right block table
@@ -198,44 +199,57 @@ class MockAttentionLayer:
 
 
 def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
-                          vllm_config, device: torch.device,
+                          layer_names: list[str], vllm_config,
+                          device: torch.device,
                           common_attn_metadata: CommonAttentionMetadata,
                           query: torch.Tensor, key: torch.Tensor,
                           value: torch.Tensor,
                           kv_cache: torch.Tensor) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
-    builder_cls, impl_cls = get_attention_backend(backend)
+    # Handle special case for FLEX_ATTENTION_SLOW
+    actual_backend = backend
+
+    use_direct_block_mask = is_torch_equal_or_newer("2.9.0.dev0")
+    if backend == "FLEX_ATTENTION_SLOW":
+        actual_backend = _Backend.FLEX_ATTENTION
+        use_direct_block_mask = False
+
+    builder_cls, impl_cls = get_attention_backend(actual_backend)
 
     # Mock flashinfer's get_per_layer_parameters if needed
-    if backend == _Backend.FLASHINFER_VLLM_V1:
+    if actual_backend == _Backend.FLASHINFER_VLLM_V1:
         import unittest.mock
 
-        from vllm.v1.attention.backends.flashinfer import PerLayerParameters
+        from vllm.v1.attention.backends.utils import PerLayerParameters
 
-        def mock_get_per_layer_parameters(vllm_config, impl_cls):
+        def mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls):
             # Return mock parameters for a single layer
             head_size = vllm_config.model_config.get_head_size()
             return {
-                "mock_layer":
+                layer_name:
                 PerLayerParameters(
                     window_left=-1,  # No sliding window
                     logits_soft_cap=0.0,  # No soft cap
                     sm_scale=1.0 / (head_size**0.5)  # Standard scale
                 )
+                for layer_name in layer_names
             }
 
         with unittest.mock.patch(
                 'vllm.v1.attention.backends.flashinfer.get_per_layer_parameters',
                 mock_get_per_layer_parameters):
-            builder = builder_cls(kv_cache_spec, vllm_config, device)
+            builder = builder_cls(kv_cache_spec, layer_names, vllm_config,
+                                  device)
             attn_metadata = builder.build(
                 common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
             )
     else:
         # Build metadata
-        builder = builder_cls(kv_cache_spec, vllm_config, device)
+        builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
+        if actual_backend == _Backend.FLEX_ATTENTION:
+            builder.direct_build = use_direct_block_mask
         attn_metadata = builder.build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
@@ -278,7 +292,8 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
 
 @pytest.mark.parametrize("batch_spec_name", [
     "small_decode", "small_prefill", "mixed_small", "medium_decode",
-    "medium_prefill", "mixed_medium"
+    "medium_prefill", "mixed_medium", "large_decode", "large_prefill",
+    "single_decode", "single_prefill"
 ])
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 def test_backend_correctness(batch_spec_name: str, model: str):
@@ -299,7 +314,8 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     """
     batch_spec = BATCH_SPECS[batch_spec_name]
     vllm_config = create_vllm_config(model_name=model,
-                                     max_model_len=max(batch_spec.seq_lens))
+                                     max_model_len=max(batch_spec.seq_lens),
+                                     num_gpu_blocks=8192)
     device = torch.device("cuda:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
@@ -427,8 +443,8 @@ def test_backend_correctness(batch_spec_name: str, model: str):
             set_kv_cache_layout("HND")
 
         backend_output = run_attention_backend(backend_name, kv_cache_spec,
-                                               vllm_config, device,
-                                               common_attn_metadata,
+                                               ["placeholder"], vllm_config,
+                                               device, common_attn_metadata,
                                                query_vllm, key_vllm,
                                                value_vllm,
                                                kv_cache_for_backend)
@@ -448,11 +464,6 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         rtol = 1e-2
         atol = 5e-3
 
-        if backend_name == _Backend.FLEX_ATTENTION:
-            atol = 5e-1  # TODO: figure out why flex_attention has such large
-            # numerical differences for medium_decode, medium_prefill,
-            # mixed_medium
-
         max_diff = torch.max(torch.abs(backend_output - sdpa_output)).item()
         max_rel_diff = torch.max(
             torch.abs(backend_output - sdpa_output) /
@@ -462,12 +473,6 @@ def test_backend_correctness(batch_spec_name: str, model: str):
                                    rtol=rtol,
                                    atol=atol)
 
-        if not all_close:
-            print(f"[{backend_name}] output differs from SDPA baseline. "
-                  f"Max diff: {max_diff:.6f} (rel: {max_rel_diff:.6f})")
-            print(f"[{backend_name}] output: {backend_output}")
-            print(f"[{backend_name}] SDPA baseline: {sdpa_output}")
-
         assert all_close, (
             f"[{backend_name}] output differs from SDPA baseline. "
-            f"Max diff: {max_diff:.6f} (rel: {max_rel_diff:.6f})")
+            f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})")
