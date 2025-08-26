@@ -146,13 +146,8 @@ def pplx_cutlass_moe(
                             dtype=torch.int64)
 
     experts = CutlassBatchedExpertsFp8(
-        num_local_experts,
-        num_dispatchers,
-        out_dtype,
-        ab_strides1,
-        ab_strides2,
-        c_strides1,
-        c_strides2
+        num_local_experts, num_dispatchers, out_dtype, ab_strides1,
+        ab_strides2, c_strides1, c_strides2,
         fp8_w8a8_moe_quant_config(
             per_act_token_quant=per_act_token,
             per_out_ch_quant=per_out_ch,
