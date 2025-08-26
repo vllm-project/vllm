@@ -370,7 +370,6 @@ void selective_scan_fwd_cuda(SSMParamsBase &params, cudaStream_t stream) {
     #endif
 }
 
-// Instantiate for all combinations of input_t, weight_t, and state_t
 template void selective_scan_fwd_cuda<at::BFloat16, float, at::BFloat16>(SSMParamsBase &params, cudaStream_t stream);
 template void selective_scan_fwd_cuda<at::BFloat16, float, float>(SSMParamsBase &params, cudaStream_t stream);
 template void selective_scan_fwd_cuda<at::Half, float, at::Half>(SSMParamsBase &params, cudaStream_t stream);
@@ -693,7 +692,6 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
     
     const at::cuda::OptionalCUDAGuard device_guard(device_of(u));
     auto stream = at::cuda::getCurrentCUDAStream().stream();
-    // Dispatch based on both input type and state type
     DISPATCH_WTYPE_ITYPE_FLOAT_AND_HALF_AND_BF16(u.scalar_type(), ssm_states.scalar_type(), "selective_scan_fwd", [&] {
         selective_scan_fwd_cuda<input_t, weight_t, state_t>(params, stream);
     });
