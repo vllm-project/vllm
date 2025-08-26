@@ -120,6 +120,29 @@ class P2pNcclConnector(KVConnectorBase_V1):
             block_ids: torch.Tensor,
             request_id: str,
         ) -> None:
+            """
+            Inject KV cache data into a given attention layer tensor.
+
+            This function updates `layer` in-place with values from `kv_cache`,
+            handling different backend layouts:
+              - MLA (Multi-Linear Attention) or FlashInfer: KV tensors are
+                indexed along the first dimension.
+              - FlashAttention: KV tensors are indexed along the second
+                dimension.
+
+            If the number of provided block IDs does not match the number of KV
+            blocks, only the overlapping portion is updated, and a warning is
+            logged.
+
+            Args:
+                layer (torch.Tensor): The attention layer KV tensor to update.
+                kv_cache (torch.Tensor): The KV cache tensor to inject.
+                block_ids (torch.Tensor): Indices of the blocks to update.
+                request_id (str): Request identifier used for logging.
+
+            Returns:
+                None. The function modifies `layer` in-place.
+            """
             if (isinstance(attn_metadata, MLACommonMetadata)
                     or layer.shape[1] == 2):  # mla or flashinfer
                 num_block = kv_cache.shape[0]
@@ -211,6 +234,23 @@ class P2pNcclConnector(KVConnectorBase_V1):
             layer: torch.Tensor,
             block_ids: torch.Tensor,
         ) -> torch.Tensor:
+            """
+            Extract KV cache slices from a given attention layer tensor.
+
+            This function handles multiple backend layouts:
+              - MLA (Multi-Linear Attention) or FlashInfer: KV tensors are
+                indexed along the first dimension.
+              - FlashAttention: KV tensors are indexed along the second
+                dimension.
+
+            Args:
+                layer (torch.Tensor): The KV cache tensor from the attention
+                layer. block_ids (torch.Tensor): Indices of blocks to extract.
+
+            Returns:
+                torch.Tensor: A tensor containing the extracted KV slices.
+                Returns None if the layout is unsupported.
+            """
             if (isinstance(attn_metadata, MLACommonMetadata)
                     or layer.shape[1] == 2):  # mla or flashinfer
                 return layer[block_ids, ...]
