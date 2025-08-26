@@ -252,7 +252,7 @@ class Qwen2AudioMultiModalProcessor(
             if audio_output_lengths:
                 num_features = audio_output_lengths[item_idx]
             else:
-                audio_embeds = out_mm_kwargs["audio_embeds"][item_idx]
+                audio_embeds = out_mm_data["audio_embeds"][item_idx]
                 assert len(audio_embeds.shape
                            ) == 2, "audio_embeds must be a 2D tensor"
                 num_features = audio_embeds.shape[0]
