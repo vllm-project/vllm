@@ -5,7 +5,9 @@ from typing import Optional, overload
 
 import pytest
 import torch
+from packaging.version import Version
 from transformers import AutoConfig, AutoModelForImageTextToText, AutoTokenizer
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm import LLM, SamplingParams
 from vllm.attention.backends.flash_attn import FlashAttentionMetadata
@@ -285,6 +287,10 @@ def clear_cache():
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
+@pytest.mark.skipif(
+    Version(TRANSFORMERS_VERSION) <= Version("4.55.2"),
+    reason="Transformers v4.55 has a regression issue on mllama, "
+    "see: https://github.com/huggingface/transformers/pull/40083")
 def test_models_single_leading_image(hf_runner, vllm_runner, image_assets,
                                      model, sizes, dtype, max_tokens,
                                      num_logprobs,
@@ -313,6 +319,10 @@ def test_models_single_leading_image(hf_runner, vllm_runner, image_assets,
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
+@pytest.mark.skipif(
+    Version(TRANSFORMERS_VERSION) <= Version("4.55.2"),
+    reason="Transformers v4.55 has a regression issue on mllama, "
+    "see: https://github.com/huggingface/transformers/pull/40083")
 def test_models_multi_leading_images(hf_runner, vllm_runner, image_assets,
                                      model, dtype, max_tokens, num_logprobs,
                                      attn_backend: _Backend) -> None:
@@ -362,6 +372,10 @@ def test_models_multi_leading_images(hf_runner, vllm_runner, image_assets,
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
+@pytest.mark.skipif(
+    Version(TRANSFORMERS_VERSION) <= Version("4.55.2"),
+    reason="Transformers v4.55 has a regression issue on mllama, "
+    "see: https://github.com/huggingface/transformers/pull/40083")
 def test_models_interleaved_images(hf_runner, vllm_runner, image_assets, model,
                                    dtype, max_tokens, num_logprobs,
                                    attn_backend: _Backend) -> None:
@@ -402,6 +416,10 @@ def test_models_interleaved_images(hf_runner, vllm_runner, image_assets, model,
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.skipif(
+    Version(TRANSFORMERS_VERSION) <= Version("4.55.2"),
+    reason="Transformers v4.55 has a regression issue on mllama, "
+    "see: https://github.com/huggingface/transformers/pull/40083")
 def test_models_distributed(
     hf_runner,
     vllm_runner,

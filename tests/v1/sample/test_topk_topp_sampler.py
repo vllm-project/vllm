@@ -2,25 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 import torch
-from flashinfer.sampling import top_k_renorm_probs, top_p_renorm_probs
 from torch import Generator
 
 from vllm.platforms import current_platform
 from vllm.v1.sample.ops.topk_topp_sampler import (apply_top_k_top_p,
                                                   is_flashinfer_available)
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
 
 BATCH_SIZE = 1024
 VOCAB_SIZE = 128 * 1024
 
 FLASHINFER_ENABLED = current_platform.is_cuda() and is_flashinfer_available
+if is_flashinfer_available:
+    from flashinfer.sampling import top_k_renorm_probs, top_p_renorm_probs
 
 
 @pytest.fixture(autouse=True)
 def reset_default_device():
     """
-    Explicitly set the default device, which can affect subsequent tests. 
+    Explicitly set the default device, which can affect subsequent tests.
     Adding this fixture helps avoid this problem.
     """
     original_device = torch.get_default_device()
@@ -58,8 +59,8 @@ def test_flashinfer_sampler():
     This test verifies that the FlashInfer top-k and top-p sampling
     implementation produces the same results as the Python implementation.
 
-    NOTE: FlashInfer did not directly expose an interface for fused top-k and 
-    top-p prob renorm (it did provide fused sampling but we cannot compare 
+    NOTE: FlashInfer did not directly expose an interface for fused top-k and
+    top-p prob renorm (it did provide fused sampling but we cannot compare
     sampling results due to randomness), so we will compare the probability
     renormed consequently by top-k and then top-p of FlashInfer implementation.
     '''

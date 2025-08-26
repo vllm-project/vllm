@@ -3,6 +3,8 @@
 
 import pytest
 import requests
+import torch
+import torch.nn.functional as F
 
 from vllm.entrypoints.openai.protocol import ClassificationResponse
 
@@ -119,8 +121,7 @@ def test_invalid_truncate_prompt_tokens_error(server: RemoteOpenAIServer,
 
     error = classification_response.json()
     assert classification_response.status_code == 400
-    assert error["object"] == "error"
-    assert "truncate_prompt_tokens" in error["message"]
+    assert "truncate_prompt_tokens" in error["error"]["message"]
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
@@ -135,7 +136,7 @@ def test_empty_input_error(server: RemoteOpenAIServer, model_name: str):
 
     error = classification_response.json()
     assert classification_response.status_code == 400
-    assert error["object"] == "error"
+    assert "error" in error
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
@@ -155,3 +156,73 @@ def test_batch_classification_empty_list(server: RemoteOpenAIServer,
     assert output.object == "list"
     assert isinstance(output.data, list)
     assert len(output.data) == 0
+
+
+@pytest.mark.asyncio
+async def test_invocations(server: RemoteOpenAIServer):
+    request_args = {
+        "model": MODEL_NAME,
+        "input": "This product was excellent and exceeded my expectations"
+    }
+
+    classification_response = requests.post(server.url_for("classify"),
+                                            json=request_args)
+    classification_response.raise_for_status()
+
+    invocation_response = requests.post(server.url_for("invocations"),
+                                        json=request_args)
+    invocation_response.raise_for_status()
+
+    classification_output = classification_response.json()
+    invocation_output = invocation_response.json()
+
+    assert classification_output.keys() == invocation_output.keys()
+    for classification_data, invocation_data in zip(
+            classification_output["data"], invocation_output["data"]):
+        assert classification_data.keys() == invocation_data.keys()
+        assert classification_data["probs"] == pytest.approx(
+            invocation_data["probs"], rel=0.01)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_activation(server: RemoteOpenAIServer, model_name: str):
+    input_text = ["This product was excellent and exceeded my expectations"]
+
+    async def get_outputs(activation):
+        response = requests.post(server.url_for("classify"),
+                                 json={
+                                     "model": model_name,
+                                     "input": input_text,
+                                     "activation": activation
+                                 })
+        outputs = response.json()
+        return torch.tensor([x['probs'] for x in outputs["data"]])
+
+    default = await get_outputs(activation=None)
+    w_activation = await get_outputs(activation=True)
+    wo_activation = await get_outputs(activation=False)
+
+    assert torch.allclose(default, w_activation,
+                          atol=1e-2), "Default should use activation."
+    assert not torch.allclose(
+        w_activation, wo_activation,
+        atol=1e-2), "wo_activation should not use activation."
+    assert torch.allclose(
+        F.softmax(wo_activation, dim=-1), w_activation, atol=1e-2
+    ), "w_activation should be close to activation(wo_activation)."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_pooling(server: RemoteOpenAIServer, model_name: str):
+    # pooling api uses ALL pooling, which does not support chunked prefill.
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "input": "test",
+            "encoding_format": "float"
+        },
+    )
+    assert response.json()["error"]["type"] == "BadRequestError"

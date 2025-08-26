@@ -2,47 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import MISSING, Field, asdict, dataclass, field
-from typing import Literal, Union
 
 import pytest
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (LoadConfig, ModelConfig, PoolerConfig, VllmConfig,
-                         config, get_field)
+                         get_field, update_config)
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
-
-
-class _TestConfig1:
-    pass
-
-
-@dataclass
-class _TestConfig2:
-    a: int
-    """docstring"""
-
-
-@dataclass
-class _TestConfig3:
-    a: int = 1
-
-
-@dataclass
-class _TestConfig4:
-    a: Union[Literal[1], Literal[2]] = 1
-    """docstring"""
-
-
-@pytest.mark.parametrize(("test_config", "expected_error"), [
-    (_TestConfig1, "must be a dataclass"),
-    (_TestConfig2, "must have a default"),
-    (_TestConfig3, "must have a docstring"),
-    (_TestConfig4, "must use a single Literal"),
-])
-def test_config(test_config, expected_error):
-    with pytest.raises(Exception, match=expected_error):
-        config(test_config)
 
 
 def test_compile_config_repr_succeeds():
@@ -79,46 +46,144 @@ def test_get_field():
     assert c.default_factory is MISSING
 
 
+@dataclass
+class _TestNestedConfig:
+    a: _TestConfigFields = field(
+        default_factory=lambda: _TestConfigFields(a=0))
+
+
+def test_update_config():
+    # Simple update
+    config1 = _TestConfigFields(a=0)
+    new_config1 = update_config(config1, {"a": 42})
+    assert new_config1.a == 42
+    # Nonexistent field
+    with pytest.raises(AssertionError):
+        new_config1 = update_config(config1, {"nonexistent": 1})
+    # Nested update with dataclass
+    config2 = _TestNestedConfig()
+    new_inner_config = _TestConfigFields(a=1, c="new_value")
+    new_config2 = update_config(config2, {"a": new_inner_config})
+    assert new_config2.a == new_inner_config
+    # Nested update with dict
+    config3 = _TestNestedConfig()
+    new_config3 = update_config(config3, {"a": {"c": "new_value"}})
+    assert new_config3.a.c == "new_value"
+    # Nested update with invalid type
+    with pytest.raises(AssertionError):
+        new_config3 = update_config(config3, {"a": "new_value"})
+
+
+# Can remove once --task option is fully deprecated
 @pytest.mark.parametrize(
-    ("model_id", "expected_runner_type", "expected_task"),
+    ("model_id", "expected_runner_type", "expected_convert_type",
+     "expected_task"),
     [
-        ("distilbert/distilgpt2", "generate", "generate"),
-        ("intfloat/multilingual-e5-small", "pooling", "embed"),
-        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
-        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "score"),
-        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "reward"),
-        ("openai/whisper-small", "transcription", "transcription"),
+        ("distilbert/distilgpt2", "generate", "none", "generate"),
+        ("intfloat/multilingual-e5-small", "pooling", "none", "embed"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none",
+         "classify"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none", "reward"),
+        ("openai/whisper-small", "generate", "none", "transcription"),
     ],
 )
-def test_auto_task(model_id, expected_runner_type, expected_task):
-    config = ModelConfig(
-        model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="float16",
-    )
+def test_auto_task(model_id, expected_runner_type, expected_convert_type,
+                   expected_task):
+    config = ModelConfig(model_id, task="auto")
 
     assert config.runner_type == expected_runner_type
-    assert config.task == expected_task
+    assert config.convert_type == expected_convert_type
+    assert expected_task in config.supported_tasks
 
 
-@pytest.mark.parametrize(("model_id", "bad_task"), [
-    ("Qwen/Qwen2.5-Math-RM-72B", "generate"),
-])
-def test_incorrect_task(model_id, bad_task):
-    with pytest.raises(ValueError, match=r"does not support the .* task"):
-        ModelConfig(
-            model_id,
-            task=bad_task,
-            tokenizer=model_id,
-            tokenizer_mode="auto",
-            trust_remote_code=False,
-            seed=0,
-            dtype="float16",
-        )
+# Can remove once --task option is fully deprecated
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_convert_type",
+     "expected_task"),
+    [
+        ("distilbert/distilgpt2", "pooling", "embed", "embed"),
+        ("intfloat/multilingual-e5-small", "pooling", "embed", "embed"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "classify",
+         "classify"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "embed", "embed"),
+        ("openai/whisper-small", "pooling", "embed", "embed"),
+    ],
+)
+def test_score_task(model_id, expected_runner_type, expected_convert_type,
+                    expected_task):
+    config = ModelConfig(model_id, task="score")
+
+    assert config.runner_type == expected_runner_type
+    assert config.convert_type == expected_convert_type
+    assert expected_task in config.supported_tasks
+
+
+# Can remove once --task option is fully deprecated
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_convert_type",
+     "expected_task"),
+    [
+        ("openai/whisper-small", "generate", "none", "transcription"),
+    ],
+)
+def test_transcription_task(model_id, expected_runner_type,
+                            expected_convert_type, expected_task):
+    config = ModelConfig(model_id, task="transcription")
+
+    assert config.runner_type == expected_runner_type
+    assert config.convert_type == expected_convert_type
+    assert expected_task in config.supported_tasks
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_convert_type"),
+    [
+        ("distilbert/distilgpt2", "generate", "none"),
+        ("intfloat/multilingual-e5-small", "pooling", "none"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none"),
+        ("openai/whisper-small", "generate", "none"),
+    ],
+)
+def test_auto_runner(model_id, expected_runner_type, expected_convert_type):
+    config = ModelConfig(model_id, runner="auto")
+
+    assert config.runner_type == expected_runner_type
+    assert config.convert_type == expected_convert_type
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_convert_type"),
+    [
+        ("distilbert/distilgpt2", "pooling", "embed"),
+        ("intfloat/multilingual-e5-small", "pooling", "none"),
+        ("jason9693/Qwen2.5-1.5B-apeach", "pooling", "classify"),
+        ("cross-encoder/ms-marco-MiniLM-L-6-v2", "pooling", "none"),
+        ("Qwen/Qwen2.5-Math-RM-72B", "pooling", "none"),
+        ("openai/whisper-small", "pooling", "embed"),
+    ],
+)
+def test_pooling_runner(model_id, expected_runner_type, expected_convert_type):
+    config = ModelConfig(model_id, runner="pooling")
+
+    assert config.runner_type == expected_runner_type
+    assert config.convert_type == expected_convert_type
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_runner_type", "expected_convert_type"),
+    [
+        ("Qwen/Qwen2.5-1.5B-Instruct", "draft", "none"),
+    ],
+)
+def test_draft_runner(model_id, expected_runner_type, expected_convert_type):
+    config = ModelConfig(model_id, runner="draft")
+
+    assert config.runner_type == expected_runner_type
+    assert config.convert_type == expected_convert_type
 
 
 MODEL_IDS_EXPECTED = [
@@ -131,74 +196,15 @@ MODEL_IDS_EXPECTED = [
 @pytest.mark.parametrize("model_id_expected", MODEL_IDS_EXPECTED)
 def test_disable_sliding_window(model_id_expected):
     model_id, expected = model_id_expected
-    model_config = ModelConfig(
-        model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="float16",
-        revision=None,
-        disable_sliding_window=True,
-    )
+    model_config = ModelConfig(model_id, disable_sliding_window=True)
     assert model_config.max_model_len == expected
-
-
-def test_get_sliding_window():
-    TEST_SLIDING_WINDOW = 4096
-    # Test that the sliding window is correctly computed.
-    # For Qwen1.5/Qwen2, get_sliding_window() should be None
-    # when use_sliding_window is False.
-    qwen2_model_config = ModelConfig(
-        "Qwen/Qwen1.5-7B",
-        task="auto",
-        tokenizer="Qwen/Qwen1.5-7B",
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="float16",
-        revision=None,
-    )
-
-    qwen2_model_config.hf_config.use_sliding_window = False
-    qwen2_model_config.hf_config.sliding_window = TEST_SLIDING_WINDOW
-    assert qwen2_model_config.get_sliding_window() is None
-
-    qwen2_model_config.hf_config.use_sliding_window = True
-    assert qwen2_model_config.get_sliding_window() == TEST_SLIDING_WINDOW
-
-    mistral_model_config = ModelConfig(
-        "mistralai/Mistral-7B-v0.1",
-        task="auto",
-        tokenizer="mistralai/Mistral-7B-v0.1",
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="float16",
-        revision=None,
-    )
-    mistral_model_config.hf_config.sliding_window = None
-    assert mistral_model_config.get_sliding_window() is None
-
-    mistral_model_config.hf_config.sliding_window = TEST_SLIDING_WINDOW
-    assert mistral_model_config.get_sliding_window() == TEST_SLIDING_WINDOW
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
                     reason="Xformers backend is not supported on ROCm.")
 def test_get_pooling_config():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
-    model_config = ModelConfig(
-        model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="float16",
-        revision=None,
-    )
+    model_config = ModelConfig(model_id)
 
     pooling_config = model_config._init_pooler_config()
     assert pooling_config is not None
@@ -211,14 +217,7 @@ def test_get_pooling_config():
                     reason="Xformers backend is not supported on ROCm.")
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
-    model_config = ModelConfig(model_id,
-                               task="auto",
-                               tokenizer=model_id,
-                               tokenizer_mode="auto",
-                               trust_remote_code=False,
-                               seed=0,
-                               dtype="float16",
-                               revision=None)
+    model_config = ModelConfig(model_id)
 
     override_pooler_config = PoolerConfig(pooling_type='CLS', normalize=True)
     model_config.override_pooler_config = override_pooler_config
@@ -228,19 +227,25 @@ def test_get_pooling_config_from_args():
     assert asdict(pooling_config) == asdict(override_pooler_config)
 
 
+@pytest.mark.parametrize(
+    ("model_id", "default_pooling_type", "pooling_type"),
+    [
+        ("tomaarsen/Qwen3-Reranker-0.6B-seq-cls", "LAST", "LAST"),  # LLM
+        ("intfloat/e5-small", "CLS", "MEAN"),  # BertModel
+        ("Qwen/Qwen2.5-Math-RM-72B", "ALL", "ALL"),  # reward
+        ("Qwen/Qwen2.5-Math-PRM-7B", "STEP", "STEP")  # step reward
+    ])
+def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
+    model_config = ModelConfig(model_id)
+    assert model_config._model_info.default_pooling_type == default_pooling_type
+    assert model_config.pooler_config.pooling_type == pooling_type
+
+
 @pytest.mark.skipif(current_platform.is_rocm(),
                     reason="Xformers backend is not supported on ROCm.")
 def test_get_bert_tokenization_sentence_transformer_config():
-    bge_model_config = ModelConfig(
-        model="BAAI/bge-base-en-v1.5",
-        task="auto",
-        tokenizer="BAAI/bge-base-en-v1.5",
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="float16",
-        revision=None,
-    )
+    model_id = "BAAI/bge-base-en-v1.5"
+    bge_model_config = ModelConfig(model_id)
 
     bert_bge_model_config = bge_model_config._get_encoder_config()
 
@@ -253,27 +258,13 @@ def test_rope_customization():
     TEST_ROPE_THETA = 16_000_000.0
     LONGCHAT_ROPE_SCALING = {"rope_type": "linear", "factor": 8.0}
 
-    llama_model_config = ModelConfig(
-        "meta-llama/Meta-Llama-3-8B-Instruct",
-        task="auto",
-        tokenizer="meta-llama/Meta-Llama-3-8B-Instruct",
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        dtype="float16",
-        seed=0,
-    )
+    llama_model_config = ModelConfig("meta-llama/Meta-Llama-3-8B-Instruct")
     assert getattr(llama_model_config.hf_config, "rope_scaling", None) is None
     assert getattr(llama_model_config.hf_config, "rope_theta", None) == 500_000
     assert llama_model_config.max_model_len == 8192
 
     llama_model_config = ModelConfig(
         "meta-llama/Meta-Llama-3-8B-Instruct",
-        task="auto",
-        tokenizer="meta-llama/Meta-Llama-3-8B-Instruct",
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        dtype="float16",
-        seed=0,
         hf_overrides={
             "rope_scaling": TEST_ROPE_SCALING,
             "rope_theta": TEST_ROPE_THETA,
@@ -285,15 +276,7 @@ def test_rope_customization():
                    None) == TEST_ROPE_THETA
     assert llama_model_config.max_model_len == 16384
 
-    longchat_model_config = ModelConfig(
-        "lmsys/longchat-13b-16k",
-        task="auto",
-        tokenizer="lmsys/longchat-13b-16k",
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        dtype="float16",
-        seed=0,
-    )
+    longchat_model_config = ModelConfig("lmsys/longchat-13b-16k")
     # Check if LONGCHAT_ROPE_SCALING entries are in longchat_model_config
     assert all(
         longchat_model_config.hf_config.rope_scaling.get(key) == value
@@ -302,12 +285,6 @@ def test_rope_customization():
 
     longchat_model_config = ModelConfig(
         "lmsys/longchat-13b-16k",
-        task="auto",
-        tokenizer="lmsys/longchat-13b-16k",
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        dtype="float16",
-        seed=0,
         hf_overrides={
             "rope_scaling": TEST_ROPE_SCALING,
         },
@@ -326,15 +303,7 @@ def test_rope_customization():
     ("meta-llama/Llama-3.2-11B-Vision", True),
 ])
 def test_is_encoder_decoder(model_id, is_encoder_decoder):
-    config = ModelConfig(
-        model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        dtype="float16",
-        seed=0,
-    )
+    config = ModelConfig(model_id)
 
     assert config.is_encoder_decoder == is_encoder_decoder
 
@@ -344,15 +313,7 @@ def test_is_encoder_decoder(model_id, is_encoder_decoder):
     ("Qwen/Qwen2-VL-2B-Instruct", True),
 ])
 def test_uses_mrope(model_id, uses_mrope):
-    config = ModelConfig(
-        model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        dtype="float16",
-        seed=0,
-    )
+    config = ModelConfig(model_id)
 
     assert config.uses_mrope == uses_mrope
 
@@ -362,26 +323,12 @@ def test_generation_config_loading():
 
     # When set generation_config to "vllm", the default generation config
     # will not be loaded.
-    model_config = ModelConfig(model_id,
-                               task="auto",
-                               tokenizer=model_id,
-                               tokenizer_mode="auto",
-                               trust_remote_code=False,
-                               seed=0,
-                               dtype="float16",
-                               generation_config="vllm")
+    model_config = ModelConfig(model_id, generation_config="vllm")
     assert model_config.get_diff_sampling_param() == {}
 
     # When set generation_config to "auto", the default generation config
     # should be loaded.
-    model_config = ModelConfig(model_id,
-                               task="auto",
-                               tokenizer=model_id,
-                               tokenizer_mode="auto",
-                               trust_remote_code=False,
-                               seed=0,
-                               dtype="float16",
-                               generation_config="auto")
+    model_config = ModelConfig(model_id, generation_config="auto")
 
     correct_generation_config = {
         "repetition_penalty": 1.1,
@@ -397,12 +344,6 @@ def test_generation_config_loading():
 
     model_config = ModelConfig(
         model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="float16",
         generation_config="auto",
         override_generation_config=override_generation_config)
 
@@ -415,12 +356,6 @@ def test_generation_config_loading():
     # is set, the override_generation_config should be used directly.
     model_config = ModelConfig(
         model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="float16",
         generation_config="vllm",
         override_generation_config=override_generation_config)
 
@@ -445,20 +380,13 @@ def test_load_config_pt_load_map_location(pt_load_map_location):
         ("BAAI/bge-reranker-base", None, 512, False),
         ("BAAI/bge-reranker-base", 256, 256, False),
         ("BAAI/bge-reranker-base", 513, 512, True),
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", None, 131072, False),
+        ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", 131073, 131072, True),
     ])
 def test_get_and_verify_max_len(model_id, max_model_len, expected_max_len,
                                 should_raise):
     """Test get_and_verify_max_len with different configurations."""
-    model_config = ModelConfig(
-        model_id,
-        task="auto",
-        tokenizer=model_id,
-        tokenizer_mode="auto",
-        trust_remote_code=False,
-        seed=0,
-        dtype="float16",
-        revision=None,
-    )
+    model_config = ModelConfig(model_id)
 
     if should_raise:
         with pytest.raises(ValueError):

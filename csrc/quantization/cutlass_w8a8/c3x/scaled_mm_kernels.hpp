@@ -36,7 +36,19 @@ void cutlass_scaled_mm_sm100_fp8(torch::Tensor& out, torch::Tensor const& a,
                                  torch::Tensor const& b_scales,
                                  std::optional<torch::Tensor> const& bias);
 
+void cutlass_scaled_mm_sm120_fp8(torch::Tensor& out, torch::Tensor const& a,
+                                 torch::Tensor const& b,
+                                 torch::Tensor const& a_scales,
+                                 torch::Tensor const& b_scales,
+                                 std::optional<torch::Tensor> const& bias);
+
 void cutlass_scaled_mm_blockwise_sm100_fp8(torch::Tensor& out,
+                                           torch::Tensor const& a,
+                                           torch::Tensor const& b,
+                                           torch::Tensor const& a_scales,
+                                           torch::Tensor const& b_scales);
+
+void cutlass_scaled_mm_blockwise_sm120_fp8(torch::Tensor& out,
                                            torch::Tensor const& a,
                                            torch::Tensor const& b,
                                            torch::Tensor const& a_scales,

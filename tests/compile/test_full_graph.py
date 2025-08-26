@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from typing import Any, Optional, Union
 
 import pytest
@@ -30,10 +31,6 @@ def models_list(*, all: bool = True, keywords: Optional[list[str]] = None):
     ]
 
     if all:
-        if is_quant_method_supported("aqlm"):
-            TEST_MODELS.append(("ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf", {
-                "quantization": "aqlm"
-            }))
 
         # TODO: figure out why this fails.
         if False and is_quant_method_supported("gguf"):  # noqa: SIM223
@@ -55,12 +52,6 @@ def models_list(*, all: bool = True, keywords: Optional[list[str]] = None):
             TEST_MODELS.append(("alexm-nm/tinyllama-24-marlin24-4bit-g128", {
                 "quantization": "gptq_marlin_24"
             }))
-
-        if is_quant_method_supported("marlin"):
-            TEST_MODELS.append(
-                ("robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-marlin", {
-                    "quantization": "marlin"
-                }))
 
         if not current_platform.is_rocm() and is_quant_method_supported("awq"):
             TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {
@@ -111,6 +102,11 @@ def test_full_graph(
                            pass_config=PassConfig(enable_fusion=True,
                                                   enable_noop=True)), model)
         for model in models_list(keywords=["FP8-dynamic", "quantized.w8a8"])
+    ] + [
+        # Test depyf integration works
+        (CompilationConfig(level=CompilationLevel.PIECEWISE,
+                           debug_dump_path=tempfile.gettempdir()),
+         ("facebook/opt-125m", {})),
     ])
 # only test some of the models
 @create_new_process_for_each_test()

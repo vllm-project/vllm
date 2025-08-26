@@ -16,7 +16,7 @@ from vllm.utils import LazyLoader, is_list_of
 from .audio import AudioResampler
 from .inputs import (AudioItem, HfAudioItem, HfImageItem, HfVideoItem,
                      ImageItem, ModalityData, MultiModalDataDict,
-                     MultiModalFieldConfig, MultiModalKwargs, VideoItem)
+                     MultiModalFieldConfig, MultiModalKwargsItems, VideoItem)
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
@@ -157,19 +157,16 @@ class DictEmbeddingItems(ModalityDataItems[Mapping[str, torch.Tensor],
         self.fields_config = fields_config
         self.required_fields = required_fields
 
-        self._kwargs = MultiModalKwargs.from_hf_inputs(
+        self._kwargs = MultiModalKwargsItems.from_hf_inputs(
             BatchFeature(dict(data)),
             fields_config,
         )
 
     def get_count(self) -> int:
-        return self._kwargs.get_item_count(self.modality)
+        return len(self._kwargs[self.modality])
 
     def get(self, index: int) -> Mapping[str, torch.Tensor]:
-        return {
-            k: v.data
-            for k, v in self._kwargs.get_item(self.modality, index).items()
-        }
+        return self._kwargs[self.modality][index].get_data()
 
     def get_processor_data(self) -> Mapping[str, object]:
         return {}
@@ -224,8 +221,14 @@ class ImageEmbeddingItems(EmbeddingItems):
 
 class VideoProcessorItems(ProcessorBatchItems[HfVideoItem]):
 
-    def __init__(self, data: Sequence[HfVideoItem]) -> None:
+    def __init__(
+        self,
+        data: Sequence[HfVideoItem],
+        metadata: Optional[Union[dict[str, Any],
+                                 list[Optional[dict[str, Any]]]]] = None,
+    ) -> None:
         super().__init__(data, "video")
+        self.metadata = metadata
 
     def get_num_frames(self, item_idx: int) -> int:
         return len(self.get(item_idx))
@@ -320,6 +323,7 @@ class MultiModalDataParser:
         *,
         target_sr: Optional[float] = None,
         audio_resample_method: Literal["librosa", "scipy"] = "librosa",
+        video_needs_metadata: bool = False,
     ) -> None:
         super().__init__()
 
@@ -327,6 +331,7 @@ class MultiModalDataParser:
             target_sr=target_sr,
             method=audio_resample_method,
         )
+        self.video_needs_metadata = video_needs_metadata
 
     def _is_embeddings(
             self, data: object
@@ -360,6 +365,21 @@ class MultiModalDataParser:
             return audio.numpy(), None
 
         assert_never(audio)
+
+    def _get_video_with_metadata(
+        self,
+        video: VideoItem,
+    ) -> tuple[np.ndarray, Optional[dict[str, Any]]]:
+        if isinstance(video, tuple):
+            return video
+        if isinstance(video, list):
+            return np.array(video), None
+        if isinstance(video, np.ndarray):
+            return video, None
+        if isinstance(video, torch.Tensor):
+            return video.numpy(), None
+
+        assert_never(video)
 
     def _parse_audio_data(
         self,
@@ -433,10 +453,25 @@ class MultiModalDataParser:
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
             data_items = [elem for elem in data]
+        elif isinstance(data, tuple) and len(data) == 2:
+            data_items = [data]
         else:
             data_items = data
 
-        return VideoProcessorItems(data_items)
+        new_videos = list[tuple[np.ndarray, Optional[dict[str, Any]]]]()
+        metadata_lst: list[Optional[dict[str, Any]]] = []
+        for data_item in data_items:
+            video, metadata = self._get_video_with_metadata(data_item)
+            if self.video_needs_metadata:
+                new_videos.append((video, metadata))
+                metadata_lst.append(metadata)
+            else:
+                new_videos.append(video)
+
+        if not self.video_needs_metadata:
+            metadata = None
+
+        return VideoProcessorItems(new_videos, metadata=metadata_lst)
 
     def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
         return {

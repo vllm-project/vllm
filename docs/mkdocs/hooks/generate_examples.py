@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 import regex as re
 
+logger = logging.getLogger("mkdocs")
+
 ROOT_DIR = Path(__file__).parent.parent.parent.parent
 ROOT_DIR_RELATIVE = '../../../../..'
 EXAMPLE_DIR = ROOT_DIR / "examples"
 EXAMPLE_DOC_DIR = ROOT_DIR / "docs/examples"
-print(ROOT_DIR.resolve())
-print(EXAMPLE_DIR.resolve())
-print(EXAMPLE_DOC_DIR.resolve())
 
 
 def fix_case(text: str) -> str:
@@ -24,7 +24,6 @@ def fix_case(text: str) -> str:
         "llm": "LLM",
         "mae": "MAE",
         "tpu": "TPU",
-        "aqlm": "AQLM",
         "gguf": "GGUF",
         "lora": "LoRA",
         "rlhf": "RLHF",
@@ -71,6 +70,10 @@ class Example:
         self.other_files = self.determine_other_files()
         self.title = self.determine_title()
 
+    @property
+    def is_code(self) -> bool:
+        return self.main_file.suffix != ".md"
+
     def determine_main_file(self) -> Path:
         """
         Determines the main file in the given path.
@@ -102,20 +105,28 @@ class Example:
         return [file for file in self.path.rglob("*") if is_other_file(file)]
 
     def determine_title(self) -> str:
+        if not self.is_code:
+            with open(self.main_file) as f:
+                first_line = f.readline().strip()
+            match = re.match(r'^#\s+(?P<title>.+)$', first_line)
+            if match:
+                return match.group('title')
         return fix_case(self.path.stem.replace("_", " ").title())
 
     def generate(self) -> str:
-        content = f"---\ntitle: {self.title}\n---\n\n"
+        content = f"# {self.title}\n\n"
         content += f"Source <gh-file:{self.path.relative_to(ROOT_DIR)}>.\n\n"
 
         # Use long code fence to avoid issues with
         # included files containing code fences too
         code_fence = "``````"
-        is_code = self.main_file.suffix != ".md"
-        if is_code:
+        # Skip the title from md snippets as it's been included above
+        start_line = 2
+        if self.is_code:
             content += f"{code_fence}{self.main_file.suffix[1:]}\n"
-        content += f'--8<-- "{self.main_file}"\n'
-        if is_code:
+            start_line = 1
+        content += f'--8<-- "{self.main_file}:{start_line}"\n'
+        if self.is_code:
             content += f"{code_fence}\n"
         content += "\n"
 
@@ -135,6 +146,11 @@ class Example:
 
 
 def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
+    logger.info("Generating example documentation")
+    logger.debug("Root directory: %s", ROOT_DIR.resolve())
+    logger.debug("Example directory: %s", EXAMPLE_DIR.resolve())
+    logger.debug("Example document directory: %s", EXAMPLE_DOC_DIR.resolve())
+
     # Create the EXAMPLE_DOC_DIR if it doesn't exist
     if not EXAMPLE_DOC_DIR.exists():
         EXAMPLE_DOC_DIR.mkdir(parents=True)
@@ -156,8 +172,8 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
     for example in sorted(examples, key=lambda e: e.path.stem):
         example_name = f"{example.path.stem}.md"
         doc_path = EXAMPLE_DOC_DIR / example.category / example_name
-        print(doc_path)
         if not doc_path.parent.exists():
             doc_path.parent.mkdir(parents=True)
         with open(doc_path, "w+") as f:
             f.write(example.generate())
+        logger.debug("Example generated: %s", doc_path.relative_to(ROOT_DIR))

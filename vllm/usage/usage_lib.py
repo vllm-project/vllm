@@ -20,8 +20,11 @@ import torch
 
 import vllm.envs as envs
 from vllm.connections import global_http_connection
+from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless, cuda_get_device_properties
 from vllm.version import __version__ as VLLM_VERSION
+
+logger = init_logger(__name__)
 
 _config_home = envs.VLLM_CONFIG_ROOT
 _USAGE_STATS_JSON_PATH = os.path.join(_config_home, "usage_stats.json")
@@ -183,7 +186,7 @@ class UsageMessage:
                 self.gpu_memory_per_device = (
                     torch_xla.core.xla_model.get_memory_info()["bytes_limit"])
             except Exception:
-                pass
+                logger.exception("Failed to collect TPU information")
         self.provider = _detect_cloud_provider()
         self.architecture = platform.machine()
         self.platform = platform.platform()

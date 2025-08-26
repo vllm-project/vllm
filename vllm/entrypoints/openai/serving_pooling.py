@@ -94,16 +94,13 @@ class OpenAIServingPooling(OpenAIServing):
         try:
             truncate_prompt_tokens = _validate_truncation_size(
                 self.max_model_len, truncate_prompt_tokens)
-            (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            lora_request = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine_client.get_tokenizer(lora_request)
-
-            if prompt_adapter_request is not None:
-                raise NotImplementedError("Prompt adapter is not supported "
-                                          "for pooling models")
+            if self.model_config.skip_tokenizer_init:
+                tokenizer = None
+            else:
+                tokenizer = await self.engine_client.get_tokenizer(lora_request
+                                                                   )
 
             if isinstance(request, PoolingChatRequest):
                 (
@@ -142,14 +139,18 @@ class OpenAIServingPooling(OpenAIServing):
         try:
             pooling_params = request.to_pooling_params()
 
+            try:
+                pooling_params.verify("encode", self.model_config)
+            except ValueError as e:
+                return self.create_error_response(str(e))
+
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
 
                 self._log_inputs(request_id_item,
                                  request_prompts[i],
                                  params=pooling_params,
-                                 lora_request=lora_request,
-                                 prompt_adapter_request=prompt_adapter_request)
+                                 lora_request=lora_request)
 
                 trace_headers = (None if raw_request is None else await
                                  self._get_trace_headers(raw_request.headers))

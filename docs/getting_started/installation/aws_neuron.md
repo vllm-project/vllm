@@ -26,7 +26,7 @@ The easiest way to launch a Trainium or Inferentia instance with pre-installed N
 - After launching the instance, follow the instructions in [Connect to your instance](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/AccessingInstancesLinux.html) to connect to the instance
 - Once inside your instance, activate the pre-installed virtual environment for inference by running
 
-```console
+```bash
 source /opt/aws_neuronx_venv_pytorch_2_6_nxd_inference/bin/activate
 ```
 
@@ -47,7 +47,7 @@ Currently, there are no pre-built Neuron wheels.
 
 To build and install vLLM from source, run:
 
-```console
+```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -U -r requirements/neuron.txt
@@ -66,7 +66,7 @@ Refer to [vLLM User Guide for NxD Inference](https://awsdocs-neuron.readthedocs-
 
 To install the AWS Neuron fork, run the following:
 
-```console
+```bash
 git clone -b neuron-2.23-vllm-v0.7.2 https://github.com/aws-neuron/upstreaming-to-vllm.git
 cd upstreaming-to-vllm
 pip install -r requirements/neuron.txt
@@ -100,7 +100,7 @@ to perform most of the heavy lifting which includes PyTorch model initialization
 To configure NxD Inference features through the vLLM entrypoint, use the `override_neuron_config` setting. Provide the configs you want to override
 as a dictionary (or JSON object when starting vLLM from the CLI). For example, to disable auto bucketing, include
 
-```console
+```python
 override_neuron_config={
     "enable_bucketing":False,
 }
@@ -108,7 +108,7 @@ override_neuron_config={
 
 or when launching vLLM from the CLI, pass
 
-```console
+```bash
 --override-neuron-config "{\"enable_bucketing\":false}"
 ```
 

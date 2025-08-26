@@ -52,10 +52,10 @@ def correctness_test_embed_models(hf_runner,
     vllm_extra_kwargs["dtype"] = model_info.dtype
 
     with vllm_runner(model_info.name,
-                     task="embed",
+                     runner="pooling",
                      max_model_len=None,
                      **vllm_extra_kwargs) as vllm_model:
-        vllm_outputs = vllm_model.encode(example_prompts)
+        vllm_outputs = vllm_model.embed(example_prompts)
 
     with hf_runner(
             model_info.name,

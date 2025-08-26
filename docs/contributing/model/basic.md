@@ -1,7 +1,4 @@
----
-title: Implementing a Basic Model
----
-[](){ #new-model-basic }
+# Basic Model
 
 This guide walks you through the steps to implement a basic vLLM model.
 
@@ -27,33 +24,35 @@ All vLLM modules within the model must include a `prefix` argument in their cons
 
 The initialization code should look like this:
 
-```python
-from torch import nn
-from vllm.config import VllmConfig
-from vllm.attention import Attention
+??? code
 
-class MyAttention(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str):
-        super().__init__()
-        self.attn = Attention(prefix=f"{prefix}.attn")
+    ```python
+    from torch import nn
+    from vllm.config import VllmConfig
+    from vllm.attention import Attention
 
-class MyDecoderLayer(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str):
-        super().__init__()
-        self.self_attn = MyAttention(prefix=f"{prefix}.self_attn")
+    class MyAttention(nn.Module):
+        def __init__(self, vllm_config: VllmConfig, prefix: str):
+            super().__init__()
+            self.attn = Attention(prefix=f"{prefix}.attn")
 
-class MyModel(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str):
-        super().__init__()
-        self.layers = nn.ModuleList(
-            [MyDecoderLayer(vllm_config, prefix=f"{prefix}.layers.{i}") for i in range(vllm_config.model_config.hf_config.num_hidden_layers)]
-        )
+    class MyDecoderLayer(nn.Module):
+        def __init__(self, vllm_config: VllmConfig, prefix: str):
+            super().__init__()
+            self.self_attn = MyAttention(prefix=f"{prefix}.self_attn")
 
-class MyModelForCausalLM(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        self.model = MyModel(vllm_config, prefix=f"{prefix}.model")
-```
+    class MyModel(nn.Module):
+        def __init__(self, vllm_config: VllmConfig, prefix: str):
+            super().__init__()
+            self.layers = nn.ModuleList(
+                [MyDecoderLayer(vllm_config, prefix=f"{prefix}.layers.{i}") for i in range(vllm_config.model_config.hf_config.num_hidden_layers)]
+            )
+
+    class MyModelForCausalLM(nn.Module):
+        def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+            super().__init__()
+            self.model = MyModel(vllm_config, prefix=f"{prefix}.model")
+    ```
 
 ### Computation Code
 
@@ -74,6 +73,8 @@ def forward(
     self,
     input_ids: torch.Tensor,
     positions: torch.Tensor,
+    intermediate_tensors: Optional[IntermediateTensors] = None,
+    inputs_embeds: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     ...
 ```
@@ -106,7 +107,7 @@ This method should load the weights from the HuggingFace's checkpoint file and a
 
 ## 5. Register your model
 
-See [this page][new-model-registration] for instructions on how to register your new model to be used by vLLM.
+See [this page](registration.md) for instructions on how to register your new model to be used by vLLM.
 
 ## Frequently Asked Questions
 
@@ -116,7 +117,7 @@ For models with interleaving sliding windows (e.g. `google/gemma-2-2b-it` and `m
 
 To support a model with interleaving sliding windows, we need to take care of the following details:
 
-- Make sure the model's `config.json` contains `sliding_window_pattern`. vLLM then sets `self.hf_text_config.interleaved_sliding_window` to the value of `self.hf_text_config.sliding_window` and deletes `sliding_window` from `self.hf_text_config`. The model will then be treated as a full-attention model.
+- Make sure the model's `config.json` contains `layer_types`.
 - In the modeling code, parse the correct sliding window value for every layer, and pass it to the attention layer's `per_layer_sliding_window` argument. For reference, check [this line](https://github.com/vllm-project/vllm/blob/996357e4808ca5eab97d4c97c7d25b3073f46aab/vllm/model_executor/models/llama.py#L171).
 
 With these two steps, interleave sliding windows should work with the model.

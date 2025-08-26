@@ -31,6 +31,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionType
+from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -49,7 +50,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
@@ -167,20 +168,16 @@ class LlamaAttention(nn.Module):
                               rope_scaling=rope_scaling,
                               quant_config=quant_config)
 
-        if hasattr(config, "interleaved_sliding_window"):
-            interleaved_sliding_window = config.interleaved_sliding_window
-            if isinstance(interleaved_sliding_window, int):
-                sliding_window = interleaved_sliding_window
-            elif isinstance(interleaved_sliding_window, list):
-                sw_idx = layer_idx % len(interleaved_sliding_window)
-                sliding_window = interleaved_sliding_window[sw_idx]
-            else:
-                raise ValueError(
-                    f"{type(interleaved_sliding_window)} is not supported.")
-        else:
-            sliding_window = None
+        sliding_window = None
+        if layer_types := getattr(config, "layer_types", None):
+            is_sliding = layer_types[layer_idx] == "sliding_attention"
+            if is_sliding:
+                sliding_window = config.sliding_window
 
-        self.attn = Attention(
+        attn_cls = (EncoderOnlyAttention
+                    if attn_type == AttentionType.ENCODER_ONLY else Attention)
+
+        self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -356,7 +353,7 @@ class LlamaModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.aux_hidden_state_layers: tuple[int] = tuple()
+        self.aux_hidden_state_layers = tuple[int, ...]()
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
@@ -470,7 +467,7 @@ class LlamaModel(nn.Module):
         return loaded_params
 
 
-class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"]
@@ -491,6 +488,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "qscale_act": "input_scale",
         "qscale_weight": "weight_scale",
         "kv_fake_quantizer.qscale_act": "kv_scale",
+        "q_fake_quantizer.qscale_act": "attn.q_scale",
+        "k_fake_quantizer.qscale_act": "k_scale",
+        "v_fake_quantizer.qscale_act": "v_scale",
         "wq": "q_proj",
         "wk": "k_proj",
         "wv": "v_proj",
@@ -553,10 +553,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.model.layers)
         return (2, num_layers // 2, num_layers - 3)
 
