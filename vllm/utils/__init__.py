@@ -93,8 +93,8 @@ MiB = 1024 * 1024
 # Max size of the input tensor per world size
 # to use flashinfer fused allreduce
 _FI_ALLREDUCE_MAX_INPUT_SIZES = {
-    2: 2 * MiB,  # 4MB
-    4: 1 * MiB,  # 1MB
+    2: 4 * MiB,  # 4MB
+    4: MiB // 2,  # 1MB
     6: 1 * MiB,  # 1MB
     8: 1 * MiB,  # 1MB
 }
