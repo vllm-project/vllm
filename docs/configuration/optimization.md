@@ -129,6 +129,53 @@ Data parallelism replicates the entire model across multiple GPU sets and proces
 Data parallelism can be combined with the other parallelism strategies and is set by `data_parallel_size=N`.
 Note that MoE layers will be sharded according to the product of the tensor parallel size and data parallel size.
 
+### Batch-level DP for Multi-Modal Encoders
+
+By default, TP is used to shard the weights of multi-modal encoders just like for language decoders,
+in order to reduce the memory and compute load on each GPU.
+
+However, since the size of multi-modal encoders is very small compared to language decoders,
+there is relatively little gain from TP. On the other hand, TP incurs significant communication
+overhead because of all-reduce being performed after every layer.
+
+Given this, it may be advantageous to instead shard the batched input data using TP, essentially
+performing batch-level DP. This has been shown to improve the throughput by around 10% for
+`tensor_parallel_size=8`. For vision encoders that use hardware-unoptimized Conv3D operations,
+batch-level DP can provide another 40% increase to throughput compared to regular TP.
+
+Nevertheless, since the weights of the multi-modal encoder are replicated across each TP rank,
+there will be a minor increase in memory consumption and may cause OOM if you can barely fit the model already.
+
+You can enable batch-level DP by setting `mm_encoder_tp_mode="data"`, for example:
+
+```python
+from vllm import LLM
+
+llm = LLM(
+    model="Qwen/Qwen2.5-VL-72B-Instruct",
+    tensor_parallel_size=4,
+    # When mm_encoder_tp_mode="data",
+    # the vision encoder uses TP=4 (not DP=1) to shard the input data,
+    # so the TP size becomes the effective DP size.
+    # Note that this is independent of the DP size for language decoder which is used in expert parallel setting.
+    mm_encoder_tp_mode="data",
+    # The language decoder uses TP=4 to shard the weights regardless
+    # of the setting of mm_encoder_tp_mode
+)
+```
+
+!! important
+    Batch-level DP is not to be confused with API request-level DP
+    (which is instead controlled by `data_parallel_size`).
+
+The availablilty of batch-level DP is based on model implementation.
+Currently, the following models support `mm_encoder_tp_mode="data"`:
+
+- Llama4 (<gh-pr:18368>)
+- MiniCPM-V-4 (<gh-pr:23327>)
+- Qwen2.5-VL (<gh-pr:22742>)
+- Step3 (<gh-pr:22697>)
+
 ## Input Processing
 
 ### Parallel Processing
@@ -148,6 +195,13 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
 
 !!! note
     API server scale-out is only available for online inference.
+
+!!! warning
+    By default, 8 CPU threads are used in each API server to load media items (e.g. images)
+    from request data.
+
+    If you apply API server scale-out, consider adjusting `VLLM_MEDIA_LOADING_THREAD_COUNT`
+    to avoid CPU resource exhaustion.
 
 !!! note
     [Multi-modal processor cache](#processor-cache) is disabled when API server scale-out is enabled

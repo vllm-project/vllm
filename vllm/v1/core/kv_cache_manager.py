@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Literal, Optional, overload
 
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
@@ -37,7 +37,24 @@ class KVCacheBlocks:
             tuple(blk1 + blk2
                   for blk1, blk2 in zip(self.blocks, other.blocks)))
 
-    def get_block_ids(self) -> tuple[list[int], ...]:
+    @overload
+    def get_block_ids(
+        self,
+        allow_none: Literal[False] = False,
+    ) -> tuple[list[int], ...]:
+        ...
+
+    @overload
+    def get_block_ids(
+        self,
+        allow_none: Literal[True] = True,
+    ) -> Optional[tuple[list[int], ...]]:
+        ...
+
+    def get_block_ids(
+        self,
+        allow_none: bool = False,
+    ):
         """
         Converts the KVCacheBlocks instance to block_ids.
         
@@ -46,6 +63,8 @@ class KVCacheBlocks:
             * the outer tuple corresponds to KV cache groups
             * each inner list contains the block_ids of the blocks in that group
         """
+        if allow_none and all(len(group) == 0 for group in self.blocks):
+            return None
         return tuple([blk.block_id for blk in group] for group in self.blocks)
 
     def get_unhashed_block_ids(self) -> list[int]:
@@ -348,10 +367,13 @@ class KVCacheManager:
         """
         return self.block_pool.take_events()
 
+    def get_blocks(self, request_id: str) -> KVCacheBlocks:
+        """Get the blocks of a request."""
+        return KVCacheBlocks(self.coordinator.get_blocks(request_id))
+
     def get_block_ids(self, request_id: str) -> tuple[list[int], ...]:
         """Get the block ids of a request."""
-        return KVCacheBlocks(
-            self.coordinator.get_blocks(request_id)).get_block_ids()
+        return self.get_blocks(request_id).get_block_ids()
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """Cache the blocks for the request, if enabled."""
