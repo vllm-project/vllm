@@ -80,10 +80,7 @@ class RayTrainingActor:
         self.model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
         from vllm.platforms import current_platform
 
-        if current_platform.is_xpu():
-            self.model.to("xpu:0")
-        else:
-            self.model.to("cuda:0")
+        self.model.to(current_platform.device_type + ":0")
         # Zero out all the parameters.
         for name, p in self.model.named_parameters():
             p.data.zero_()
