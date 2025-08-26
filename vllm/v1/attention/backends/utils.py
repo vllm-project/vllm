@@ -185,9 +185,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support updating the block table in existing
     # metadata
     supports_update_block_table: bool = False
-    # The specialization key can be used by dynamic subclasses to identify
-    # the builder uniquely based on captured values. Affects unique_cls_id.
-    __specialization_key__: tuple = ()
 
     @abstractmethod
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
@@ -268,10 +265,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         num_sms: int,
     ) -> bool:
         return False
-
-    @classmethod
-    def unique_cls_id(cls) -> tuple:
-        return (cls.__mro__, cls.__specialization_key__)
 
 
 @functools.lru_cache

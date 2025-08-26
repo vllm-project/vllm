@@ -369,7 +369,7 @@ class FlashAttentionMetadataBuilder(
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> FlashAttentionMetadata:
-        new_metadata = copy.deepcopy(metadata)
+        new_metadata = copy.copy(metadata)
         new_metadata.block_table = blk_table
         new_metadata.slot_mapping = slot_mapping
         return new_metadata

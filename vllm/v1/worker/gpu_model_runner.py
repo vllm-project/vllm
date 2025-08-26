@@ -845,8 +845,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
-        attn_metadata_cache: dict[tuple[KVCacheSpec, tuple[str, str]],
-                                  Any] = {}
+        attn_metadata_cache: dict[tuple[KVCacheSpec, type], Any] = {}
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
@@ -910,7 +909,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         builder,
                     )
 
-                cache_key = (kv_cache_spec, builder.unique_cls_id())
+                cache_key = (kv_cache_spec, type(builder))
                 if cache_key in attn_metadata_cache \
                     and builder.supports_update_block_table:
                     cached_attn_metadata = attn_metadata_cache[cache_key]

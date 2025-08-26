@@ -26,9 +26,6 @@ def create_chunked_local_attention_backend(
     underlying_builder = underlying_attn_backend.get_builder_cls()
 
     class ChunkedLocalAttentionBuilder(underlying_builder):  # type: ignore
-        # Make sure the unique_cls_id is not the same for different
-        # attention_chunk_size and block_size.
-        __specialization_key__ = (attention_chunk_size, block_size)
 
         def build(self,
                   common_prefix_len: int,
