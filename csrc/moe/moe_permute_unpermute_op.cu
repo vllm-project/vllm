@@ -45,8 +45,6 @@ void moe_permute(
   auto copy_topk_ids = topk_ids.clone();  // copy topk_ids for preprocess
   auto permuted_experts_id = torch::empty_like(topk_ids);
   auto sorted_row_idx = torch::empty_like(inv_permuted_idx);
-  auto align_expert_first_token_offset =
-      torch::zeros_like(expert_first_token_offset);
 
   CubKeyValueSorter sorter{};
   int64_t* valid_num_ptr = nullptr;
@@ -85,12 +83,14 @@ void moe_permute(
   });
 
   // get m_indices and update expert_first_token_offset with align block
-  getMIndices(get_ptr<int64_t>(expert_first_token_offset),
-              get_ptr<int64_t>(align_expert_first_token_offset),
-              get_ptr<int>(m_indices), n_local_expert, align_block_size_value,
-              stream);
+  // this is only required for DeepGemm and not required for CUTLASS group gemm
   if (align_block_size.has_value()) {
-    // update align_expert_first_token_offset
+    auto align_expert_first_token_offset =
+        torch::zeros_like(expert_first_token_offset);
+    getMIndices(get_ptr<int64_t>(expert_first_token_offset),
+                get_ptr<int64_t>(align_expert_first_token_offset),
+                get_ptr<int>(m_indices), n_local_expert, align_block_size_value,
+                stream);
     expert_first_token_offset.copy_(align_expert_first_token_offset);
   }
 }
@@ -195,19 +195,14 @@ void moe_permute(const torch::Tensor& input, const torch::Tensor& topk_weights,
                  torch::Tensor& expert_first_token_offset,
                  torch::Tensor& src_row_id2dst_row_id_map,
                  torch::Tensor& m_indices) {
-  TORCH_CHECK(false, "moe_unpermute is not supported on CUDA < 12.0");
+  TORCH_CHECK(false, "moe_permute is not supported on CUDA < 12.0");
 }
 
-void moe_unpermute(const torch::Tensor& input,
-                   const torch::Tensor& topk_weights, torch::Tensor& topk_ids,
-                   const torch::Tensor& token_expert_indices,
-                   const std::optional<torch::Tensor>& expert_map,
-                   int64_t n_expert, int64_t n_local_expert, int64_t topk,
-                   const std::optional<int64_t>& align_block_size,
-                   torch::Tensor& permuted_input,
-                   torch::Tensor& expert_first_token_offset,
-                   torch::Tensor& src_row_id2dst_row_id_map,
-                   torch::Tensor& m_indices) {
+void moe_unpermute(
+    const torch::Tensor& permuted_hidden_states,
+    const torch::Tensor& topk_weights, const torch::Tensor& inv_permuted_idx,
+    const std::optional<torch::Tensor>& expert_first_token_offset, int64_t topk,
+    torch::Tensor& hidden_states) {
   TORCH_CHECK(false, "moe_unpermute is not supported on CUDA < 12.0");
 }
 

@@ -149,9 +149,16 @@ class PoolingModelRunner(
         if not self.is_driver_worker:
             return []
 
+        pooling_metadata = model_input.pooling_metadata
+        assert pooling_metadata is not None
+
+        pooling_metadata.build_pooling_cursor(
+            num_scheduled_tokens=pooling_metadata.prompt_lens,
+            device=hidden_or_intermediate_states.device)
+
         return [
             self.model.pooler(hidden_states=hidden_or_intermediate_states,
-                              pooling_metadata=model_input.pooling_metadata)
+                              pooling_metadata=pooling_metadata)
         ]
 
     def make_model_input_from_broadcasted_tensor_dict(

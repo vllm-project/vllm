@@ -51,14 +51,14 @@ def test_processor_override(
         prompt = encode_tokens(tokenizer, prompt)
 
     processed_inputs = processor.apply(prompt, mm_data, mm_processor_kwargs)
-    mm_kwargs = processed_inputs["mm_kwargs"]
+    mm_data = processed_inputs["mm_kwargs"].get_data()
 
     # place holder replacements
     prompt_token_ids = processed_inputs["prompt_token_ids"]
     assert prompt_token_ids.count(config.boi_token_index) == num_imgs
     assert prompt_token_ids.count(config.eoi_token_index) == num_imgs
     assert prompt_token_ids.count(vocab[hf_processor.image_token]) == num_imgs
-    aspect_ratios = mm_kwargs["aspect_ratios"]
+    aspect_ratios = mm_data["aspect_ratios"]
     num_x_separators = num_y_separators = 0
     for tiles_y, tiles_x in aspect_ratios:
         if tiles_x * tiles_y > 1:
@@ -80,6 +80,6 @@ def test_processor_override(
     num_patches_per_chunk = processor.info.get_patch_per_chunk(
         config.vision_config)
     assert prompt_token_ids.count(config.image_token_index) \
-        == mm_kwargs["patches_per_image"].sum() * num_patches_per_chunk
-    assert mm_kwargs["pixel_values"].shape[0] \
-        == mm_kwargs["patches_per_image"].sum()
+        == sum(mm_data["patches_per_image"]) * num_patches_per_chunk
+    assert len(mm_data["pixel_values"]) \
+        == sum(mm_data["patches_per_image"])

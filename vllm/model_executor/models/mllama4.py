@@ -44,7 +44,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -646,13 +646,8 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptUpdate]:
-        assert (
-            mm_items.get_count("image", strict=False) == 0
-            or "aspect_ratios" in out_mm_kwargs
-        ), "Transformers expect to include aspect_ratios in out_mm_kwargs"
-
         config = self.info.get_hf_config()
         vision_config = config.vision_config
 
@@ -662,7 +657,8 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
         img_patch_token = hf_processor.img_patch_token
 
         def get_replacement(item_idx: int):
-            aspect_ratio = out_mm_kwargs["aspect_ratios"][item_idx]
+            out_item = out_mm_kwargs["image"][item_idx]
+            aspect_ratio = out_item["aspect_ratios"].data
 
             repl = hf_processor._prompt_split_image(
                 aspect_ratio=aspect_ratio,
@@ -732,8 +728,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        self.use_data_parallel = (vllm_config.parallel_config.
-                                  enable_multimodal_encoder_data_parallel)
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config

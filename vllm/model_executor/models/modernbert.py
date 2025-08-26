@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from transformers import ModernBertConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -104,12 +104,12 @@ class ModernBertAttention(nn.Module):
                                                     head_size=self.head_dim,
                                                     dim=self.head_dim,
                                                     base=rope_theta)
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              prefix=f"{layer_id}.attn",
-                              attn_type=AttentionType.ENCODER_ONLY,
-                              per_layer_sliding_window=sliding_window)
+        self.attn = EncoderOnlyAttention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            prefix=f"{layer_id}.attn",
+            per_layer_sliding_window=sliding_window)
         self.Wo = RowParallelLinear(config.hidden_size,
                                     config.hidden_size,
                                     bias=config.attention_bias)

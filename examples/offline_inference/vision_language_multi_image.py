@@ -680,6 +680,36 @@ def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+# ovis2_5
+def load_ovis2_5(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "AIDC-AI/Ovis2.5-2B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        trust_remote_code=True,
+        dtype="half",
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = "\n".join(
+        f"Image-{i}: <image>\n" for i, _ in enumerate(image_urls, start=1)
+    )
+    messages = [{"role": "user", "content": f"{placeholders}\n{question}"}]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_pixtral_hf(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "mistral-community/pixtral-12b"
 
@@ -962,6 +992,39 @@ def load_qwen2_5_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_r_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "YannQi/R-4B"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=16384,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_smolvlm(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
 
@@ -1064,6 +1127,76 @@ def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+# GLM-4.5V
+def load_glm4_5v(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "zai-org/GLM-4.5V"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=32768,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        enforce_eager=True,
+        tensor_parallel_size=4,
+    )
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+    processor = AutoProcessor.from_pretrained(model_name)
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
+# GLM-4.5V-FP8
+def load_glm4_5v_fp8(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "zai-org/GLM-4.5V-FP8"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=32768,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        enforce_eager=True,
+        tensor_parallel_size=4,
+    )
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+    processor = AutoProcessor.from_pretrained(model_name)
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
 model_example_map = {
     "aria": load_aria,
     "aya_vision": load_aya_vision,
@@ -1085,6 +1218,7 @@ model_example_map = {
     "mllama": load_mllama,
     "NVLM_D": load_nvlm_d,
     "ovis": load_ovis,
+    "ovis2_5": load_ovis2_5,
     "phi3_v": load_phi3v,
     "phi4_mm": load_phi4mm,
     "phi4_multimodal": load_phi4_multimodal,
@@ -1092,10 +1226,13 @@ model_example_map = {
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
     "qwen2_5_vl": load_qwen2_5_vl,
+    "rvl": load_r_vl,
     "smolvlm": load_smolvlm,
     "step3": load_step3,
     "tarsier": load_tarsier,
     "tarsier2": load_tarsier2,
+    "glm4_5v": load_glm4_5v,
+    "glm4_5v_fp8": load_glm4_5v_fp8,
 }
 
 

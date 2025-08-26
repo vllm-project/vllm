@@ -17,13 +17,11 @@ from vllm.multimodal.processing import (PlaceholderFeaturesInfo,
                                         PromptReplacement, apply_text_matches,
                                         apply_token_matches,
                                         find_mm_placeholders,
-                                        find_text_matches, find_token_matches,
                                         iter_token_matches,
                                         replace_token_matches)
 # yapf: enable
 from vllm.multimodal.profiling import MultiModalProfiler
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import full_groupby
 
 from .utils import random_image
 
@@ -75,12 +73,15 @@ from .utils import random_image
         ),
     ],
 )
+@pytest.mark.parametrize("start_idx", [0, 4, 8])
 # yapf: enable
-def test_iter_token_matches(token_ids, match_ids, expected):
-    result = list(iter_token_matches(token_ids, match_ids))
+def test_iter_token_matches(token_ids, match_ids, expected, start_idx):
+    result = list(iter_token_matches(token_ids, match_ids,
+                                     start_idx=start_idx))
 
     # Manually constructed results
-    assert [item._asdict() for item in result] == expected
+    assert [item._asdict() for item in result
+            ] == [item for item in expected if item["start_idx"] >= start_idx]
 
     # Invariants
     match_lens = [end - start for start, end in result]
@@ -241,21 +242,23 @@ def test_find_token_matches(
     # Should not be used since there is nothing to convert to token IDs
     mock_tokenizer = cast(AnyTokenizer, object())
 
-    prompt_updates = [
-        update_type(key, target, []).bind(mock_tokenizer)
+    prompt_updates = {
+        key: update_type(key, target, []).resolve(0)
         for key, target in target_by_key.items()
-    ]
-    result = find_token_matches(prompt, prompt_updates)
+    }
+    result = {
+        key: list(update.iter_token_matches(prompt, mock_tokenizer))
+        for key, update in prompt_updates.items()
+    }
 
     # Only displayed on error
     print("result:", result)
 
     # Manually constructed results
-    result_groups = dict(full_groupby(result, key=lambda x: x.modality))
     assert {
         key: [
             dict(start_idx=item.start_idx, end_idx=item.end_idx)
-            for item in result_groups.get(key, [])
+            for item in result.get(key, [])
         ]
         for key in expected_by_key
     } == expected_by_key
@@ -388,21 +391,23 @@ def test_find_text_matches(
     # Should not be used since there is nothing to convert to text
     mock_tokenizer = cast(AnyTokenizer, object())
 
-    prompt_updates = [
-        update_type(key, target, []).bind(mock_tokenizer)
+    prompt_updates = {
+        key: update_type(key, target, []).resolve(0)
         for key, target in target_by_key.items()
-    ]
-    result = find_text_matches(prompt, prompt_updates)
+    }
+    result = {
+        key: list(update.iter_text_matches(prompt, mock_tokenizer))
+        for key, update in prompt_updates.items()
+    }
 
     # Only displayed on error
     print("result:", result)
 
     # Manually constructed results
-    result_groups = dict(full_groupby(result, key=lambda x: x.modality))
     assert {
         key: [
             dict(start_idx=item.start_idx, end_idx=item.end_idx)
-            for item in result_groups.get(key, [])
+            for item in result.get(key, [])
         ]
         for key in expected_by_key
     } == expected_by_key
@@ -552,39 +557,35 @@ def test_find_update_text(
             update_type,
             expected_by_mm_count,
     ) in expected_by_update_type_mm_count.items():
-        mm_prompt_updates = {
-            key:
-            [update_type(key, target, repl_by_key[key]).bind(mock_tokenizer)]
-            for key, target in target_by_key.items()
-        }
-        mm_matches = {
-            key: find_text_matches(prompt, updates)
-            for key, updates in mm_prompt_updates.items()
-        }
-
         for mm_count, expected in expected_by_mm_count.items():
-            result = apply_text_matches(
+            mm_prompt_updates = {
+                key: [[update_type(key, target, repl_by_key[key]).resolve(i)]
+                      for i in range(mm_count)]
+                for key, target in target_by_key.items()
+            }
+
+            new_prompt, result = apply_text_matches(
                 prompt,
-                mm_matches,
-                {key: mm_count
-                 for key in repl_by_key},
+                mm_prompt_updates,
+                mock_tokenizer,
             )
 
             # Only displayed on error
             print("update_type:", update_type)
             print("mm_count:", mm_count)
-            print("mm_matches:", mm_matches)
+            print("mm_prompt_updates:", mm_prompt_updates)
+            print("new_prompt:", new_prompt)
             print("result:", result)
 
             # Manually constructed results
-            assert result == expected
+            assert new_prompt == expected
 
 
 # yapf: disable
 @pytest.mark.parametrize(
     ("prompt", "target_by_key", "repl_by_key", "expected_by_update_type_mm_count"),  # noqa: E501
     [
-        # Tokenized test cases of `test_find_replace_text`
+        # Tokenized test cases of `test_find_update_text`
         # using the vocab of llava-hf/llava-v1.6-mistral-7b-hf
         (
             [1, 9833, 28747, 32000, 9833, 28747, 32000, 32000, 918],
@@ -726,32 +727,28 @@ def test_find_update_tokens(
             update_type,
             expected_by_mm_count,
     ) in expected_by_update_type_mm_count.items():
-        mm_prompt_updates = {
-            key:
-            [update_type(key, target, repl_by_key[key]).bind(mock_tokenizer)]
-            for key, target in target_by_key.items()
-        }
-        mm_matches = {
-            key: find_token_matches(prompt, updates)
-            for key, updates in mm_prompt_updates.items()
-        }
-
         for mm_count, expected in expected_by_mm_count.items():
-            result = apply_token_matches(
+            mm_prompt_updates = {
+                key: [[update_type(key, target, repl_by_key[key]).resolve(i)]
+                      for i in range(mm_count)]
+                for key, target in target_by_key.items()
+            }
+
+            new_prompt, result = apply_token_matches(
                 prompt,
-                mm_matches,
-                {key: mm_count
-                 for key in repl_by_key},
+                mm_prompt_updates,
+                mock_tokenizer,
             )
 
             # Only displayed on error
             print("update_type:", update_type)
             print("mm_count:", mm_count)
-            print("mm_matches:", mm_matches)
+            print("mm_prompt_updates:", mm_prompt_updates)
+            print("new_prompt:", new_prompt)
             print("result:", result)
 
             # Manually constructed results
-            assert result == expected
+            assert new_prompt == expected
 
 
 # yapf: disable
@@ -878,17 +875,11 @@ def test_find_mm_placeholders(
     mock_tokenizer = cast(AnyTokenizer, object())
 
     mm_prompt_updates = {
-        key: [update_type(key, [], repl).bind(mock_tokenizer)]
+        key: [[update_type(key, [], repl).resolve(i)] for i in range(3)]
         for key, repl in repl_by_key.items()
     }
 
-    result = find_mm_placeholders(
-        mm_prompt_updates,
-        prompt,
-        # Effectively match all occurrences in the prompt
-        {key: 3
-         for key in repl_by_key},
-    )
+    result = find_mm_placeholders(prompt, mm_prompt_updates, mock_tokenizer)
 
     # Only displayed on error
     print("result:", result)

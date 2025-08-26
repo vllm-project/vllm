@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils import has_deep_ep
 
+from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
 
 if has_deep_ep():
@@ -411,6 +412,7 @@ DTYPES = [torch.bfloat16, torch.float8_e4m3fn]
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
 @pytest.mark.parametrize("per_act_token_quant", [False, True])
+@multi_gpu_test(num_gpus=2)
 @requires_deep_ep
 def test_deep_ep_moe(
     dtype: torch.dtype,
@@ -459,6 +461,7 @@ USE_FP8_DISPATCH = [True, False]
 @pytest.mark.parametrize("topk", [6])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
 @pytest.mark.parametrize("use_fp8_dispatch", USE_FP8_DISPATCH)
+@multi_gpu_test(num_gpus=2)
 @requires_deep_ep
 def test_low_latency_deep_ep_moe(dtype: torch.dtype, mnk: tuple[int, int, int],
                                  num_experts: int, topk: int,

@@ -21,7 +21,7 @@ from vllm.model_executor.models.bart import (BartDecoder, BartEncoder,
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
@@ -647,7 +647,8 @@ class Florence2LanguageModel(nn.Module):
 
         encoder_hidden_states = None
 
-        if inputs_embeds is not None or encoder_input_ids.numel() > 0:
+        if ((inputs_embeds is not None and inputs_embeds.numel() > 0)
+                or encoder_input_ids.numel() > 0):
             # Run encoder attention if a non-zero number of encoder tokens
             # are provided as input
             encoder_hidden_states = self.encoder(input_ids=encoder_input_ids,
@@ -681,6 +682,8 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
         self.lm_head = BartParallelLMHead(self.vocab_size,
                                           config.d_model,
                                           embed_scale=embed_scale)
+        if self.config.tie_word_embeddings:
+            self.lm_head.tie_weights(self.model.shared)
 
         self.logits_processor = LogitsProcessor(self.vocab_size,
                                                 config.vocab_size)
@@ -749,7 +752,8 @@ class Florence2LanguageForConditionalGeneration(nn.Module, SupportsV0Only):
             else:
                 if "final_logits_bias" in name:
                     continue
-                if self.config.tie_word_embeddings and "embed_tokens" in name:
+                if self.config.tie_word_embeddings and ("embed_tokens" in name
+                                                        or "lm_head" in name):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
@@ -860,7 +864,7 @@ class Florence2MultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         pad_token_id = hf_config.pad_token_id
