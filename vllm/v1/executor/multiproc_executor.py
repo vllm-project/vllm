@@ -644,9 +644,6 @@ class WorkerProc:
                 # exception might not be serializable, so we convert it to
                 # string, only for logging purpose.
                 if output_rank is None or self.rank == output_rank:
-                    print("Enqueueing FAILURE message to worker_response_mq")
-                    print(traceback.format_exc())
-                    print(str(e))
                     self.worker_response_mq.enqueue(
                         (WorkerProc.ResponseStatus.FAILURE, str(e)))
                 continue
