@@ -82,15 +82,15 @@ class KVCacheBlocks:
 
 class KVCacheManager:
 
-    def __init__(
-        self,
-        kv_cache_config: KVCacheConfig,
-        max_model_len: int,
-        enable_caching: bool = True,
-        use_eagle: bool = False,
-        log_stats: bool = False,
-        enable_kv_cache_events: bool = False,
-    ) -> None:
+    def __init__(self,
+                 kv_cache_config: KVCacheConfig,
+                 max_model_len: int,
+                 enable_caching: bool = True,
+                 use_eagle: bool = False,
+                 log_stats: bool = False,
+                 enable_kv_cache_events: bool = False,
+                 enable_wa_policy: bool = False,
+                 wa_offline_param_path: Optional[str] = "") -> None:
         self.max_model_len = max_model_len
 
         self.enable_caching = enable_caching
@@ -114,7 +114,8 @@ class KVCacheManager:
             use_eagle=self.use_eagle,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
-        )
+            enable_wa_policy=enable_wa_policy,
+            wa_offline_param_path=wa_offline_param_path)
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
@@ -273,7 +274,7 @@ class KVCacheManager:
                                                   new_computed_block_list)
 
         new_blocks = self.coordinator.allocate_new_blocks(
-            request.request_id, num_tokens_need_slot)
+            request.request_id, num_tokens_need_slot, request.type_info)
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.

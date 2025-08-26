@@ -24,13 +24,16 @@ class KVCacheCoordinator(ABC):
         use_eagle: bool,
         enable_caching: bool,
         enable_kv_cache_events: bool,
+        enable_wa_policy: bool,
+        wa_offline_param_path: Optional[str],
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
         self.enable_caching = enable_caching
 
         self.block_pool = BlockPool(kv_cache_config.num_blocks, enable_caching,
-                                    enable_kv_cache_events)
+                                    enable_kv_cache_events, enable_wa_policy,
+                                    wa_offline_param_path)
 
         # Needs special handling for find_longest_cache_hit if eagle is enabled
         self.use_eagle = use_eagle
@@ -79,8 +82,9 @@ class KVCacheCoordinator(ABC):
             manager.save_new_computed_blocks(request_id,
                                              new_computed_blocks[i])
 
-    def allocate_new_blocks(self, request_id: str,
-                            num_tokens: int) -> tuple[list[KVCacheBlock], ...]:
+    def allocate_new_blocks(
+            self, request_id: str, num_tokens: int,
+            type_info: Optional[str]) -> tuple[list[KVCacheBlock], ...]:
         """
         Allocate new blocks for the request to give it at least `num_tokens` 
         token slots.
@@ -89,12 +93,13 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
             num_tokens: The total number of tokens that need a slot (including 
                 tokens that are already allocated).
+            type_info: The request type corresponding to these blocks
 
         Returns:
             The new allocated blocks.
         """
         return tuple(
-            manager.allocate_new_blocks(request_id, num_tokens)
+            manager.allocate_new_blocks(request_id, num_tokens, type_info)
             for manager in self.single_type_managers)
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
@@ -180,9 +185,11 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
     """
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
-                 use_eagle: bool, enable_kv_cache_events: bool):
+                 use_eagle: bool, enable_kv_cache_events: bool,
+                 enable_wa_policy: bool, wa_offline_param_path: Optional[str]):
         super().__init__(kv_cache_config, max_model_len, use_eagle, False,
-                         enable_kv_cache_events)
+                         enable_kv_cache_events, enable_wa_policy,
+                         wa_offline_param_path)
         self.num_single_type_manager = len(self.single_type_managers)
 
     def get_num_common_prefix_blocks(self, request_id: str,
@@ -208,9 +215,11 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
                  use_eagle: bool, enable_caching: bool,
-                 enable_kv_cache_events: bool):
+                 enable_kv_cache_events: bool, enable_wa_policy: bool,
+                 wa_offline_param_path: Optional[str]):
         super().__init__(kv_cache_config, max_model_len, use_eagle,
-                         enable_caching, enable_kv_cache_events)
+                         enable_caching, enable_kv_cache_events,
+                         enable_wa_policy, wa_offline_param_path)
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[
             0].kv_cache_spec
         self.block_size = self.kv_cache_spec.block_size
@@ -244,9 +253,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
                  use_eagle: bool, enable_caching: bool,
-                 enable_kv_cache_events: bool):
+                 enable_kv_cache_events: bool, enable_wa_policy: bool,
+                 wa_offline_param_path: Optional[str]):
         super().__init__(kv_cache_config, max_model_len, use_eagle,
-                         enable_caching, enable_kv_cache_events)
+                         enable_caching, enable_kv_cache_events,
+                         enable_wa_policy, wa_offline_param_path)
         self.verify_and_split_kv_cache_groups()
 
     def verify_and_split_kv_cache_groups(self) -> None:
@@ -378,16 +389,25 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
 
 def get_kv_cache_coordinator(
-        kv_cache_config: KVCacheConfig, max_model_len: int, use_eagle: bool,
+        kv_cache_config: KVCacheConfig,
+        max_model_len: int,
+        use_eagle: bool,
         enable_caching: bool,
-        enable_kv_cache_events: bool) -> KVCacheCoordinator:
+        enable_kv_cache_events: bool,
+        enable_wa_policy: bool,
+        wa_offline_param_path: Optional[str] = "") -> KVCacheCoordinator:
     if not enable_caching:
         return KVCacheCoordinatorNoPrefixCache(kv_cache_config, max_model_len,
                                                use_eagle,
-                                               enable_kv_cache_events)
+                                               enable_kv_cache_events,
+                                               enable_wa_policy,
+                                               wa_offline_param_path)
     if len(kv_cache_config.kv_cache_groups) == 1:
         return UnitaryKVCacheCoordinator(kv_cache_config, max_model_len,
                                          use_eagle, enable_caching,
-                                         enable_kv_cache_events)
+                                         enable_kv_cache_events,
+                                         enable_wa_policy,
+                                         wa_offline_param_path)
     return HybridKVCacheCoordinator(kv_cache_config, max_model_len, use_eagle,
-                                    enable_caching, enable_kv_cache_events)
+                                    enable_caching, enable_kv_cache_events,
+                                    enable_wa_policy, wa_offline_param_path)
