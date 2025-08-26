@@ -22,7 +22,7 @@ def test_basic_allocate_and_reuse():
     req = MockRequest("r1", ["imgA"], [4])
 
     assert not cache.check_and_update_cache(req, 0)
-    assert cache.try_allocate(req, 0, int(1e9))
+    assert cache.can_allocate(req, 0, int(1e9), 0)
 
     cache.allocate(req, 0)
 
@@ -44,7 +44,7 @@ def test_freeing_decreases_refcount_and_moves_to_freeable():
     manager = EncoderCacheManager(cache_size=10)
     req = MockRequest("req2", ["img3"], [5])
 
-    assert manager.try_allocate(req, 0, int(1e9))
+    assert manager.can_allocate(req, 0, int(1e9), 0)
     manager.allocate(req, 0)
 
     assert len(manager.cached["img3"]) == 1
@@ -60,10 +60,10 @@ def test_free_request_frees_all_inputs():
     manager = EncoderCacheManager(cache_size=10)
     req = MockRequest("req3", ["a", "b"], [2, 3])
 
-    assert manager.try_allocate(req, 0, int(1e9))
+    assert manager.can_allocate(req, 0, int(1e9), 0)
     manager.allocate(req, 0)
 
-    assert manager.try_allocate(req, 1, int(1e9))
+    assert manager.can_allocate(req, 1, int(1e9), 0)
     manager.allocate(req, 1)
 
     assert len(manager.cached["a"]) == 1
@@ -84,11 +84,11 @@ def test_eviction_when_cache_is_full():
     req1 = MockRequest("req1", ["x"], [6])
     req2 = MockRequest("req2", ["y"], [5])
 
-    assert manager.try_allocate(req1, 0, int(1e9))
+    assert manager.can_allocate(req1, 0, int(1e9), 0)
     manager.allocate(req1, 0)
     manager.free_encoder_input(req1, 0)
 
-    assert manager.try_allocate(req2, 0, int(1e9))
+    assert manager.can_allocate(req2, 0, int(1e9), 0)
     manager.allocate(req2, 0)
 
     # 'x' should have been evicted.
@@ -100,10 +100,10 @@ def test_get_cached_input_ids():
     manager = EncoderCacheManager(cache_size=10)
     req = MockRequest("reqX", ["m", "n", "o"], [2, 4, 3])
 
-    assert manager.try_allocate(req, 0, int(1e9))
+    assert manager.can_allocate(req, 0, int(1e9), 0)
     manager.allocate(req, 0)
 
-    assert manager.try_allocate(req, 2, int(1e9))
+    assert manager.can_allocate(req, 2, int(1e9), 0)
     manager.allocate(req, 2)
 
     cached_ids = manager.get_cached_input_ids(req)
@@ -114,7 +114,7 @@ def test_has_cache_restores_from_freeable():
     manager = EncoderCacheManager(cache_size=10)
     req = MockRequest("reqY", ["imgZ"], [4])
 
-    assert manager.try_allocate(req, 0, int(1e9))
+    assert manager.can_allocate(req, 0, int(1e9), 0)
     manager.allocate(req, 0)
 
     manager.free_encoder_input(req, 0)
@@ -131,14 +131,41 @@ def test_get_freed_mm_hashes_clears_freed_list():
     req1 = MockRequest("reqA", ["a"], [5])
     req2 = MockRequest("reqB", ["b"], [6])
 
-    assert manager.try_allocate(req1, 0, int(1e9))
+    assert manager.can_allocate(req1, 0, int(1e9), 0)
     manager.allocate(req1, 0)
     manager.free_encoder_input(req1, 0)
 
     # Should trigger eviction of 'a'.
-    assert manager.try_allocate(req2, 0, int(1e9))
+    assert manager.can_allocate(req2, 0, int(1e9), 0)
     manager.allocate(req2, 0)
 
     freed = manager.get_freed_mm_hashes()
     assert "a" in freed
     assert manager.get_freed_mm_hashes() == []
+
+
+def test_schedule_request_multi_images_respect_space_limit():
+    manager = EncoderCacheManager(cache_size=10)
+    req = MockRequest("reqA", ["a", "b"], [5, 6])
+    compute_budget = 100
+
+    num_tokens_to_schedule = 0
+    assert manager.can_allocate(req, 0, compute_budget, num_tokens_to_schedule)
+    num_tokens_to_schedule += req.get_num_encoder_tokens(0)
+    compute_budget -= req.get_num_encoder_tokens(0)
+
+    assert not manager.can_allocate(req, 1, compute_budget,
+                                    num_tokens_to_schedule)
+
+
+def test_schedule_request_multi_images_respect_compute_limit():
+    manager = EncoderCacheManager(cache_size=100)
+    req = MockRequest("reqA", ["a", "b"], [5, 6])
+    compute_budget = 10
+    num_tokens_to_schedule = 0
+    assert manager.can_allocate(req, 0, compute_budget, num_tokens_to_schedule)
+    num_tokens_to_schedule += req.get_num_encoder_tokens(0)
+    compute_budget -= req.get_num_encoder_tokens(0)
+
+    assert not manager.can_allocate(req, 1, compute_budget,
+                                    num_tokens_to_schedule)
