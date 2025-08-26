@@ -41,6 +41,7 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
                                                    supports_eagle3,
+                                                   supports_multimodal_pruning,
                                                    supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
@@ -1151,28 +1152,45 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
         encoder_outputs = []
-        for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
+        for modality, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
                 mm_kwargs,
                 device=self.device,
                 pin_memory=self.pin_memory,
         ):
-            # Run the encoder.
-            # `curr_group_outputs` is either of the following:
-            # 1. A tensor of shape (num_items, feature_size, hidden_size)
-            # in case feature_size is fixed across all multimodal items.
-            # 2. A list or tuple (length: num_items) of tensors, each of shape
-            # (feature_size, hidden_size) in case the feature size is dynamic
-            # depending on the input multimodal items.
-            curr_group_outputs = self.model.get_multimodal_embeddings(
-                **mm_kwargs_group)
+            encoder_outputs_for_modality = []
+            # (ekhvedchenia): Temporary hack to limit peak memory usage when
+            # processing multimodal data.This solves the issue with scheduler
+            # putting too many video samples into a single batch. Scheduler
+            # uses pruned vision tokens count to compare it versus compute
+            # budget which is incorrect (Either input media size or non-pruned
+            # output vision tokens count should be considered)
+            if self.is_multimodal_pruning_enabled and modality == "video":
+                micro_batch_size = 1
+            else:
+                # If pruning is disabled, process all media as usual
+                micro_batch_size = num_items
+
+            for i in range(0, num_items, micro_batch_size):
+                micro_batch_mm_inputs = dict(
+                    (k, v[i:i + micro_batch_size])
+                    for k, v in mm_kwargs_group.items())
+                # Run the encoder.
+                # `curr_group_outputs` is either of the following:
+                # 1. A tensor of shape (num_items, feature_size, hidden_size)
+                # in case feature_size is fixed across all multimodal items.
+                # 2. A list or tuple (length: num_items) of tensors,
+                # each of shape (feature_size, hidden_size) in case the feature
+                # size is dynamic depending on the input multimodal items.
+                curr_group_outputs = self.model.get_multimodal_embeddings(
+                    **micro_batch_mm_inputs)
+
+                encoder_outputs_for_modality.extend(curr_group_outputs)
 
             sanity_check_mm_encoder_outputs(
-                curr_group_outputs,
+                encoder_outputs_for_modality,
                 expected_num_items=num_items,
             )
-
-            for output in curr_group_outputs:
-                encoder_outputs.append(output)
+            encoder_outputs.extend(encoder_outputs_for_modality)
 
         # Cache the encoder outputs by mm_hash
         for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
@@ -1186,8 +1204,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         shift_computed_tokens: int = 0,
     ) -> list[torch.Tensor]:
+        should_sync_mrope_positions = False
         mm_embeds: list[torch.Tensor] = []
         for req_id in self.input_batch.req_ids:
+            mm_embeds_req: list[torch.Tensor] = []
+
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
             req_state = self.requests[req_id]
@@ -1230,7 +1251,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     encoder_output[start_idx:end_idx],
                     is_embed=is_embed,
                 )
-                mm_embeds.append(mm_embeds_item)
+                mm_embeds_req.append(mm_embeds_item)
+
+            if self.is_multimodal_pruning_enabled:
+                should_sync_mrope_positions = True
+                mm_embeds_req, new_mrope_positions, new_delta = (
+                    self.model.recompute_mrope_positions(
+                        input_ids=req_state.prompt_token_ids,
+                        multimodal_embeddings=mm_embeds_req,
+                        mrope_positions=req_state.mrope_positions,
+                        num_computed_tokens=req_state.num_computed_tokens,
+                    ))
+                assert req_state.mrope_positions is not None
+                req_state.mrope_positions.copy_(new_mrope_positions)
+                req_state.mrope_position_delta = new_delta
+
+            mm_embeds.extend(mm_embeds_req)
+
+        if should_sync_mrope_positions:
+            self._calc_mrope_positions(scheduler_output)
+
         return mm_embeds
 
     def get_model(self) -> nn.Module:
@@ -2012,6 +2052,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # for other compilation levels, cudagraph behavior is controlled by
         # CudagraphWraper and CudagraphDispatcher of vllm.
 
+        self.is_multimodal_pruning_enabled = (supports_multimodal_pruning(
+            self.model) and self.model.is_multimodal_pruning_enabled())
         # wrap the model with full cudagraph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.model = CUDAGraphWrapper(self.model,
