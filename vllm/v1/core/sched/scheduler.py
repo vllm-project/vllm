@@ -448,6 +448,7 @@ class Scheduler(SchedulerInterface):
                             delay_cache_blocks=load_kv_async,
                             chunk_size=self.max_num_scheduled_tokens,
                         ))
+
                     if new_blocks is None:
                         # The request cannot be scheduled.
                         break
