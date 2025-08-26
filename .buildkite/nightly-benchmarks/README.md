@@ -141,7 +141,7 @@ When run, benchmark script generates results under `benchmark/results` folder, a
 `compare-json-results.py` compares two `benchmark_results.json` files and provides performance ratio e.g. for Output Tput, Median TTFT and Median TPOT.  
 If only one benchmark_results.json is passed, `compare-json-results.py` compares different TP and PP configurations in the benchmark_results.json instead.
 
-Here is an example using the script to compare result_a and result_b with Model, Dataset name, input/output lenght, max concurrency and qps.
+Here is an example using the script to compare result_a and result_b with Model, Dataset name, input/output length, max concurrency and qps.
 `python3 compare-json-results.py -f results_a/benchmark_results.json -f results_b/benchmark_results.json`
 
 |   | Model | Dataset Name | Input Len | Output Len | # of max concurrency | qps  | results_a/benchmark_results.json | results_b/benchmark_results.json | perf_ratio        |
