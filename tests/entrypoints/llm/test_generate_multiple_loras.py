@@ -4,12 +4,12 @@
 import weakref
 
 import pytest
-# downloading lora to test lora requests
-from huggingface_hub import snapshot_download
 
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
+
+# downloading lora to test lora requests
 
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
@@ -53,11 +53,6 @@ def llm(request, monkeypatch_module):
     del llm
 
     cleanup_dist_env_and_memory()
-
-
-@pytest.fixture(scope="module")
-def zephyr_lora_files():
-    return snapshot_download(repo_id=LORA_NAME)
 
 
 @pytest.mark.skip_global_cleanup
