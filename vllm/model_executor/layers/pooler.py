@@ -455,8 +455,9 @@ class EmbeddingPoolerHead(PoolerHead):
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
-        assert not isinstance(pooled_data, list), \
-            "embed api does not support all pooling."
+
+        if isinstance(pooled_data, list):
+            pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_dimension]
 
         # Apply ST projector
@@ -663,8 +664,8 @@ class ClassifierPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
-        assert not isinstance(pooled_data, list), \
-            "classify api does not support all pooling."
+        if isinstance(pooled_data, list):
+            pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_size]
 
         if self.classifier is not None:
