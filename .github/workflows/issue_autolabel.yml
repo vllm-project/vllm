@@ -21,50 +21,16 @@ jobs:
               rocm: {
                 // Keyword search - matches whole words only (with word boundaries)
                 keywords: [
-                  // Core ROCm/AMD terms
-                  "rocm",
-                  "amd",
                   "hip",
-                  // GPU Models - Instinct Series
-                  "amd instinct",
-                  "mi300",
-                  "mi300x",
-                  "mi300a",
-                  "mi250x",
-                  "mi250",
-                  "mi210x",
-                  "mi210",
-                  "mi325x",
-                  "mi350x",
-                  "mi355x",
-                  // GPU Models - Radeon Series
-                  "radeon",
-                  "r9700",
-                  "rx 9070",
-                  "rx 9060",
-                  "rx 7900",
-                  "rx 7800",
-                  // GPU Models - Pro Series
-                  "w7900",
-                  "w7800",
-                  "w7700",
-                  "v710",
-                  "v620",
-                  "w6800",
-                  // Libraries and tools
                   "composable kernel",
                   "rccl",
                   "migraphx",
                   "hipgraph",
-                  "pytorch",
-                  "cuda",
+                  "ROCm System Management Interface",
                 ],
                 
                 // Substring search - matches anywhere in text (partial matches)
                 substrings: [
-                  // Version patterns
-                  "rocm-",           // matches rocm-5.7, rocm-6.0, etc.
-                  "rocm_",           // matches rocm_5_7, etc.
                   "hip-",            // matches hip-config, etc.
                   
                   // Architecture prefixes
@@ -79,43 +45,18 @@ jobs:
                   
                   // ROCm tools and libraries
                   "hipify",          // matches hipify-perl, hipify-clang, etc.
-                  
-                  // Error patterns
-                  "hipError",        // matches hipErrorMemoryFree, etc.
-                  "rocm error",      // matches various rocm error messages
-                  "amd gpu",         // matches "amd gpu driver", etc.
+                ],
+                
+                // Regex patterns - for complex pattern matching
+                regexPatterns: [
+                  {
+                    pattern: "\\bmi\\d{3}[a-z]*\\b",  // matches mi200, mi300x, mi300a, mi355x, mi450, etc.
+                    description: "AMD GPU names (mi + 3 digits + optional letters)",
+                    flags: "gi"
+                  }
                 ],
               },
             };
-            
-            // Helper function to remove only the collect_env.py details section
-            function removeCollectEnvDetails(text) {
-              // Pattern to match the specific collect_env.py details section
-              // This looks for <details> tags that contain "python collect_env.py" in the summary
-              const collectEnvPattern = /<details[\s\S]*?<summary>[\s\S]*?python collect_env\.py[\s\S]*?<\/summary>[\s\S]*?<\/details>/gi;
-              
-              // Alternative patterns in case the format varies slightly
-              const alternativePatterns = [
-                // Pattern for "The output of python collect_env.py"
-                /<details[\s\S]*?<summary>[\s\S]*?output of[\s\S]*?python collect_env\.py[\s\S]*?<\/summary>[\s\S]*?<\/details>/gi,
-                // Pattern for "collect_env.py output"
-                /<details[\s\S]*?<summary>[\s\S]*?collect_env\.py[\s\S]*?output[\s\S]*?<\/summary>[\s\S]*?<\/details>/gi,
-                // Pattern for environment information
-                /<details[\s\S]*?<summary>[\s\S]*?environment[\s\S]*?information[\s\S]*?<\/summary>[\s\S]*?<\/details>/gi,
-              ];
-              
-              let result = text;
-              
-              // Try the main pattern first
-              result = result.replace(collectEnvPattern, '');
-              
-              // Try alternative patterns if the main one didn't match
-              for (const pattern of alternativePatterns) {
-                result = result.replace(pattern, '');
-              }
-              
-              return result;
-            }
             
             // Helper function to create regex based on search type
             function createSearchRegex(term, type) {
@@ -135,7 +76,7 @@ jobs:
             }
             
             // Helper function to find matching terms in text with line information
-            function findMatchingTermsWithLines(text, keywords = [], substrings = []) {
+            function findMatchingTermsWithLines(text, keywords = [], substrings = [], regexPatterns = []) {
               const matches = [];
               const lines = text.split('\n');
               
@@ -211,6 +152,44 @@ jobs:
                 }
               }
               
+              // Process regex patterns
+              for (const regexConfig of regexPatterns) {
+                const regex = new RegExp(regexConfig.pattern, regexConfig.flags || "gi");
+                const termMatches = [];
+                
+                // Check each line for matches
+                lines.forEach((line, lineIndex) => {
+                  const lineMatches = line.match(regex);
+                  if (lineMatches) {
+                    lineMatches.forEach(match => {
+                      termMatches.push({
+                        match: match,
+                        lineNumber: lineIndex + 1,
+                        lineContent: line.trim(),
+                        searchType: 'regex',
+                        originalTerm: regexConfig.pattern,
+                        description: regexConfig.description,
+                        // Show context around the match in the line
+                        context: line.length > 100 ? 
+                          line.substring(Math.max(0, line.toLowerCase().indexOf(match.toLowerCase()) - 30), 
+                                       line.toLowerCase().indexOf(match.toLowerCase()) + match.length + 30) + '...' 
+                          : line.trim()
+                      });
+                    });
+                  }
+                });
+                
+                if (termMatches.length > 0) {
+                  matches.push({
+                    term: regexConfig.description || regexConfig.pattern,
+                    searchType: 'regex',
+                    pattern: regexConfig.pattern,
+                    matches: termMatches,
+                    count: termMatches.length
+                  });
+                }
+              }
+              
               return matches;
             }
             
@@ -219,32 +198,41 @@ jobs:
               const body = context.payload.issue.body || "";
               const title = context.payload.issue.title || "";
               
-              // Remove only the collect_env.py details section, keep other details
-              const textWithoutCollectEnv = removeCollectEnvDetails(title + " " + body);
+              // Combine title and body for searching
+              const searchText = title + " " + body;
               
-              core.notice(`Original text length: ${(title + " " + body).length}`);
-              core.notice(`Text after removing collect_env details: ${textWithoutCollectEnv.length}`);
+              core.notice(`Searching in issue title and body (${searchText.length} characters total)`);
+              core.notice(`Issue Title: "${title}"`);
+              core.notice(`Issue Body length: ${body.length} characters`);
               
               let shouldAddLabel = false;
               let reason = '';
               
-              // Check for terms in the remaining text (including other details sections)
-              if (textWithoutCollectEnv) {
+              // Check for terms in the issue title and body
+              if (searchText.trim()) {
                 const keywords = config.keywords || [];
                 const substrings = config.substrings || [];
+                const regexPatterns = config.regexPatterns || [];
                 
-                core.notice(`Searching with ${keywords.length} keywords and ${substrings.length} substrings`);
+                core.notice(`Searching with ${keywords.length} keywords, ${substrings.length} substrings, and ${regexPatterns.length} regex patterns`);
                 
-                const matchingTerms = findMatchingTermsWithLines(textWithoutCollectEnv, keywords, substrings);
+                const matchingTerms = findMatchingTermsWithLines(searchText, keywords, substrings, regexPatterns);
                 if (matchingTerms.length > 0) {
                   core.notice(`Found ${matchingTerms.length} matching term(s):`);
                   
                   for (const termMatch of matchingTerms) {
-                    core.notice(`  📍 Term: "${termMatch.term}" (${termMatch.searchType} search) found ${termMatch.count} time(s):`);
+                    if (termMatch.searchType === 'regex') {
+                      core.notice(`  📍 Regex: "${termMatch.term}" (pattern: ${termMatch.pattern}) found ${termMatch.count} time(s):`);
+                    } else {
+                      core.notice(`  📍 Term: "${termMatch.term}" (${termMatch.searchType} search) found ${termMatch.count} time(s):`);
+                    }
                     
                     // Show details for each match
                     termMatch.matches.forEach((match, index) => {
                       core.notice(`    ${index + 1}. Line ${match.lineNumber}: "${match.match}" [${match.searchType}]`);
+                      if (match.description) {
+                        core.notice(`       Description: ${match.description}`);
+                      }
                       core.notice(`       Context: ${match.context}`);
                       if (match.lineContent !== match.context) {
                         core.notice(`       Full line: ${match.lineContent}`);
@@ -256,16 +244,18 @@ jobs:
                   const totalMatches = matchingTerms.reduce((sum, t) => sum + t.count, 0);
                   const keywordMatches = matchingTerms.filter(t => t.searchType === 'keyword');
                   const substringMatches = matchingTerms.filter(t => t.searchType === 'substring');
+                  const regexMatches = matchingTerms.filter(t => t.searchType === 'regex');
                   
                   const keywordCount = keywordMatches.reduce((sum, t) => sum + t.count, 0);
                   const substringCount = substringMatches.reduce((sum, t) => sum + t.count, 0);
+                  const regexCount = regexMatches.reduce((sum, t) => sum + t.count, 0);
                   
-                  reason = `Found ${totalMatches} total matches outside collect_env.py details section (${keywordCount} keyword matches, ${substringCount} substring matches)`;
+                  reason = `Found ${totalMatches} total matches in issue title and body (${keywordCount} keyword matches, ${substringCount} substring matches, ${regexCount} regex matches)`;
                 }
               }
               
               core.notice(`Final decision: ${shouldAddLabel ? 'ADD LABEL' : 'DO NOT ADD LABEL'}`);
-              core.notice(`Reason: ${reason || 'No matching terms found outside collect_env.py details section'}`);
+              core.notice(`Reason: ${reason || 'No matching terms found in issue title and body'}`);
               
               if (shouldAddLabel) {
                 const existingLabels = context.payload.issue.labels.map(l => l.name);
@@ -283,7 +273,7 @@ jobs:
                 return false;
               }
               
-              core.notice(`No matching terms found outside collect_env.py details section for label "${labelName}".`);
+              core.notice(`No matching terms found in issue title and body for label "${labelName}".`);
               return false;
             }
             
