@@ -430,14 +430,6 @@ class VllmBackend:
         # them, e.g. backbone (default), eagle_head, etc.
         self.prefix = prefix or model_tag
 
-        global_graph_pool = current_platform.get_global_graph_pool(
-            vllm_config.model_config.enable_sleep_mode)
-
-        # TODO: in the future, if we want to use multiple
-        # streams, it might not be safe to share a global pool.
-        # only investigate this when we use multiple streams
-        self.graph_pool = global_graph_pool
-
         # Passes to run on the graph post-grad.
         self.post_grad_pass_manager = PostGradPassManager()
 
