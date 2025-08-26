@@ -952,8 +952,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_DEEP_GEMM":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
 
-    # Whether to use E8M0 scaling when DeepGEMM is used on Blackwell GPUs.
-    # E8M0 is faster on B200 but may reduce accuracy.
+    # Whether to use E8M0 scaling when DeepGEMM is used on
+    # Hopper/Blackwell GPUs.
+    # E8M0 is faster but may reduce accuracy.
     "VLLM_USE_DEEP_GEMM_E8M0":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM_E8M0", "1"))),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
