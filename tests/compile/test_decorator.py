@@ -284,3 +284,87 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
         # num_cudagraph_sizes * num cudagraphable graphs to capture
     ):
         run_model(vllm_config, mod_A, cudagraph_runtime_mode)
+
+
+def test_no_weak_ref_output_decorator():
+    # piecewise
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            use_cudagraph=True,
+            splitting_ops=["silly.attention"],
+            cudagraph_capture_sizes=[1, 2],
+        )
+    )
+    cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
+
+    @support_torch_compile(no_weak_ref_output=False)
+    class A(nn.Module):
+        def __init__(
+            self, *, vllm_config: VllmConfig, prefix: str = "", **kwargs
+        ) -> None:
+            super().__init__()
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            x = x + x
+            attn_output = torch.empty_like(x)
+            torch.ops.silly.attention(x, x, x, attn_output)
+            x = attn_output
+            x = x * 3
+            return x
+
+    @support_torch_compile(no_weak_ref_output=True)
+    @support_torch_compile(no_weak_ref_output=False)
+    class B(A): ...
+
+    # no_weak_ref_output defaults to False
+    @support_torch_compile()
+    class C(B): ...
+
+    with compilation_counter.expect(
+        num_weakref_output_graphs=1,
+        # Single compile target (mod A), one VllmBackend initialized
+        # no_weak_ref_output set to False
+    ) and set_current_vllm_config(vllm_config):
+        mod_A = A(vllm_config=vllm_config, prefix="").eval().cuda()
+
+    # A has support_torch_compile
+    with compilation_counter.expect(
+        num_graphs_seen=1,
+        num_piecewise_graphs_seen=3,
+        num_piecewise_capturable_graphs_seen=2,
+        num_backend_compilations=2,
+        num_cudagraph_captured=4,
+        # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+    ):
+        run_model(vllm_config, mod_A, cudagraph_runtime_mode)
+
+    with compilation_counter.expect(
+        num_weakref_output_graphs=0,
+    ) and set_current_vllm_config(vllm_config):
+        mod_B = B(vllm_config=vllm_config, prefix="").eval().cuda()
+
+    # B also has support_torch_compile
+    with compilation_counter.expect(
+        num_graphs_seen=1,
+        num_piecewise_graphs_seen=3,
+        num_piecewise_capturable_graphs_seen=2,
+        num_backend_compilations=2,
+        num_cudagraph_captured=4,
+    ):
+        run_model(vllm_config, mod_B, cudagraph_runtime_mode)
+
+    with compilation_counter.expect(
+        num_weakref_output_graphs=1,
+    ) and set_current_vllm_config(vllm_config):
+        mod_C = C(vllm_config=vllm_config, prefix="").eval().cuda()
+
+    # C has support_torch_compile
+    with compilation_counter.expect(
+        num_graphs_seen=1,
+        num_piecewise_graphs_seen=3,
+        num_piecewise_capturable_graphs_seen=2,
+        num_backend_compilations=2,
+        num_cudagraph_captured=4,
+    ):
+        run_model(vllm_config, mod_C, cudagraph_runtime_mode)

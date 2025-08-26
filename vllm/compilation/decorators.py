@@ -34,6 +34,7 @@ from .monitor import start_monitoring_torch_compile
 logger = init_logger(__name__)
 
 IGNORE_COMPILE_KEY = "_ignore_compile_vllm"
+LAST_PIECEWISE_GRAPH_WEAKREF_KEY = "_last_graph_weakref_vllm"
 
 _T = TypeVar("_T", bound=type[nn.Module])
 
@@ -233,7 +234,11 @@ def support_torch_compile(
                     f"Argument {k} not found in the forward method of {cls}"
                 )
         return _support_torch_compile(
-            cls, inferred_dynamic_arg_dims, mark_unbacked_dims, enable_if, no_weak_ref_output
+            cls,
+            inferred_dynamic_arg_dims,
+            mark_unbacked_dims,
+            enable_if,
+            no_weak_ref_output,
         )
 
     if cls is not None:
@@ -294,6 +299,9 @@ def _support_torch_compile(
 
     setattr(cls, IGNORE_COMPILE_KEY, False)
 
+    # setting as attribute on cls ensures child class will override parent class
+    setattr(cls, LAST_PIECEWISE_GRAPH_WEAKREF_KEY, no_weak_ref_output)
+
     def __init__(
         self, *, vllm_config: VllmConfig | None = None, prefix: str = "", **kwargs
     ):
@@ -323,6 +331,8 @@ def _support_torch_compile(
         )
         if self.do_not_compile:
             return
+
+        no_weak_ref_output = getattr(cls, LAST_PIECEWISE_GRAPH_WEAKREF_KEY, False)
 
         compilation_counter.num_models_seen += 1
         self.compiled = False

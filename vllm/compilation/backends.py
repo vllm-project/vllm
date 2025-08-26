@@ -470,8 +470,9 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 # non-last submodule should not be converted to a weakref as it
                 # may result in memory being overwritten by subsequent graph
                 # replays. In these cases, no_weak_ref_output can be set to True
-                weak_ref_output = (piecewise_backend.is_last_graph
-                                   and not self.no_weak_ref_output)
+                weak_ref_output = (
+                    piecewise_backend.is_last_graph and not self.no_weak_ref_output
+                )
 
                 # Always assign PIECEWISE runtime mode to the
                 # CUDAGraphWrapper for piecewise_backend, to distinguish
@@ -756,11 +757,11 @@ class VllmBackend:
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
         PiecewiseCompileInterpreter(
-            self.split_gm, 
+            self.split_gm,
             submod_names_to_compile,
-            self.vllm_config, 
+            self.vllm_config,
             self.no_weak_ref_output,
-            self
+            self,
         ).run(*example_inputs)
 
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")
