@@ -182,7 +182,7 @@ class Scheduler(SchedulerInterface):
         token_budget = self.max_num_scheduled_tokens
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
-        encoder_budget = self.max_num_encoder_input_tokens
+        encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
@@ -211,12 +211,13 @@ class Scheduler(SchedulerInterface):
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
-            new_encoder_budget = encoder_budget
+            new_encoder_compute_budget = encoder_compute_budget
             if request.has_encoder_inputs:
                 (encoder_inputs_to_schedule, num_new_tokens,
-                 new_encoder_budget) = self._try_schedule_encoder_inputs(
+                 new_encoder_compute_budget
+                 ) = self._try_schedule_encoder_inputs(
                      request, request.num_computed_tokens, num_new_tokens,
-                     encoder_budget)
+                     encoder_compute_budget)
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -298,7 +299,7 @@ class Scheduler(SchedulerInterface):
                 # Allocate the encoder cache.
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
-                encoder_budget = new_encoder_budget
+                encoder_compute_budget = new_encoder_compute_budget
 
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
@@ -382,7 +383,7 @@ class Scheduler(SchedulerInterface):
                     num_computed_tokens = request.num_computed_tokens
 
                 encoder_inputs_to_schedule = None
-                new_encoder_budget = encoder_budget
+                new_encoder_compute_budget = encoder_compute_budget
 
                 # KVTransfer: loading remote KV, do not allocate for new work.
                 if load_kv_async:
@@ -413,10 +414,10 @@ class Scheduler(SchedulerInterface):
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
                         (encoder_inputs_to_schedule, num_new_tokens,
-                         new_encoder_budget
+                         new_encoder_compute_budget
                          ) = self._try_schedule_encoder_inputs(
                              request, num_computed_tokens, num_new_tokens,
-                             encoder_budget)
+                             encoder_compute_budget)
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
@@ -495,7 +496,7 @@ class Scheduler(SchedulerInterface):
                     # Allocate the encoder cache.
                     for i in encoder_inputs_to_schedule:
                         self.encoder_cache_manager.allocate(request, i)
-                    encoder_budget = new_encoder_budget
+                    encoder_compute_budget = new_encoder_compute_budget
 
         # Put back any skipped requests at the head of the waiting queue
         if skipped_waiting_requests:
@@ -658,7 +659,7 @@ class Scheduler(SchedulerInterface):
         request: Request,
         num_computed_tokens: int,
         num_new_tokens: int,
-        encoder_budget: int,
+        encoder_compute_budget: int,
     ) -> tuple[list[int], int, int]:
         """
         Determine which encoder inputs need to be scheduled in the current step,
@@ -680,11 +681,17 @@ class Scheduler(SchedulerInterface):
         blocks and externally cached blocks (via KVConnector).
         """
         if num_new_tokens == 0 or not request.has_encoder_inputs:
-            return [], num_new_tokens, encoder_budget
+            return [], num_new_tokens, encoder_compute_budget
         encoder_inputs_to_schedule: list[int] = []
         mm_positions = request.mm_positions
         assert mm_positions is not None
         assert len(mm_positions) > 0
+
+        # NOTE: since scheduler operates on the request level (possibly with
+        # multiple encoder inputs per request), we need to create temporary
+        # trackers for accounting at the encoder input level.
+        mm_hashes_to_schedule = set()
+        num_tokens_to_schedule = 0
         for i, pos_info in enumerate(mm_positions):
             start_pos = pos_info.offset
             num_encoder_tokens = pos_info.length
@@ -695,13 +702,20 @@ class Scheduler(SchedulerInterface):
             if start_pos >= num_computed_tokens + num_new_tokens:
                 # The encoder input is not needed in this step.
                 break
+
             if start_pos + num_encoder_tokens <= num_computed_tokens:
                 # The encoder input is already computed and stored
                 # in the decoder's KV cache.
                 continue
 
+            # The same encoder input has already been scheduled in the current
+            # step.
+            if request.mm_hashes[i] in mm_hashes_to_schedule:
+                continue
+
             if self.encoder_cache_manager.check_and_update_cache(request, i):
-                # The encoder input is already computed and cached.
+                # The encoder input is already computed and cached from a
+                # previous step.
                 continue
 
             # If no encoder input chunking is allowed, we do not want to
@@ -714,8 +728,9 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = start_pos - num_computed_tokens
                 break
 
-            if not self.encoder_cache_manager.try_allocate(
-                    request, i, encoder_budget):
+            if not self.encoder_cache_manager.can_allocate(
+                    request, i, encoder_compute_budget,
+                    num_tokens_to_schedule):
                 # The encoder cache is full or the encoder budget is exhausted.
                 # NOTE(woosuk): We assume that the encoder input tokens should
                 # be processed altogether, as the encoder usually uses
@@ -732,9 +747,16 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = 0
                 break
 
-            encoder_budget -= num_encoder_tokens
+            num_tokens_to_schedule += num_encoder_tokens
+            encoder_compute_budget -= num_encoder_tokens
+            mm_hashes_to_schedule.add(request.mm_hashes[i])
             encoder_inputs_to_schedule.append(i)
-        return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
+
+        return (
+            encoder_inputs_to_schedule,
+            num_new_tokens,
+            encoder_compute_budget,
+        )
 
     def get_grammar_bitmask(
         self,
