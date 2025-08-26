@@ -3,7 +3,6 @@
 
 import dataclasses
 import gc
-import threading
 import itertools
 import time
 from collections import defaultdict
@@ -33,8 +32,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
-from vllm.forward_context import (BatchDescriptor, DPMetadata, create_forward_context,
-                                  override_forward_context, set_forward_context)
+from vllm.forward_context import (BatchDescriptor, DPMetadata, set_forward_context)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -110,24 +108,6 @@ PerLayerAttnMetadata: TypeAlias = Union[list[AttnMetadataDict],
                                         AttnMetadataDict]
 
 UBatchSlices: TypeAlias = list[UbatchSlice]
-
-
-@dataclasses.dataclass
-class UbatchMetadata:
-    context: UBatchContext
-    input_ids: torch.Tensor
-    positions: torch.Tensor
-    inputs_embeds: Optional[torch.Tensor]
-    intermediate_tensors: Optional[IntermediateTensors]
-    num_tokens: int
-
-
-@dataclasses.dataclass
-class CUDAGraphMetaData:
-    cudagraph: torch.cuda.CUDAGraph
-    ubatch_metadata: UbatchMetadata
-    outputs: Optional[Any] = None
-
 
 class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
@@ -2559,7 +2539,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ubatch_slices = None
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
-        # logger.info("PADDING DUMMY DONE")
         if should_ubatch:
             # We only support decode-only cudagraphs
             assert num_reqs == num_tokens
@@ -2577,7 +2556,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             slice(num_tokens // 2, num_tokens))
             ]
 
-        # attn_metadata: Optional[dict[str, Any]] = None
         attn_metadata: Optional[PerLayerAttnMetadata] = None
 
         # If force_attention is True, we always capture attention. Otherwise,
@@ -3054,14 +3032,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                                 force_attention=force_attention,
                                 uniform_decode=uniform_decode,
-                                allow_microbatching=False,
                                 skip_eplb=True)
             self._dummy_run(num_tokens,
                             cudagraph_runtime_mode=cudagraph_runtime_mode,
                             uniform_decode=uniform_decode,
-                            allow_microbatching=False,
                             skip_eplb=True)
-
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
