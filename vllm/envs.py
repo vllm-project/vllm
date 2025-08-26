@@ -368,7 +368,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Debug pattern matching inside custom passes
     "VLLM_PATTERN_MATCH_DEBUG":
-    lambda: os.environ.get("VLLM_PATTERN_MATCH_DEBUG", None),
+    lambda: os.environ.get("VLLM_PATTERN_MATCH_DEBUG"),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
