@@ -41,7 +41,7 @@ __device__ inline void vectorize_with_alignment(
 
     for (int i = tid; i < num_vec; i += stride) {
       vout_t tmp;
-      // *** Key change: make a local copy of the entire pack ***
+      // Make a local copy of the entire pack
       vin_t src = v_in[i];  // <- encourages a single vector ld
       vec_op(tmp, src);
       v_out[i] = tmp;  // <- encourages a single vector st
@@ -73,7 +73,7 @@ __device__ inline void vectorize_with_alignment(
   // 2. vectorize the main part
   for (int i = tid; i < num_vec; i += stride) {
     vout_t tmp;
-    // *** Key change: make a local copy of the entire pack ***
+    // Make a local copy of the entire pack
     vin_t src = v_in[i];  // <- encourages a single vector ld
     vec_op(tmp, src);
     v_out[i] = tmp;  // <- encourages a single vector st
