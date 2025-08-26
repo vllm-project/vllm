@@ -58,6 +58,7 @@ class Scheduler(SchedulerInterface):
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
+        self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -82,6 +83,9 @@ class Scheduler(SchedulerInterface):
         if self.vllm_config.kv_transfer_config is not None:
             assert len(self.kv_cache_config.kv_cache_groups) == 1, (
                 "Multiple KV cache groups are not currently supported "
+                "with KV connectors")
+            assert not self.is_encoder_decoder, (
+                "Encoder-decoder models are not currently supported "
                 "with KV connectors")
             self.connector = KVConnectorFactory.create_connector(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
@@ -431,6 +435,22 @@ class Scheduler(SchedulerInterface):
                                               == 0 else
                                               self.num_lookahead_tokens)
 
+                # Determine if we need to allocate cross-attention blocks.
+                if self.is_encoder_decoder and request.has_encoder_inputs:
+                    # TODO(russellb): For Whisper, we know that the input is
+                    # always padded to the maximum length. If we support other
+                    # encoder-decoder models, this will need to be updated if we
+                    # want to only allocate what is needed.
+                    assert ("whisper"
+                            in self.vllm_config.model_config.model.lower()), (
+                                "Whisper is the only supported "
+                                "encoder-decoder model.")
+                    num_encoder_tokens = MULTIMODAL_REGISTRY.\
+                        get_encdec_max_encoder_len(
+                        self.vllm_config.model_config)
+                else:
+                    num_encoder_tokens = 0
+
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_computed_tokens,
@@ -438,6 +458,7 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
                     delay_cache_blocks=load_kv_async,
+                    num_encoder_tokens=num_encoder_tokens,
                 )
 
                 if new_blocks is None:
@@ -703,7 +724,21 @@ class Scheduler(SchedulerInterface):
                 # The encoder input is not needed in this step.
                 break
 
-            if start_pos + num_encoder_tokens <= num_computed_tokens:
+            if self.is_encoder_decoder and num_computed_tokens > 0:
+                assert start_pos == 0, (
+                    "Encoder input should be processed at the beginning of "
+                    "the sequence when encoder-decoder models are used.")
+                # Encoder input has already been computed
+                # The calculation here is a bit different. We don't turn encoder
+                # output into tokens that get processed by the decoder and
+                # reflected in num_computed_tokens. Instead, start_pos reflects
+                # the position where we need to ensure we calculate encoder
+                # inputs. This should always be 0 to ensure we calculate encoder
+                # inputs before running the decoder.  Once we've calculated some
+                # decoder tokens (num_computed_tokens > 0), then we know we
+                # already calculated encoder inputs and can skip here.
+                continue
+            elif start_pos + num_encoder_tokens <= num_computed_tokens:
                 # The encoder input is already computed and stored
                 # in the decoder's KV cache.
                 continue
