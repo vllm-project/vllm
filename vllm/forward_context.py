@@ -13,6 +13,13 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
+from typing import TypeAlias
+
+@dataclass
+class UbatchSlice:
+    request_slice: slice
+    token_slice: slice
+UBatchSlices: TypeAlias = list[UbatchSlice]
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -66,6 +73,7 @@ def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: list[int],
 class DPMetadata:
     max_tokens_across_dp_cpu: torch.Tensor
     cu_tokens_across_dp_cpu: torch.Tensor
+    _num_tokens_across_dp: torch.Tensor
     local_sizes: Optional[list[int]] = None
 
     @staticmethod
@@ -134,7 +142,8 @@ class DPMetadata:
                 batchsize, dp_size, dp_rank)
         max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp)
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_across_dp, dim=0)
-        return DPMetadata(max_tokens_across_dp_cpu, cu_tokens_across_dp_cpu)
+        return DPMetadata(max_tokens_across_dp_cpu, cu_tokens_across_dp_cpu, 
+                          num_tokens_across_dp)
 
     @contextmanager
     def chunked_sizes(self, max_chunk_size_per_rank: int, chunk_idx: int):
@@ -189,7 +198,7 @@ class ForwardContext:
     attention layer to its attention metadata
     set dynamically for each forward pass
     """
-    attn_metadata: Union["AttentionMetadata", dict[str, "AttentionMetadata"]]
+    attn_metadata: Union["AttentionMetadata", dict[str, "AttentionMetadata"], list[dict[str, "AttentionMetadata"]]]
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
@@ -198,6 +207,8 @@ class ForwardContext:
     # by default NONE, no cudagraph is used.
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE
     batch_descriptor: Optional[BatchDescriptor] = None
+
+    ubatch_slices: Optional[UBatchSlices] = None
 
     def __post_init__(self):
         assert self.cudagraph_runtime_mode in [
@@ -222,7 +233,8 @@ def create_forward_context(attn_metadata: Any,
                            num_tokens: Optional[int] = None,
                            num_tokens_across_dp: Optional[torch.Tensor] = None,
                            cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-                           batch_descriptor: Optional[BatchDescriptor] = None):
+                           batch_descriptor: Optional[BatchDescriptor] = None,
+                           ubatch_slices: Optional[UBatchSlices] = None):
     dp_metadata: Optional[DPMetadata] = None
     if vllm_config.parallel_config.data_parallel_size > 1 and (
             attn_metadata is not None or num_tokens is not None):
@@ -236,7 +248,8 @@ def create_forward_context(attn_metadata: Any,
                           attn_metadata=attn_metadata,
                           dp_metadata=dp_metadata,
                           cudagraph_runtime_mode=cudagraph_runtime_mode,
-                          batch_descriptor=batch_descriptor)
+                          batch_descriptor=batch_descriptor,
+                          ubatch_slices=ubatch_slices)
 
 
 @contextmanager
@@ -262,7 +275,8 @@ def set_forward_context(
         num_tokens: Optional[int] = None,
         num_tokens_across_dp: Optional[torch.Tensor] = None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-        batch_descriptor: Optional[BatchDescriptor] = None):
+        batch_descriptor: Optional[BatchDescriptor] = None,
+        ubatch_slices: Optional[UBatchSlices] = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     Here we can inject common logic for every model forward pass.
@@ -275,7 +289,8 @@ def set_forward_context(
     forward_context = create_forward_context(attn_metadata, vllm_config,
                                              virtual_engine, num_tokens,
                                              num_tokens_across_dp,
-                                             cudagraph_runtime_mode, batch_descriptor)
+                                             cudagraph_runtime_mode, batch_descriptor,
+                                             ubatch_slices)
 
     try:
         with override_forward_context(forward_context):
