@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from transformers import BertConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -28,7 +28,8 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 
-from .interfaces import SupportsCrossEncoding, SupportsQuant
+from .interfaces import (SupportsCrossEncoding, SupportsQuant,
+                         default_pooling_type)
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -238,14 +239,13 @@ class BertSelfAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj")
 
-        self.attn = Attention(num_heads=self.num_heads,
-                              head_size=self.head_dim,
-                              scale=self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn",
-                              attn_type=AttentionType.ENCODER_ONLY)
+        self.attn = EncoderOnlyAttention(num_heads=self.num_heads,
+                                         head_size=self.head_dim,
+                                         scale=self.scaling,
+                                         num_kv_heads=self.num_kv_heads,
+                                         cache_config=cache_config,
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -327,6 +327,7 @@ class BertOutput(nn.Module):
 
 
 @support_torch_compile
+@default_pooling_type("CLS")
 class BertModel(nn.Module, SupportsQuant):
 
     is_pooling_model = True
@@ -401,6 +402,7 @@ class BertModel(nn.Module, SupportsQuant):
         return loaded_params
 
 
+@default_pooling_type("ALL")
 class BertPoolingModel(BertModel):
 
     is_pooling_model = True
@@ -431,6 +433,7 @@ class BertPoolingModel(BertModel):
         return loaded_params
 
 
+@default_pooling_type("CLS")
 class BertEmbeddingModel(nn.Module, SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.
 
@@ -486,13 +489,8 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
 
     def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
         return DispatchPooler({
-            "encode":
-            Pooler.for_encode(pooler_config),
-            "embed":
-            Pooler.for_embed(
-                pooler_config,
-                default_pooling_type=PoolingType.CLS,
-            ),
+            "encode": Pooler.for_encode(pooler_config),
+            "embed": Pooler.for_embed(pooler_config),
         })
 
 
@@ -529,9 +527,9 @@ def _encode_token_type_ids(input_ids: torch.Tensor,
 
 def _decode_token_type_ids(input_ids: torch.Tensor) -> torch.Tensor:
 
-    ids_mask = torch.ones(input_ids.shape,
-                          dtype=torch.int32,
-                          device=input_ids.device) << TOKEN_TYPE_SHIFT
+    ids_mask = torch.ones_like(input_ids,
+                               dtype=torch.int32,
+                               device=input_ids.device) << TOKEN_TYPE_SHIFT
     tokens_mask = ids_mask.bitwise_not()
 
     token_type_ids = input_ids.bitwise_and(ids_mask) >> TOKEN_TYPE_SHIFT
@@ -541,6 +539,7 @@ def _decode_token_type_ids(input_ids: torch.Tensor) -> torch.Tensor:
     return token_type_ids
 
 
+@default_pooling_type("CLS")
 class BertForSequenceClassification(nn.Module, SupportsCrossEncoding,
                                     SupportsQuant):
     """A model that uses Bert to provide embedding functionalities.

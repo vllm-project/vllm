@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalInputs, MultiModalKwargs)
+                                    MultiModalInputs, MultiModalKwargsItems)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -72,8 +72,9 @@ class PixtralHFImagePixelInputs(TensorSchema):
     in which case the data is passed as a list instead of a batched tensor.
     """
     type: Literal["pixel_values_pixtral"] = "pixel_values_pixtral"
-    pixel_values: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                            TensorShape("bn", "c", "h", "w")]
+    pixel_values: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "c", "h", "w", dynamic_dims={"h", "w"})]
 
 
 class LlavaImageEmbeddingInputs(TensorSchema):
@@ -249,7 +250,7 @@ class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
@@ -342,7 +343,7 @@ class PixtralHFMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         hf_config = self.info.get_hf_config()
@@ -794,7 +795,6 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
@@ -806,7 +806,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         )
 
         result = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
-                               tokenization_kwargs, return_mm_hashes)
+                               tokenization_kwargs)
 
         mm_items = self._to_mm_items(mm_data)
         mm_item_counts = mm_items.get_all_counts()
@@ -828,26 +828,19 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
                 target=[image_token_id] * num_image_tokens,
                 replacement=get_replacement_mantis,
             )
-        ])
+        ], mm_item_counts)
 
         prompt_ids, prompt, _ = self._apply_prompt_updates(
             result["prompt_token_ids"],
             mantis_mm_repls,
-            mm_item_counts,
         )
 
-        unbound_orig_repls = self._get_prompt_updates(
+        orig_repls = self._get_mm_prompt_updates(
             mm_items,
             hf_processor_mm_kwargs,
             mm_kwargs,
         )
-        orig_repls = self._bind_and_group_updates(unbound_orig_repls)
-
-        mm_placeholders = self._find_mm_placeholders(
-            orig_repls,
-            prompt_ids,
-            mm_item_counts,
-        )
+        mm_placeholders = self._find_mm_placeholders(prompt_ids, orig_repls)
         self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
         mm_placeholder_ranges = {
