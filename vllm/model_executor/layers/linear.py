@@ -42,7 +42,6 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "GPTQMarlinLinearMethod",
     "Fp8LinearMethod",
     "MarlinLinearMethod",
-    "QQQLinearMethod",
     "GPTQMarlin24LinearMethod",
     "TPUInt8LinearMethod",
     "GPTQLinearMethod",
@@ -53,6 +52,7 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "HQQMarlinMethod",
     "QuarkLinearMethod",
     "ModelOptNvFp4LinearMethod",
+    "PetitNvFp4LinearMethod",
 ]
 
 
@@ -200,11 +200,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if current_platform.is_cpu() and envs.VLLM_CPU_SGL_KERNEL:
+            from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
             N, K = layer.weight.size()
             dtype = layer.weight.dtype
-            if (torch._C._cpu._is_amx_tile_supported()
-                    and dtype == torch.bfloat16 and N % 32 == 0
-                    and K % 32 == 0):
+            if check_cpu_sgl_kernel(N, K, dtype):
                 packed_weight = torch.ops._C.convert_weight_packed(
                     layer.weight)
                 assert packed_weight.size() == layer.weight.size()
@@ -216,7 +215,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
             else:
                 logger.warning(
                     "CPU SGL kernels require Intel AMX support,"
-                    " bfloat16 weight, IC and OC are divisible by 32.")
+                    " bf16/fp16/int8 weight, IC and OC are divisible by "
+                    "32 and 16.")
                 layer.use_cpu_sgl = False
 
     def apply(self,
@@ -1378,7 +1378,7 @@ class RowParallelLinear(LinearBase):
         return output, output_bias
 
     def extra_repr(self) -> str:
-        s = f"input_features={self.input_size_per_partition}"
+        s = f"in_features={self.input_size_per_partition}"
         s += f", output_features={self.output_size}"
         s += f", bias={self.bias is not None}"
         s += f", tp_size={self.tp_size}"

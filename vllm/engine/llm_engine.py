@@ -1822,7 +1822,7 @@ class LLMEngine:
                 assert isinstance(mm_processor, EncDecMultiModalProcessor)
 
                 if mm_processor.pad_dummy_encoder_prompt:
-                    return  # Skip encoder length check for Whisper
+                    return  # Skip encoder length check for Whisper and Donut
 
             if model_config.is_multimodal_model:
                 suggestion = (
