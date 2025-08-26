@@ -474,6 +474,12 @@ class Qwen2_5_VisionAttention(nn.Module):
         return output
 
 
+# @set_model_tag("Qwen2_5_VisionBlock")
+# @support_torch_compile(dynamic_arg_dims={
+#     "x": 0,
+#     "cu_seqlens": 0,
+#     "rotary_pos_emb": 0,
+# })
 class Qwen2_5_VisionBlock(nn.Module):
     def __init__(
         self,
@@ -533,6 +539,10 @@ class Qwen2_5_VisionBlock(nn.Module):
         return x
 
 
+@set_model_tag("Qwen2_5_VisionPatchEmbed")
+@support_torch_compile(dynamic_arg_dims={
+    "x": 0,
+})
 class Qwen2_5_VisionPatchEmbed(nn.Module):
     def __init__(
         self,
@@ -882,9 +892,10 @@ class Qwen2_5_VisionTransformer(nn.Module):
             ) = self.get_rope_by_thw(t, h, w)
 
             window_index.append(window_index_thw + window_index_id)
-            window_index_id += t * llm_h * llm_w
-
-            cu_seqlens_window_thw = cu_seqlens_window_thw + cu_window_seqlens_last
+            window_index_id += (t * llm_h * llm_w)
+            assert cu_seqlens_window_thw.size()[0] >= 2  # Just for compile
+            cu_seqlens_window_thw = (cu_seqlens_window_thw +
+                                     cu_window_seqlens_last)
             cu_window_seqlens_last = cu_seqlens_window_thw[-1]
             cu_window_seqlens.append(cu_seqlens_window_thw)
 
@@ -1256,7 +1267,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 else None
             )
             self.visual = Qwen2_5_VisionTransformer(
-                config.vision_config,
+                vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "visual"),
@@ -1411,7 +1422,9 @@ class Qwen2_5_VLForConditionalGeneration(
                     self.visual, pixel_values_videos, grid_thw_list, rope_type="rope_3d"
                 )
             else:
-                video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw_list)
+                with set_forward_context(None, self.vllm_config):
+                    video_embeds = self.visual(pixel_values_videos,
+                                               grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
