@@ -403,10 +403,15 @@ if flashinfer_comm is not None:
         8: MiB // 2,  # 512KB
     }
 
-    _FI_MAX_SIZES.update({
-        int(k): int(float(v) * MiB)
-        for k, v in envs.VLLM_FLASHINFER_FUSION_THRESHOLDS_MB.items()
-    })
+    try:
+        _FI_MAX_SIZES.update({
+            int(k): int(float(v) * MiB)
+            for k, v in envs.VLLM_FLASHINFER_FUSION_THRESHOLDS_MB.items()
+        })
+    except Exception as e:
+        raise ValueError(
+            f"Failed to parse VLLM_FLASHINFER_FUSION_THRESHOLDS_MB: {e}"
+        ) from e
 
     # opt for a more conservative default value
     # when world size is not in _FI_MAX_SIZES
