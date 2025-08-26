@@ -20,8 +20,16 @@ class CustomAllreduceProtocol(Protocol):
     """Protocol for custom allreduce implementations. 
     used just to bypass mypy error"""
 
+    disabled: bool = True
+
     def __init__(self, group: ProcessGroup,
                  device: Union[int, str, torch.device]) -> None:
+        ...
+
+    def should_custom_ar(self, inp: torch.Tensor):
+        ...
+
+    def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
         ...
 
 
@@ -38,7 +46,8 @@ def dispatch_custom_allreduce() -> type[CustomAllreduceProtocol]:
     """Dispatch the custom allreduce implementation based on the platform."""
     if is_rocm_aiter_custom_allreduce_enabled():
         from aiter.dist.custom_all_reduce import CustomAllreduce
-        logger.info("Using aiter.dist.custom_all_reduce for ROCm platform")
+        logger.info_once(
+            "Using aiter.dist.custom_all_reduce for ROCm platform")
     else:
         from vllm.distributed.device_communicators.custom_all_reduce import (  # noqa: E501
             CustomAllreduce)
@@ -82,7 +91,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
-        self.ca_comm: Optional[CustomAllreduce] = None  # type: ignore
+        self.ca_comm: Optional[CustomAllreduceProtocol] = None
         self.qr_comm: Optional[QuickAllReduce] = None
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
