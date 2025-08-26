@@ -80,11 +80,17 @@ def canon_value(x):
 
     # Unsupported type
     try:
-        import logging
-        logging.getLogger(__name__).debug("canon_value: unsupported type '%s'",
-                                          type(x).__name__)
+        from vllm.logger import init_logger
+        init_logger(__name__).debug("canon_value: unsupported type '%s'",
+                                    type(x).__name__)
     except Exception:
-        pass
+        try:
+            import logging
+            logging.getLogger(__name__).debug(
+                "canon_value: unsupported type '%s'",
+                type(x).__name__)
+        except Exception:
+            pass
     raise TypeError
 
 
