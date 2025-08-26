@@ -82,8 +82,7 @@ class Scheduler(SchedulerInterface):
         self.connector = None
         if self.vllm_config.kv_transfer_config is not None:
             self.connector = KVConnectorFactory.create_connector(
-                config=self.vllm_config,
-                role=KVConnectorRole.SCHEDULER)
+                config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -368,7 +367,7 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens))
-                    
+
                     # Total computed tokens (local + external).
                     num_computed_tokens = (num_new_local_computed_tokens +
                                            num_external_computed_tokens)
@@ -429,19 +428,26 @@ class Scheduler(SchedulerInterface):
                                               == 0 else
                                               self.num_lookahead_tokens)
 
-                # if self.connector is not None and num_external_computed_tokens > 0:
-                if False:
+                if all([
+                        self.connector is not None,
+                        num_external_computed_tokens > 0
+                ]):
                     # Since external computed tokens can be very large,
-                    # We want to only allocate tokens inside the sliding window.
-                    # This is done by `allocate_slots_and_remove_unnecessary_blocks`.
-                    new_blocks = self.kv_cache_manager.allocate_slots_and_remove_unnecessary_blocks(
-                        request,
-                        num_external_computed_tokens,
-                        num_new_local_computed_tokens,
-                        new_computed_blocks,
-                        delay_cache_blocks=load_kv_async,
-                        chunk_size=self.max_num_scheduled_tokens,
-                    )
+                    # We want to only allocate tokens inside the sliding
+                    # window. This is done by
+                    # `allocate_slots_and_remove_unnecessary_blocks`.
+                    # FIXME(Kuntai): need to handle rollback when allocation
+                    # fails.
+                    manager = self.kv_cache_manager
+                    new_blocks = (
+                        manager.allocate_slots_and_remove_unnecessary_blocks(
+                            request,
+                            num_external_computed_tokens,
+                            num_new_local_computed_tokens,
+                            new_computed_blocks,
+                            delay_cache_blocks=load_kv_async,
+                            chunk_size=self.max_num_scheduled_tokens,
+                        ))
                     if new_blocks is None:
                         # The request cannot be scheduled.
                         break
@@ -1153,7 +1159,8 @@ class Scheduler(SchedulerInterface):
         if self.connector is None:
             return False, None
 
-        blocks = self.kv_cache_manager.coordinator.get_blocks(request.request_id)
+        blocks = self.kv_cache_manager.coordinator.get_blocks(
+            request.request_id)
         return self.connector.request_finished(request, blocks)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
