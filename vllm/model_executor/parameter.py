@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Hashable
 from fractions import Fraction
 from typing import Callable, Optional, Union
+from weakref import WeakValueDictionary
 
 import torch
 from torch.nn import Parameter
@@ -376,25 +378,35 @@ class BlockQuantScaleParameter(_ColumnvLLMParameter, RowvLLMParameter):
     pass
 
 
-class PartitionedLinearWeightParameter(BasevLLMParameter):
+class SharedWeightParameter(BasevLLMParameter):
     """
-    Parameter for weights whose partitions (shards) must be separate tensors.
+    Parameter for weights with many shared tensors across a model
 
     For example, when applying transforms to the "gate" and "up" partitions of
     `MergedColumnParallelLinear`, the tranform weights must stay separate
     tensors in order to allow for tensor memory sharing between layers.
     """
+    # global registry for sharing tensors based on passed `data_key`
+    # this dict holds weaksrefs to avoid memory leak after model cleanup
+    tensors_registry: WeakValueDictionary = WeakValueDictionary()
+
+    # local container for strong references to shared tensors
+    # this set compensates for the fact that torch.nn.Parameter
+    # and Parameter subclasses do not hold reliable references to tensors
+    local_tensors: set[torch.Tensor]
+
+    # dictionary mapping partition indices to associated parameters
     partitions: dict[int, Union[ModelWeightParameter, Parameter]]
 
     def __new__(cls, **kwargs):
-        instance = super().__new__(cls, data=None, **kwargs)
-        return instance
+        return super().__new__(cls, data=None, **kwargs)
 
     def __init__(self, input_dim: int = 1, output_dim: int = 0, **kwargs):
         weight_loader: Callable = kwargs.get(
             "weight_loader")  # type: ignore[assignment]
         super().__init__(data=None, weight_loader=weight_loader)
 
+        self.local_tensors = set()
         self.partitions = {}
         self.kwargs = {
             "input_dim": input_dim,
@@ -409,9 +421,30 @@ class PartitionedLinearWeightParameter(BasevLLMParameter):
             raise NotImplementedError(f"{self.__class__.__name__} does not "
                                       "currently support tensor parallelism")
 
-    def add_partition(self, index: int, data: torch.Tensor):
+    def add_partition(self, index: int, data_key: Hashable, *args, **kwargs):
+        """
+        Add a partition to the weight parameter. Partitions whose `data_key`
+        is the same will share tensor data
+
+        :param index: index of partition to add
+        :param data_key: hashable key used to key shared tensors
+        :param *args: arguments for `torch.empty`
+        :param **kwargs: keyword arguments for `torch.empty`
+        """
+        # load (shared) tensor using `data_key`
+        if data_key not in self.tensors_registry:
+            data = torch.empty(*args, **kwargs)
+            self.tensors_registry[data_key] = data
+        else:
+            data = self.tensors_registry[data_key]
+
+        # create associated model parameter
         self.partitions[index] = ModelWeightParameter(
             data=data, **self.kwargs)  # type: ignore[arg-type]
+
+        # hold local reference, since ModelWeightParameter does not
+        # see https://github.com/pytorch/pytorch/issues/75932
+        self.local_tensors.add(data)
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
         assert len(self.partitions) == 1 and 0 in self.partitions

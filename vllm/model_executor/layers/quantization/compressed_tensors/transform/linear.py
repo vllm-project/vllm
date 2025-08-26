@@ -58,7 +58,7 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
             "weight_loader")  # type: ignore[assignment]
 
         # HACK: UnquantizedLinearMethod does not support weight loader v2, but
-        # transforms (specifically PartitionedLinearWeightParameter) requires
+        # transforms (specifically SharedWeightParameter) requires
         # weight loader v2. Until UnquantizedLinearMethod supports v2, we must
         # hack around this by getting weight loader v1 so ULM can load correctly
         quant_method_name = self.quant_method.__class__.__name__
