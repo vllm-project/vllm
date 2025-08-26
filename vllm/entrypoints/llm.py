@@ -186,7 +186,7 @@ class LLM:
                                            CompilationConfig]] = None,
         logits_processors: Optional[list[Union[str,
                                                type[LogitsProcessor]]]] = None,
-        **kwargs,
+        **kwargs: object,
     ) -> None:
         """LLM constructor."""
 
