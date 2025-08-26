@@ -1270,6 +1270,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if should_sync_mrope_positions:
             self._calc_mrope_positions(scheduler_output)
+            self.mrope_positions.copy_to_gpu()
 
         return mm_embeds
 
