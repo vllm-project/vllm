@@ -5,12 +5,11 @@ from typing import Optional
 
 import torch
 
-from vllm import envs
+import vllm.envs as envs
 from vllm.model_executor.custom_op import CustomOp
 
 from .common import apply_rotary_emb_dispatch, apply_rotary_emb_torch
-from .rocm_aiter_rope_ops import is_rocm_rotary_embedding_enabled
-
+from .rocm_aiter_rope_ops import is_rocm_rotary_embedding_enabled, is_rocm_triton_rotary_embedding_enabled
 
 @CustomOp.register("rotary_embedding")
 class RotaryEmbedding(CustomOp):
@@ -38,6 +37,7 @@ class RotaryEmbedding(CustomOp):
         self.cos_sin_cache: torch.Tensor
         self.register_buffer("cos_sin_cache", cache, persistent=False)
         self.is_rocm_aiter_enabled = is_rocm_rotary_embedding_enabled()
+        self.is_rocm_aiter_triton_enabled = is_rocm_triton_rotary_embedding_enabled()
 
     def _compute_inv_freq(self, base: float) -> torch.Tensor:
         """Compute the inverse frequency."""
@@ -110,8 +110,8 @@ class RotaryEmbedding(CustomOp):
                                                        dtype=query.dtype)
 
         num_tokens = positions.numel()
-        if envs.VLLM_USE_AITER_TRITON_ROPE and num_tokens <= 128:
-            import aiter.ops.triton.rope as ops
+
+        if envs.VLLM_USE_AITER_TRITON_ROPE:
             assert key is not None
             cos, sin = self.cos_sin_cache.chunk(2, dim=-1)
             query_shape = query.shape
@@ -120,30 +120,20 @@ class RotaryEmbedding(CustomOp):
             key = key.view(num_tokens, -1, self.head_size)
             query_ = query[..., :self.rotary_dim]
             key_ = key[..., :self.rotary_dim]
+            rotate_style = 0 if self.is_neox_style else 1
+            positions = positions.view(*query.shape[:1])
             if offsets is not None:
                 offsets = offsets.view(*query.shape[:1])
-                ops.rope_cached_thd_positions_offsets_2c_fwd_inplace(
-                    query_,
-                    key_,
-                    cos,
-                    sin,
-                    positions,
-                    offsets,
-                    0,
-                    True,
-                    False,
-                )
-            else:
-                ops.rope_cached_thd_positions_2c_fwd_inplace(
-                    query_,
-                    key_,
-                    cos,
-                    sin,
-                    positions,
-                    0,
-                    True,
-                    False,
-                )
+            torch.ops.vllm.rocm_aiter_rotary_emb_with_key_forward_triton(
+                positions,
+                sin,
+                cos,
+                query_,
+                key_,
+                offsets,
+                rotate_style,
+                False,
+            )
             query = query.view(query_shape)
             key = key.view(key_shape)
         else:
@@ -173,7 +163,9 @@ class RotaryEmbedding(CustomOp):
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         # currently only rotary embedding ops from AITER package are
         # supported for HiP forward.
-        if self.is_rocm_aiter_enabled:
+        if self.is_rocm_aiter_triton_enabled:
+            return self.forward_cuda(positions, query, key, offsets)
+        elif self.is_rocm_aiter_enabled:
             return self.forward_hip_rocm_aiter(positions, query, key, offsets,
                                                is_nope_first)
         return self.forward_native(positions, query, key, offsets)

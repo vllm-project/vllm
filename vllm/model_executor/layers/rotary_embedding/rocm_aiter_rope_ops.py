@@ -13,6 +13,9 @@ from vllm.utils import direct_register_custom_op
 def is_rocm_rotary_embedding_enabled() -> bool:
     return (current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER)
 
+def is_rocm_triton_rotary_embedding_enabled() -> bool:
+    return (current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER and envs.VLLM_USE_AITER_TRITON_ROPE)
+
 
 def rocm_aiter_rotary_emb_without_key_forward_hip_impl(
     positions: torch.Tensor,
@@ -123,5 +126,66 @@ if is_rocm_rotary_embedding_enabled():
         op_func=rocm_aiter_rotary_emb_without_key_forward_hip_impl,
         mutates_args=["query"],
         fake_impl=rocm_aiter_rotary_emb_without_key_forward_hip_fake,
+        dispatch_key=current_platform.dispatch_key,
+    )
+
+
+
+def rocm_aiter_rotary_emb_with_key_forward_triton_impl(
+    positions: torch.Tensor,
+    sin: torch.Tensor,
+    cos: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    offsets: Optional[torch.Tensor] = None,
+    rotate_style: int = 0,
+    is_nope_first: bool = False,
+) -> None:
+    import aiter.ops.triton.rope as ops
+    if offsets is None:
+        ops.rope_cached_thd_positions_2c_fwd_inplace(
+            query,
+            key,
+            cos,
+            sin,
+            positions,
+            rotate_style,
+            reuse_freqs_front_part=True,
+            nope_first=is_nope_first,
+        )
+    else:
+        ops.rope_cached_thd_positions_offsets_2c_fwd_inplace(
+            query,
+            key,
+            cos,
+            sin,
+            positions,
+            offsets,
+            rotate_style,
+            reuse_freqs_front_part=True,
+            nope_first=is_nope_first,
+        )
+
+
+def rocm_aiter_rotary_emb_with_key_forward_triton_fake(
+    positions: torch.Tensor,
+    sin: torch.Tensor,
+    cos: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    offsets: Optional[torch.Tensor] = None,
+    rotate_style: int = 0,
+    is_nope_first: bool = False,
+) -> None:
+    pass
+
+
+if is_rocm_triton_rotary_embedding_enabled():
+
+    direct_register_custom_op(
+        op_name="rocm_aiter_rotary_emb_with_key_forward_triton",
+        op_func=rocm_aiter_rotary_emb_with_key_forward_triton_impl,
+        mutates_args=["key", "query"],
+        fake_impl=rocm_aiter_rotary_emb_with_key_forward_triton_fake,
         dispatch_key=current_platform.dispatch_key,
     )
