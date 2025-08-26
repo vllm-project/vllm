@@ -353,7 +353,7 @@ class LlamaModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.aux_hidden_state_layers: tuple[int] = tuple()
+        self.aux_hidden_state_layers = tuple[int, ...]()
 
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
@@ -553,10 +553,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int]:
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.model.layers)
         return (2, num_layers // 2, num_layers - 3)
 
