@@ -204,6 +204,7 @@ def initialize_kv_cache_for_kv_sharing(
     kv_caches: dict[str, torch.Tensor],
     # Optional for now to avoid breaking TPU
     attn_groups: Optional[list[list[AttentionGroup]]] = None,
+    runner_only_attn_layers: Optional[set[str]] = None,
 ) -> None:
     """
     Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
@@ -250,6 +251,9 @@ def initialize_kv_cache_for_kv_sharing(
             attn_groups[kv_cache_group_idx][attn_group_idx].layer_names.append(
                 layer_name)
 
+        if runner_only_attn_layers is not None:
+            runner_only_attn_layers.add(layer_name)
+
 
 def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
@@ -294,3 +298,32 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         # NOTE: Use list because of v0 PP virtual engine.
         forward_context[layer_name].kv_cache = [kv_cache]
+
+
+class CpuGpuBuffer:
+
+    def __init__(
+        self,
+        *args,
+        dtype: torch.dtype,
+        device: torch.device,
+        pin_memory: bool,
+    ):
+        self.cpu = torch.zeros(*args,
+                               dtype=dtype,
+                               device="cpu",
+                               pin_memory=pin_memory)
+        self.np = self.cpu.numpy()
+        self.gpu = self.cpu.to(device)
+
+    def copy_to_gpu(self, n: Optional[int] = None) -> None:
+        if n is None:
+            return self.gpu.copy_(self.cpu, non_blocking=True)
+        return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
+
+    def copy_to_cpu(self, n: Optional[int] = None) -> None:
+        """NOTE: Because this method is non-blocking, explicit synchronization
+        is needed to ensure the data is copied to CPU."""
+        if n is None:
+            return self.cpu.copy_(self.gpu, non_blocking=True)
+        return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
