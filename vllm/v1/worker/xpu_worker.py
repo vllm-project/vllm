@@ -153,11 +153,9 @@ class XPUWorker(Worker):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
 
-        ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
-        ENV_LOCAL_WORLD_SIZE = os.getenv("LOCAL_WORLD_SIZE",
-                                         str(self.parallel_config.world_size))
-        os.environ["CCL_ATL_TRANSPORT"] = ENV_CCL_ATL_TRANSPORT
-        os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
+        os.environ.setdefault("CCL_ATL_TRANSPORT", "ofi")
+        os.environ.setdefault("LOCAL_WORLD_SIZE",
+                              str(self.parallel_config.world_size))
         os.environ["LOCAL_RANK"] = str(self.local_rank)
 
         init_worker_distributed_environment(self.vllm_config, self.rank,
