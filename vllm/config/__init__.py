@@ -523,7 +523,7 @@ class ModelConfig:
         from vllm.config.utils import hash_items_sha256 as _hash_sha256
 
         # Default-include; exclude only fields that don't change the compiled
-        # graph or are unstable. See PR #23134 for context.
+        # graph or are unstable. See RFC #16501.
         MODEL_EXCLUDE_FROM_HASH = {
             "tokenizer",
             "hf_config",  # hash content via JSON below
@@ -541,49 +541,23 @@ class ModelConfig:
             "hf_token",
             "hf_config_path",
         }
-
         # Build base items from declared fields using the shared utility
         items: list[tuple[str, Any]] = _build_items(self,
                                                     MODEL_EXCLUDE_FROM_HASH)
-
-        # Hash hf_config; fallback to stable subset
+        # Hash hf_config by content; if JSON export is unavailable, include a
+        # minimal stable subset.
         hf = getattr(self, "hf_config", None)
         if hf is not None:
-            # Prefer to_dict for breadth and sorted JSON for stability.
-            to_dict = getattr(hf, "to_dict", None)
-
-            if callable(to_dict):
-                from contextlib import suppress
-                with suppress(Exception):
-                    hf_dict = to_dict()
-                    items.append((
-                        "hf_config_dict_json",
-                        json.dumps(hf_dict, sort_keys=True, default=str),
-                    ))
-
-            # Fallback to to_json_string if available.
-            if not any(k == "hf_config_dict_json" for k, _ in items):
-                from contextlib import suppress
-                with suppress(Exception):
-                    items.append((
-                        "hf_config_json",
-                        hf.to_json_string(),
-                    ))
-
-            # Last fallback: minimal, stable discriminator to avoid collisions
-            # without over-fragmenting cache keys.
-            if not any(k in ("hf_config_dict_json", "hf_config_json")
-                       for k, _ in items):
-                minimal = {
-                    "_class":
-                    f"{hf.__class__.__module__}.{hf.__class__.__name__}",
-                    "model_type": getattr(hf, "model_type", None),
-                }
+            try:
+                items.append(("hf_config_json", hf.to_json_string()))
+            except (AttributeError, TypeError, ValueError):
                 items.append((
-                    "hf_config_minimal_json",
-                    json.dumps(minimal, sort_keys=True, default=str),
+                    "hf_config_fallback",
+                    {
+                        "model_type": getattr(hf, "model_type", None),
+                        "architectures": getattr(hf, "architectures", None),
+                    },
                 ))
-
         return _hash_sha256(items)
 
     def __post_init__(self) -> None:
@@ -2525,13 +2499,22 @@ class LoRAConfig:
 
     def compute_hash(self) -> str:
         """
+        WARNING: Whenever a new field is added to this config,
+        ensure that it is included in the factors list if
+        it affects the computation graph.
+
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
+
         Opt-out: default-include declared fields; keep a tiny exclude set;
         normalize types; keep MD5 for compatibility.
         """
         from vllm.config.utils import build_opt_out_items as _build_items
 
         EXCLUDE_FROM_HASH = {
-            # Derived/runtime counters or toggles not affecting compiled shapes
             # (none at present, placeholder to keep policy explicit)
         }
 
@@ -3474,6 +3457,12 @@ class VllmConfig:
         from vllm import __version__
         vllm_factors.append(__version__)
         vllm_factors.append(envs.VLLM_USE_V1)
+        # Include environment hash (opt-out) so backend decisions
+        # driven by env vars are reflected in the cache key.
+        try:
+            vllm_factors.append(envs.compute_hash())
+        except Exception:
+            vllm_factors.append("env_hash_unavailable")
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
         else:
