@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 
@@ -13,14 +13,24 @@ from vllm.utils import next_power_of_2
 
 class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
-    def __init__(self, moe: FusedMoEConfig, layer: Any):
+    def __init__(
+        self,
+        moe: FusedMoEConfig,
+        gemm1_alpha,
+        gemm1_beta,
+        gemm1_clamp_limit,
+        w13_bias,
+        w2_bias,
+        max_capture_size,
+    ):
         super().__init__(moe.quant_config)
         self.moe = moe
-        self.gemm1_alpha = layer.gemm1_alpha
-        self.gemm1_beta = layer.gemm1_beta
-        self.gemm1_clamp_limit = layer.gemm1_clamp_limit
-        self.w13_bias = layer.w13_bias
-        self.w2_bias = layer.w2_bias
+        self.gemm1_alpha = gemm1_alpha
+        self.gemm1_beta = gemm1_beta
+        self.gemm1_clamp_limit = gemm1_clamp_limit
+        self.w13_bias = w13_bias
+        self.w2_bias = w2_bias
+        self.max_capture_size = max_capture_size
 
     @property
     def activation_formats(
@@ -33,7 +43,7 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return True
 
     def supports_expert_map(self) -> bool:
-        return False
+        return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -178,6 +188,8 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             True,
             "output":
             output,
+            "tune_max_num_tokens":
+            self.max_capture_size,
         }
 
         from flashinfer import trtllm_fp4_block_scale_routed_moe

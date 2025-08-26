@@ -462,7 +462,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         else:
             if should_use_flashinfer_mxfp4():
                 # B200 code-path
-                return TrtLlmGenExperts(moe, layer)
+                kwargs = {
+                    "gemm1_alpha": layer.gemm1_alpha,
+                    "gemm1_beta": layer.gemm1_beta,
+                    "gemm1_clamp_limit": layer.gemm1_clamp_limit,
+                    "w13_bias": layer.w13_bias,
+                    "w2_bias": layer.w2_bias,
+                    "max_capture_size": self.max_capture_size,
+                }
+                return TrtLlmGenExperts(moe, **kwargs)
             else:
                 # Use matmul_ogs from triton_kernels here!
                 raise NotImplementedError(
