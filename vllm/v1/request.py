@@ -121,6 +121,11 @@ class Request:
             self.get_hash_new_full_blocks = partial(block_hasher, self)
             self.block_hashes = self.get_hash_new_full_blocks()
 
+        self.token_ids_of_cp_sp = None
+        self.num_blocks_of_cp_sp = None
+        self.num_computed_tokens_of_cp_sp = None
+        self.kv_rank = (0, 0)
+
     @classmethod
     def from_engine_core_request(
         cls, request: EngineCoreRequest,

@@ -615,6 +615,10 @@ class Scheduler(SchedulerInterface):
         new_block_ids: list[Optional[tuple[list[int], ...]]] = []
         num_computed_tokens: list[int] = []
 
+        # cp param
+        kv_rank: list[tuple[int]] = []
+        num_computed_tokens_of_cp_sp: list[list[list[int]]] = []
+
         use_connector = self.connector is not None
         for req in itertools.chain(running_reqs, resumed_reqs):
             req_id = req.request_id
@@ -638,6 +642,8 @@ class Scheduler(SchedulerInterface):
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True))
             num_computed_tokens.append(req.num_computed_tokens)
+            kv_rank.append(req.kv_rank)
+            num_computed_tokens_of_cp_sp.append(req.num_computed_tokens_of_cp_sp)
         # Because resumed_reqs is usually empty, it is more efficient to do
         # in-place appending so that we don't need to allocate a new list.
         resumed_from_preemption = [False] * len(running_reqs)
@@ -649,6 +655,8 @@ class Scheduler(SchedulerInterface):
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
+            kv_rank=kv_rank,
+            num_computed_tokens_of_cp_sp=num_computed_tokens_of_cp_sp,
         )
 
     def _try_schedule_encoder_inputs(

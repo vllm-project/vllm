@@ -32,6 +32,7 @@ class NewRequestData:
     block_ids: tuple[list[int], ...]
     num_computed_tokens: int
     lora_request: Optional[LoRARequest]
+    num_computed_tokens_of_cp_sp: Optional[list[list[int]]]
 
     @classmethod
     def from_request(
@@ -50,6 +51,7 @@ class NewRequestData:
             block_ids=block_ids,
             num_computed_tokens=request.num_computed_tokens,
             lora_request=request.lora_request,
+            num_computed_tokens_of_cp_sp=request.num_computed_tokens_of_cp_sp,
         )
 
     def __repr__(self):
@@ -93,6 +95,8 @@ class CachedRequestData:
     new_token_ids: list[list[int]]
     new_block_ids: list[Optional[tuple[list[int], ...]]]
     num_computed_tokens: list[int]
+    kv_rank: list[tuple[int]]
+    num_computed_tokens_of_cp_sp: list[list[list[int]]]
 
     @property
     def num_reqs(self) -> int:
@@ -106,6 +110,8 @@ class CachedRequestData:
             new_token_ids=[],
             new_block_ids=[],
             num_computed_tokens=[],
+            kv_rank=[],
+            num_computed_tokens_of_cp_sp=[],
         )
 
 

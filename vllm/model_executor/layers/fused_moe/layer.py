@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size,
+                              get_context_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -759,6 +760,7 @@ class FusedMoE(CustomOp):
         tp_size: Optional[int] = None,
         ep_size: Optional[int] = None,
         dp_size: Optional[int] = None,
+        cp_size: Optional[int] = None,
         prefix: str = "",
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
@@ -778,12 +780,15 @@ class FusedMoE(CustomOp):
                     get_tensor_model_parallel_world_size())
         dp_size_ = (dp_size
                     if dp_size is not None else get_dp_group().world_size)
+        cp_size_ = (cp_size
+                    if cp_size is not None else get_context_model_parallel_world_size())
 
         vllm_config = get_current_vllm_config()
         self.moe_parallel_config: FusedMoEParallelConfig = (
             FusedMoEParallelConfig.make(
                 tp_size_=tp_size_,
                 dp_size_=dp_size_,
+                cp_size_=cp_size_,
                 vllm_parallel_config=vllm_config.parallel_config))
 
         self.global_num_experts = num_experts + num_redundant_experts

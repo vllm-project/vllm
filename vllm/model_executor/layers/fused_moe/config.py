@@ -10,7 +10,7 @@ from compressed_tensors.quantization import (QuantizationArgs,
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig
-from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank
+from vllm.distributed import get_dp_group, get_tensor_model_parallel_rank, get_context_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -163,9 +163,11 @@ class FusedMoEQuantConfig:
 @dataclass
 class FusedMoEParallelConfig:
     tp_size: int
+    cp_size: int
     dp_size: int
     ep_size: int
     tp_rank: int
+    cp_rank: int
     dp_rank: int
     ep_rank: int
 
@@ -197,7 +199,7 @@ class FusedMoEParallelConfig:
                 and envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput")
 
     @staticmethod
-    def make(tp_size_: int, dp_size_: int,
+    def make(tp_size_: int, dp_size_: int, cp_size_: int,
              vllm_parallel_config: ParallelConfig) -> "FusedMoEParallelConfig":
         """
         Determine MoE parallel configuration. Based on the input `tp_size_`,
@@ -278,16 +280,20 @@ class FusedMoEParallelConfig:
             tp_rank = dp_rank * tp_size_ + tp_rank
             return tp_size, tp_rank
 
-        use_ep = (dp_size_ * tp_size_ > 1
+        use_ep = (dp_size_ * tp_size_ * cp_size_ > 1
                   and vllm_parallel_config.enable_expert_parallel)
 
         dp_size = dp_size_
         dp_rank = get_dp_group().rank_in_group if dp_size > 1 else 0
         tp_size, tp_rank = flatten_tp_across_dp(dp_rank)
+        cp_size = cp_size_
+        cp_rank = get_context_model_parallel_rank() if cp_size_ > 1 else 0
 
         if not use_ep:
             return FusedMoEParallelConfig(tp_size=tp_size,
                                           tp_rank=tp_rank,
+                                          cp_size=cp_size,
+                                          cp_rank=cp_rank,
                                           dp_size=dp_size,
                                           dp_rank=dp_rank,
                                           ep_size=1,
@@ -297,10 +303,12 @@ class FusedMoEParallelConfig:
         assert use_ep
         # In EP, each device owns a set of experts fully. There is no tensor
         # parallel update tp_size, tp_rank, ep_size and ep_rank to reflect that.
-        ep_size = tp_size
-        ep_rank = tp_rank
+        ep_size = tp_size * cp_size
+        ep_rank = tp_rank + tp_size * cp_rank
         return FusedMoEParallelConfig(tp_size=1,
                                       tp_rank=0,
+                                      cp_size=1,
+                                      cp_rank=0,
                                       dp_size=dp_size,
                                       dp_rank=dp_rank,
                                       ep_size=ep_size,
