@@ -160,7 +160,7 @@ class MoeWNA16Config(QuantizationConfig):
             else:
                 raise ValueError("moe_wna16 only support gptq and awq.")
         elif isinstance(layer, FusedMoE):
-            return MoeWNA16Method(self, layer)
+            return MoeWNA16Method(self, layer.moe_config)
         return None
 
 
