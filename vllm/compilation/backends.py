@@ -294,13 +294,12 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
 
     def __init__(self, module: torch.fx.GraphModule,
                  compile_submod_names: list[str], vllm_config: VllmConfig,
-                 graph_pool, vllm_backend: "VllmBackend"):
+                 vllm_backend: "VllmBackend"):
         super().__init__(module)
         from torch._guards import detect_fake_mode
         self.fake_mode = detect_fake_mode()
         self.compile_submod_names = compile_submod_names
         self.compilation_config = vllm_config.compilation_config
-        self.graph_pool = graph_pool
         self.vllm_config = vllm_config
         self.vllm_backend = vllm_backend
         # When True, it annoyingly dumps the torch.fx.Graph on errors.
@@ -359,7 +358,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                     runnable=piecewise_backend,
                     vllm_config=self.vllm_config,
                     runtime_mode=CUDAGraphMode.PIECEWISE,
-                    graph_pool=self.graph_pool,
                     cudagraph_options=CUDAGraphOptions(
                         debug_log_enable=piecewise_backend.is_first_graph,
                         gc_disable=not piecewise_backend.is_first_graph,
@@ -405,7 +403,6 @@ class VllmBackend:
 
     vllm_config: VllmConfig
     compilation_config: CompilationConfig
-    graph_pool: Any
     _called: bool = False
     # the graph we compiled
     graph: fx.GraphModule
@@ -587,7 +584,7 @@ class VllmBackend:
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
         PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
-                                    self.vllm_config, self.graph_pool,
+                                    self.vllm_config,
                                     self).run(*example_inputs)
 
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")
