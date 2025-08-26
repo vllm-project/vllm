@@ -69,11 +69,11 @@ class CompilerInterface:
     ) -> tuple[Optional[Callable], Optional[Any]]:
         """
         Compile the graph with the given example inputs and compiler config,
-        with a runtime shape. If the `compile_range` is None, it means
+        with a range. If the `compile_range` is None, it means
         the `example_inputs` have a dynamic shape. Otherwise, the
         `compile_range` specifies the range of the inputs, 
         it could be concrete size, e.g. (4, 4).
-        Right now we only support one variable shape for all inputs,
+        Right now we only support one variable range of shapes for all inputs,
          which is the batchsize (number of tokens) during inference.
 
         Dynamo will make sure `graph(*example_inputs)` is valid.
@@ -465,7 +465,7 @@ class InductorAdaptor(CompilerInterface):
              graph: fx.GraphModule,
              example_inputs: list[Any],
              graph_index: int,
-             runtime_shape: Optional[int] = None) -> Callable:
+             compile_range: Optional[tuple[int, int]] = None) -> Callable:
         assert isinstance(handle, tuple)
         assert isinstance(handle[0], str)
         assert isinstance(handle[1], str)
@@ -567,7 +567,7 @@ class EagerAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        runtime_shape: Optional[int] = None,
+        compile_range: Optional[tuple[int, int]] = None,
         key: Optional[str] = None,
     ) -> tuple[Optional[Callable], Optional[Any]]:
         compilation_counter.num_eager_compiles += 1
