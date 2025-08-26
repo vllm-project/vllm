@@ -147,7 +147,6 @@ class LlamaModel(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         input_embeds = self.embed_tokens(input_ids)
         assert hidden_states.shape[-1] == input_embeds.shape[-1]
-
         residual = None
         hidden_states, residual = self.layers[0](
             positions,

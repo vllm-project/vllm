@@ -372,7 +372,7 @@ class EagleProposer:
                                                     dtype=torch.int32),
                 num_reqs=batch_size,
                 num_actual_tokens=batch_size,
-                max_query_len=1,
+                max_query_len=attn_metadata.max_query_len,
                 max_seq_len=attn_metadata.max_seq_len,
                 block_table_tensor=block_table_tensor[:batch_size],
                 slot_mapping=attn_metadata.slot_mapping,
