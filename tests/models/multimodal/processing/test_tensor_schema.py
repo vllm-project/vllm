@@ -226,4 +226,6 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
         for modality, _, mm_kwargs in create_batched_mm_kwargs(
                 model_config, processor):
             for method_name in inputs_parse_methods:
+                print(f"Testing `{method_name}` with modality={modality} "
+                      f"and mm_kwargs{list(mm_kwargs.keys())}")
                 getattr(model, method_name)(modality=modality, **mm_kwargs)
