@@ -64,8 +64,8 @@ class DeepSeekV31ToolParser(ToolParser):
         if (self.tool_calls_start_token_id is None
                 or self.tool_calls_end_token_id is None):
             raise RuntimeError(
-                "DeepSeek-V3 Tool parser could not locate tool call start/end "
-                "tokens in the tokenizer!")
+                "DeepSeek-V3.1 Tool parser could not locate tool call "
+                "start/end tokens in the tokenizer!")
 
     def extract_tool_calls(
         self,
