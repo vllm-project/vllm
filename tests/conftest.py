@@ -1022,7 +1022,7 @@ class VllmRunner:
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
-        concurency_limit: Optional[int] = None,
+        concurrency_limit: Optional[int] = None,
     ) -> list[tuple[list[list[int]], list[str]]]:
         inputs = self.get_inputs(prompts,
                                  images=images,
@@ -1032,7 +1032,7 @@ class VllmRunner:
         outputs = self.llm.beam_search(inputs,
                                        BeamSearchParams(beam_width=beam_width,
                                                         max_tokens=max_tokens),
-                                       concurency_limit=concurency_limit)
+                                       concurrency_limit=concurrency_limit)
         returned_outputs = []
         for output in outputs:
             token_ids = [x.tokens for x in output.sequences]

@@ -634,7 +634,7 @@ class LLM:
         params: BeamSearchParams,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         use_tqdm: bool = False,
-        concurency_limit: Optional[int] = None,
+        concurrency_limit: Optional[int] = None,
     ) -> list[BeamSearchOutput]:
         """
         Generate sequences using beam search.
@@ -645,7 +645,7 @@ class LLM:
             params: The beam search parameters.
             lora_request: LoRA request to use for generation, if any.
             use_tqdm: Whether to use tqdm to display the progress bar.
-            concurency_limit: The maximum number of concurrent requests.
+            concurrency_limit: The maximum number of concurrent requests.
                 If None, the number of concurrent requests is unlimited.
         """
         # TODO: how does beam search work together with length penalty,
@@ -665,14 +665,14 @@ class LLM:
             length_penalty,
         )
 
-        if use_tqdm and concurency_limit is not None:
+        if use_tqdm and concurrency_limit is not None:
             logger.warning(
-                "Progress bar is not supported when using concurency_limit. "
+                "Progress bar is not supported when using concurrency_limit. "
                 "Disabling progress bar.")
             use_tqdm = False
 
-        if concurency_limit is None:
-            concurency_limit = len(prompts)
+        if concurrency_limit is None:
+            concurrency_limit = len(prompts)
 
         def create_tokens_prompt_from_beam(
                 beam: BeamSearchSequence) -> TokensPrompt:
@@ -718,8 +718,9 @@ class LLM:
                     **mm_kwargs,
                 ), )
 
-        for i in range(0, len(prompts), concurency_limit):
-            instances_batch = instances[i:i + concurency_limit]
+        for prompt_start in range(0, len(prompts), concurrency_limit):
+            instances_batch = instances[prompt_start:prompt_start +
+                                        concurrency_limit]
 
             token_iter = range(max_tokens)
             if use_tqdm:

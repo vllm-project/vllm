@@ -72,7 +72,7 @@ def test_beam_search_single_input(
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", MAX_TOKENS)
 @pytest.mark.parametrize("beam_width", BEAM_WIDTHS)
-def test_beam_search_with_concurency_limit(
+def test_beam_search_with_concurrency_limit(
     hf_runner,
     vllm_runner,
     example_prompts,
@@ -84,8 +84,8 @@ def test_beam_search_with_concurency_limit(
     # example_prompts[3] fails due to unknown reason even without concurency
     # limit.
     example_prompts = example_prompts[:3] + example_prompts[4:7]
-    concurency_limit = 2
-    assert len(example_prompts) > concurency_limit
+    concurrency_limit = 2
+    assert len(example_prompts) > concurrency_limit
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_beam_search(example_prompts, beam_width,
                                                    max_tokens)
@@ -95,7 +95,7 @@ def test_beam_search_with_concurency_limit(
             example_prompts,
             beam_width,
             max_tokens,
-            concurency_limit=concurency_limit)
+            concurrency_limit=concurrency_limit)
     correct = True
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_texts = hf_outputs[i]
