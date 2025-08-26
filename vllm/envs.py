@@ -1047,8 +1047,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE":
     lambda: int(os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")),
 
-    # Specifies the thresholds under which vllm should use flashinfer fused
-    # allreduce. The variable should be a JSON with the following format:
+    # Specifies the thresholds of the communicated tensor sizes under which
+    # vllm should use flashinfer fused allreduce. The variable should be a
+    # JSON with the following format:
     #     { <world size>: <max size in mb> }
     # Unspecified world sizes will fallback to
     #     { 2: 64, 4: 1, <everything else>: 0.5 }
