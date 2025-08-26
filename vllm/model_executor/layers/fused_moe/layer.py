@@ -358,8 +358,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 use_prepack=True,
             )
         elif current_platform.is_cpu():
+            from vllm.model_executor.layers.fused_moe import cpu_fused_moe
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                from vllm.model_executor.layers.fused_moe import cpu_fused_moe
                 from vllm.model_executor.layers.utils import (
                     check_cpu_sgl_kernel)
                 dtype_w13 = layer.w13_weight.dtype
@@ -382,7 +382,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 else:
                     layer.cpu_fused_moe = cpu_fused_moe.IPEXFusedMOE(layer)
             else:
-                raise NotImplementedError("CPU MOE only supports x86 arch.")
+                layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
 
     def apply(
         self,
