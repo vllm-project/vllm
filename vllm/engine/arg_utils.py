@@ -455,8 +455,7 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(
                 **self.compilation_config)
         if isinstance(self.eplb_config, dict):
-            self.eplb_config = EPLBConfig.from_cli(json.dumps(
-                self.eplb_config))
+            self.eplb_config = EPLBConfig(**self.eplb_config)
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -1434,15 +1433,15 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        # Need at least Ampere for now (FA support required).
-        # Skip this check if we are running on a non-GPU platform,
-        # or if the device capability is not available
-        # (e.g. in a Ray actor without GPUs).
+        # Triton v3.3 has f16 conversion regression issue on Turing and Volta,
+        # which broke fp16 inference
+        # see: https://github.com/triton-lang/triton/issues/6698
         if (current_platform.is_cuda()
-                and current_platform.get_device_capability()
-                and current_platform.get_device_capability().major < 8):
-            _raise_or_fallback(feature_name="Compute Capability < 8.0",
-                               recommend_to_remove=False)
+                and not current_platform.has_device_capability(80)
+                and model_config.dtype == torch.float16):
+            _raise_or_fallback(
+                feature_name="Compute Capability < 8.0 with FP16",
+                recommend_to_remove=False)
             return False
 
         if self.kv_cache_dtype != "auto":
