@@ -89,7 +89,7 @@ def get_hf_prompt_tokens(model_name, content, image_url):
         "role": "user",
         "content": f"{placeholder}{content}",
     }]
-    response = requests.get(image_url)
+    response = requests.get(image_url, headers={'User-Agent': 'Mozilla/5.0'})
     response.raise_for_status()
     images = [Image.open(io.BytesIO(response.content))]
 
