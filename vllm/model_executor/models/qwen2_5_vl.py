@@ -933,6 +933,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsMultiModalPruning):
 
     packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
