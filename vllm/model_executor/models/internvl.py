@@ -855,8 +855,10 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
 
     def get_video_token(self) -> Optional[str]:
         text_model_type = self.get_hf_config().get_text_config().model_type
-        if text_model_type == "qwen2":
+        if text_model_type in ("qwen2", "qwen3", "qwen3_moe"):
             return "<|video_pad|>"
+        elif text_model_type == "gpt_oss":
+            return "<|reserved_200000|>"
         return None
 
     def get_num_frames_with_most_features(
