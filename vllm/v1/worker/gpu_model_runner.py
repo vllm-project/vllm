@@ -239,7 +239,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # The batch sizes in the config are in descending order.
         self.cudagraph_batch_sizes = list(
             reversed(self.compilation_config.cudagraph_capture_sizes))
-        
+
         # Cache the device properties.
         self._init_device_properties()
 
@@ -1466,12 +1466,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
     def sync_and_slice_intermediate_tensors(
-            self, tokens_slice: slice,
-            intermediate_tensors: IntermediateTensors,
+            self, num_tokens: int, intermediate_tensors: IntermediateTensors,
             sync_self: bool) -> IntermediateTensors:
 
         assert self.intermediate_tensors is not None
-        num_tokens = tokens_slice.stop - tokens_slice.start
 
         tp = self.vllm_config.parallel_config.tensor_parallel_size
         enabled_sp = self.compilation_config.pass_config. \
@@ -1482,12 +1480,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert num_tokens % tp == 0
         is_residual_scattered = tp > 1 and enabled_sp \
             and num_tokens % tp == 0
-
-        def copy_slice(is_scattered: bool) -> slice:
-            if is_scattered:
-                return slice(tokens_slice.start // tp, tokens_slice.stop // tp)
-            else:
-                return tokens_slice
 
         # When sequence parallelism is enabled, the "residual" tensor is sharded
         # across tensor parallel ranks, so each rank only needs its own slice.
@@ -1502,7 +1494,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return IntermediateTensors({
             k:
-            v[copy_slice(k == "residual" and is_residual_scattered)]
+            v[:num_tokens // tp]
+            if k == "residual" and is_residual_scattered else v[:num_tokens]
             for k, v in self.intermediate_tensors.items()
         })
 

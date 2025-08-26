@@ -3578,6 +3578,7 @@ class VllmConfig:
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         disable_chunked_prefill_reasons: list[str] = []
+
         if self.model_config and self.model_config.pooler_config:
             pooling_type = self.model_config.pooler_config.pooling_type
             if pooling_type is None or pooling_type.lower() != "last":
