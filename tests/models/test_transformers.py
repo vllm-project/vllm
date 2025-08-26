@@ -181,10 +181,13 @@ def test_classify(
     import torch
     from transformers import AutoModelForSequenceClassification
 
+    # Seem to use slightly more memory after torch.compile in 2.8
+    # only for this model jason9693/Qwen2.5-1.5B-apeach
     with vllm_runner(model,
                      max_model_len=512,
                      dtype=dtype,
-                     model_impl="transformers") as vllm_model:
+                     model_impl="transformers",
+                     gpu_memory_utilization=0.85) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
 
