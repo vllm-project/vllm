@@ -211,7 +211,7 @@ The prefix caching support of the mamba model is work in progress. Once implemen
 
 ![Overview of Hybrid KV Cache Manager](../assets/design/hybrid_kv_cache_manager/overview.png)
 
-The [KVCacheManager][vllm.v1.core.kv_cache_manager.KVCacheManager] is organized into 3 layers:
+The `KVCacheManager` is organized into 3 layers:
 
 - **[KVCacheManager][vllm.v1.core.kv_cache_manager.KVCacheManager]**: The interface between the scheduler and kv cache management system.
 - **[KVCacheCoordinator][vllm.v1.core.kv_cache_coordinator.KVCacheCoordinator]**: coordinate per-group SingleTypeKVCacheManagers to generate the allocation result of a request. Depending on the model's configuration, one of these coordinators is chosen:
