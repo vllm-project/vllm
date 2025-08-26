@@ -299,7 +299,8 @@ def rocm_aiter_grouped_topk(
             scoring_func,
         )
 
-    topk_weights = topk_weights * routed_scaling_factor
+    if routed_scaling_factor != 1.0:
+        topk_weights = topk_weights * routed_scaling_factor
     return topk_weights, topk_ids
 
 
