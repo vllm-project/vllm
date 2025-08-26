@@ -47,11 +47,13 @@ class BatchUpdate:
     # list of generated output tokens.
     #
     # NOTE:
-    # * Added requests may replace existing requests with the same index.
-    # * Added requests should be processed before moved requests.
+    # * Added or moved requests may replace existing requests with the same
+    #   index.
+    # * Operations should be processed in the following order:
+    #   - removed, added, moved
     removed: Sequence[RemovedRequest]
-    moved: Sequence[MovedRequest]
     added: Sequence[AddedRequest]
+    moved: Sequence[MovedRequest]
 
 
 class LogitsProcessor(ABC):

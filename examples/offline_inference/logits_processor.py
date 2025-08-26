@@ -53,7 +53,7 @@ class DummyLogitsProcessor(LogitsProcessor):
     def __init__(
         self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
     ):
-        self.req_info: dict[int, SamplingParams] = {}
+        self.req_info: dict[int, int] = {}
 
     def is_argmax_invariant(self) -> bool:
         """Never impacts greedy sampling"""
@@ -63,8 +63,9 @@ class DummyLogitsProcessor(LogitsProcessor):
         process_dict_updates(
             self.req_info,
             batch_update,
-            # This function returns the LP's state based on the request details,
-            # or None if this LP does not apply to the request.
+            # This function returns the LP's per-request state based on the
+            # request details, or None if this LP does not apply to the
+            # request.
             lambda params, _, __: params.extra_args
             and (params.extra_args.get("target_token")),
         )

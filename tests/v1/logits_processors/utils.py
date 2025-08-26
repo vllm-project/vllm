@@ -8,7 +8,6 @@ from typing import Optional
 import torch
 
 from vllm.config import VllmConfig
-from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.logits_processor import (LOGITSPROCS_GROUP, BatchUpdate,
                                              LogitsProcessor)
 from vllm.v1.sample.logits_processor.builtin import process_dict_updates
@@ -45,7 +44,7 @@ class DummyLogitsProcessor(LogitsProcessor):
 
     def __init__(self, vllm_config: "VllmConfig", device: torch.device,
                  is_pin_memory: bool):
-        self.req_info: dict[int, SamplingParams] = {}
+        self.req_info: dict[int, int] = {}
 
     def is_argmax_invariant(self) -> bool:
         """Never impacts greedy sampling"""
