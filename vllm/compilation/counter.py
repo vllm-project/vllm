@@ -29,6 +29,8 @@ class CompilationCounter:
     num_compiled_artifacts_saved: int = 0
     # Number of times a model was loaded with CompilationMode.STOCK_TORCH_COMPILE
     stock_torch_compile_count: int = 0
+    # Number of piecewise graphs that will return a weakref output
+    num_weakref_output_graphs: int = 0
 
     def clone(self) -> "CompilationCounter":
         return copy.deepcopy(self)
