@@ -26,7 +26,7 @@ class MLAModules:
     q_proj: Optional[torch.nn.Module]
 
 
-@CustomOp.register("mla")
+@CustomOp.register("multi_head_latent_attention")
 class MultiHeadLatentAttention(CustomOp):
     """MLA layer.
 
