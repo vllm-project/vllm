@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 import json
 import os
 import sys
@@ -1056,8 +1055,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Unspecified world sizes will fallback to
     #     { 2: 64, 4: 1, <everything else>: 0.5 }
     "VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB":
-    lambda: json.loads(os.getenv(
-        "VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB", "{}")),
+    lambda: json.loads(
+        os.getenv("VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB", "{}")),
 
     # MoE routing strategy selector.
     # See `RoutingSimulator.get_available_strategies()` # for available
