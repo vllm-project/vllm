@@ -43,6 +43,7 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -672,20 +673,21 @@ class MiniMaxText01Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
+        self.rotary_emb = get_rope(
+            head_size=self.head_dim,
+            rotary_dim=rotary_dim,
+            max_position=max_position,
+            base=int(rope_theta),
+            is_neox_style=True,
+            dtype=torch.float32,
+        )
         return
 
     def forward(self, hidden_states: torch.Tensor, output: torch.Tensor,
                 positions: torch.Tensor, **kwargs) -> None:
-        forward_context = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        if envs.VLLM_USE_V1:
-            if attn_metadata is not None:
-                q, k = attn_metadata[f"{self.prefix}.attn"].rotary_emb(
-                    positions, q, k)
-        else:
-            q, k = attn_metadata.rotary_emb(positions, q, k)
+        q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output[:], _ = self.o_proj(attn_output)
 
@@ -992,23 +994,9 @@ class MiniMaxText01Model(nn.Module):
             self.minimax_cache = MinimaxCacheManager(
                 dtype=torch.float32, cache_shape=self.cache_shape)
 
-        rope_theta = getattr(config, "rope_theta", 10000)
         head_dim = getattr(config, "head_dim", None)
         if head_dim is None:
             head_dim = config.hidden_size // config.num_attention_heads
-        if hasattr(config, "max_model_len") and isinstance(
-                config.max_model_len, int):
-            max_position_embeddings = min(config.max_position_embeddings,
-                                          config.max_model_len)
-        self.rotary_emb = MiniMaxText01RotaryEmbedding(
-            head_dim,
-            rotary_dim=config.rotary_dim
-            if hasattr(config, "rotary_dim") else head_dim,
-            max_position=max_position_embeddings,
-            base=int(rope_theta),
-            is_neox_style=True,
-            cache_dtype=torch.float32,
-        )
 
         norm_kwargs = {}
         if hasattr(config, "rms_norm_eps"):
@@ -1092,16 +1080,6 @@ class MiniMaxText01Model(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            if attn_metadata is not None:
-                # TODO (tdoublep): this whole thing with the rotary_emb is
-                # weird. we shouldn't be passing it via attn_metadata imo.
-                if envs.VLLM_USE_V1:
-                    if isinstance(layer.self_attn, MiniMaxText01Attention):
-                        attn_metadata[layer.prefix +
-                                      ".attn"].rotary_emb = self.rotary_emb
-                else:
-                    attn_metadata.rotary_emb = self.rotary_emb
-
             _caches = None
             if not envs.VLLM_USE_V1 and isinstance(
                     layer.self_attn, MiniMaxText01LinearAttention):
@@ -1487,7 +1465,6 @@ def linear_attention(
     layer_name: str,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
-    print("layer_name: ", layer_name)
     self = forward_context.no_compile_layers[layer_name]
     self._forward(hidden_states=hidden_states,
                   output=output,
