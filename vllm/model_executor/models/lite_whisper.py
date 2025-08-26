@@ -106,51 +106,49 @@ class LiteWhisperForConditionalGeneration(WhisperForConditionalGeneration):
         """Load weights, prioritizing regular weights over low-rank reconstruction."""
         # Convert to dict for easier processing
         weight_dict = dict(weights)
-        
+
         # First, collect all existing regular weights
         final_weights = []
         processed_keys = set()
         reconstructed_count = 0
-        
+
         # Add all non-low-rank weights first
         for name, weight in weight_dict.items():
             if ".weight1" not in name and ".weight2" not in name:
                 final_weights.append((name, weight))
                 processed_keys.add(name)
-        
+
         # Now process low-rank weights - find weight1/weight2 pairs
         weight1_keys = {k for k in weight_dict.keys() if ".weight1" in k}
-        
+
         for weight1_key in weight1_keys:
             # Get corresponding weight2 key
             base_name = weight1_key.replace(".weight1", "")
             weight2_key = weight1_key.replace(".weight1", ".weight2")
             regular_key = base_name + ".weight"
-            
+
             # Skip if we already have the regular weight
             if regular_key in processed_keys:
                 continue
-                
+
             if weight2_key in weight_dict:
                 weight1 = weight_dict[weight1_key]  
                 weight2 = weight_dict[weight2_key]
-                
+
                 # Reconstruct: weight = weight1 @ weight2 (standard low-rank reconstruction)
                 reconstructed = torch.mm(weight1, weight2)
-                
-                # Apply transpose for both fc1 and fc2 based on analysis results
-                # fc1: [1280, 5120] -> [5120, 1280] (needs transpose)
-                # fc2: [5120, 1280] -> [1280, 5120] (needs transpose)
-                if "fc1" in base_name or "fc2" in base_name:
-                    reconstructed = reconstructed.T
-                
+
+                # Always transpose to match linear layer weight shape: [out_features, in_features]
+                reconstructed = reconstructed.T
+
                 final_weights.append((regular_key, reconstructed))
                 processed_keys.add(regular_key)
                 reconstructed_count += 1
-        
-        print(f"Lite-Whisper: Reconstructed {reconstructed_count} weights from low-rank decomposition")
+
+        print(f"Lite-Whisper: Reconstructed {reconstructed_count} weights" + 
+            " from low-rank decomposition")
         logger.info(f"LiteWhisper: Successfully reconstructed {reconstructed_count} weights from low-rank decomposition")
-        
+
         # Load weights using parent method
         return super().load_weights(final_weights)
 
