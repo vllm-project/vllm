@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
 import json
 
 import openai
@@ -88,7 +89,9 @@ def get_hf_prompt_tokens(model_name, content, image_url):
         "role": "user",
         "content": f"{placeholder}{content}",
     }]
-    images = [Image.open(requests.get(image_url, stream=True).raw)]
+    response = requests.get(image_url)
+    response.raise_for_status()
+    images = [Image.open(io.BytesIO(response.content))]
 
     prompt = processor.tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True)

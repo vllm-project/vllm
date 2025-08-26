@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import io
 import json
 
 import pytest
@@ -64,7 +65,9 @@ def get_hf_prompt_tokens(model_name, content, image_url):
 
     placeholder = "<|image_1|> "
     prompt = f"{placeholder}{content}"
-    images = [Image.open(requests.get(image_url, stream=True).raw)]
+    response = requests.get(image_url)
+    response.raise_for_status()
+    images = [Image.open(io.BytesIO(response.content))]
     inputs = processor(prompt, images, return_tensors="pt")
     return inputs.input_ids.shape[1]
 
