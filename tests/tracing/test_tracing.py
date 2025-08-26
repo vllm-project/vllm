@@ -79,7 +79,7 @@ def test_traces(
 ):
     with monkeypatch.context() as m:
         m.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
-
+        m.setenv("VLLM_USE_V1", "1")
         sampling_params = SamplingParams(
             temperature=0.01,
             top_p=0.1,
@@ -151,7 +151,7 @@ def test_traces_with_detailed_steps(
 ):
     with monkeypatch.context() as m:
         m.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
-
+        m.setenv("VLLM_USE_V1", "1")
         sampling_params = SamplingParams(
             temperature=0.01,
             top_p=0.1,
