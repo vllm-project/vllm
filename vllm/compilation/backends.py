@@ -455,6 +455,9 @@ class VllmBackend:
             self.compilation_config)
 
         self.no_weak_ref_output = no_weak_ref_output
+        if not self.no_weak_ref_output:
+            # used for testing purposes
+            compilation_counter.num_weakref_output_graphs += 1
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
