@@ -27,7 +27,7 @@ import math
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Any, Callable, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Callable, Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -48,7 +48,7 @@ from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors)
 from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
@@ -63,6 +63,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import flatten_2d_lists
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
@@ -74,36 +75,47 @@ from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
 _MAX_FRAMES_PER_VIDEO = 16
 
 
-class MiniCPMVImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    pixel_values: list[torch.Tensor]
+class MiniCPMVImagePixelInputs(TensorSchema):
     """
-    Shape: `(batch_size * num_images * num_slices, num_channels, height, width)`
-
-    Note that the image size may vary, so we pass it as a list
-    instead of a batched tensor.
-    """
-
-    tgt_sizes: torch.Tensor
-    """
-    Shape: `(batch_size * num_images * num_slices, 2)`
-
-    This should be in `(height, width)` format.
+    Dimensions:
+        - bns: Batch size * number of images * number of slices
+        - bn: Batch size * number of images
+        - c: Number of channels
+        - h: Height
+        - w: Width
     """
 
-    num_slices: torch.Tensor
-    """Shape: `(batch_size * num_images)`"""
+    type: Literal["pixel_values"] = "pixel_values"
+
+    # Note that the image size may vary, so we pass it as a list instead of a
+    # batched tensor.
+    pixel_values: Annotated[
+        list[torch.Tensor],
+        TensorShape("bns", "c", "h", "w", dynamic_dims={"h", "w"}),
+    ]
+    tgt_sizes: Annotated[
+        torch.Tensor,
+        TensorShape("bns", 2),  # This should be in `(height, width)` format.
+    ]
+    num_slices: Annotated[
+        torch.Tensor,
+        TensorShape("bn"),
+    ]
 
 
-class MiniCPMVImageEmbeddingInputs(TypedDict):
+class MiniCPMVImageEmbeddingInputs(TensorSchema):
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - ns: Number of slices
+        - hs: Hidden size (must match language model backbone)
+    """
+
     type: Literal["image_embeds"]
-    image_embeds: Union[torch.Tensor, list[torch.Tensor]]
-    """
-    Shape: `(batch_size * num_images, num_slices, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
-    instead of a batched tensor.
-    """
+    image_embeds: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "ns", "hs"),
+    ]
 
 
 MiniCPMVImageInputs = Union[MiniCPMVImagePixelInputs,
@@ -682,7 +694,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         placeholders = [("image", self.info.image_pattern),
                         ("video", self.info.video_pattern)]
@@ -766,6 +778,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         # and config class
         self.config = config
         self.multimodal_config = multimodal_config
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         self.version = get_version_by_config(self.config)
         self.llm = self.init_llm(vllm_config=vllm_config,
@@ -831,11 +844,6 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         pixel_values_flat = flatten_bn(flatten_2d_lists(pixel_values))
         tgt_sizes_flat = flatten_bn(flatten_2d_lists(tgt_sizes), concat=True)
-
-        if len(pixel_values_flat) != len(tgt_sizes_flat):
-            raise ValueError("Inconsistent flattened lengths, found: "
-                             f"{len(pixel_values_flat)} vs. "
-                             f"{len(tgt_sizes_flat)}")
 
         return MiniCPMVImagePixelInputs(
             type="pixel_values",
@@ -1318,9 +1326,11 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         prefix: str = "",
     ) -> nn.Module:
         quant_config = self._maybe_ignore_quant_config(quant_config)
-        model = Idefics2VisionTransformer(config.vision_config,
-                                          quant_config=quant_config,
-                                          prefix=prefix)
+        model = Idefics2VisionTransformer(
+            config.vision_config,
+            quant_config=quant_config,
+            prefix=prefix,
+            use_data_parallel=self.use_data_parallel)
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
         return model
