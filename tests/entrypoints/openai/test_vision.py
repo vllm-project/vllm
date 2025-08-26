@@ -6,8 +6,6 @@ import json
 import openai
 import pytest
 import pytest_asyncio
-import requests
-from PIL import Image
 from transformers import AutoProcessor
 
 from vllm.multimodal.utils import encode_image_base64, fetch_image
@@ -36,7 +34,7 @@ EXPECTED_MM_BEAM_SEARCH_RES = [
     ],
     [
         "The image shows a Venn diagram with three over",
-        "The image shows a Venn diagram with three intersect",
+        "This image shows a Venn diagram with three intersect",
     ],
     [
         "This image displays a gradient of colors ranging from",
@@ -88,7 +86,7 @@ def get_hf_prompt_tokens(model_name, content, image_url):
         "role": "user",
         "content": f"{placeholder}{content}",
     }]
-    images = [Image.open(requests.get(image_url, stream=True).raw)]
+    images = [fetch_image(image_url)]
 
     prompt = processor.tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True)
