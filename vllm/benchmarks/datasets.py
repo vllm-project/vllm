@@ -73,7 +73,7 @@ class SampleRequest:
     Represents a single inference request for benchmarking.
     """
 
-    prompt: Union[str, Any]
+    prompt: Union[str, list[str]]
     prompt_len: int
     expected_output_len: int
     multi_modal_data: Optional[
@@ -409,6 +409,7 @@ class RandomDataset(BenchmarkDataset):
         range_ratio: float = DEFAULT_RANGE_RATIO,
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
+        batchsize: int = 1,
         **kwargs,
     ) -> list[SampleRequest]:
 
@@ -439,6 +440,21 @@ class RandomDataset(BenchmarkDataset):
                     request_id=request_id_prefix + str(i),
                 )
             )
+        # only used for embeddings benchmark.
+        if batchsize > 1:
+            batch_requests = []
+            # Create batched requests
+            for i in range(0, num_requests, batchsize):
+                batch = requests[i : i + batchsize]
+                batch_requests.append(
+                    SampleRequest(
+                        prompt=[req.prompt for req in batch],
+                        prompt_len=sum(req.prompt_len for req in batch),
+                        expected_output_len=0,
+                        request_id=request_id_prefix + str(i // batchsize),
+                    )
+                )
+            requests = batch_requests
         return requests
 
     def get_prefix(
@@ -475,8 +491,8 @@ class RandomDataset(BenchmarkDataset):
         input_high = math.ceil(real_input_len * (1 + range_ratio))
         output_low = math.floor(output_len * (1 - range_ratio))
         output_high = math.ceil(output_len * (1 + range_ratio))
-        # Ensure the lower bound for output length is at least 1 to 
-        # prevent sampling 0 tokens. 
+        # Ensure the lower bound for output length is at least 1 to
+        # prevent sampling 0 tokens.
         output_low = max(output_low, 1)
 
         if input_low > input_high:
@@ -505,7 +521,6 @@ class RandomDataset(BenchmarkDataset):
         offsets = self._rng.integers(0, tokenizer.vocab_size, 
                                         size=num_requests)
         return input_lens, output_lens, offsets
-
 
     def generate_token_sequence(
         self,
@@ -1105,6 +1120,13 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
               "context length sampled from [input_len * (1 - range_ratio), "
               "input_len * (1 + range_ratio)]."),
     )
+    random_group.add_argument(
+        "--random-batch-size",
+        type=int,
+        default=1,
+        help=("Batch size for random sampling. "
+              "Only used for embeddings benchmark."),
+    )
 
     # random multimodal dataset options
     random_mm_group = parser.add_argument_group(
@@ -1195,8 +1217,6 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "OBS bis.: Only image sampling is supported for now."
         ),
     )
-
-
 
     hf_group = parser.add_argument_group("hf dataset options")
     hf_group.add_argument("--hf-subset",
@@ -1348,22 +1368,24 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
     else:
         # For datasets that follow a similar structure, use a mapping.
         dataset_mapping = {
-            "sharegpt":
-            lambda: ShareGPTDataset(random_seed=args.seed,
-                                    dataset_path=args.dataset_path).sample(
-                                        tokenizer=tokenizer,
-                                        num_requests=args.num_prompts,
-                                        output_len=args.sharegpt_output_len,
-                                        request_id_prefix=args.request_id_prefix,
-                                    ),
-            "burstgpt":
-            lambda: BurstGPTDataset(random_seed=args.seed,
-                                    dataset_path=args.dataset_path).
-            sample(tokenizer=tokenizer, num_requests=args.num_prompts, 
-                   request_id_prefix=args.request_id_prefix,),
-            "random":
-            lambda: RandomDataset(random_seed=args.seed,
-                                  dataset_path=args.dataset_path).sample(
+            "sharegpt": lambda: ShareGPTDataset(
+                random_seed=args.seed, dataset_path=args.dataset_path
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                output_len=args.sharegpt_output_len,
+                request_id_prefix=args.request_id_prefix,
+            ),
+            "burstgpt": lambda: BurstGPTDataset(
+                random_seed=args.seed, dataset_path=args.dataset_path
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                request_id_prefix=args.request_id_prefix,
+            ),
+            "random": lambda: RandomDataset(
+                random_seed=args.seed, dataset_path=args.dataset_path
+            ).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 prefix_len=args.random_prefix_len,
@@ -1371,6 +1393,7 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
                 output_len=args.random_output_len,
                 range_ratio=args.random_range_ratio,
                 request_id_prefix=args.request_id_prefix,
+                batchsize=args.random_batch_size,
             ),
             "random-mm":
             lambda: RandomMultiModalDataset(
