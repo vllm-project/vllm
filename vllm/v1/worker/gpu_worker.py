@@ -232,24 +232,24 @@ class Worker(WorkerBase):
             by adjusting the `gpu_memory_utilization` parameter.
         """
         GiB = lambda b: b / GiB_bytes
-        if kv_cache_memory := self.cache_config.kv_cache_memory:
+        if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
             self.model_runner.profile_run()
 
             msg = (
                 f"Initial free memory {GiB(self.init_snapshot.free_memory)} "
-                f"GiB, reserved {GiB(kv_cache_memory):.2f}GiB memory for "
-                "KV Cache as specified by kv_cache_memory config and skipped "
-                "memory profiling. This does does not respect the "
-                "gpu_memory_utilization config. Only use kv_cache_memory "
+                f"GiB, reserved {GiB(kv_cache_memory_bytes):.2f}GiB memory for "
+                "KV Cache as specified by kv_cache_memory_bytes config and "
+                "skipped memory profiling. This does does not respect the "
+                "gpu_memory_utilization config. Only use kv_cache_memory_bytes "
                 "config when you want manual control of KV cache memory "
                 "size. If OOM'ed, check the difference of initial free "
                 "memory between the current run and the previous run "
-                "where kv_cache_memory is suggested and update it "
+                "where kv_cache_memory_bytes is suggested and update it "
                 "correspondingly.")
             logger.info(msg)
-            return kv_cache_memory
+            return kv_cache_memory_bytes
 
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
@@ -276,7 +276,7 @@ class Worker(WorkerBase):
             "release GPU memory while vLLM is profiling during initialization. "
             "To fix this, ensure consistent GPU memory allocation or "
             "isolate vLLM in its own container.")
-        self.available_kv_cache_memory = self.requested_memory \
+        self.available_kv_cache_memory_bytes = self.requested_memory \
             - profile_result.non_kv_cache_memory
 
         unrequested_memory = self.init_snapshot.free_memory \
@@ -296,10 +296,10 @@ class Worker(WorkerBase):
         )
         logger.debug(profile_result)
         logger.info("Available KV cache memory: %.2f GiB",
-                    GiB(self.available_kv_cache_memory))
+                    GiB(self.available_kv_cache_memory_bytes))
         gc.collect()
 
-        return int(self.available_kv_cache_memory)
+        return int(self.available_kv_cache_memory_bytes)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
@@ -336,7 +336,7 @@ class Worker(WorkerBase):
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
 
-        if (self.cache_config.kv_cache_memory is None
+        if (self.cache_config.kv_cache_memory_bytes is None
                 and hasattr(self, "peak_activation_memory")):
             # Suggests optimal kv cache memory size if we rely on
             # memory_profiling to guess the kv cache memory size which
@@ -379,7 +379,7 @@ class Worker(WorkerBase):
                 f"requested memory, or `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_gpu_limit}` to fully "
                 f"utilize gpu memory. Current kv cache memory in use is "
-                f"{int(self.available_kv_cache_memory)} bytes.")
+                f"{int(self.available_kv_cache_memory_bytes)} bytes.")
 
             logger.info(msg)
 

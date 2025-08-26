@@ -108,13 +108,14 @@ class LLM:
             values will increase the KV cache size and thus improve the model's
             throughput. However, if the value is too high, it may cause out-of-
             memory (OOM) errors.
-        kv_cache_memory: Size of KV Cache per GPU in bytes. By default, this is
-            set to None and vllm can automatically infer the kv cache size based
-            on gpu_memory_utilization. However, users may want to manually
-            specify the kv cache memory size. kv_cache_memory allows more
-            fine-grain control of how much memory gets used when compared with
-            using gpu_memory_memory_utilization. Note that kv_cache_memory
-            (when not-None) ignores gpu_memory_utilization
+        kv_cache_memory_bytes: Size of KV Cache per GPU in bytes. By default,
+            this is set to None and vllm can automatically infer the kv cache
+            size based on gpu_memory_utilization. However, users may want to
+            manually specify the kv cache memory size. kv_cache_memory_bytes
+            allows more fine-grain control of how much memory gets used when
+            compared with using gpu_memory_memory_utilization. Note that
+            kv_cache_memory_bytes (when not-None) ignores
+            gpu_memory_utilization
         swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
             This can be used for temporarily storing the states of the requests
             when their `best_of` sampling parameters are larger than 1. If all
@@ -189,7 +190,7 @@ class LLM:
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[dict[str, Any]] = None,
         override_pooler_config: Optional[PoolerConfig] = None,
-        kv_cache_memory: Optional[int] = None,
+        kv_cache_memory_bytes: Optional[int] = None,
         compilation_config: Optional[Union[int, dict[str, Any],
                                            CompilationConfig]] = None,
         logits_processors: Optional[list[Union[str,
@@ -211,7 +212,6 @@ class LLM:
         if "kv_transfer_config" in kwargs and isinstance(
                 kwargs["kv_transfer_config"], dict):
             from vllm.config import KVTransferConfig
-
             raw_config_dict = kwargs["kv_transfer_config"]
             try:
                 kwargs["kv_transfer_config"] = KVTransferConfig(
@@ -258,7 +258,7 @@ class LLM:
             tokenizer_revision=tokenizer_revision,
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
-            kv_cache_memory=kv_cache_memory,
+            kv_cache_memory_bytes=kv_cache_memory_bytes,
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
@@ -1367,7 +1367,6 @@ class LLM:
             This method is only available with the V1 LLM engine.
         """
         from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
-
         assert isinstance(self.llm_engine, V1LLMEngine)
         return self.llm_engine.get_metrics()
 
