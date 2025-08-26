@@ -1330,7 +1330,7 @@ def apply_mistral_chat_template(
     # mistral-common uses assert statements to stop processing of input
     # if input does not comply with the expected format.
     # We convert those assertion errors to ValueErrors so they can be
-    # are properly caught in the preprocessing_input step
+    # properly caught in the preprocessing_input step
     except (AssertionError, MistralCommonException) as e:
         raise ValueError(str(e)) from e
 
@@ -1345,5 +1345,18 @@ def apply_mistral_chat_template(
             "template")
         raise ValueError(str(e)) from e
 
-def random_tool_call_id() -> str:
-    return f"chatcmpl-tool-{random_uuid()}"
+def get_history_tool_calls_cnt(conversation: list[ConversationMessage]):
+    idx = 0
+    for msg in conversation:
+        if msg['role'] == 'assistant':
+            tool_calls = msg.get('tool_calls')
+            idx += len(list(tool_calls)) if tool_calls is not None else 0 # noqa
+    return idx
+
+def make_tool_call_id(id_type:str='random', func_name=None, idx=None):
+
+    if id_type=='kimi_k2':
+        return f'functions.{func_name}:{idx}'
+    else:
+        # by default return random
+        return f"chatcmpl-tool-{random_uuid()}"
