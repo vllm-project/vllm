@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the CUTLASS W4A8 kernel.
 
-Run `pytest tests/kernels/test_cutlass_w4a8.py`.
+Run `pytest tests/kernels/quantization/test_cutlass_w4a8.py`.
 """
 
 from dataclasses import dataclass
