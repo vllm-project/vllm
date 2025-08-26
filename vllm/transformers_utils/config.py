@@ -27,19 +27,6 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
-# yapf conflicts with isort for this block
-# yapf: disable
-from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
-                                             EAGLEConfig, JAISConfig,
-                                             KimiVLConfig, MedusaConfig,
-                                             MLPSpeculatorConfig,
-                                             Nemotron_Nano_VL_Config,
-                                             NemotronConfig, OvisConfig,
-                                             RWConfig, SpeculatorsConfig,
-                                             Step3TextConfig, Step3VLConfig,
-                                             UltravoxConfig)
-# yapf: enable
-from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
 
 if envs.VLLM_USE_MODELSCOPE:
@@ -67,24 +54,31 @@ def _get_hf_token() -> Optional[str]:
     return None
 
 
-_CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
-    "chatglm": ChatGLMConfig,
-    "deepseek_vl_v2": DeepseekVLV2Config,
-    "kimi_vl": KimiVLConfig,
-    "Llama_Nemotron_Nano_VL": Nemotron_Nano_VL_Config,
-    "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
-    "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
-    "jais": JAISConfig,
-    "mlp_speculator": MLPSpeculatorConfig,
-    "medusa": MedusaConfig,
-    "eagle": EAGLEConfig,
-    "speculators": SpeculatorsConfig,
-    "nemotron": NemotronConfig,
-    "ovis": OvisConfig,
-    "ultravox": UltravoxConfig,
-    "step3_vl": Step3VLConfig,
-    "step3_text": Step3TextConfig,
-}
+class LazyConfigDict(dict):
+
+    def __getitem__(self, key):
+        import vllm.transformers_utils.configs as configs
+        return getattr(configs, super().__getitem__(key))
+
+
+_CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
+    chatglm="ChatGLMConfig",
+    deepseek_vl_v2="DeepseekVLV2Config",
+    kimi_vl="KimiVLConfig",
+    Llama_Nemotron_Nano_VL="Nemotron_Nano_VL_Config",
+    RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
+    RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
+    jais="JAISConfig",
+    mlp_speculator="MLPSpeculatorConfig",
+    medusa="MedusaConfig",
+    eagle="EAGLEConfig",
+    speculators="SpeculatorsConfig",
+    nemotron="NemotronConfig",
+    ovis="OvisConfig",
+    ultravox="UltravoxConfig",
+    step3_vl="Step3VLConfig",
+    step3_text="Step3TextConfig",
+)
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
@@ -460,6 +454,8 @@ def get_config(
             max_position_embeddings = _maybe_retrieve_max_pos_from_hf(
                 model, revision, **kwargs)
             config_dict["max_position_embeddings"] = max_position_embeddings
+
+        from vllm.transformers_utils.configs.mistral import adapt_config_dict
 
         config = adapt_config_dict(config_dict)
 
@@ -927,3 +923,25 @@ def get_model_path(model: Union[str, Path], revision: Optional[str] = None):
 
     from huggingface_hub import snapshot_download
     return snapshot_download(repo_id=model, **common_kwargs)
+
+
+def get_hf_file_bytes(file_name: str,
+                      model: Union[str, Path],
+                      revision: Optional[str] = 'main') -> Optional[bytes]:
+    """Get file contents from HuggingFace repository as bytes."""
+    file_path = try_get_local_file(model=model,
+                                   file_name=file_name,
+                                   revision=revision)
+
+    if file_path is None:
+        hf_hub_file = hf_hub_download(model,
+                                      file_name,
+                                      revision=revision,
+                                      token=_get_hf_token())
+        file_path = Path(hf_hub_file)
+
+    if file_path is not None and file_path.is_file():
+        with open(file_path, 'rb') as file:
+            return file.read()
+
+    return None
