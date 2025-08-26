@@ -31,10 +31,6 @@ def models_list(*, all: bool = True, keywords: Optional[list[str]] = None):
     ]
 
     if all:
-        if is_quant_method_supported("aqlm"):
-            TEST_MODELS.append(("ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf", {
-                "quantization": "aqlm"
-            }))
 
         # TODO: figure out why this fails.
         if False and is_quant_method_supported("gguf"):  # noqa: SIM223
@@ -56,12 +52,6 @@ def models_list(*, all: bool = True, keywords: Optional[list[str]] = None):
             TEST_MODELS.append(("alexm-nm/tinyllama-24-marlin24-4bit-g128", {
                 "quantization": "gptq_marlin_24"
             }))
-
-        if is_quant_method_supported("marlin"):
-            TEST_MODELS.append(
-                ("robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-marlin", {
-                    "quantization": "marlin"
-                }))
 
         if not current_platform.is_rocm() and is_quant_method_supported("awq"):
             TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {

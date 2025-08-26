@@ -3,7 +3,10 @@
 """Inference-only MiniMaxText01 model."""
 import math
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionBackend
 
 import regex as re
 import torch
@@ -16,7 +19,8 @@ from transformers import MiniMaxConfig
 from vllm import envs
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
+                         get_current_vllm_config)
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tensor_model_parallel_rank,
@@ -36,7 +40,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
-    MambaStateShapeCalculator)
+    MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -340,6 +344,17 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
     def mamba_type(self) -> str:
         return "linear_attention"
 
+    def get_attn_backend(self) -> type["AttentionBackend"]:
+        from vllm.v1.attention.backends.linear_attn import (
+            LinearAttentionBackend)
+        return LinearAttentionBackend
+
+    def get_state_dtype(self) -> tuple[torch.dtype]:
+        return MambaStateDtypeCalculator.linear_attention_state_dtype(
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+        )
+
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.linear_attention_state_shape(
             num_heads=self.num_heads,
@@ -355,6 +370,8 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         max_position: int,
         block_size: int,
         num_hidden_layer: int,
+        model_config: Optional[ModelConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         layer_idx: int = 0,
         linear_layer_idx: int = 0,
@@ -376,6 +393,8 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         self.tp_heads = self.total_num_heads // self.tp_size
         self.qkv_size = self.num_heads * self.head_dim
         self.tp_hidden = self.head_dim * self.tp_heads
+        self.model_config = model_config
+        self.cache_config = cache_config
         self.prefix = prefix
 
         self.qkv_proj = ColumnParallelLinear(
@@ -676,6 +695,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
     def __init__(
         self,
         config: MiniMaxConfig,
+        model_config: Optional[ModelConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         expert_num: int = 1,
@@ -712,6 +732,8 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 max_position=max_position_embeddings,
                 block_size=config.block if hasattr(config, "block") else 256,
                 num_hidden_layer=config.num_hidden_layers,
+                model_config=model_config,
+                cache_config=cache_config,
                 quant_config=quant_config,
                 layer_idx=self._ilayer,
                 linear_layer_idx=linear_layer_id,
@@ -877,12 +899,16 @@ class MiniMaxText01DecoderLayer(nn.Module):
 @support_torch_compile
 class MiniMaxText01Model(nn.Module):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        config: MiniMaxConfig,
+        model_config: Optional[ModelConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: Optional[CacheConfig] = None,
+        scheduler_config=None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
-        config: MiniMaxConfig = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-        scheduler_config = vllm_config.scheduler_config
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -926,6 +952,7 @@ class MiniMaxText01Model(nn.Module):
             decoder_kwargs = {
                 "quant_config": quant_config,
                 "layer_id": layer_idx,
+                "model_config": model_config,
                 "cache_config": cache_config
             }
 
@@ -1111,6 +1138,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
         super().__init__()
         config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         self.config = config
         self.lora_config = lora_config
@@ -1123,8 +1151,13 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         self.unpadded_vocab_size = self.config.vocab_size
         if hasattr(vllm_config.model_config, "max_model_len"):
             self.config.max_model_len = vllm_config.model_config.max_model_len
-        self.model = MiniMaxText01Model(vllm_config=vllm_config,
-                                        prefix=maybe_prefix(prefix, "model"))
+        self.model = MiniMaxText01Model(
+            self.config,
+            model_config=vllm_config.model_config,
+            cache_config=vllm_config.cache_config,
+            quant_config=quant_config,
+            scheduler_config=vllm_config.scheduler_config,
+            prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
@@ -1418,6 +1451,17 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
             load_basic_weight(name, loaded_weight, self)
         return loaded_params
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: "VllmConfig",
+    ) -> tuple[torch.dtype, torch.dtype]:
+
+        return MambaStateDtypeCalculator.linear_attention_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+        )
 
     @classmethod
     def get_mamba_state_shape_from_config(
