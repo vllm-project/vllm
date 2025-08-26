@@ -128,11 +128,7 @@ class ParallelConfig:
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
     ray_workers_use_nsight: bool = False
-    """Whether to profile Ray workers with Nsight.
-
-    See Ray docs: https://docs.ray.io/en/latest/ray-observability/
-    user-guides/profiling.html#profiling-nsight-profiler
-    """
+    """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 
     ray_runtime_env: Optional[RuntimeEnv] = None
     """Ray runtime environment to pass to distributed workers."""
@@ -263,14 +259,12 @@ class ParallelConfig:
 
     def compute_hash(self):
         """
-        Provide a hash that uniquely identifies parallelism-related configs
-        that affect the compiled graph assumptions.
-
-        Opt-out: default-include declared fields; keep a tiny exclude set;
-        normalize types; keep SHA-256; explicitly include
-        envs.VLLM_ALL2ALL_BACKEND as before.
+        Provide a hash that uniquely identifies all the configs
+        that affect the structure of the computation
+        graph from input ids/embeddings to the final hidden states,
+        excluding anything before input ids/embeddings and after
+        the final hidden states.
         """
-
         EXCLUDE_FROM_HASH = {
             # Derived/runtime topology, networking, or launch details
             "data_parallel_rank",
