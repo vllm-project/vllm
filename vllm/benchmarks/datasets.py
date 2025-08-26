@@ -2041,7 +2041,7 @@ Original file:
 Change request:
 {change_request}
 
-Please generate the new code file in the "New file" section below."""
+Please generate the new code file in the "New file" section below.""" # noqa: E501
 
             # apply template
             prompt = tokenizer.apply_chat_template(
