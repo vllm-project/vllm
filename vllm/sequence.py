@@ -16,14 +16,17 @@ import msgspec
 import torch
 
 from vllm.inputs import SingletonInputs
-from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 if TYPE_CHECKING:
+    from vllm.lora.request import LoRARequest
     from vllm.v1.worker.kv_connector_model_runner_mixin import (
         KVConnectorOutput)
+else:
+    LoRARequest = Any
+    KVConnectorOutput = Any
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
@@ -1138,7 +1141,7 @@ class IntermediateTensors:
     """
 
     tensors: dict[str, torch.Tensor]
-    kv_connector_output: Optional["KVConnectorOutput"]
+    kv_connector_output: Optional[KVConnectorOutput]
 
     def __init__(self, tensors):
         # manually define this function, so that
