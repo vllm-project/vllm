@@ -36,23 +36,28 @@ def is_deep_gemm_e8m0_used() -> bool:
     "E8M0 scale on a Hopper or Blackwell-class GPU.
     """
     if not is_deep_gemm_supported():
-        logger.debug_once(
+        logger.info_once(
             "DeepGEMM E8M0 disabled: DeepGEMM not supported on this system.")
-        return False
-
-    if not envs.VLLM_USE_DEEP_GEMM_E8M0:
-        logger.debug_once("DeepGEMM E8M0 disabled: VLLM_USE_DEEP_GEMM_E8M0=0.")
         return False
 
     _lazy_init()
 
     if _fp8_gemm_nt_impl is None:
-        logger.debug_once(
-            "DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found")
+        logger.info_once("DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found")
         return False
 
-    logger.debug_once("DeepGEMM E8M0 enabled.")
-    return True
+    if current_platform.is_device_capability(100) and \
+            envs.VLLM_USE_DEEP_GEMM_E8M0:
+        logger.info_once("DeepGEMM E8M0 enabled on Blackwell GPU.")
+        return True
+
+    if current_platform.is_device_capability(90) and \
+            envs.VLLM_USE_DEEP_GEMM_E8M0_HOPPER:
+        logger.info_once("DeepGEMM E8M0 enabled on Hopper GPU.")
+        return True
+
+    logger.info_once("DeepGEMM E8M0 disabled on current configuration.")
+    return False
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
