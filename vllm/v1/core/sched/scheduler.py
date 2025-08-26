@@ -489,8 +489,6 @@ class Scheduler(SchedulerInterface):
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
-                    if num_external_computed_tokens > 0:
-                        breakpoint()
                     self.connector.update_state_after_alloc(
                         request,
                         new_computed_blocks + new_blocks,
