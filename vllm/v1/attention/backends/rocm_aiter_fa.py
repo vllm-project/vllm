@@ -234,7 +234,6 @@ class AiterFlashAttentionMetadataBuilder(
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
-        self.scheduler_config = vllm_config.scheduler_config
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
         self.cache_config = vllm_config.cache_config
@@ -267,8 +266,8 @@ class AiterFlashAttentionMetadataBuilder(
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
         if self.use_full_cuda_graph:
-            num_actual_kv_tokens = self.model_config.max_model_len * \
-                self.scheduler_config.max_num_partial_prefills
+            num_actual_kv_tokens = self.model_config.max_seq_len_to_capture * \
+                self.compilation_config.max_capture_size
         else:
             num_actual_kv_tokens = int(seq_lens.sum())
 
