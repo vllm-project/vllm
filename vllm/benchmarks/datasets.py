@@ -2015,9 +2015,6 @@ class BlazeditDataset(HuggingFaceDataset):
                       if output_len is not None else self.DEFAULT_OUTPUT_LEN)
         sampled_requests = []
 
-        max_prompt_len = 0
-        min_prompt_len = 1e9
-        prompt_lens = []
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
@@ -2054,14 +2051,7 @@ Please generate the new code file in the "New file" section below.""" # noqa: E5
             )
 
             prompt_len = len(tokenizer(prompt).input_ids)
-            prompt_lens.append(prompt_len)
 
-            # REMOVE
-            if prompt_len > 1500:
-                continue
-
-            max_prompt_len = max(prompt_len, max_prompt_len)
-            min_prompt_len = min(prompt_len, min_prompt_len)
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
