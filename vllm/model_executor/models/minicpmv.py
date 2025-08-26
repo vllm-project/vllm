@@ -1651,7 +1651,8 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         all_pixel_values = torch.zeros((B, 3, P, L),
                                        dtype=dtype,
                                        device=device)
-        all_temporal_ids = None if temporal_ids is None else flatten_2d_lists(temporal_ids)
+        all_temporal_ids = None if temporal_ids is None else flatten_2d_lists(
+            temporal_ids)
         for i, pixel_values_item in enumerate(pixel_values):
             L_item = pixel_values_item.shape[-1]
             all_pixel_values[i, ..., :L_item] = pixel_values_item
