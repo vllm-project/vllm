@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
-from typing import Any, Callable, Optional
+from typing import Any, Callable
 
 import torch.fx as fx
 
-import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.monitor import end_monitoring_torch_compile
 from vllm.config import VllmConfig
@@ -17,7 +16,7 @@ logger = init_logger(__name__)
 
 @dataclasses.dataclass
 class RangeEntry:
-    compile_range: Optional[tuple[int, int]]
+    compile_range: tuple[int, int]
     compiled: bool = False
     runnable: Callable = None  # type: ignore
 
@@ -67,8 +66,8 @@ class PiecewiseBackend:
             if s in self.compile_sizes:
                 self.compile_ranges.append((s, s))
         self.compile_ranges = sorted(self.compile_ranges)
-        logger.debug("PiecewiseBackend: compile_ranges: %s",
-                     self.compile_ranges)
+        logger.debug_once("PiecewiseBackend: compile_ranges: %s",
+                          self.compile_ranges)
 
         self.is_in_range = lambda x, range: range[0] <= x < range[1] if range[
             0] < range[1] else x == range[0]
@@ -78,8 +77,6 @@ class PiecewiseBackend:
         self.compiled_graph_for_general_shape = compiled_graph_for_general_shape  # noqa
 
         self.sym_shape_indices = sym_shape_indices
-
-        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
         # the entries for different shapes that we need to compile
         # self.concrete_size_entries: dict[int, RangeEntry] = {}
