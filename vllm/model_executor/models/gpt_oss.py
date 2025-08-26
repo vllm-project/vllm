@@ -180,7 +180,9 @@ class TransformerBlock(torch.nn.Module):
     ):
         super().__init__()
         self.layer_idx = extract_layer_index(prefix)
-        self.attn = OAIAttention(config, prefix=f"{prefix}.attn", cache_config=cache_config)
+        self.attn = OAIAttention(config,
+                                 prefix=f"{prefix}.attn",
+                                 cache_config=cache_config)
         self.mlp = MLPBlock(config,
                             self.layer_idx,
                             quant_config=quant_config,
@@ -215,7 +217,7 @@ class GptOssModel(nn.Module):
         self.layers = torch.nn.ModuleList([
             TransformerBlock(
                 self.config,
-                cache_config = self.cache_config,
+                cache_config=self.cache_config,
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, f"block.{layer_idx}"),
             ) for layer_idx in range(self.config.num_hidden_layers)
