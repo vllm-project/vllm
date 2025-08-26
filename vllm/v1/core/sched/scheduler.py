@@ -9,12 +9,12 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
-import vllm.distributed.kv_transfer.kv_connector.factory  # noqa: F401
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
+from vllm.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
-                                                          KVConnectorRole,
-                                                          kv_connector_manager)
+                                                          KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -83,18 +83,8 @@ class Scheduler(SchedulerInterface):
             assert len(self.kv_cache_config.kv_cache_groups) == 1, (
                 "Multiple KV cache groups are not currently supported "
                 "with KV connectors")
-            kv_connector_name = self.vllm_config.kv_transfer_config.kv_connector
-            if kv_connector_name is None:
-                # With ExtensionManager, we no longer do on-the-fly imports,
-                # as extensions must be registered via
-                # register(...) decorator.
-                raise ValueError(
-                    "KV connector name must be set in KVTransferConfig")
-            self.connector = kv_connector_manager.create_or_import(
-                name=kv_connector_name,
-                extension_path=self.vllm_config.kv_transfer_config.
-                kv_connector_module_path,
-                role=KVConnectorRole.SCHEDULER)
+            self.connector = KVConnectorFactory.create_connector(
+                config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
