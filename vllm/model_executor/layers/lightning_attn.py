@@ -459,7 +459,7 @@ def lightning_attention(
         v: torch.Tensor,
         ed: torch.Tensor,
         block_size: int = 256,
-        kv_history: torch.Tensor = None) -> tuple[torch.Tensor, torch.Tensor]:
+        kv_history: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply lightning attention algorithm 
     to compute attention efficiently.
