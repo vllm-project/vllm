@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import io
 import json
 
 import pytest
 import requests
-from PIL import Image
 from transformers import AutoProcessor
 
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
@@ -65,9 +63,7 @@ def get_hf_prompt_tokens(model_name, content, image_url):
 
     placeholder = "<|image_1|> "
     prompt = f"{placeholder}{content}"
-    response = requests.get(image_url, headers={'User-Agent': 'Mozilla/5.0'})
-    response.raise_for_status()
-    images = [Image.open(io.BytesIO(response.content))]
+    images = [fetch_image(image_url)]
     inputs = processor(prompt, images, return_tensors="pt")
     return inputs.input_ids.shape[1]
 
