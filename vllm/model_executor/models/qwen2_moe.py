@@ -122,7 +122,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.num_experts,
                                      bias=False,
-                                     quant_config=None)
+                                     quant_config=quant_config)
         if config.shared_expert_intermediate_size > 0:
             self.shared_expert = Qwen2MoeMLP(
                 hidden_size=config.hidden_size,
@@ -134,9 +134,10 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             )
         else:
             self.shared_expert = None
-        self.shared_expert_gate = torch.nn.Linear(config.hidden_size,
+        self.shared_expert_gate = ReplicatedLinear(config.hidden_size,
                                                   1,
-                                                  bias=False)
+                                                  bias=False,
+                                                  quant_config=quant_config)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
@@ -147,8 +148,8 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
         if self.shared_expert is not None:
             shared_output = self.shared_expert(hidden_states)
             if self.shared_expert_gate is not None:
-                shared_output = F.sigmoid(
-                    self.shared_expert_gate(hidden_states)) * shared_output
+                gate_logits, _ = self.shared_expert_gate(hidden_states)
+                shared_output = F.sigmoid(gate_logits) * shared_output
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
