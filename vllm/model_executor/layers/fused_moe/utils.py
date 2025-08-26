@@ -178,15 +178,18 @@ def _mxfp4_quantize(
 
     return A, None
 
-def _mxfp8_quantize(A: torch.Tensor,
-                    A_scale: Optional[torch.Tensor],
-                    per_act_token_quant: bool,
-                    block_shape: Optional[list[int]] = None,
-                    ) -> tuple[torch.Tensor, torch.Tensor]:
+
+def _mxfp8_quantize(
+    A: torch.Tensor,
+    A_scale: Optional[torch.Tensor],
+    per_act_token_quant: bool,
+    block_shape: Optional[list[int]] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     assert A_scale is None
     assert not per_act_token_quant
     assert block_shape is None
-    return mxfp8_quantize(A) 
+    return mxfp8_quantize(A)
+
 
 def moe_kernel_quantize_input(
     A: torch.Tensor,

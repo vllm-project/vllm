@@ -458,7 +458,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         if (prepare_finalize.activation_format ==
                 mk.FusedMoEActivationFormat.BatchedExperts):
             raise NotImplementedError(
-                    "Mxfp4 does not support batched experts format for EP")
+                "Mxfp4 does not support batched experts format for EP")
         else:
             if should_use_flashinfer_mxfp4():
                 # B200 code-path
@@ -586,12 +586,26 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         if self.fused_experts is not None:
             return self._route_and_experts(
-                layer, x, router_logits, top_k, renormalize, use_grouped_topk,
-                topk_group, num_expert_group, global_num_experts, expert_map,
-                custom_routing_function, scoring_func, e_score_correction_bias,
-                apply_router_weight_on_input, activation, enable_eplb,
-                expert_load_view, logical_to_physical_map,
-                logical_replica_count)
+                layer,
+                x,
+                router_logits,
+                top_k,
+                renormalize,
+                use_grouped_topk,
+                topk_group,
+                num_expert_group,
+                global_num_experts,
+                expert_map,
+                custom_routing_function,
+                scoring_func,
+                e_score_correction_bias,
+                apply_router_weight_on_input,
+                activation,
+                enable_eplb,
+                expert_load_view,
+                logical_to_physical_map,
+                logical_replica_count,
+            )
 
         assert _can_support_mxfp4(
             use_grouped_topk, topk_group, num_expert_group, expert_map,
