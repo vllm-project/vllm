@@ -15,4 +15,5 @@ ruff
 -f https://download.pytorch.org/whl/cpu
 cachetools
 msgspec
+pydantic
 torch
