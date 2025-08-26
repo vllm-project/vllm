@@ -45,7 +45,8 @@ class MultiModalHasher:
         if isinstance(obj, torch.Tensor):
             tensor_obj: torch.Tensor = obj.cpu()
             if tensor_obj.dtype == torch.bfloat16:
-                tensor_obj = tensor_obj.to(torch.float32)
+                tensor_obj = tensor_obj.view(
+                    (tensor_obj.numel(), )).view(torch.uint8)
             return cls.item_to_bytes("tensor", tensor_obj.numpy())
         if isinstance(obj, np.ndarray):
             # If the array is non-contiguous, we need to copy it first
