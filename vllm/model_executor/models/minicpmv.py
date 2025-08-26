@@ -220,7 +220,7 @@ class Resampler2_5(BaseResampler):
         return x
 
 
-class Resampler4_5(BaseResampler):
+class Resampler4_5(Resampler2_5):
 
     def __init__(self,
                  num_queries: int,
@@ -229,7 +229,7 @@ class Resampler4_5(BaseResampler):
                  kv_dim: Optional[int] = None,
                  norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
                  max_size: tuple[int, int] = (70, 70),
-                 max_temporal_size=36000,
+                max_temporal_size: int = 36000,
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = "") -> None:
         super().__init__(num_queries,
@@ -237,15 +237,12 @@ class Resampler4_5(BaseResampler):
                          num_heads,
                          kv_dim,
                          norm_layer,
+                         max_size,
                          quant_config=quant_config,
                          prefix=prefix)
 
         trunc_normal_(self.query, std=.02)
-        self.max_size = max_size
         self.max_temporal_size = max_temporal_size
-
-
-        self._set_2d_pos_cache(self.max_size)
         self._set_temporal_pos_cache(self.max_temporal_size)
         self.apply(self._init_weights)
 
@@ -272,28 +269,7 @@ class Resampler4_5(BaseResampler):
         emb = np.concatenate([emb_sin, emb_cos], axis=1)  # (M, D)
         return emb
     
-    def _set_2d_pos_cache(self,
-                          max_size: tuple[int, int],
-                          device: torch.types.Device = "cpu") -> None:
-        pos_embed_arr = get_2d_sincos_pos_embed(self.embed_dim,
-                                                max_size,
-                                                version=(2, 5))
-        pos_embed = torch.from_numpy(pos_embed_arr).float().to(device)
-        self.register_buffer("pos_embed", pos_embed, persistent=False)
 
-    def _adjust_pos_cache(self,
-                          tgt_sizes: torch.Tensor,
-                          device: torch.types.Device) -> None:
-        max_h = tgt_sizes[:, 0].max().item()
-        max_w = tgt_sizes[:, 1].max().item()
-        assert isinstance(max_h, int) and isinstance(max_w, int)
-
-        if max_h > self.max_size[0] or max_w > self.max_size[1]:
-            self.max_size = (
-                max(max_h, self.max_size[0]),
-                max(max_w, self.max_size[1]),
-            )
-            self._set_2d_pos_cache(self.max_size, device)
     
     def _set_temporal_pos_cache(self,
                                 max_temporal_size: int,
@@ -340,7 +316,7 @@ class Resampler4_5(BaseResampler):
         if temporal_ids is not None:
             # example: [[-1], [-1], [2, 6, 9]]
             temporal_ids_flatten = list(chain.from_iterable(temporal_ids))
-            max_temporal_size = max(temporal_ids_flatten)
+            max_temporal_size = max(temporal_ids_flatten, default=0)
             if max_temporal_size > -1:
                 temporal_pos_emb = True
             if max_temporal_size > self.max_temporal_size:
@@ -1613,10 +1589,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> nn.Module:
-        if self.version == (4, 5):
-            return Qwen3ForCausalLM(vllm_config=vllm_config, prefix=prefix)
-        else:
-            raise ValueError(f"Unsupported version: {self.version}")
+        return Qwen3ForCausalLM(vllm_config=vllm_config, prefix=prefix)
 
     def init_vision_module(
         self,
