@@ -16,11 +16,6 @@ from vllm.multimodal.image import convert_image_mode
 
 logger = init_logger(__name__)
 
-MultiModalHashDict = dict[str, list[str]]
-"""
-A dictionary containing hashes for items in each modality.
-"""
-
 
 class MultiModalHasher:
 

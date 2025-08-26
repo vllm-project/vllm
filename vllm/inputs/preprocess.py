@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
-                                    MultiModalInputs, MultiModalUUIDDict)
+                                    MultiModalInputs, MultiModalUUIDs)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
@@ -253,7 +253,7 @@ class InputPreprocessor:
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
         *,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        mm_uuids: Optional[MultiModalUUIDs] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> MultiModalInputs:
@@ -283,7 +283,7 @@ class InputPreprocessor:
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Mapping[str, object]],
         *,
-        mm_uuids: Optional[MultiModalUUIDDict] = None,
+        mm_uuids: Optional[MultiModalUUIDs] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
     ) -> MultiModalInputs:
