@@ -55,7 +55,9 @@ class InfEncoder(json.JSONEncoder):
     def clear_inf(self, o: Any):
         if isinstance(o, dict):
             return {
-                str(k) if isinstance(k, tuple) else k: self.clear_inf(v)
+                str(k)
+                if not isinstance(k, (str, int, float, bool, type(None)))
+                else k: self.clear_inf(v)
                 for k, v in o.items()
             }
         elif isinstance(o, list):
@@ -75,5 +77,4 @@ def write_to_json(filename: str, records: list) -> None:
             f,
             cls=InfEncoder,
             default=lambda o: f"<{type(o).__name__} is not JSON serializable>",
-            skipkeys=True,
         )
