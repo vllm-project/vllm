@@ -140,7 +140,7 @@ class MultiConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> tuple[int, bool]:
+    ) -> tuple[Optional[int], bool]:
         to_return = (0, False)
         for i, c in enumerate(self._connectors):
             toks, load_async = c.get_num_new_matched_tokens(
