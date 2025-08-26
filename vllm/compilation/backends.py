@@ -159,11 +159,11 @@ class CompilerManager:
                 elapsed = now - compilation_start_time
                 if runtime_shape is None:
                     logger.info(
-                        "Directly load compiled graph(s) for "
-                        "dynamic shape from the cache, took %.3f s", elapsed)
+                        "Directly load the compiled graph(s) for dynamic shape "
+                        "from the cache, took %.3f s", elapsed)
                 else:
                     logger.info(
-                        "Directly load compiled graph(s) for shape %s "
+                        "Directly load the compiled graph(s) for shape %s "
                         "from the cache, took %.3f s", str(runtime_shape),
                         elapsed)
             return compiled_graph
@@ -326,16 +326,15 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
             global compilation_start_time
-            compiled_graph_for_dynamic_shape = (
-                self.vllm_backend.compiler_manager.compile(
-                    submod,
-                    args,
-                    self.compilation_config.inductor_compile_config,
-                    self.compilation_config,
-                    graph_index=index,
-                    num_graphs=len(self.compile_submod_names),
-                    runtime_shape=None,
-                ))
+            compiled_graph_for_dynamic_shape = self.vllm_backend.\
+                compiler_manager.compile(
+                submod,
+                args,
+                self.compilation_config.inductor_compile_config,
+                self.compilation_config,
+                graph_index=index,
+                num_graphs=len(self.compile_submod_names),
+                runtime_shape=None)
             # Lazy import here to avoid circular import
             from .cuda_graph import CUDAGraphOptions
             from .cuda_piecewise_backend import PiecewiseBackend
@@ -474,17 +473,13 @@ class VllmBackend:
             # graph.
 
             factors = []
-
-            # RFC #16501: include env hash (opt-out, default-include)
-
             # 0. factors come from the env, for example, The values of
             # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-
             env_hash = envs.compute_hash()
             factors.append(env_hash)
 
-            # 1. factors come from the vllm_config
-            #    (summarizes how the model is created)
+            # 1. factors come from the vllm_config (it mainly summarizes how the
+            #    model is created)
             config_hash = vllm_config.compute_hash()
             factors.append(config_hash)
 
@@ -562,7 +557,7 @@ class VllmBackend:
         self.configure_post_pass()
 
         self.split_gm, self.piecewise_graphs = split_graph(
-            graph, self.compilation_config.splitting_ops or [])
+            graph, self.compilation_config.splitting_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
 
@@ -598,8 +593,8 @@ class VllmBackend:
 
         self._called = True
 
-        if (self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-                or not self.compilation_config.cudagraph_copy_inputs):
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE or \
+            not self.compilation_config.cudagraph_copy_inputs:
             return self.split_gm
 
         # if we need to copy input buffers for cudagraph
@@ -616,8 +611,8 @@ class VllmBackend:
         from torch.fx.experimental.symbolic_shapes import is_symbolic
         self.sym_tensor_indices = [
             i for i, x in enumerate(fake_args)
-            if (isinstance(x, torch._subclasses.fake_tensor.FakeTensor)
-                and any(is_symbolic(d) for d in x.size()))
+            if isinstance(x, torch._subclasses.fake_tensor.FakeTensor) and \
+                any(is_symbolic(d) for d in x.size())
         ]
 
         # compiler managed cudagraph input buffers
