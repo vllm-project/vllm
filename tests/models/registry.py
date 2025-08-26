@@ -422,7 +422,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                         trust_remote_code=True),  # noqa: E501
     "InternVLChatModel": _HfExamplesInfo("OpenGVLab/InternVL2-1B",
                                          extras={"2B": "OpenGVLab/InternVL2-2B",
-                                                 "3.0": "OpenGVLab/InternVL3-1B"},  # noqa: E501
+                                                 "3.0": "OpenGVLab/InternVL3-1B",   # noqa: E501
+                                                 "3.5-qwen3": "OpenGVLab/InternVL3_5-1B",   # noqa: E501
+                                                 "3.5-qwen3moe": "OpenGVLab/InternVL3_5-30B-A3B",   # noqa: E501
+                                                 "3.5-gptoss": "OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview"},  # noqa: E501
                                          trust_remote_code=True),
     "KeyeForConditionalGeneration": _HfExamplesInfo("Kwai-Keye/Keye-VL-8B-Preview", # noqa: E501
                                                     trust_remote_code=True),
