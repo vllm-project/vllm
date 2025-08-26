@@ -431,7 +431,6 @@ class Scheduler(SchedulerInterface):
 
                 # if self.connector is not None and num_external_computed_tokens > 0:
                 if False:
-
                     # Since external computed tokens can be very large,
                     # We want to only allocate tokens inside the sliding window.
                     # This is done by `allocate_slots_and_remove_unnecessary_blocks`.

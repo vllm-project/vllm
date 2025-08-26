@@ -119,10 +119,6 @@ class KVCacheManager:
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
 
-
-        # for debug
-        self.break_flag = False
-
     @property
     def usage(self) -> float:
         """Get the KV cache usage.
@@ -227,7 +223,6 @@ class KVCacheManager:
         Returns:
             A list of new allocated blocks.
         """
-
         if num_new_tokens == 0:
             raise ValueError("num_new_tokens must be greater than 0")
 
@@ -250,7 +245,6 @@ class KVCacheManager:
         # the new prefix caching hits
         num_computed_tokens = (request.num_computed_tokens +
                                num_new_computed_tokens)
-
         num_tokens_need_slot = min(
             num_computed_tokens + num_new_tokens + num_lookahead_tokens,
             self.max_model_len)
@@ -390,9 +384,6 @@ class KVCacheManager:
                 return None
 
             accumulated = chunk_blocks if accumulated is None else (accumulated + chunk_blocks)
-
-            print("Accumulated len: ", len(accumulated.blocks[0]))
-            print("Chunked len: ", len(chunk_blocks.blocks[0]))
 
         return accumulated
 
