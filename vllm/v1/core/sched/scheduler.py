@@ -50,7 +50,6 @@ class Scheduler(SchedulerInterface):
         log_stats: bool = False,
     ) -> None:
         self.vllm_config = vllm_config
-        self.vllm_config.kv_cache_config = kv_cache_config
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
@@ -60,6 +59,11 @@ class Scheduler(SchedulerInterface):
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
+
+        # NOTE(Kuntai): stuff kv_cache_config into vllm_config, so that
+        # KV cache connector can see the kv_cache_config and figure out
+        # which layer belongs to which kv_cache_group.
+        self.vllm_config.kv_cache_config = kv_cache_config
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
