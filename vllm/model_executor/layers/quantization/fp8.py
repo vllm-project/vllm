@@ -223,8 +223,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         self.fp8_linear = Fp8LinearOp(
             act_quant_static=self.act_q_static,
-            act_quant_group_shape=self.act_q_group_shape,
-            cutlass_fp8_supported=cutlass_fp8_supported())
+            act_quant_group_shape=self.act_q_group_shape)
 
     def create_weights(
         self,
@@ -376,6 +375,8 @@ class Fp8LinearMethod(LinearMethodBase):
             # Update the layer with the new values.
             layer.weight = Parameter(qweight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+            # layer.input_scale is None indicates dynamic quant and scale is
+            # computed from input.
             layer.input_scale = None
 
         # If checkpoint is fp8, handle that there are N scales for N
