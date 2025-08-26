@@ -44,7 +44,7 @@ class MultiModalHasher:
                 "image", np.asarray(convert_image_mode(obj, "RGBA")))
         if isinstance(obj, torch.Tensor):
             if obj.dtype == torch.bfloat16:
-                obj = obj.to(torch.float16)
+                obj = obj.to(torch.float32)
             return cls.item_to_bytes("tensor", obj.cpu().numpy())
         if isinstance(obj, np.ndarray):
             # If the array is non-contiguous, we need to copy it first
