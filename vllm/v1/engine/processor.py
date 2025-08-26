@@ -291,6 +291,10 @@ class Processor:
             request_id, prompt) if self.model_config.generate_mm_hash_overrides
                              else None)
 
+        # Process inputs, which includes:
+        # 1. Tokenize text prompt, with LoRA request if one exists.
+        # 2. For multimodal models with a merged preprocessor, preprocess
+        #   multimodal data and expand prompt token ids accordingly.
         processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
