@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from vllm.logger import init_logger
+from vllm.reasoning import ReasoningParser
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
@@ -30,10 +33,11 @@ class AsyncScheduler(Scheduler):
         self,
         request: Request,
         new_token_ids: list[int],
+        reasoner: Optional[ReasoningParser] = None,
     ) -> tuple[list[int], bool]:
         status_before_update = request.status
         new_token_ids, stopped = super()._update_request_with_output(
-            request, new_token_ids)
+            request, new_token_ids, reasoner)
 
         # Update the number of output placeholders.
         request.num_output_placeholders -= len(new_token_ids)

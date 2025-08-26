@@ -11,6 +11,7 @@ from transformers import PreTrainedTokenizerFast
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
+from vllm.reasoning import ReasoningParser
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.v1.engine import EngineCoreRequest
@@ -35,8 +36,10 @@ class IncrementalDetokenizer:
     def output_token_ids(self) -> list[int]:
         return self.token_ids
 
-    def update(self, new_token_ids: list[int],
-               stop_terminated: bool) -> Optional[str]:
+    def update(self,
+               new_token_ids: list[int],
+               stop_terminated: bool,
+               reasoner: Optional[ReasoningParser] = None) -> Optional[str]:
         self.token_ids.extend(new_token_ids)
         return None
 
@@ -88,8 +91,10 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # Generation data
         self.output_text = ""
 
-    def update(self, new_token_ids: list[int],
-               stop_terminated: bool) -> Optional[str]:
+    def update(self,
+               new_token_ids: list[int],
+               stop_terminated: bool,
+               reasoner: Optional[ReasoningParser] = None) -> Optional[str]:
         """
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
@@ -137,7 +142,9 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
                 stop=self.stop,
                 include_in_output=self.include_stop_str_in_output,
             )
-            if stop is not None:
+            if stop is not None and (reasoner is None
+                                     or reasoner.is_reasoning_end(
+                                         self.token_ids)):
                 stop_string, truncate_to = stop
                 if truncate_to != -1:
                     self.output_text = self.output_text[:truncate_to]

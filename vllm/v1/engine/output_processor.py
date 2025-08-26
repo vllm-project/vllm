@@ -10,6 +10,7 @@ import torch
 
 from vllm.outputs import (CompletionOutput, PoolingOutput,
                           PoolingRequestOutput, RequestOutput)
+from vllm.reasoning import ReasoningParser
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
@@ -278,9 +279,11 @@ class OutputProcessor:
         self,
         tokenizer: TokenizerGroup,
         log_stats: bool,
+        reasoner: Optional[ReasoningParser] = None,
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
+        self.reasoner = reasoner
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
         self.lora_states = LoRARequestStates()
@@ -405,7 +408,9 @@ class OutputProcessor:
                 assert req_state.logprobs_processor is not None
                 # 2) Detokenize the token ids into text and perform stop checks.
                 stop_string = req_state.detokenizer.update(
-                    new_token_ids, finish_reason == FinishReason.STOP)
+                    new_token_ids,
+                    finish_reason == FinishReason.STOP,
+                    reasoner=self.reasoner)
                 if stop_string:
                     finish_reason = FinishReason.STOP
                     stop_reason = stop_string
