@@ -94,9 +94,9 @@ VLLM_TRACE_FUNCTION: int = 0
 # Pipeline and partitioning
 VLLM_PP_LAYER_PARTITION: Optional[str] = None
 
-# CPU backend settings
-VLLM_CPU_KVCACHE_SPACE: Optional[int] = 0
-VLLM_CPU_OMP_THREADS_BIND: str = ""
+# CPU backend settings  
+VLLM_CPU_KVCACHE_SPACE: Optional[int] = None
+VLLM_CPU_OMP_THREADS_BIND: str = "auto"
 VLLM_CPU_NUM_OF_RESERVED_CPU: Optional[int] = None
 VLLM_CPU_MOE_PREPACK: bool = True
 VLLM_CPU_SGL_KERNEL: bool = False
@@ -107,7 +107,7 @@ VLLM_XLA_CHECK_RECOMPILATION: bool = False
 VLLM_XLA_USE_SPMD: bool = False
 
 # MoE (Mixture of Experts) settings
-VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
+VLLM_FUSED_MOE_CHUNK_SIZE: int = 32768
 VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
 
 # Ray distributed computing
@@ -152,7 +152,7 @@ VLLM_TORCH_PROFILER_WITH_FLOPS: bool = False
 # Quantization and kernels
 VLLM_USE_TRITON_AWQ: bool = False
 VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
-VLLM_SKIP_P2P_CHECK: bool = False
+VLLM_SKIP_P2P_CHECK: bool = True
 VLLM_DISABLED_KERNELS: list[str] = []
 
 # Version control
@@ -198,9 +198,9 @@ VLLM_CUDART_SO_PATH: Optional[str] = None
 
 # Data parallel settings  
 VLLM_DP_RANK: int = 0
-VLLM_DP_RANK_LOCAL: int = -1
+VLLM_DP_RANK_LOCAL: int = 0  # Will be computed dynamically
 VLLM_DP_SIZE: int = 1
-VLLM_DP_MASTER_IP: str = ""
+VLLM_DP_MASTER_IP: str = "127.0.0.1"
 VLLM_DP_MASTER_PORT: int = 0
 VLLM_MOE_DP_CHUNK_SIZE: int = 256
 VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
@@ -236,7 +236,7 @@ VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
 VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
 
 # Additional settings
-VLLM_XGRAMMAR_CACHE_MB: int = 0
+VLLM_XGRAMMAR_CACHE_MB: int = 512
 VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
 VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
 
@@ -281,3 +281,9 @@ VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
 
 # Configuration folder
 VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
+
+
+# Create a dictionary of all defaults for easy access
+# This will be used by __init__.py for standardized parsing
+__defaults = {name: value for name, value in globals().items() 
+              if not name.startswith('_') and not callable(value) and name.isupper()}
