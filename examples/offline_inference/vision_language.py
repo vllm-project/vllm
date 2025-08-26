@@ -831,10 +831,10 @@ def run_llama4(questions: list[str], modality: str) -> ModelRequestData:
 
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=3128,
+        max_model_len=8192,
         max_num_seqs=4,
         tensor_parallel_size=8,
-        gpu_memory_utilization=0.7,
+        gpu_memory_utilization=0.4,
         limit_mm_per_prompt={modality: 1},
     )
 

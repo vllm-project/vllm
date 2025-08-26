@@ -474,12 +474,6 @@ class Qwen2_5_VisionAttention(nn.Module):
         return output
 
 
-# @set_model_tag("Qwen2_5_VisionBlock")
-# @support_torch_compile(dynamic_arg_dims={
-#     "x": 0,
-#     "cu_seqlens": 0,
-#     "rotary_pos_emb": 0,
-# })
 class Qwen2_5_VisionBlock(nn.Module):
     def __init__(
         self,
@@ -893,7 +887,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
             window_index.append(window_index_thw + window_index_id)
             window_index_id += (t * llm_h * llm_w)
-            assert cu_seqlens_window_thw.size()[0] >= 2  # Just for compile
+
             cu_seqlens_window_thw = (cu_seqlens_window_thw +
                                      cu_window_seqlens_last)
             cu_window_seqlens_last = cu_seqlens_window_thw[-1]
