@@ -23,6 +23,7 @@ from vllm.utils import has_deep_ep, has_deep_gemm
 from vllm.utils.deep_gemm import (is_blackwell_deep_gemm_e8m0_used,
                                   is_deep_gemm_supported)
 
+from ...utils import multi_gpu_test
 from .parallel_utils import ProcessGroupInfo, parallel_launch
 from .utils import make_test_weights
 
@@ -370,6 +371,7 @@ NUM_EXPERTS = [32]
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOPKS)
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
+@multi_gpu_test(num_gpus=2)
 @requires_deep_ep
 @requires_deep_gemm
 @pytest.mark.skipif(is_blackwell_deep_gemm_e8m0_used(),
@@ -427,6 +429,7 @@ USE_FP8_DISPATCH = [False]
 @pytest.mark.parametrize("use_fp8_dispatch", USE_FP8_DISPATCH)
 @pytest.mark.parametrize("block_size", [[128, 128]])
 @pytest.mark.parametrize("world_dp_size", [(2, 1)])
+@multi_gpu_test(num_gpus=2)
 @requires_deep_ep
 @requires_deep_gemm
 @pytest.mark.skipif(is_blackwell_deep_gemm_e8m0_used(),
