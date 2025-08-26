@@ -68,7 +68,4 @@ def test_encode_api(llm: LLM):
 def test_score_api(llm: LLM):
     err_msg = "Score API is only enabled for num_labels == 1."
     with pytest.raises(ValueError, match=err_msg):
-        llm.score(
-            "ping",
-            "pong",
-            use_tqdm=False)
+        llm.score("ping", "pong", use_tqdm=False)
