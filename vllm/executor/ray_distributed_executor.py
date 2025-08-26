@@ -69,6 +69,14 @@ class RayDistributedExecutor(DistributedExecutorBase):
     def _init_executor(self) -> None:
         self.forward_dag: Optional[ray.dag.CompiledDAG] = None
 
+        # For XPU, we use ZE_AFFINITY_MASK in vllm to control device
+        # visibility, instead of using 'ONEAPI_DEVICE_SELECTOR' in
+        # ray (which requires the "level_zero:" prefix). This makes it
+        # easier to share the same code logic with CUDA_VISIBLE_DEVICES.
+        # Therefore, we are removing ONEAPI_DEVICE_SELECTOR here. If not
+        # removed, setting both environment variables (ZE_AFFINITY_MASK
+        # and ONEAPI_DEVICE_SELECTOR) would result in the controlled
+        # devices being the intersection of the two.
         if current_platform.is_xpu():
             os.environ.pop("ONEAPI_DEVICE_SELECTOR", None)
 
