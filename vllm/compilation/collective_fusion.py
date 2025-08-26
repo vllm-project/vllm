@@ -10,6 +10,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch.distributed._symmetric_memory import enable_symm_mem_for_group
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
@@ -401,6 +402,18 @@ if flashinfer_comm is not None:
         6: MiB // 2,  # 512KB
         8: MiB // 2,  # 512KB
     }
+
+    try:
+        _FI_MAX_SIZES.update({
+            int(k): int(float(v) * MiB)
+            for k, v in
+            envs.VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB.items()
+        })
+    except Exception as e:
+        raise ValueError(
+            "Failed to parse VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB: "
+            + str(e)) from e
+
     # opt for a more conservative default value
     # when world size is not in _FI_MAX_SIZES
     _DEFAULT_FI_MAX_SIZE = MiB // 2
