@@ -225,7 +225,8 @@ class CompilationConfig:
     # CudaGraph compilation
     cudagraph_mode: Optional[CUDAGraphMode] = None
     """
-    The mode of the cudagraph.
+    The mode of the cudagraph:
+
     - NONE, no cudagraph capture.
     - PIECEWISE. (v1 default)
     - FULL.
@@ -384,13 +385,10 @@ class CompilationConfig:
         if pass_config_exclude:
             exclude["pass_config"] = pass_config_exclude
 
-        # The cast to string is necessary because Pydantic is mocked in docs
-        # builds and sphinx-argparse doesn't know the return type of decode()
-        return str(
-            TypeAdapter(CompilationConfig).dump_json(
-                self,
-                exclude=exclude,  # type: ignore[arg-type]
-                exclude_unset=True).decode())
+        return TypeAdapter(CompilationConfig).dump_json(
+            self,
+            exclude=exclude,  # type: ignore[arg-type]
+            exclude_unset=True).decode()
 
     __str__ = __repr__
 
