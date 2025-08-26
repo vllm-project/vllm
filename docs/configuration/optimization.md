@@ -168,7 +168,7 @@ llm = LLM(
     Batch-level DP is not to be confused with API request-level DP
     (which is instead controlled by `data_parallel_size`).
 
-The availablilty of batch-level DP is based on model implementation.
+The availability of batch-level DP is based on model implementation.
 Currently, the following models support `mm_encoder_tp_mode="data"`:
 
 - Llama4 (<gh-pr:18368>)
