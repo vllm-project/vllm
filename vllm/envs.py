@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
 import json
 import os
 import sys
@@ -214,9 +215,8 @@ def get_vllm_port() -> Optional[int]:
         if parsed.scheme:
             raise ValueError(
                 f"VLLM_PORT '{port}' appears to be a URI. "
-                "This may be caused by a Kubernetes service discovery issue, "
-                "check the warning in: "
-                "https://docs.vllm.ai/en/stable/serving/env_vars.html"
+                "This may be caused by a Kubernetes service discovery issue,"
+                "check the warning in: https://docs.vllm.ai/en/stable/serving/env_vars.html"
             ) from None
         raise ValueError(
             f"VLLM_PORT '{port}' must be a valid integer") from err
@@ -354,8 +354,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Use AITER triton unified attention for V1 attention
     "VLLM_USE_AITER_UNIFIED_ATTENTION":
-    lambda: (os.getenv("VLLM_USE_AITER_UNIFIED_ATTENTION", "False").lower() in
-             ("true", "1")),
+    lambda:
+    (os.getenv("VLLM_USE_AITER_UNIFIED_ATTENTION", "False").lower() in
+     ("true", "1")),
 
     # Force vllm to use a specific flash-attention version (2 or 3), only valid
     # when using the flash-attention backend.
@@ -442,8 +443,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, vllm will log stats at this interval in seconds
     # If not set, vllm will log stats every 10 seconds.
     "VLLM_LOG_STATS_INTERVAL":
-    lambda: val if
-    (val := float(os.getenv("VLLM_LOG_STATS_INTERVAL", "10."))) > 0. else 10.,
+    lambda: val if (val := float(os.getenv("VLLM_LOG_STATS_INTERVAL", "10.")))
+        > 0. else 10.,
 
     # Trace function calls
     # If set to 1, vllm will trace function calls
@@ -669,9 +670,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # traces (CPU & GPU) will be saved under this directory.
     # Note that it must be an absolute path.
     "VLLM_TORCH_PROFILER_DIR":
-    lambda:
-    (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os.path.
-     abspath(os.path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", ".")))),
+    lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
+             .path.abspath(os.path.expanduser(os.getenv(
+        "VLLM_TORCH_PROFILER_DIR", ".")))),
 
     # Enable torch profiler to record shapes if set
     # VLLM_TORCH_PROFILER_RECORD_SHAPES=1. If not set, torch profiler will
@@ -891,11 +892,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DP_MASTER_PORT":
     lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
 
-    # In the context of executing MoE models with
-    # data-parallel, expert-parallel and batched all-to-all
-    # dispatch/combine kernels, VLLM_MOE_DP_CHUNK_SIZE dictates
-    # the quantum of tokens that can be dispatched from a DP rank.
-    # All DP ranks process activations in VLLM_MOE_DP_CHUNK_SIZE units.
+    # In the context of executing MoE models with Data-Parallel, Expert-Parallel
+    # and Batched All-to-All dispatch/combine kernels, VLLM_MOE_DP_CHUNK_SIZE
+    # dictates the quantum of tokens that can be dispatched from a DP
+    # rank. All DP ranks process the activations in VLLM_MOE_DP_CHUNK_SIZE
+    # units.
     "VLLM_MOE_DP_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_MOE_DP_CHUNK_SIZE", "256")),
 
@@ -1035,10 +1036,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # To set this backend, define the environment variable:
     #     export VLLM_FLASHINFER_MOE_BACKEND=latency.
     # If not set, defaults to "throughput".
-    "VLLM_FLASHINFER_MOE_BACKEND":
-    lambda: os.getenv(
-        "VLLM_FLASHINFER_MOE_BACKEND",
-        "throughput",
+    "VLLM_FLASHINFER_MOE_BACKEND": lambda: os.getenv(
+    "VLLM_FLASHINFER_MOE_BACKEND", "throughput"
     ),
 
     # Control the maximum number of tokens per expert supported by the
@@ -1055,8 +1054,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Unspecified world sizes will fallback to
     #     { 2: 64, 4: 1, <everything else>: 0.5 }
     "VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB":
-    lambda: json.loads(
-        os.getenv("VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB", "{}")),
+    lambda: json.loads(os.getenv(
+        "VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB", "{}")),
 
     # MoE routing strategy selector.
     # See `RoutingSimulator.get_available_strategies()` # for available
@@ -1159,10 +1158,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # kv-cache memory usage and enable longer contexts)
     # TODO(lucas): Remove this flag once latency regression is resolved.
     "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE":
-    lambda: bool(
-        int(
-            os.getenv("VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE", "0"
-                      ))),
+    lambda: bool(int(os.getenv(\
+            "VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE", "0"))),
 
     # Enables support for the "store" option in the OpenAI Responses API.
     # When set to 1, vLLM's OpenAI server will retain the input and output
@@ -1183,6 +1180,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER":
     lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1217,7 +1215,15 @@ def set_vllm_use_v1(use_v1: bool):
 
 def compute_hash() -> str:
     """
-    Opt-out env hashing for torch.compile cache keys (RFC #16501):
+    WARNING: Whenever a new key is added to this environment
+    variables, ensure that it is included in the factors list if
+    it affects the computation graph. For example, different values
+    of VLLM_PP_LAYER_PARTITION will generate different computation
+    graphs, so it is included in the factors list. The env vars that
+    affect the choice of different kernels or attention backends should
+    also be included in the factors list.
+
+    Opt-out env hashing for torch.compile cache keys:
     default-include all known vLLM environment variables, exclude a
     tiny set that clearly do not affect the compiled graph.
     """
@@ -1246,5 +1252,4 @@ def compute_hash() -> str:
         except Exception:
             # Skip values we cannot canonicalize deterministically.
             continue
-
     return hash_items_sha256(items)
