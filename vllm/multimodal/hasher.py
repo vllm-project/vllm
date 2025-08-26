@@ -45,16 +45,22 @@ class MultiModalHasher:
         if isinstance(obj, torch.Tensor):
             tensor_obj: torch.Tensor = obj.cpu()
             tensor_dtype = tensor_obj.dtype
+            tensor_shape = tensor_obj.shape
+
+            # NumPy does not support bfloat16.
+            # Workaround: View the tensor as a contiguous 1D array of bytes
             if tensor_dtype == torch.bfloat16:
                 tensor_obj = tensor_obj.contiguous()
                 tensor_obj = tensor_obj.view(
                     (tensor_obj.numel(), )).view(torch.uint8)
+
                 return cls.item_to_bytes(
                     "tensor", {
                         "original_dtype": str(tensor_dtype),
-                        "original_shape": tuple(tensor_obj.shape),
-                        "data": tensor_obj.numpy()
+                        "original_shape": tuple(tensor_shape),
+                        "data": tensor_obj.numpy(),
                     })
+
             return cls.item_to_bytes("tensor", tensor_obj.numpy())
         if isinstance(obj, np.ndarray):
             # If the array is non-contiguous, we need to copy it first
