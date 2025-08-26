@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from functools import cache
 from typing import Optional
 
 import torch
 import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
@@ -18,6 +20,11 @@ _FP8_FINFO = torch.finfo(_FP8_DTYPE)
 _FP8_MAX = 224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.max
 _FP8_MIN = -224.0 if current_platform.is_fp8_fnuz() else _FP8_FINFO.min
 _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
+
+
+@cache
+def use_aiter():
+    return envs.VLLM_ROCM_USE_AITER
 
 
 @CustomOp.register("quant_fp8")
@@ -63,6 +70,17 @@ class QuantFP8(CustomOp):
             num_token_padding=self.num_token_padding,
             scale_ub=scale_ub,
             use_per_token_if_dynamic=self.use_per_token_if_dynamic)
+
+    def forward_hip(
+        self,
+        x: torch.Tensor,
+        scale: Optional[torch.Tensor] = None,
+        scale_ub: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if use_aiter() and self.group_shape == GroupShape.PER_TENSOR:
+            from aiter.ops.quant import per_tensor_quant_hip
+            return per_tensor_quant_hip(x, scale, _FP8_DTYPE)
+        return self.forward_cuda(x, scale, scale_ub)
 
     def forward_native(
         self,
