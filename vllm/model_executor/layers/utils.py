@@ -104,6 +104,14 @@ def aiter_GEMM_check(m, n, k):
     return False
 
 
+def aiter_GEMM_check(m, n, k):
+    if ((n == 5120 and k == 2880)
+        or (n == 2880 and k == 4096)
+        or (n == 128 and k == 2880)
+        or (n == 640 and k == 2880)
+        or (n == 2880 and k == 512)):
+        return True
+    return False
 
 def rocm_unquantized_gemm_impl(
         x: torch.Tensor,
@@ -117,6 +125,9 @@ def rocm_unquantized_gemm_impl(
     use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and on_gfx9() and \
                     x.dtype in [torch.float16, torch.bfloat16] \
                     and k % 8 == 0 and bias is None)
+
+    if VLLM_USE_AITER_TRITON_GEMM and aiter_GEMM_check(n, m, k):
+        return gemm_a16w16(x, weight, bias)
 
     if use_skinny is not True:
         return torch.nn.functional.linear(x, weight, bias)
