@@ -16,7 +16,7 @@ ENV LANG=C.UTF-8 \
 RUN microdnf install -y \
     which procps findutils tar vim git gcc gcc-gfortran g++ make patch zlib-devel \
     libjpeg-turbo-devel libtiff-devel libpng-devel libwebp-devel freetype-devel harfbuzz-devel \
-    openssl-devel openblas openblas-devel autoconf automake libtool cmake numpy && \
+    openssl-devel openblas openblas-devel autoconf automake libtool cmake numpy libsndfile && \
     microdnf clean all
 
 # Python Installation
@@ -136,6 +136,71 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     mkdir -p /tmp/hf-xet/dist && \
     cp dist/*.whl /tmp/hf-xet/dist/
 
+# Build numba
+FROM python-install AS numba-builder
+
+ARG MAX_JOBS
+ARG NUMBA_VERSION=0.61.2
+
+WORKDIR /tmp
+
+# Clone all required dependencies
+RUN --mount=type=cache,target=/root/.cache/uv \
+    microdnf install ninja-build gcc gcc-c++ -y && \
+    git clone --recursive https://github.com/llvm/llvm-project.git -b llvmorg-15.0.7  && \
+    git clone --recursive https://github.com/numba/llvmlite.git -b v0.44.0 && \
+    git clone --recursive https://github.com/numba/numba.git -b ${NUMBA_VERSION} && \
+    cd llvm-project && mkdir build && cd  build && \
+    uv pip install 'cmake<4' setuptools numpy && \
+    export PREFIX=/usr/local && CMAKE_ARGS="${CMAKE_ARGS} -DLLVM_ENABLE_PROJECTS=lld;libunwind;compiler-rt" \
+    CFLAGS="$(echo $CFLAGS | sed 's/-fno-plt //g')" \
+    CXXFLAGS="$(echo $CXXFLAGS | sed 's/-fno-plt //g')" \
+    CMAKE_ARGS="${CMAKE_ARGS} -DFFI_INCLUDE_DIR=$PREFIX/include" \
+    CMAKE_ARGS="${CMAKE_ARGS} -DFFI_LIBRARY_DIR=$PREFIX/lib" \
+    cmake -DCMAKE_INSTALL_PREFIX="${PREFIX}"               \
+        -DCMAKE_BUILD_TYPE=Release                       \
+        -DCMAKE_LIBRARY_PATH="${PREFIX}"                 \
+        -DLLVM_ENABLE_LIBEDIT=OFF                        \
+        -DLLVM_ENABLE_LIBXML2=OFF                        \
+        -DLLVM_ENABLE_RTTI=ON                            \
+        -DLLVM_ENABLE_TERMINFO=OFF                       \
+        -DLLVM_INCLUDE_BENCHMARKS=OFF                    \
+        -DLLVM_INCLUDE_DOCS=OFF                          \
+        -DLLVM_INCLUDE_EXAMPLES=OFF                      \
+        -DLLVM_INCLUDE_GO_TESTS=OFF                      \
+        -DLLVM_INCLUDE_TESTS=OFF                         \
+        -DLLVM_INCLUDE_UTILS=ON                          \
+        -DLLVM_INSTALL_UTILS=ON                          \
+        -DLLVM_UTILS_INSTALL_DIR=libexec/llvm            \
+        -DLLVM_BUILD_LLVM_DYLIB=OFF                      \
+        -DLLVM_LINK_LLVM_DYLIB=OFF                       \
+        -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=WebAssembly \
+        -DLLVM_ENABLE_FFI=ON                             \
+        -DLLVM_ENABLE_Z3_SOLVER=OFF                      \
+        -DLLVM_OPTIMIZED_TABLEGEN=ON                     \
+        -DCMAKE_POLICY_DEFAULT_CMP0111=NEW               \
+        -DCOMPILER_RT_BUILD_BUILTINS=ON                  \
+        -DCOMPILER_RT_BUILTINS_HIDE_SYMBOLS=OFF          \
+        -DCOMPILER_RT_BUILD_LIBFUZZER=OFF                \
+        -DCOMPILER_RT_BUILD_CRT=OFF                      \
+        -DCOMPILER_RT_BUILD_MEMPROF=OFF                  \
+        -DCOMPILER_RT_BUILD_PROFILE=OFF                  \
+        -DCOMPILER_RT_BUILD_SANITIZERS=OFF               \
+        -DCOMPILER_RT_BUILD_XRAY=OFF                     \
+        -DCOMPILER_RT_BUILD_GWP_ASAN=OFF                 \
+        -DCOMPILER_RT_BUILD_ORC=OFF                      \
+        -DCOMPILER_RT_INCLUDE_TESTS=OFF                  \
+        ${CMAKE_ARGS} -GNinja ../llvm                    \
+
+    && ninja install  . && \
+    #  build llvmlite
+    cd ../../llvmlite && python setup.py bdist_wheel && \
+    cd ../numba && \
+    if ! grep '#include "dynamic_annotations.h"' numba/_dispatcher.cpp; then \
+       sed -i '/#include "internal\/pycore_atomic.h"/i\#include "dynamic_annotations.h"' numba/_dispatcher.cpp; \
+    fi && python setup.py bdist_wheel
+
+
 # Final build stage
 FROM python-install AS vllm-cpu
 ARG PYTHON_VERSION
@@ -163,23 +228,30 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=torch-vision,source=/tmp/vision/dist,target=/tmp/vision-wheels/ \
     --mount=type=bind,from=hf-xet-builder,source=/tmp/hf-xet/dist,target=/tmp/hf-xet-wheels/ \
     --mount=type=bind,from=torch,source=/tmp/pytorch/dist,target=/tmp/torch-wheels/ \
+    --mount=type=bind,from=numba-builder,source=/tmp/llvmlite/dist,target=/tmp/llvmlite-wheels/ \
+    --mount=type=bind,from=numba-builder,source=/tmp/numba/dist,target=/tmp/numba-wheels/ \
      sed -i '/^torch/d' requirements/build.txt && \
-     ARROW_WHL_FILE=$(ls /tmp/arrow-wheels/pyarrow-*.whl | head -n 1) && \
-     VISION_WHL_FILE=$(ls /tmp/vision-wheels/*.whl | head -n 1) && \
-     HF_XET_WHL_FILE=$(ls /tmp/hf-xet-wheels/*.whl | head -n 1) && \
-     TORCH_WHL_FILE=$(ls /tmp/torch-wheels/*.whl | head -n 1) && \
+     ARROW_WHL_FILE=$(ls /tmp/arrow-wheels/pyarrow-*.whl) && \
+     VISION_WHL_FILE=$(ls /tmp/vision-wheels/*.whl) && \
+     HF_XET_WHL_FILE=$(ls /tmp/hf-xet-wheels/*.whl) && \
+     TORCH_WHL_FILE=$(ls /tmp/torch-wheels/*.whl) && \
+     LLVM_WHL_FILE=$(ls /tmp/llvmlite-wheels/*.whl) && \
+     NUMBA_WHL_FILE=$(ls /tmp/numba-wheels/*.whl) && \
     uv pip install -v \    
         $ARROW_WHL_FILE  \
         $VISION_WHL_FILE \
         $HF_XET_WHL_FILE \
         $TORCH_WHL_FILE \
+        $LLVM_WHL_FILE \
+        $NUMBA_WHL_FILE \
         --index-strategy unsafe-best-match \
         -r requirements/build.txt \
-        -r requirements/cpu.txt 
+        -r requirements/cpu.txt
+
 
 # Build and install vllm
 RUN --mount=type=cache,target=/root/.cache/uv \
-    VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
+    VLLM_TARGET_DEVICE=cpu VLLM_CPU_MOE_PREPACK=0 python setup.py bdist_wheel && \
     uv pip install "$(echo dist/*.whl)[tensorizer]"
 
 # setup non-root user for vllm
@@ -196,4 +268,3 @@ WORKDIR /home/vllm
 
 # Set the default entrypoint
 ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]
-
