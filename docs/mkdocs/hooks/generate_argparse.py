@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import importlib
 import logging
 import sys
 from argparse import SUPPRESS, HelpFormatter
 from pathlib import Path
 from typing import Literal
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
+
+from pydantic_core import core_schema
 
 logger = logging.getLogger("mkdocs")
 
@@ -13,8 +16,32 @@ ROOT_DIR = Path(__file__).parent.parent.parent.parent
 ARGPARSE_DOC_DIR = ROOT_DIR / "docs/argparse"
 
 sys.path.insert(0, str(ROOT_DIR))
+sys.modules["vllm._C"] = MagicMock()
 
-from docs.mkdocs.hooks.mocking import auto_mock  # noqa: E402
+
+class PydanticMagicMock(MagicMock):
+    """`MagicMock` that's able to generate pydantic-core schemas."""
+
+    def __get_pydantic_core_schema__(self, source_type, handler):
+        return core_schema.any_schema()
+
+
+def auto_mock(module, attr, max_tries=50):
+    """Function that automatically mocks missing modules during imports."""
+    for _ in range(max_tries):
+        try:
+            # First treat attr as an attr, then as a submodule
+            return getattr(importlib.import_module(module), attr,
+                           importlib.import_module(f"{module}.{attr}"))
+        except importlib.metadata.PackageNotFoundError as e:
+            raise e
+        except ModuleNotFoundError as e:
+            logger.info("Mocking %s for argparse doc generation", e.name)
+            sys.modules[e.name] = PydanticMagicMock()
+    else:
+        raise ImportError(
+            f"Failed to import {module}.{attr} after {max_tries} attempts")
+
 
 latency = auto_mock("vllm.benchmarks", "latency")
 serve = auto_mock("vllm.benchmarks", "serve")
