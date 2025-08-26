@@ -572,6 +572,13 @@ class Platform:
         """
         return False
 
+    @classmethod
+    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+        """
+        Check if the dtype is supported by the current platform.
+        """
+        raise NotImplementedError
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
