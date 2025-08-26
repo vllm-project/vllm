@@ -5,7 +5,6 @@ import json
 
 import pytest
 import requests
-from PIL import Image
 from transformers import AutoProcessor
 
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
@@ -64,7 +63,7 @@ def get_hf_prompt_tokens(model_name, content, image_url):
 
     placeholder = "<|image_1|> "
     prompt = f"{placeholder}{content}"
-    images = [Image.open(requests.get(image_url, stream=True).raw)]
+    images = [fetch_image(image_url)]
     inputs = processor(prompt, images, return_tensors="pt")
     return inputs.input_ids.shape[1]
 
