@@ -40,7 +40,7 @@ from vllm.ray.lazy_utils import is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
 from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.config import get_model_path, is_interleaved
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.utils import check_gguf_file, is_remote_url
 from vllm.utils import (STR_DUAL_CHUNK_FLASH_ATTN_VAL, FlexibleArgumentParser,
                         GiB_bytes, get_ip, is_in_ray_actor)
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -996,6 +996,9 @@ class EngineArgs:
 
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
+        if is_remote_url(self.model) and not self.load_format.startswith(
+                "runai_streamer"):
+            self.load_format = "remote"
 
         if self.load_format == "tensorizer":
             if hasattr(self.model_loader_extra_config, "to_serializable"):

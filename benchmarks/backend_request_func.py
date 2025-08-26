@@ -601,8 +601,19 @@ def get_model(pretrained_model_name_or_path: str) -> str:
                 ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"],
             )
 
-            return model_path
-    return pretrained_model_name_or_path
+        return model_path
+
+    from vllm.transformers_utils.utils import is_remote_url
+
+    if is_remote_url(pretrained_model_name_or_path):
+        from vllm.connector import create_remote_connector
+
+        # BaseConnector implements __del__() to clean up the local dir.
+        # Since config files need to exist all the time, so we DO NOT use
+        # with statement to avoid closing the client.
+        client = create_remote_connector(pretrained_model_name_or_path)
+        client.pull_files(ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+        return client.get_local_dir()
 
 
 def get_tokenizer(

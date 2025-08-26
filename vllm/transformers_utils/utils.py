@@ -7,6 +7,8 @@ from os import PathLike
 from pathlib import Path
 from typing import Optional, Union
 
+import regex as re
+
 from vllm.envs import VLLM_MODEL_REDIRECT_PATH
 from vllm.logger import init_logger
 
@@ -15,6 +17,32 @@ logger = init_logger(__name__)
 
 def is_s3(model_or_path: str) -> bool:
     return model_or_path.lower().startswith('s3://')
+
+
+def is_remote_url(url: Union[str, Path]) -> bool:
+    """
+    Check if the URL is a remote URL of the format:
+    <connector_type>://<host>:<port>/<model_name>
+    """
+    if isinstance(url, Path):
+        return False
+
+    pattern = r"(.+)://(.*)"
+    m = re.match(pattern, url)
+    return m is not None
+
+
+def parse_connector_type(url: str) -> str:
+    """
+    Parse the connector type from the URL of the format:
+    <connector_type>://<path>
+    """
+    pattern = r"(.+)://(.*)"
+    m = re.match(pattern, url)
+    if m is None:
+        return ""
+
+    return m.group(1)
 
 
 def check_gguf_file(model: Union[str, PathLike]) -> bool:
