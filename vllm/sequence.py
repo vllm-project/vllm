@@ -144,13 +144,7 @@ class SequenceDataDelta(
 
 class SequenceData(msgspec.Struct,
                    omit_defaults=True):  # type: ignore[call-arg]
-    """Data associated with a sequence.
-
-    Attributes:
-        _prompt_token_ids: The token IDs of the prompt.
-        _output_token_ids: The token IDs of the output.
-        _cumulative_logprob: The cumulative log probability of the output.
-    """
+    """Data associated with a sequence."""
     # NOTE: we cannot use Union[list, array] because msgspec cannot support
     # union of 2 list types.
     _prompt_token_ids: array
@@ -248,10 +242,12 @@ class SequenceData(msgspec.Struct,
 
     @property
     def cumulative_logprob(self) -> float:
+        """The cumulative log probability of the output."""
         return self._cumulative_logprob
 
     @property
     def prompt_token_ids(self) -> tuple[int, ...]:
+        """The token IDs of the prompt."""
         return self._prompt_token_ids_tuple
 
     @prompt_token_ids.setter
@@ -269,6 +265,7 @@ class SequenceData(msgspec.Struct,
 
     @property
     def output_token_ids(self) -> tuple[int, ...]:
+        """The token IDs of the output."""
         return tuple(self._output_token_ids)
 
     @output_token_ids.setter
