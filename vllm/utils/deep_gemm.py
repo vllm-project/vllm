@@ -51,7 +51,7 @@ def is_deep_gemm_e8m0_used() -> bool:
             "DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found")
         return False
 
-    logger.debug_once("DeepGEMM E8M0 enabled GPU.")
+    logger.debug_once("DeepGEMM E8M0 enabled.")
     return True
 
 
