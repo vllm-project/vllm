@@ -3654,7 +3654,6 @@ void paged_attention(
     const std::string& mfma_type) {
   // clang-format on
   bool is_navi = is_navi_gpu();
-  printf("\nkv, mfma is_navi = %s %s %d", kv_cache_dtype.c_str(), mfma_type.c_str(), is_navi);
   const int head_size = query.size(2);
   if (kv_cache_dtype == "auto") {
     if (query.dtype() == at::ScalarType::Half) {
