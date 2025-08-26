@@ -43,7 +43,7 @@ class MultiModalHasher:
             return cls.item_to_bytes(
                 "image", np.asarray(convert_image_mode(obj, "RGBA")))
         if isinstance(obj, torch.Tensor):
-            tensor_obj: torch.Tensor = obj.cpu()
+            tensor_obj: torch.Tensor = obj.cpu().contiguous()
             if tensor_obj.dtype == torch.bfloat16:
                 tensor_obj = tensor_obj.view(
                     (tensor_obj.numel(), )).view(torch.uint8)
