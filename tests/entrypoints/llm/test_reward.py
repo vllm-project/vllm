@@ -36,10 +36,9 @@ def llm():
               trust_remote_code=True,
               seed=0)
 
-    with llm.deprecate_legacy_api():
-        yield weakref.proxy(llm)
+    yield weakref.proxy(llm)
 
-        del llm
+    del llm
 
     cleanup_dist_env_and_memory()
 
