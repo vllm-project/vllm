@@ -301,7 +301,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
 
     # 2. Generate data and compute SDPA reference output for MLA
     all_q_vllm, all_kv_c_vllm, all_k_pe_vllm = [], [], []
-    all_sdpa_outputs = []
+    all_sdpa_outputs: list[list[torch.Tensor]] = []
     kv_c_contexts, k_pe_contexts = [], []
 
     # Create shared MLA weight matrices for consistency across all sequences
@@ -317,7 +317,6 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
                        device=device)
     kv_b_proj_weight = torch.cat([W_UK, W_UV], dim=-1)
 
-    all_sdpa_outputs = []
     for i, backend in enumerate(BACKENDS_TO_TEST):
         all_sdpa_outputs.append([])
 
