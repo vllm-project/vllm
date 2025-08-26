@@ -38,7 +38,7 @@ from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import (direct_register_custom_op, has_deep_ep, has_pplx,
                         round_up)
 from vllm.utils.flashinfer import has_flashinfer
-from vllm.v1.worker.ubatching import get_current_ubatch_context
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -1557,9 +1557,7 @@ class FusedMoE(CustomOp):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
 
-            ubatch_ctx = get_current_ubatch_context()
-            ubatch_id = ubatch_ctx.id if ubatch_ctx is not None else -1
-            batch_buffer_idx = 0 if ubatch_id == -1 else ubatch_id
+            batch_buffer_idx = dbo_current_ubatch_id()
 
             assert self.batched_hidden_states is not None
             assert self.batched_router_logits is not None

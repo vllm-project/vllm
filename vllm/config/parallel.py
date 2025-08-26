@@ -103,7 +103,7 @@ class ParallelConfig:
     enable_microbatching: bool = False
     """Enable microbatching for the model executor."""
 
-    microbatching_token_threshold: int = 4
+    microbatching_token_threshold: int = 32
     """The threshold for microbatching. If the number of tokens in the
     request is greater than this threshold, microbatching will be used.
     Otherwise, the request will be processed in a single batch."""

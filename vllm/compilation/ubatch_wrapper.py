@@ -54,6 +54,7 @@ class UBatchWrapper:
         self.compilation_config = vllm_config.compilation_config
         self.comm_stream = torch.cuda.Stream()
         self.device = device
+        self.ready_barrier = threading.Barrier(3)
 
         self.cudagraphs = {}
 
@@ -77,7 +78,8 @@ class UBatchWrapper:
 
     def _capture_ubatches(self, ubatch_metadata, model) -> torch.Tensor:
 
-        def _capture_ubatch_thread(results, ubatch_metadata, start_signal):
+        @torch.inference_mode()
+        def _capture_ubatch_thread(results, ubatch_metadata):
             # print(f"Starting Request on ubatch: {ubatch_ctx.id}", flush=True)
             context = ubatch_metadata.context
             with torch.cuda.stream(context.compute_stream):
@@ -85,7 +87,6 @@ class UBatchWrapper:
             with torch.cuda.stream(context.comm_stream):
                 _ = torch.cuda.current_blas_handle()
             with context:
-                start_signal.wait()
                 model_output = model(
                     input_ids=ubatch_metadata.input_ids,
                     positions=ubatch_metadata.positions,
@@ -104,18 +105,16 @@ class UBatchWrapper:
         # it to None here so we can have it restored correctly later
         with override_forward_context(None):
             ubatch_threads = []
-            start_signals = []
             for metadata in ubatch_metadata:
                 start_signal = threading.Event()
                 thread = threading.Thread(target=_capture_ubatch_thread,
                                           args=(
                                               results,
                                               metadata,
-                                              start_signal,
                                           ))
                 ubatch_threads.append(thread)
                 thread.start()
-                start_signals.append(start_signal)
+            self.ready_barrier.wait() # Wait for both threads to be ready
 
             # DO capture
             cudagraph_metadata = \
@@ -126,8 +125,6 @@ class UBatchWrapper:
             with torch.cuda.graph(cudagraph_metadata.cudagraph,
                                   stream=compute_stream,
                                   pool=self.graph_pool):
-                for start_signal in start_signals:
-                    start_signal.set()
                 ubatch_metadata[0].context.cpu_wait_event.set()
                 for thread in ubatch_threads:
                     thread.join()
@@ -166,7 +163,7 @@ class UBatchWrapper:
                                           ))
                 ubatch_threads.append(thread)
                 thread.start()
-
+            self.ready_barrier.wait() # Wait for both threads to be ready
             ubatch_metadata[0].context.cpu_wait_event.set()
             for thread in ubatch_threads:
                 thread.join()
@@ -199,6 +196,7 @@ class UBatchWrapper:
             comm_stream=self.comm_stream,
             compute_stream=compute_stream,
             forward_contexts=forward_contexts,
+            ready_barrier=self.ready_barrier,
             device=self.device,
             enable_async_comms=self.vllm_config.parallel_config.enable_async_comms)
 

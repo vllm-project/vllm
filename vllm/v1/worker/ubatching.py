@@ -9,6 +9,8 @@ from vllm import forward_context
 from vllm.forward_context import ForwardContext
 from vllm.utils import current_stream
 
+_THREAD_ID_TO_CONTEXT: dict = {}
+_CURRENT_CONTEXTS: list[Optional['UBatchContext']] = [None, None]
 
 class UBatchContext:
     """
@@ -20,6 +22,7 @@ class UBatchContext:
                  comm_stream: torch.cuda.Stream,
                  compute_stream: torch.cuda.Stream,
                  forward_context: ForwardContext,
+                 ready_barrier: threading.Barrier,
                  cpu_wait_event: threading.Event,
                  cpu_signal_event: threading.Event,
                  gpu_comm_done_event: torch.cuda.Event,
@@ -30,6 +33,7 @@ class UBatchContext:
         self.comm_stream = comm_stream
         self.compute_stream = compute_stream
         self.forward_context = forward_context
+        self.ready_barrier = ready_barrier
         self.cpu_wait_event = cpu_wait_event
         self.cpu_signal_event = cpu_signal_event
         self.current_stream = compute_stream
@@ -37,12 +41,14 @@ class UBatchContext:
         self.gpu_compute_done_event = gpu_compute_done_event
         self.enable_async_comms = enable_async_comms
         self.schedule = schedule
+        self.recv_hook = None
 
     def __enter__(self):
-        global _CURRENT_CONTEXT
-        _CURRENT_CONTEXT[threading.get_ident()] = self
+        global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
+        _THREAD_ID_TO_CONTEXT[threading.get_ident()] = self.id
+        _CURRENT_CONTEXTS[self.id] = self
+        self.ready_barrier.wait()
 
-        self.cpu_wait_event.clear()
         self.cpu_wait_event.wait()
         self.cpu_wait_event.clear()
         self._restore_context()
@@ -51,8 +57,9 @@ class UBatchContext:
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        global _CURRENT_CONTEXT
-        _CURRENT_CONTEXT[threading.get_ident()] = None
+        global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
+        _CURRENT_CONTEXTS[self.id] = None
+        del _THREAD_ID_TO_CONTEXT[threading.get_ident()]
         self.cpu_signal_event.set()
         self.cpu_wait_event.clear()
         self.current_stream = self.compute_stream
@@ -100,6 +107,22 @@ class UBatchContext:
         self.cpu_wait_event.clear()
         self._restore_context()
 
+    def switch_to_comm_sync(self):
+        self._signal_compute_done()
+        self.update_stream(self.comm_stream)
+        self._wait_comm_done()
+    
+    def maybe_run_recv_hook(self):
+        if self.recv_hook is not None:
+            self.recv_hook()
+            self.recv_hook = None
+
+    def yield_(self):
+        self.current_stream = current_stream()
+        self._cpu_yield()
+        if self.current_stream == current_stream():
+            self.update_stream(self.current_stream)
+    
     def yield_and_switch_from_compute_to_comm(self):
         assert current_stream() == self.compute_stream
         self._signal_compute_done()
@@ -108,49 +131,49 @@ class UBatchContext:
         self.update_stream(self.comm_stream)
         self._wait_compute_done()
 
-    def yield_and_switch_from_comm_to_compute(self, recv_hook = None):
+    def yield_and_switch_from_comm_to_compute(self):
         assert current_stream() == self.comm_stream
-        if recv_hook is None:
-            self._signal_comm_done()
+        self._signal_comm_done()
         self._cpu_yield()
-        if recv_hook is not None:
-            recv_hook()
-            self._signal_comm_done()
         assert self.current_stream == self.comm_stream
         self.update_stream(self.compute_stream)
         self._wait_comm_done()
 
 
-_CURRENT_CONTEXT: dict = {}
+def dbo_enabled() -> bool:
+    return len(_THREAD_ID_TO_CONTEXT) > 0
 
+def dbo_current_ubatch_id() -> int:
+    if len(_THREAD_ID_TO_CONTEXT) == 0:
+        return 0
+    return _THREAD_ID_TO_CONTEXT[threading.get_ident()]
 
-def get_current_ubatch_context() -> Optional[UBatchContext]:
-    global _CURRENT_CONTEXT
-    """
-    Get the current UBatchContext for the current thread.
-    """
-    return _CURRENT_CONTEXT.get(threading.get_ident(), None)
+def _register_ubatch_function(func, context_offset):
+    def wrapper(*args, **kwargs):
+        if len(_THREAD_ID_TO_CONTEXT) > 0:
+            ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()] + context_offset
+            ctx = _CURRENT_CONTEXTS[ctx_idx]
+            func(ctx, *args, **kwargs)
+    return wrapper
 
+dbo_yield_and_switch_from_compute_to_comm = _register_ubatch_function(UBatchContext.yield_and_switch_from_compute_to_comm, 0)
+dbo_yield_and_switch_from_comm_to_compute = _register_ubatch_function(UBatchContext.yield_and_switch_from_comm_to_compute, 0)
+dbo_yield = _register_ubatch_function(UBatchContext.yield_, 0)
+dbo_maybe_run_recv_hook = _register_ubatch_function(UBatchContext.maybe_run_recv_hook, 0)
+dbo_switch_to_comm_sync = _register_ubatch_function(UBatchContext.switch_to_comm_sync, 0)
 
-def yield_and_switch_from_compute_to_comm(schedule="default"):
-    # Perform the barrier if a context exists for this thread
-    ctx = get_current_ubatch_context()
-    if ctx is not None and ctx.schedule == schedule:
-        ctx.yield_and_switch_from_compute_to_comm()
-
-
-def yield_and_switch_from_comm_to_compute(schedule="default", recv_hook = None):
-    # Perform the barrier if a context exists for this thread
-    ctx = get_current_ubatch_context()
-    if ctx is not None and ctx.schedule == schedule:
-        ctx.yield_and_switch_from_comm_to_compute(recv_hook=recv_hook)
-
+def dbo_register_recv_hook(recv_hook):
+    if len(_THREAD_ID_TO_CONTEXT) > 0:
+        ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
+        next_ctx = _CURRENT_CONTEXTS[(ctx_idx + 1) % 2]
+        next_ctx.recv_hook = recv_hook
 
 def make_ubatch_contexts(
     num_micro_batches: int,
     compute_stream: torch.cuda.Stream,
     comm_stream: torch.cuda.Stream,
     forward_contexts: list[ForwardContext],
+    ready_barrier: threading.Barrier,
     device: Optional[torch.device] = None,
     enable_async_comms: bool = False,
     schedule: str = "default",
@@ -177,6 +200,7 @@ def make_ubatch_contexts(
                             compute_stream=compute_stream,
                             comm_stream=comm_stream,
                             forward_context=forward_contexts[i],
+                            ready_barrier=ready_barrier,
                             cpu_wait_event=cpu_events[i],
                             cpu_signal_event=cpu_events[(i + 1) %
                                                         num_micro_batches],
