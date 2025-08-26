@@ -176,7 +176,7 @@ class CudagraphDispatcher:
                 num_tokens, uniform_aligned=False), True
 
         if uniform_decode and uniform_query_len > 1 and \
-            num_tokens <= self.compilation_config.max_capture_size_uniform:
+            num_tokens <= self.compilation_config.max_uniform_capture_size:
             # this is particular for uniform-decode alignment for vaildation
             # phase of spec-decode, or for the first iteration of drafter when
             # support padded speculation
