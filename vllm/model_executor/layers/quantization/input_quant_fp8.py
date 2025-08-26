@@ -24,7 +24,7 @@ _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 
 @cache
 def use_aiter():
-    return envs.VLLM_ROCM_USE_AITER
+    return envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR
 
 
 @CustomOp.register("quant_fp8")
