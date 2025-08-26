@@ -4,7 +4,7 @@ r"""Benchmark online serving throughput.
 
 On the server side, run one of the following commands
 to launch the vLLM OpenAI API server:
-    vllm serve <your_model> <engine arguments>        
+    vllm serve <your_model> <engine arguments>
 
 On the client side, run:
     vllm bench serve \
@@ -160,7 +160,7 @@ async def get_request(
             # Sample the request interval from the gamma distribution.
             # If burstiness is 1, it follows exponential distribution.
             delay_ts.append(np.random.gamma(shape=burstiness, scale=theta))
-    
+
     # Calculate the cumulative delay time from the first sent out requests.
     for i in range(1, len(delay_ts)):
         delay_ts[i] += delay_ts[i - 1]
@@ -170,11 +170,11 @@ async def get_request(
         # logic would re-scale delay time to ensure the final delay_ts
         # align with target_total_delay_s.
         #
-        # NOTE: If we simply accumulate the random delta values 
-        # from the gamma distribution, their sum would have 1-2% gap 
+        # NOTE: If we simply accumulate the random delta values
+        # from the gamma distribution, their sum would have 1-2% gap
         # from target_total_delay_s. The purpose of the following logic is to
-        # close the gap for stablizing the throughput data 
-        # from different random seeds. 
+        # close the gap for stablizing the throughput data
+        # from different random seeds.
         target_total_delay_s = total_requests / request_rate
         normalize_factor = target_total_delay_s / delay_ts[-1]
         delay_ts = [delay * normalize_factor for delay in delay_ts]
@@ -333,6 +333,7 @@ async def benchmark(
     ramp_up_start_rps: Optional[int] = None,
     ramp_up_end_rps: Optional[int] = None,
     ready_check_timeout_sec: int = 600,
+    initial_test_output_len: Optional[int] = None
 ):
     if endpoint_type in ASYNC_REQUEST_FUNCS:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -379,7 +380,7 @@ async def benchmark(
         prompt=test_prompt,
         api_url=api_url,
         prompt_len=test_prompt_len,
-        output_len=test_output_len,
+        output_len=initial_test_output_len or test_output_len,
         logprobs=logprobs,
         multi_modal_content=test_mm_content,
         ignore_eos=ignore_eos,
@@ -421,7 +422,7 @@ async def benchmark(
         if profile_output.success:
             print("Profiler started")
 
-    distribution = ("Poisson process" if burstiness == 1.0 
+    distribution = ("Poisson process" if burstiness == 1.0
                    else "Gamma distribution")
 
     if ramp_up_strategy is not None:
@@ -449,7 +450,7 @@ async def benchmark(
                                       session=session,
                                       pbar=pbar)
         async with semaphore:
-            return await request_func(request_func_input=request_func_input, 
+            return await request_func(request_func_input=request_func_input,
                                       session=session,
                                       pbar=pbar)
 
@@ -963,6 +964,13 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Maximum time to wait for the endpoint to become ready "
         "in seconds (default: 600 seconds / 10 minutes).",
     )
+    parser.add_argument(
+        "--initial-test-output-len",
+        type=int,
+        help="When this is set to a number larger than 0, we will "
+        "use this value as the output lengths limit for initial "
+        "single prompt attempt.",
+    )
 
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
@@ -994,6 +1002,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                 and args.ramp_up_start_rps == 0):
             raise ValueError(
                 "For exponential ramp-up, the start RPS cannot be 0.")
+    if (args.initial_test_output_len is not None
+        and args.initial_test_output_len <= 0):
+        raise ValueError("--initial-test-output-len must be positive.")
 
     endpoint_type = args.endpoint_type
     label = args.label
@@ -1071,6 +1082,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             ramp_up_start_rps=args.ramp_up_start_rps,
             ramp_up_end_rps=args.ramp_up_end_rps,
             ready_check_timeout_sec=args.ready_check_timeout_sec,
+            initial_test_output_len=args.initial_test_output_len,
         )
 
     # Save config and results to json
