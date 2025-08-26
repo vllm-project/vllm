@@ -471,19 +471,15 @@ class EagleProposer:
             self.hidden_states[:num_tokens] = tree_hidden_states.view(
                 num_tokens, -1)
 
-            # As decode phase of TreeAttentionBackend does not have a uniform
-            # decode query length (1 for the root level and total_num_drafts
-            # for subsequent levels), so here we expect runtime mode should be
-            # not FULL, until we find ways to support full cudagraph of this
-            # case.
+            # Note: decode phase of TreeAttentionBackend does not have an
+            # unique uniform decode query length (1 for the root level and
+            # total_num_drafts for subsequent levels). Here we may support
+            # this situation once full cudagraph of TreeAttention is supported.
             cudagraph_runtime_mode, batch_descriptor, num_input_tokens = \
             self.cudagraph_dispatcher.plan(
                 num_scheduled_tokens=num_tokens,
                 num_reqs=batch_size,
                 max_query_len=attn_metadata.max_query_len)
-            assert cudagraph_runtime_mode != CUDAGraphMode.FULL, \
-                "TreeAttentionBackend does not support full cudagraphs at " \
-                "this moment"
 
             # Run the model.
             with set_forward_context(
@@ -677,14 +673,28 @@ class EagleProposer:
         num_tokens: int,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
         force_attention: bool = False,
-        uniform_decode: bool = False,
+        batch_descriptor: Optional[BatchDescriptor] = None,
     ) -> None:
         assert cudagraph_runtime_mode != CUDAGraphMode.FULL, \
             "Eagle drafter doesn't support full cudagraphs at this moment"
 
-        max_query_len = 1 if uniform_decode else num_tokens
+        uniform_decode = False
+        if batch_descriptor is not None and batch_descriptor.uniform_decode:
+            assert batch_descriptor.num_tokens == num_tokens, \
+                "num_tokens mismatch"
+            uniform_decode = True
+            max_query_len = batch_descriptor.uniform_query_len
+        else:
+            max_query_len = num_tokens
+
         max_num_reqs = self.vllm_config.scheduler_config.max_num_seqs
-        num_reqs = min(num_tokens, max_num_reqs)
+        if uniform_decode:
+            assert num_tokens % max_query_len == 0, \
+                "num_tokens must be divisible by max_query_len for uniform " \
+                "decode"
+            num_reqs = min(num_tokens // max_query_len, max_num_reqs)
+        else:
+            num_reqs = min(num_tokens, max_num_reqs)
 
         per_layer_attn_metadata: Optional[dict[str, Any]] = None
         if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
@@ -720,12 +730,11 @@ class EagleProposer:
         if cudagraph_runtime_mode == CUDAGraphMode.NONE:
             batch_descriptor = None
         else:
-            # filter out the valid batch descriptor
-            _cg_mode, batch_descriptor = \
-                self.cudagraph_dispatcher.dispatch(
-                    BatchDescriptor(num_tokens=num_tokens,
-                                    uniform_decode=uniform_decode))
+            assert batch_descriptor is not None, \
+                "batch_descriptor should be provided for cudagraph capture"
             # sanity check
+            _cg_mode, batch_descriptor = \
+                self.cudagraph_dispatcher.dispatch(batch_descriptor)
             assert cudagraph_runtime_mode == _cg_mode, (
                 f"Cudagraph runtime mode mismatch at dummy_run. "
                 f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}.")

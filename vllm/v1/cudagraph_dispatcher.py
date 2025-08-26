@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from typing import Optional, Union
 
 from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
@@ -42,8 +42,9 @@ class CudagraphDispatcher:
         # Placeholder for capture sizes. Should be initialized in
         # self.initialize_cudagraph_keys.
         self.cudagraph_capture_sizes: list[int] = []
-        self.uniform_cudagraph_capture_sizes: list[int] = []
-        self.uniform_decode_query_len: int = 0
+        # map uniform_query_len to capture sizes
+        self.uniform_cudagraph_capture_sizes: dict[int, list[int]] = {}
+        self.uniform_query_lens: list[int] = []
 
         assert not self.cudagraph_mode.requires_piecewise_compilation() or \
             (self.compilation_config.level == CompilationLevel.PIECEWISE and
@@ -63,7 +64,8 @@ class CudagraphDispatcher:
         self.cudagraph_keys[runtime_mode].add(batch_descriptor)
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode,
-                                  uniform_decode_query_len: int):
+                                  uniform_query_lens: Union[int, list[int]]):
+
         # This should be called only after attention backend is initialized.
 
         # Note: we create all valid keys possible for cudagraph but do not
@@ -73,6 +75,26 @@ class CudagraphDispatcher:
         # trigger capturing/replaying the piecewise cudagraphs depending on
         # CompilationConfig.cudagraph_mode. In addition, if we allow lazy
         # capturing in future PR, some keys may never be triggered.
+
+        # support multiple uniform_decode_query_lens for spec-decode
+        if isinstance(uniform_query_lens, int):
+            uniform_query_lens = [uniform_query_lens]
+        assert len(uniform_query_lens) > 0 and all(
+            isinstance(x, int) and x > 0 for x in uniform_query_lens), \
+            f"Invalid uniform_query_lens: {uniform_query_lens}"
+        self.uniform_query_lens = uniform_query_lens
+
+        # we only have compilation_config.cudagraph_capture_sizes_uniform
+        # being aligned with one uniform_query_len that greater than 1, not
+        # multiple of them. Should verify this here.
+        for uniform_query_len in self.uniform_query_lens:
+            if uniform_query_len > 1 and \
+                self.compilation_config.cudagraph_capture_sizes_uniform:
+                assert all(x % uniform_query_len == 0 for x in
+                           self.compilation_config.\
+                            cudagraph_capture_sizes_uniform), \
+                    f"Invalid uniform_query_lens: {uniform_query_len}"
+
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
             for bs in self.compilation_config.cudagraph_capture_sizes:
                 self.add_cudagraph_key(
@@ -83,57 +105,85 @@ class CudagraphDispatcher:
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
         # mode full cudagraphs then add them here.
-        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL \
-            and cudagraph_mode.separate_routine():
-            max_num_tokens = uniform_decode_query_len * \
-                self.vllm_config.scheduler_config.max_num_seqs
-            # for uniform_decode_query_len==1, we use the non-uniform
-            # capture sizes, this can be for main model without spec-decode or
-            # for the drafter. Otherwise, we use the uniform-projected sizes.
-            candidate_sizes = self.compilation_config.cudagraph_capture_sizes\
-                if uniform_decode_query_len == 1 else \
-                self.compilation_config.cudagraph_capture_sizes_uniform
-            cudagraph_capture_sizes_for_decode = [
-                x for x in candidate_sizes
-                if x <= max_num_tokens and x >= uniform_decode_query_len
-            ]
-            for bs in cudagraph_capture_sizes_for_decode:
-                self.add_cudagraph_key(
-                    CUDAGraphMode.FULL,
-                    BatchDescriptor(num_tokens=bs, uniform_decode=True))
-            self.uniform_cudagraph_capture_sizes = \
-                cudagraph_capture_sizes_for_decode
+        for uniform_query_len in self.uniform_query_lens:
+            if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL \
+                and cudagraph_mode.separate_routine():
+                max_num_tokens = uniform_query_len * \
+                    self.vllm_config.scheduler_config.max_num_seqs
+                # for uniform_query_len==1, we use the non-uniform
+                # capture sizes, this can be for main model without spec-decode
+                # or for the drafter. Otherwise, we use the uniform-aligned
+                # sizes.
+                candidate_sizes = self.compilation_config.\
+                    cudagraph_capture_sizes \
+                    if uniform_query_len == 1 else \
+                    self.compilation_config.cudagraph_capture_sizes_uniform
+                cudagraph_capture_sizes_for_decode = [
+                    x for x in candidate_sizes
+                    if x <= max_num_tokens and x >= uniform_query_len
+                ]
+                for bs in cudagraph_capture_sizes_for_decode:
+                    self.add_cudagraph_key(
+                        CUDAGraphMode.FULL,
+                        BatchDescriptor(num_tokens=bs,
+                                        uniform_decode=True,
+                                        uniform_query_len=uniform_query_len))
+                self.uniform_cudagraph_capture_sizes[uniform_query_len] = \
+                    cudagraph_capture_sizes_for_decode
 
-        self.uniform_decode_query_len = uniform_decode_query_len
+        # update the cudagraph mode resolved from runner
+        self.cudagraph_mode = cudagraph_mode
         self.keys_initialized = True
 
-    def get_capture_cases(self, uniform_decode: bool) -> list[int]:
-        """Return capture sizes for a given whether it is uniform-decode."""
+    def get_capture_cases(
+        self, uniform_decode: bool, uniform_query_len: int
+    ) -> tuple[CUDAGraphMode, list[BatchDescriptor], list[int]]:
+        """Return capture sizes, keys, and runtime mode for a given case.
+        The capture sizes and keys are sorted in descending order.
+        """
         if not uniform_decode:
-            return list(self.cudagraph_capture_sizes)
+            runtime_mode = self.cudagraph_mode.mixed_mode()
+            uniform_query_len = 0
+            capture_sizes = sorted(self.cudagraph_capture_sizes, reverse=True)
         else:
-            return list(self.uniform_cudagraph_capture_sizes)
+            runtime_mode = self.cudagraph_mode.decode_mode()
+            assert uniform_query_len in self.uniform_cudagraph_capture_sizes
+            capture_sizes = sorted(
+                self.uniform_cudagraph_capture_sizes[uniform_query_len],
+                reverse=True)
+        keys = [
+            BatchDescriptor(num_tokens=x,
+                            uniform_decode=uniform_decode,
+                            uniform_query_len=uniform_query_len)
+            for x in capture_sizes
+        ]
+        return capture_sizes, keys, runtime_mode
 
-    def padded_num_tokens(self, num_tokens: int,
-                          uniform_decode: bool) -> tuple[int, bool]:
+    def padded_num_tokens(self, num_tokens: int, uniform_decode: bool,
+                          uniform_query_len: int) -> tuple[int, bool]:
         """Return num_tokens after padded and whether it is cudagraph padded.
         """
-        if self.uniform_decode_query_len == 1 and num_tokens <= \
+        assert uniform_query_len == 0 or uniform_query_len in \
+            self.uniform_query_lens, \
+            f"Invalid uniform_query_len: {uniform_query_len}"
+        if uniform_query_len <= 1 and num_tokens <= \
             self.compilation_config.max_capture_size:
             # common situation within the range of max_capture_size for main
-            # model without spec-decode or it is for a drafter.
+            # model or for a drafter.
             # we ignore whether it is uniform-decode since it is always safe
             # to pad.
             return self.vllm_config.pad_for_cudagraph(
                 num_tokens, uniform_aligned=False), True
 
-        if self.uniform_decode_query_len > 1 and uniform_decode and \
+        if uniform_decode and uniform_query_len > 1 and \
             num_tokens <= self.compilation_config.max_capture_size_uniform:
             # this is particular for uniform-decode alignment for vaildation
-            # phase of spec-decode.
+            # phase of spec-decode, or for the first iteration of drafter when
+            # support padded speculation
             return self.vllm_config.pad_for_cudagraph(
                 num_tokens, uniform_aligned=True), True
 
+        # otherwise, it is not cudagraph padded
         return num_tokens, False
 
     def plan(
@@ -146,14 +196,15 @@ class CudagraphDispatcher:
 
         Returns (runtime_mode, batch_descriptor, num_input_tokens_padded).
         """
-        uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
+        uniform_decode = (max_query_len in self.uniform_query_lens) and (
             num_scheduled_tokens == num_reqs * max_query_len)
+        uniform_query_len = max_query_len if uniform_decode else 0
 
         # Compute padded tokens
         cudagraph_padded = False
         if self.cudagraph_mode != CUDAGraphMode.NONE:
             num_input_tokens, cudagraph_padded = self.padded_num_tokens(
-                num_scheduled_tokens, uniform_decode)
+                num_scheduled_tokens, uniform_decode, uniform_query_len)
         else:
             num_input_tokens = num_scheduled_tokens
 
@@ -168,7 +219,8 @@ class CudagraphDispatcher:
 
         # Build initial descriptor and dispatch
         descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                     uniform_decode=uniform_decode)
+                                     uniform_decode=uniform_decode,
+                                     uniform_query_len=uniform_query_len)
         runtime_mode, descriptor = self.dispatch(descriptor)
         return runtime_mode, descriptor, num_input_tokens
 
