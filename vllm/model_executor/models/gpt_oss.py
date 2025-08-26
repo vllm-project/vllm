@@ -11,7 +11,7 @@ from transformers import GptOssConfig
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_ep_group, get_tensor_model_parallel_rank,
+from vllm.distributed import (get_ep_group, get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -27,8 +27,9 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
-from .utils import (AutoWeightsLoader, WeightsMapper, extract_layer_index,
-                    maybe_prefix)
+from .interfaces import SupportsPP
+from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper, extract_layer_index, is_pp_missing_parameter,
+                    maybe_prefix, make_empty_intermediate_tensors_factory, make_layers)
 
 
 class OAIAttention(nn.Module):
@@ -210,21 +211,42 @@ class GptOssModel(nn.Module):
             self.config.vocab_size,
             self.config.hidden_size,
         )
-        self.layers = torch.nn.ModuleList([
-            TransformerBlock(
-                self.config,
-                quant_config=self.quant_config,
-                prefix=maybe_prefix(prefix, f"block.{layer_idx}"),
-            ) for layer_idx in range(self.config.num_hidden_layers)
-        ])
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            self.config.num_hidden_layers,
+            lambda prefix: TransformerBlock(
+                    self.config,
+                    quant_config=self.quant_config,
+                    prefix=prefix,
+                prefix=maybe_prefix(prefix, "block."),
+            )
+        )
         self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], self.config.hidden_size))
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embedding(input_ids)
 
     def forward(self, input_ids: torch.Tensor,
-                positions: torch.Tensor) -> torch.Tensor:
-        x = self.embedding(input_ids)
+                positions: torch.Tensor,
+                intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,) -> torch.Tensor:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                x = inputs_embeds
+            else:
+                x = self.get_input_embeddings(input_ids)
+
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            x = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
         for layer in self.layers:
-            x = layer(x, positions)
-        x = self.norm(x)
+            x, residual = layer(x, positions, residual)
+        x, _ = self.norm(x, residual)
         return x
 
     def _load_weights_mxfp4(
@@ -557,7 +579,7 @@ class GptOssModel(nn.Module):
                                             weights, stacked_params_mapping)
 
 
-class GptOssForCausalLM(nn.Module):
+class GptOssForCausalLM(nn.Module, SupportsPP):
     packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -604,6 +626,11 @@ class GptOssForCausalLM(nn.Module):
             self.config.hidden_size,
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
+    
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(self,
                 input_ids: torch.Tensor,
