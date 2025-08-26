@@ -605,7 +605,8 @@ class FlashAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             output: shape = [num_tokens, num_heads, head_size]
-            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+            kv_cache: KV cache tensor with shape 
+                [2, num_blocks, block_size, num_kv_heads, head_size].
                 NOTE: kv_cache will be an empty tensor with shape [0]
                 for profiling run.
             attn_metadata: Metadata for attention.
@@ -850,7 +851,7 @@ class FlashAttentionImpl(AttentionImpl):
 
 
 def _get_query_key_seq_metadata(
-    attn_metadata,
+    attn_metadata: FlashAttentionMetadata,
     is_prompt: bool,
     attn_type: str,
 ) -> tuple:

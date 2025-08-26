@@ -186,7 +186,7 @@ class LLM:
                                            CompilationConfig]] = None,
         logits_processors: Optional[list[Union[str,
                                                type[LogitsProcessor]]]] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """LLM constructor."""
 
@@ -697,8 +697,8 @@ class LLM:
         Generate responses for a chat conversation.
 
         The chat conversation is converted into a text prompt using the
-        tokenizer and calls the [generate][] method to generate the
-        responses.
+        tokenizer and calls the [generate][vllm.LLM.generate] method to generate
+        the responses.
 
         Multi-modal inputs can be passed in the same way you would pass them
         to the OpenAI API.
@@ -1334,8 +1334,8 @@ class LLM:
 
     def wake_up(self, tags: Optional[list[str]] = None):
         """
-        Wake up the engine from sleep mode. See the [sleep][] method
-        for more details.
+        Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]
+        method for more details.
 
         Args:
             tags: An optional list of tags to reallocate the engine memory

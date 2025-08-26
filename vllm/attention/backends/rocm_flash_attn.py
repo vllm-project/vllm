@@ -584,17 +584,18 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 use prefill sequence attributes
 
         Args:
+            layer: Attention layer instance.
             query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+            kv_cache: KV cache tensor with shape 
+                [2, num_blocks, block_size * num_kv_heads * head_size].
                 NOTE: kv_cache will be an empty tensor with shape [0]
                 for profiling run.
             attn_metadata: Metadata for attention.
-            attn_type: Select attention type, between encoder attention,
-                       decoder self-attention, or encoder/decoder cross-
-                       attention. Defaults to decoder self-attention,
-                       which is the vLLM default generally
+            output: Optional output tensor.
+            output_scale: Optional output scale tensor.
+            output_block_scale: Optional output block scale tensor.
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
