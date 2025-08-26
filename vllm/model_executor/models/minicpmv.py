@@ -377,8 +377,6 @@ class Resampler4_5(BaseResampler):
         v = x + pos_embed_2d
         
         if pos_embed_temporal:
-            # temporal 维度折叠
-            # 时序 embedding
             k += torch.stack(pos_embed_temporal, dim=0)
             bs = len(temporal_ids)
             merge_k = []
