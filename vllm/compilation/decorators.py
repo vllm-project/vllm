@@ -248,7 +248,7 @@ def _support_torch_compile(
             self.__class__) or not enable_compile
         if self.do_not_compile:
             return
-        
+
         no_weak_ref_output =\
             getattr(cls, LAST_PIECEWISE_GRAPH_WEAKREF_KEY, False)
 

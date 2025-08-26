@@ -294,8 +294,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
 
     def __init__(self, module: torch.fx.GraphModule,
                  compile_submod_names: list[str], vllm_config: VllmConfig,
-                 no_weak_ref_output: bool,
-                 vllm_backend: "VllmBackend"):
+                 no_weak_ref_output: bool, vllm_backend: "VllmBackend"):
         super().__init__(module)
         from torch._guards import detect_fake_mode
         self.fake_mode = detect_fake_mode()
@@ -593,8 +592,7 @@ class VllmBackend:
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
         PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
-                                    self.vllm_config,
-                                    self.no_weak_ref_output,
+                                    self.vllm_config, self.no_weak_ref_output,
                                     self).run(*example_inputs)
 
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")

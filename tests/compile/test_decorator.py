@@ -289,12 +289,11 @@ def test_no_weak_ref_output_decorator():
         ...
 
     with compilation_counter.expect(
-        num_weakref_output_graphs=1,
-        # Single compile target (mod A), one VllmBackend initialized
-        # no_weak_ref_output set to False
-    ):
-        with set_current_vllm_config(vllm_config):
-            mod_A = A(vllm_config=vllm_config, prefix='').eval().cuda()
+            num_weakref_output_graphs=1,
+            # Single compile target (mod A), one VllmBackend initialized
+            # no_weak_ref_output set to False
+    ) and set_current_vllm_config(vllm_config):
+        mod_A = A(vllm_config=vllm_config, prefix='').eval().cuda()
 
     # A has support_torch_compile
     with compilation_counter.expect(
@@ -308,13 +307,12 @@ def test_no_weak_ref_output_decorator():
         run_model(vllm_config, mod_A, cudagraph_runtime_mode)
 
     with compilation_counter.expect(
-        num_weakref_output_graphs=1,
-        # This is 1 instead of 0 because B inherits from A
-        # and A's __init__ is called which initializes the VllmBackend
-        # If no_weak_ref_output=False, this value would be 2 
-    ):
-        with set_current_vllm_config(vllm_config):
-            mod_B = B(vllm_config=vllm_config, prefix='').eval().cuda()
+            num_weakref_output_graphs=1,
+            # This is 1 instead of 0 because B inherits from A
+            # and A's __init__ is called which initializes the VllmBackend
+            # If no_weak_ref_output=False, this value would be 2
+    ) and set_current_vllm_config(vllm_config):
+        mod_B = B(vllm_config=vllm_config, prefix='').eval().cuda()
 
     # B also has support_torch_compile
     with compilation_counter.expect(
@@ -327,13 +325,12 @@ def test_no_weak_ref_output_decorator():
         run_model(vllm_config, mod_B, cudagraph_runtime_mode)
 
     with compilation_counter.expect(
-        num_weakref_output_graphs=2,
-        # C inherits from B which inherits from A
-        # both B and A's __init__ are called, incrementing the count by 2
-        # as A has no_weak_ref_output=False
-    ):
-        with set_current_vllm_config(vllm_config):
-            mod_C = C(vllm_config=vllm_config, prefix='').eval().cuda()
+            num_weakref_output_graphs=2,
+            # C inherits from B which inherits from A
+            # both B and A's __init__ are called, incrementing the count by 2
+            # as A has no_weak_ref_output=False
+    ) and set_current_vllm_config(vllm_config):
+        mod_C = C(vllm_config=vllm_config, prefix='').eval().cuda()
 
     # C has support_torch_compile
     with compilation_counter.expect(
