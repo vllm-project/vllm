@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+from collections.abc import Hashable
 from typing import Callable, Optional
-from weakref import ReferenceType, ref
 
 import torch
 from compressed_tensors.transform import TransformLocation, TransformScheme
@@ -16,9 +16,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils 
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.parameter import PartitionedLinearWeightParameter
-
-LoadKey = tuple[int, int]
+from vllm.model_executor.parameter import SharedWeightParameter
 
 
 class HadamardTransform(torch.nn.Module):
@@ -28,10 +26,9 @@ class HadamardTransform(torch.nn.Module):
     and attention transforms method (not implemented yet)
     """
     transforms: dict[int, TransformTuple]  # info parsed from transforms config
-    weight: PartitionedLinearWeightParameter  # container for shared tensors
+    weight: SharedWeightParameter  # container for shared tensors
 
     kernel: Callable  # function used during application
-    weight_tensors: dict[LoadKey, ReferenceType[Tensor]] = {}  # shared tensors
     scales: dict[int, float]  # hadamard scale, usually sqrt(matrix.size(0))
 
     def __init__(self,
@@ -51,10 +48,9 @@ class HadamardTransform(torch.nn.Module):
 
         # Similar to row/col parallel params, but tensors are separate
         # to allow for loading with shared memory
-        self.weight = PartitionedLinearWeightParameter(
-            weight_loader=weight_loader)
+        self.weight = SharedWeightParameter(weight_loader=weight_loader)
 
-        # utilize `weight_tensors` registry to create weights with shared memory
+        # create shared partition data for each partition of the original weight
         input_size = input_size_per_partition
         for part_index, (_scheme_name, scheme,
                          args) in self.transforms.items():
@@ -62,16 +58,13 @@ class HadamardTransform(torch.nn.Module):
             weight_size = self._get_weight_size(layer, args.location,
                                                 input_size, output_size)
 
-            load_key = self._get_load_key(scheme, weight_size)
-            if load_key in self.weight_tensors and self.weight_tensors[
-                    load_key]() is not None:
-                weight = self.weight_tensors[load_key]()
-            else:
-                weight = torch.empty((weight_size, weight_size),
-                                     dtype=scheme.precision)
-                self.weight_tensors[load_key] = ref(weight)
-
-            self.weight.add_partition(part_index, weight)
+            data_key = self._get_data_key(scheme, weight_size)
+            self.weight.add_partition(
+                part_index,
+                data_key,
+                size=(weight_size, weight_size),
+                dtype=scheme.precision,
+            )
 
         # validate that shared tensors and schemes are correct
         self._validate_input_transforms()
@@ -83,24 +76,15 @@ class HadamardTransform(torch.nn.Module):
         for part_id in self.weight.partitions:
             data = self.weight.partitions[part_id].data
 
-            # FUTURE: avoid runtime tranpose by preprocessing weights
-            # weight_size = data.size(0)
-            # load_key = (id(self.scheme), weight_size)
-            # processed_key = (id(self.scheme), weight_size, self.args.inverse)
-            # if processed_key not in self.processed_weights:
-            #     self.processed_weights[processed_key] = (
-            #         data.contiguous()
-            #         if self.args.inverse
-            #         else data.T.contiguous())
-            # if load_key in self.weight_registry:
-            #     del self.weight_registry[load_key]
-
             # required by torch.compile
             self.weight.process_weights_after_loading()
 
             # precompute scale as a runtime multiply, not division
             # do not fold into weight in order to utilize FWHT
             self.scales[part_id] = 1 / math.sqrt(data.size(0))
+
+            # FUTURE: avoid runtime tranpose by processing weights
+            # prior to apply
 
     def forward(self, value: Tensor, part_id: int = 0) -> Tensor:
         if part_id not in self.weight.partitions:
@@ -113,8 +97,8 @@ class HadamardTransform(torch.nn.Module):
         return self.kernel(self, value.to(weight.dtype), weight, None).to(
             value.dtype) * scale
 
-    def _get_load_key(self, scheme: TransformScheme,
-                      weight_size: int) -> LoadKey:
+    def _get_data_key(self, scheme: TransformScheme,
+                      weight_size: int) -> Hashable:
         return (id(scheme), weight_size)
 
     def _get_weight_size(self, layer: torch.nn.Module,
