@@ -224,6 +224,39 @@ class Processor:
             # Remember that this backend was set automatically
             params.guided_decoding.backend_was_auto = True
 
+    def _maybe_build_mm_hash_overrides(
+        self,
+        request_id: str,
+        prompt: PromptType,
+    ) -> Optional[dict[str, list[str]]]:
+        """Build per-item multimodal hash overrides when enabled.
+
+        Returns a mapping modality -> list[str] of overrides, or None if
+        disabled or no multimodal data is present.
+        """
+
+        def _extract_mm_data(p: PromptType):
+            if isinstance(p, dict) and "encoder_prompt" in p:
+                enc = p.get("encoder_prompt")
+                if isinstance(enc, dict):
+                    return enc.get("multi_modal_data")
+                return None
+            if isinstance(p, dict):
+                return p.get("multi_modal_data")
+            return None
+
+        mm_data = _extract_mm_data(prompt)
+        if not mm_data:
+            return None
+
+        overrides: dict[str, list[str]] = {}
+        for modality, data in mm_data.items():
+            n = len(data) if isinstance(data, list) else 1
+            overrides[modality] = [
+                f"{request_id}-{modality}-{i}" for i in range(n)
+            ]
+        return overrides
+
     def process_inputs(
         self,
         request_id: str,
@@ -253,14 +286,16 @@ class Processor:
         if arrival_time is None:
             arrival_time = time.time()
 
-        # Process inputs, which includes:
-        # 1. Tokenize text prompt, with LoRA request if one exists.
-        # 2. For multimodal models with a merged preprocessor, preprocess
-        #   multimodal data and expand prompt token ids accordingly.
+        # Optionally generate multimodal hash overrides based on request id.
+        mm_hash_overrides = (self._maybe_build_mm_hash_overrides(
+            request_id, prompt) if self.model_config.generate_mm_hash_overrides
+                             else None)
+
         processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
+            mm_hash_overrides=mm_hash_overrides,
         )
         from vllm.platforms import current_platform
         current_platform.validate_request(
