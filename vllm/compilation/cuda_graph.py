@@ -104,7 +104,6 @@ class CUDAGraphWrapper:
         return self.runnable
 
     def __call__(self, *args, **kwargs):
-        # logger.debug("ENTERING CUDAGRAPH WRAPPER")
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
@@ -178,7 +177,6 @@ class CUDAGraphWrapper:
             # important: we need to return the output, rather than
             # the weak ref of the output, so that pytorch can correctly
             # manage the memory during cuda graph capture
-            # logger.debug("CUDAGRAPH WRAPPER: CAPTURING")
             return output
 
         if self.is_debugging_mode:
@@ -191,6 +189,5 @@ class CUDAGraphWrapper:
                 f"during replay. Expected {entry.input_addresses}, "
                 f"got {new_input_addresses}")
 
-        # logger.debug("REPLAYING IN CUDAGRAPH WRAPPER")
         entry.cudagraph.replay()
         return entry.output

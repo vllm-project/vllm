@@ -126,19 +126,14 @@ class UBatchWrapper:
             with torch.cuda.graph(cudagraph_metadata.cudagraph,
                                   stream=compute_stream,
                                   pool=self.graph_pool):
-                # logger.info("STARTING WAKEUP LOOP")
                 for start_signal in start_signals:
                     start_signal.set()
-                # logger.info("FINISHED WAKEUP LOOP")
                 ubatch_metadata[0].context.cpu_wait_event.set()
                 for thread in ubatch_threads:
                     thread.join()
                 sorted_results = [value for position, value in sorted(results)]
                 result = torch.cat(sorted_results, dim=0)
                 cudagraph_metadata.outputs = result
-            # if is_global_first_rank():
-            #     logger.info(f"IN UBATCH RUNNER: "
-            #                 f"Capturing for {num_tokens} tokens")
             self.cudagraphs[num_tokens] = cudagraph_metadata
         return cudagraph_metadata.outputs
 
@@ -244,15 +239,12 @@ class UBatchWrapper:
         batch_descriptor = forward_context.batch_descriptor
         ubatch_slices = forward_context.ubatch_slices
         # If there's no ubatching, just run the runnable object
-        # logger.info(f"GETTING TO THE WRAPPER")
         # Check the cudagraph_runtime_mode
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
-        # logger.debug(f"IN UBATCH WRAPPER CUDA MODE {cudagraph_runtime_mode} BD: {batch_descriptor} UBATCH SLICES {ubatch_slices}")
         if ubatch_slices is None:
             if cudagraph_runtime_mode is CUDAGraphMode.NONE:
                 return self.runnable(*args, **kwargs)
             else:
-                # logger.info("RUNNING THROUGH THE CUDAGRAPH WRAPPER")
                 assert self.cudagraph_wrapper is not None
                 return self.cudagraph_wrapper(*args, **kwargs)
 
@@ -270,13 +262,8 @@ class UBatchWrapper:
         assert dp_metadata is not None
         num_tokens_across_dp = dp_metadata._num_tokens_across_dp
 
-        # print(f"CUDAGRAPH RUNTIME MODE {cudagraph_runtime_mode}")
-        # return self._run_ubatches(ubatch_metadata, self.runnable) 
-
-
         if num_tokens not in self.cudagraphs \
             and cudagraph_runtime_mode is CUDAGraphMode.FULL:
-            # logger.debug(f"CAPTURING {num_tokens}")
             ubatch_metadata = self._make_ubatch_metadata(
                     ubatch_slices=ubatch_slices,
                     attn_metadata=attn_metadata,
@@ -293,11 +280,9 @@ class UBatchWrapper:
         elif num_tokens in self.cudagraphs \
             and cudagraph_runtime_mode is CUDAGraphMode.FULL:
             cudagraph_metadata = self.cudagraphs[num_tokens]
-            # logger.debug(f"UBATCH REPLAY {num_tokens}")
             cudagraph_metadata.cudagraph.replay()
             return cudagraph_metadata.outputs
         else:
-            # logger.debug(f"RUNNING NORMALLY {num_tokens}")
             ubatch_metadata = self._make_ubatch_metadata(
                     ubatch_slices=ubatch_slices,
                     attn_metadata=attn_metadata,
