@@ -644,10 +644,10 @@ class LLMEngine:
         Details:
             - Set arrival_time to the current time if it is None.
             - Set prompt_token_ids to the encoded prompt if it is None.
-            - Create `n` number of [Sequence][vllm.Sequence] objects.
-            - Create a [SequenceGroup][vllm.SequenceGroup] object
-              from the list of [Sequence][vllm.Sequence].
-            - Add the [SequenceGroup][vllm.SequenceGroup] object to the
+            - Create `n` number of [Sequence][vllm.sequence.Sequence] objects.
+            - Create a [SequenceGroup][vllm.sequence.SequenceGroup] object
+              from the list of [Sequence][vllm.sequence.Sequence].
+            - Add the [SequenceGroup][vllm.sequence.SequenceGroup] object to the
               scheduler.
 
         Example:
