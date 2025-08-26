@@ -204,7 +204,7 @@ def get_cross_encoder_activation_function(config: PretrainedConfig):
         fn = resolve_obj_by_qualname(function_name)()
         return PoolerActivation.wraps(fn)
 
-    return PoolerScore()
+    return PoolerClassify()
 
 
 def build_output(
@@ -417,21 +417,6 @@ class PoolerClassify(PoolerActivation):
         return F.softmax(pooled_data.float(), dim=-1).to(pooled_data.dtype)
 
 
-class PoolerScore(PoolerActivation):
-
-    def __init__(self):
-        super().__init__()
-
-        from vllm.config import get_current_vllm_config
-        vllm_config = get_current_vllm_config()
-        num_labels = getattr(vllm_config.model_config.hf_config, "num_labels",
-                             0)
-        assert num_labels == 1, "Score api is only enabled for num_labels == 1."
-
-    def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
-
-
 class LambdaPoolerActivation(PoolerActivation):
 
     def __init__(self, fn: Callable[[torch.Tensor], torch.Tensor]):
@@ -470,6 +455,9 @@ class EmbeddingPoolerHead(PoolerHead):
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
+        assert not isinstance(pooled_data, list), \
+            "embed api does not support all pooling."
+        # pooled_data shape: [batchsize, hidden_dimension]
 
         # Apply ST projector
         if self.projector is not None:
@@ -480,16 +468,10 @@ class EmbeddingPoolerHead(PoolerHead):
                 y = projector(x.to(torch.float32))
                 return y.to(orig_dtype)
 
-            if isinstance(pooled_data, torch.Tensor):
-                pooled_data = _proj(pooled_data)
-            else:
-                pooled_data = [_proj(t) for t in pooled_data]
+            pooled_data = _proj(pooled_data)
+        # pooled_data shape: [batchsize, embedding_dimension]
 
         pooling_params = get_pooling_params(pooling_metadata)
-
-        if isinstance(pooled_data, list):
-            pooled_data = torch.stack(pooled_data)
-        # pooled_data shape: [batchsize, embedding_dimension]
 
         # for matryoshka representation
         dimensions_list = [
@@ -520,6 +502,7 @@ class EmbeddingPoolerHead(PoolerHead):
                 for vecs, f in zip(pooled_data, flags)
             ]
 
+        # pooled_data shape: [batchsize, embedding_dimension]
         return pooled_data
 
 
@@ -680,9 +663,8 @@ class ClassifierPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
-
-        if isinstance(pooled_data, list):
-            pooled_data = torch.stack(pooled_data)
+        assert not isinstance(pooled_data, list), \
+            "classify api does not support all pooling."
         # pooled_data shape: [batchsize, hidden_size]
 
         if self.classifier is not None:
