@@ -5,6 +5,7 @@ from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.benchmarks.datasets import add_dataset_parser, get_samples
+from vllm.inputs import TokensPrompt
 from vllm.v1.metrics.reader import Counter, Vector
 
 try:
@@ -137,7 +138,8 @@ def main():
     sampling_params = SamplingParams(temperature=args.temp, max_tokens=args.output_len)
     if not args.custom_mm_prompts:
         outputs = llm.generate(
-            prompt_token_ids=prompt_ids, sampling_params=sampling_params
+            TokensPrompt(prompt_token_ids=prompt_ids),
+            sampling_params=sampling_params,
         )
     else:
         outputs = llm.chat(prompts, sampling_params=sampling_params)

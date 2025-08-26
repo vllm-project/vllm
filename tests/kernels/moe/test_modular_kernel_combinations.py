@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
+from ...utils import multi_gpu_test
 from .modular_kernel_tools.common import (Config, RankTensors, WeightTensors,
                                           reference_moe_impl,
                                           run_modular_kernel)
@@ -162,6 +163,7 @@ def is_nyi_config(config: Config) -> bool:
     product(MK_MULTI_GPU_PREPARE_FINALIZE_TYPES, MK_FUSED_EXPERT_TYPES))
 @pytest.mark.parametrize("fused_moe_chunk_size", FUSED_MOE_CHUNK_SIZEs)
 @pytest.mark.parametrize("world_size", [2])
+@multi_gpu_test(num_gpus=2)
 @meets_multi_gpu_requirements
 def test_modular_kernel_combinations_multigpu(
         k: int, n: int, e: int, dtype: torch.dtype,

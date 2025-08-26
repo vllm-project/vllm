@@ -5,7 +5,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from functools import cached_property
-from typing import Literal, Optional, TypedDict, Union
+from typing import Annotated, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -48,6 +48,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import (MistralTokenizer,
                                                cached_tokenizer_from_config)
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
@@ -68,15 +69,20 @@ except ImportError:
 PATCH_MERGE = "patch_merge"
 
 
-class PixtralImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-
-    images: Union[torch.Tensor, list[torch.Tensor]]
+class PixtralImagePixelInputs(TensorSchema):
     """
-    Shape: `(batch_size * num_images, num_channels, image_width, image_height)`
-
+    Dimensions:
+        - bn: Batch size * number of images
+        - c: Number of channels (3)
+        - h: Height of each image
+        - w: Width of each image
+    
     The result of stacking `ImageEncoding.tokens` from each prompt.
     """
+    type: Literal["pixel_values"] = "pixel_values"
+
+    images: Annotated[Union[torch.Tensor, list[torch.Tensor]],
+                      TensorShape("bn", 3, "h", "w", dynamic_dims={"h", "w"})]
 
 
 class PixtralProcessorAdapter:
@@ -308,15 +314,12 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        *,
-        return_mm_hashes: bool,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            return_mm_hashes=return_mm_hashes,
         )
 
         # NOTE: The tokens are already inserted by the chat template
@@ -383,10 +386,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         images = kwargs.pop("images", None)
         if images is None:
             return None
-
-        if not isinstance(images, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of images. "
-                             f"Got type: {type(images)}")
 
         return PixtralImagePixelInputs(
             type="pixel_values",

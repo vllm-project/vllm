@@ -2,17 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """This file is used for /tests and /benchmarks"""
 from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
 from typing import ClassVar, NamedTuple, Optional
 
 import numpy
 import torch
+from torch import fx
 
 from vllm._custom_ops import cutlass_scaled_mm_supports_fp4
-from vllm.model_executor.layers.quantization.qqq import (
-    MARLIN_QQQ_SUPPORTED_NUM_BITS)
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+
+FP8_DTYPE = current_platform.fp8_dtype()
+FP4_DTYPE = torch.uint8
 
 
 # Use proxy as NamedTuple direct subclasses cannot have static members
@@ -34,6 +37,64 @@ class GroupShape(_GroupShape):
 
 GroupShape.PER_TENSOR = GroupShape(-1, -1)
 GroupShape.PER_TOKEN = GroupShape(1, -1)
+
+
+@dataclass(frozen=True)
+class ScaleDesc:
+    """
+    Class for describing a single quantization scaling factor.
+    dtype: data type of the scale
+    static: static scale if True, dynamic if False
+    group_shape: group shape of the scale
+    """
+    dtype: torch.dtype
+    static: bool
+    group_shape: GroupShape
+
+    def __str__(self):
+        group_shape = ('per_tensor'
+                       if self.group_shape == GroupShape.PER_TENSOR else
+                       ('per_token' if self.group_shape == GroupShape.PER_TOKEN
+                        else str(self.group_shape)))
+
+        return (f"{fx.graph.dtype_abbrs[self.dtype]},"
+                f"{'static' if self.static else 'dynamic'},{group_shape}")
+
+
+@dataclass(frozen=True)
+class QuantKey:
+    """
+    Class for identifying the type of quantization.
+    dtype: quantized data type
+    scale: scale descriptor
+    scale2: second-level scale descriptor
+    symmetric: symmetric if True, asymmetric if False
+    """
+    dtype: torch.dtype
+    scale: ScaleDesc
+    scale2: Optional[ScaleDesc] = None
+    symmetric: bool = True
+
+    def __str__(self):
+        scale2_str = f"scale2({self.scale2})," if self.scale2 else ""
+        return (f"QuantKey({fx.graph.dtype_abbrs[self.dtype]},"
+                f"scale({self.scale}),{scale2_str}"
+                f"{'a' if not self.symmetric else ''}symmetric)")
+
+
+kStaticTensorScale = ScaleDesc(torch.float32, True, GroupShape.PER_TENSOR)
+kFp8StaticTensorSym = QuantKey(FP8_DTYPE, kStaticTensorScale, symmetric=True)
+
+kDynamicTensorScale = ScaleDesc(torch.float32, False, GroupShape.PER_TENSOR)
+kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, kDynamicTensorScale, symmetric=True)
+
+kDynamicTokenScale = ScaleDesc(torch.float32, False, GroupShape.PER_TOKEN)
+kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, kDynamicTokenScale, symmetric=True)
+
+kNvfp4GroupScale = ScaleDesc(FP8_DTYPE, False, GroupShape(1, 16))
+kNvfp4Quant = QuantKey(FP4_DTYPE,
+                       scale=kNvfp4GroupScale,
+                       scale2=kStaticTensorScale)
 
 
 # Normalize the group_shape to the full extent for any dims that are -1
@@ -386,89 +447,6 @@ def gptq_quantize_weights(w: torch.Tensor,
     return w_ref, w_q, w_s, g_idx, rand_perm
 
 
-# QQQ employs different quant schemes for per-group and
-# per-channel quantization.
-def qqq_quantize_weights(w: torch.Tensor, num_bits: int, group_size: int):
-    orig_device = w.device
-    size_k, size_n = w.shape
-
-    assert w.is_floating_point(), "w must be float"
-    assert num_bits in MARLIN_QQQ_SUPPORTED_NUM_BITS, \
-           f"Unsupported num_bits = {num_bits}"
-    assert group_size in SUPPORTED_GROUP_SIZES + [
-        size_k
-    ], f"Unsupported groupsize = {group_size}"
-
-    if group_size == -1:
-        group_size = size_k
-    assert group_size <= size_k
-
-    if group_size < size_k:
-        # Reshape to [groupsize, -1]
-        w = w.reshape((-1, group_size, size_n))
-        w = w.permute(1, 0, 2)
-        w = w.reshape((group_size, -1))
-
-        max_q_val = 2**num_bits - 1
-        half_q_val = (max_q_val + 1) // 2
-
-        # Compute scale for each group
-        s_group = torch.max(torch.abs(w), 0, keepdim=True)[0]
-        s_group *= 2 / max_q_val  # 2 => symmetric
-
-        # Quantize
-        q_w = torch.round(w / s_group).int()
-        q_w += half_q_val
-        q_w = torch.clamp(q_w, 0, max_q_val)
-        # Compute ref (dequantized)
-        w_ref = (q_w - half_q_val).half() * s_group
-
-        # Restore original shapes
-        def reshape_w(w):
-            w = w.reshape((group_size, -1, size_n))
-            w = w.permute(1, 0, 2)
-            w = w.reshape((size_k, size_n)).contiguous()
-            return w
-
-        q_w = reshape_w(q_w)
-        w_ref = reshape_w(w_ref)
-
-        # Compute int8 quantization scale for each channel
-        s_channel = torch.max(torch.abs(w_ref), 0, keepdim=True)[0]
-        s_channel /= 127.0
-        t_int8 = (w_ref / s_channel).round().clamp(-128, 127).to(torch.int8)
-        w_ref = t_int8.half() * s_channel
-        s_channel = s_channel.reshape(1, -1).to(dtype=torch.float)
-
-        # Fuse scales
-        s_group = (s_group.reshape(-1, size_n).contiguous() /
-                   s_channel).to(dtype=torch.half)
-    else:
-        max_q_val = 2**(num_bits - 1) - 1
-
-        # Compute scale for each channel
-        s_channel = torch.max(torch.abs(w), 0, keepdim=True)[0]
-        s_channel /= max_q_val
-
-        # Quantize
-        q_w = torch.round(w / s_channel).int()
-        q_w = torch.clamp(q_w, -max_q_val, max_q_val)
-        # Compute ref (dequantized)
-        w_ref = q_w.half() * s_channel
-
-        s_group = torch.tensor([], dtype=torch.half)
-        # div 2 ** (8 - self.bits)) to offset right shift in unpacking
-        s_channel /= (2**(8 - num_bits))
-        s_channel = s_channel.reshape(-1, size_n).contiguous().to(torch.float)
-
-    return (
-        w_ref.to(device=orig_device),
-        q_w.to(device=orig_device),
-        s_group.to(device=orig_device),
-        s_channel.to(device=orig_device),
-    )
-
-
 def sort_weights(q_w: torch.Tensor, g_idx: torch.Tensor):
     orig_device = q_w.device
 
@@ -637,8 +615,8 @@ def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:
     swizzled = padded.permute(0, 1, 4, 3, 2, 5).contiguous().cuda()
 
     if scale_ndim == 2:
-        return swizzled.reshape(M, K)
-    return swizzled.reshape(B, M, K)
+        return swizzled.reshape(M_padded, K_padded)
+    return swizzled.reshape(B, M_padded, K_padded)
 
 
 def cutlass_fp4_supported() -> bool:

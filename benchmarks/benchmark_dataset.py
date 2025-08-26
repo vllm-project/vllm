@@ -293,6 +293,41 @@ def process_image(image: Any) -> Mapping[str, Any]:
     )
 
 
+def process_video(video: Any) -> Mapping[str, Any]:
+    """
+    Process a single video input and return a multimedia content dictionary.
+
+    Supports the following input types:
+
+    1. Dictionary with raw video bytes: - Expects a dict with a 'bytes' key
+       containing raw video data.
+
+    2. String input: - Treats the string as a URL or local file path.  -
+       Prepends "file://" if the string doesn't start with "http://" or
+       "file://".  - Returns a dictionary with the image URL.
+
+    Raises:
+        ValueError: If the input is not a supported type.
+    """
+    if isinstance(video, dict) and "bytes" in video:
+        video_bytes = video["bytes"]
+        video_base64 = base64.b64encode(video_bytes).decode("utf-8")
+        return {
+            "type": "video_url",
+            "video_url": {"url": f"data:video/mp4;base64,{video_base64}"},
+        }
+
+    if isinstance(video, str):
+        video_url = (
+            video if video.startswith(("http://", "file://")) else f"file://{video}"
+        )
+        return {"type": "video_url", "video_url": {"url": video_url}}
+
+    raise ValueError(
+        f"Invalid video input {video}. Must be a string of local path/remote url, or a dictionary with raw video bytes in the form of `{{'bytes': raw_video_bytes}}`."  # noqa: E501
+    )
+
+
 # -----------------------------------------------------------------------------
 # Random Dataset Implementation (Synthetic Data)
 # -----------------------------------------------------------------------------
@@ -451,9 +486,10 @@ class ShareGPTDataset(BenchmarkDataset):
                 skip_min_output_len_check=output_len is not None,
             ):
                 continue
-            # TODO: Also support ShareGPT4Video.
             if image_path := entry.get("image"):
                 mm_content = process_image(image_path)
+            elif video_path := entry.get("video"):
+                mm_content = process_video(video_path)
             else:
                 mm_content = None
             if enable_multimodal_chat:
@@ -922,8 +958,10 @@ class InstructCoderDataset(HuggingFaceDataset):
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
-            prompt = f"{item['input']}\n\n{item['instruction']} Just output \
-            the code, do not include any explanation."
+            prompt = (
+                f"{item['input']}\n\n{item['instruction']} Just output "
+                "the code, do not include any explanation."
+            )
 
             # apply template
             prompt = tokenizer.apply_chat_template(

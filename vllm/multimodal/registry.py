@@ -372,3 +372,22 @@ class MultiModalRegistry:
             )
 
         return dummy_data
+
+    def get_encdec_max_encoder_len(self, model_config: "ModelConfig") -> int:
+        """
+        Get the maximum length of the encoder input for encoder-decoder models.
+        """
+        if not model_config.is_encoder_decoder:
+            return 0
+        max_tokens = self.\
+            get_max_tokens_per_item_by_nonzero_modality(model_config)
+        if not max_tokens:
+            # TODO - this function assumes encoder-decoder models are
+            # multimodal. This will need to change when adding support for more
+            # than whisper.
+            return 0
+        assert len(max_tokens) == 1, "Encoder-decoder models are expected \
+            to implement the multimodal interface with at most one modality."
+
+        first_modality = next(iter(max_tokens))
+        return max_tokens[first_modality]

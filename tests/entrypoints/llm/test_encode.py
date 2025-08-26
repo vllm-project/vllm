@@ -5,10 +5,8 @@ import weakref
 
 import pytest
 
-from vllm import LLM, PoolingParams, PoolingRequestOutput
+from vllm import LLM, PoolingParams
 from vllm.distributed import cleanup_dist_env_and_memory
-
-from ...models.utils import check_embeddings_close
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 
@@ -48,55 +46,11 @@ def llm():
               enforce_eager=True,
               seed=0)
 
-    with llm.deprecate_legacy_api():
-        yield weakref.proxy(llm)
+    yield weakref.proxy(llm)
 
-        del llm
+    del llm
 
     cleanup_dist_env_and_memory()
-
-
-def assert_outputs_match(o1: list[PoolingRequestOutput],
-                         o2: list[PoolingRequestOutput]):
-    check_embeddings_close(
-        embeddings_0_lst=[o.outputs.data for o in o1],
-        embeddings_1_lst=[o.outputs.data for o in o2],
-        name_0="hf",
-        name_1="vllm",
-        tol=1e-2,
-    )
-
-
-@pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize('prompt_token_ids', TOKEN_IDS)
-def test_v1_v2_api_consistency_single_prompt_tokens(llm: LLM,
-                                                    prompt_token_ids):
-    pooling_params = PoolingParams()
-
-    with pytest.warns(DeprecationWarning, match="'prompt_token_ids'"):
-        v1_output = llm.encode(prompt_token_ids=prompt_token_ids,
-                               pooling_params=pooling_params)
-
-    v2_output = llm.encode({"prompt_token_ids": prompt_token_ids},
-                           pooling_params=pooling_params)
-    assert_outputs_match(v1_output, v2_output)
-
-
-@pytest.mark.skip_global_cleanup
-def test_v1_v2_api_consistency_multi_prompt_tokens(llm: LLM):
-    pooling_params = PoolingParams()
-
-    with pytest.warns(DeprecationWarning, match="'prompt_token_ids'"):
-        v1_output = llm.encode(prompt_token_ids=TOKEN_IDS,
-                               pooling_params=pooling_params)
-
-    v2_output = llm.encode(
-        [{
-            "prompt_token_ids": p
-        } for p in TOKEN_IDS],
-        pooling_params=pooling_params,
-    )
-    assert_outputs_match(v1_output, v2_output)
 
 
 @pytest.mark.skip_global_cleanup

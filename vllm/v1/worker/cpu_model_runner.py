@@ -11,6 +11,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backends.cpu_attn import TorchSDPAMetadataBuilderV1
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.utils import CpuGpuBuffer
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -21,7 +22,8 @@ logger = init_logger(__name__)
 class CPUModelRunner(GPUModelRunner):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        super().__init__(vllm_config, device)
+        with _torch_cuda_wrapper():
+            super().__init__(vllm_config, device)
 
         assert device == torch.device("cpu")
         assert self.speculative_config is None, "spec decode is not supported."
@@ -71,8 +73,8 @@ class CPUModelRunner(GPUModelRunner):
                 setattr(obj, device_attr_name, cpu_tensor)
 
         for k, v in vars(self).items():
-            if k.endswith("_cpu") and isinstance(v, torch.Tensor):
-                replace_tensor(self, k, k[:-4])
+            if isinstance(v, CpuGpuBuffer):
+                v.gpu = v.cpu
 
         for k, v in vars(self.input_batch).items():
             if k.endswith("_cpu_tensor") and isinstance(v, torch.Tensor):
@@ -107,6 +109,26 @@ class CPUModelRunner(GPUModelRunner):
 
     def _sync_device(self) -> None:
         pass
+
+    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
+        return sampled_token_ids.tolist()
+
+
+@contextmanager
+def _torch_cuda_wrapper():
+
+    class _EventPlaceholder:
+
+        def __init__(self, *args, **kwargs) -> None:
+            self.record = lambda: None
+            self.synchronize = lambda: None
+
+    try:
+        cuda_event = torch.cuda.Event
+        torch.cuda.Event = _EventPlaceholder
+        yield
+    finally:
+        torch.cuda.Event = cuda_event
 
 
 @contextmanager

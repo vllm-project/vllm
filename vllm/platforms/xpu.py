@@ -97,13 +97,6 @@ class XPUPlatform(Platform):
             from vllm.config import CompilationLevel
             vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION  # noqa: E501
 
-        # Instances created using VllmConfig() typically have model_config as
-        # None by default. The modification involves adding a check to prevent
-        # potential null exceptions check and update model config.
-        if model_config is not None and model_config.dtype == torch.bfloat16 \
-            and not cls.device_support_bf16():
-            model_config.dtype = torch.float16
-
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
         compilation_config = vllm_config.compilation_config
@@ -163,28 +156,9 @@ class XPUPlatform(Platform):
         return torch.xpu.max_memory_allocated(device)
 
     @classmethod
-    def device_support_bf16(cls) -> bool:
-        device_name = cls.get_device_name().lower()
-        if cls.is_client_gpu_a770():
-            logger.warning("Intel Arc A770 have bfloat16 accuracy known issue,"
-                           " fallback to float16")
-            return False
-        else:
-            logger.info(
-                "Device name %s supports bfloat16. Please file an issue "
-                "if you encounter any accuracy problems with bfloat16.",
-                device_name)
-            return True
-
-    @classmethod
     def is_data_center_gpu(cls) -> bool:
         device_name = cls.get_device_name().lower()
         return device_name.count("data center gpu") > 0
-
-    @classmethod
-    def is_client_gpu_a770(cls) -> bool:
-        device_name = cls.get_device_name().lower()
-        return device_name.count("a770") > 0
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
@@ -197,3 +171,14 @@ class XPUPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return torch.xpu.device_count()
+
+    @classmethod
+    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+            device_name = cls.get_device_name().lower()
+            # client gpu a770
+            if device_name.count("a770") > 0:
+                raise ValueError(
+                    "Intel Arc A770 have bfloat16 accuracy known issue. "
+                    "You can use float16 instead by explicitly setting the "
+                    "`dtype` flag in CLI, for example: --dtype=half.")

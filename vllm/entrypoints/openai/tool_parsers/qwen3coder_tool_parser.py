@@ -208,15 +208,10 @@ class Qwen3CoderToolParser(ToolParser):
                             "valid JSON object in tool '%s', will try other "
                             "methods to parse it.", param_value, param_name,
                             func_name)
-                try:
-                    converted_value = eval(param_value)
-                    return converted_value
-                except Exception:
-                    logger.warning(
-                        "Parsed value '%s' of parameter '%s' cannot be "
-                        "converted via Python `eval()` in tool '%s', "
-                        "degenerating to string.", param_value, param_name,
-                        func_name)
+                logger.warning(
+                    "Parameter '%s' has unknown type '%s'. "
+                    "The value will be treated as a string.", param_name,
+                    param_type)
                 return param_value
 
         # Extract function name

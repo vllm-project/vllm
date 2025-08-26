@@ -481,17 +481,62 @@ class CudaPlatformBase(Platform):
         return cuda_device_count_stateless()
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
         fp8_attention = kv_cache_dtype.startswith("fp8")
-        will_use_fa = (not envs.is_set("VLLM_ATTENTION_BACKEND")
-                       ) or envs.VLLM_ATTENTION_BACKEND == "FLASH_ATTN_VLLM_V1"
+        attention_backend = envs.VLLM_ATTENTION_BACKEND
+
         supported = False
-        if cls.is_device_capability(100):
-            supported = True
-        elif fp8_attention and will_use_fa:
-            from vllm.attention.utils.fa_utils import flash_attn_supports_fp8
-            supported = flash_attn_supports_fp8()
+        if model_config is not None and model_config.use_mla:
+            # Default to CutlassMLA for blackwell,
+            # FlashMLA otherwise
+            if attention_backend is None:
+                if cls.is_device_capability(100):
+                    attention_backend = "CUTLASS_MLA"
+                else:
+                    attention_backend = "FLASHMLA"
+
+            # Only FlashMLA supports fp8
+            if attention_backend == "FLASHMLA":
+                supported = True
+            else:
+                supported = (not fp8_attention)
+        else:
+            # Default to FlashAttention
+            if attention_backend is None:
+                attention_backend = "FLASH_ATTN_VLLM_V1"
+
+            # All Blackwell backends support fp8
+            if cls.is_device_capability(100):
+                supported = True
+            elif attention_backend == "FLASH_ATTN_VLLM_V1":
+                if fp8_attention:
+                    from vllm.attention.utils.fa_utils import (
+                        flash_attn_supports_fp8)
+                    supported = flash_attn_supports_fp8()
+                else:
+                    supported = True
         return supported
+
+    @classmethod
+    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+            if not cls.has_device_capability(80):
+                capability = cls.get_device_capability()
+                gpu_name = cls.get_device_name()
+
+                if capability is None:
+                    compute_str = "does not have a compute capability"
+                else:
+                    version_str = capability.as_version_str()
+                    compute_str = f"has compute capability {version_str}"
+
+                raise ValueError(
+                    "Bfloat16 is only supported on GPUs "
+                    "with compute capability of at least 8.0. "
+                    f"Your {gpu_name} GPU {compute_str}. "
+                    "You can use float16 instead by explicitly setting the "
+                    "`dtype` flag in CLI, for example: --dtype=half.")
 
 
 # NVML utils

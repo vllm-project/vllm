@@ -132,6 +132,11 @@ def has_nvidia_artifactory() -> bool:
     This checks connectivity to the kernel inference library artifactory
     which is required for downloading certain cubin kernels like TRTLLM FHMA.
     """
+    # Since FLASHINFER_CUBIN_DIR defines the pre-downloaded cubins path, when
+    # it's true, we could assume the cubins are available.
+    if envs.VLLM_HAS_FLASHINFER_CUBIN:
+        return True
+
     try:
         # Use a short timeout to avoid blocking for too long
         response = requests.get(FLASHINFER_CUBINS_REPOSITORY, timeout=5)
@@ -260,6 +265,37 @@ if has_flashinfer():
                            dtype=dtype,
                            device=A.device)
 
+    @torch.library.custom_op(
+        "vllm::bmm_fp8",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def bmm_fp8(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        A_scale: torch.Tensor,
+        B_scale: torch.Tensor,
+        dtype: torch.dtype,
+        backend: str,
+    ) -> torch.Tensor:
+        from flashinfer import bmm_fp8 as bmm_fp8_
+        return bmm_fp8_(A, B, A_scale, B_scale, dtype, None, backend)
+
+    @torch.library.register_fake("vllm::bmm_fp8", )
+    def bmm_fp8_fake(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        A_scale: torch.Tensor,
+        B_scale: torch.Tensor,
+        dtype: torch.dtype,
+        backend: str,
+    ) -> torch.Tensor:
+        return torch.empty(A.shape[0],
+                           A.shape[1],
+                           B.shape[2],
+                           dtype=dtype,
+                           device=A.device)
+
 
 def flashinfer_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
                              block_scale_a: torch.Tensor,
@@ -288,6 +324,35 @@ def flashinfer_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
     )
 
 
+def flashinfer_scaled_fp8_mm(
+        a: torch.Tensor,
+        b: torch.Tensor,
+        scale_a: torch.Tensor,
+        scale_b: torch.Tensor,
+        out_dtype: torch.dtype,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    assert a.ndim == 2 and b.ndim == 2
+    assert a.shape[1] == b.shape[0]
+    assert scale_a.numel() == 1 and scale_b.numel() == 1
+    assert a.dtype == torch.float8_e4m3fn and b.dtype == torch.float8_e4m3fn
+    assert a.device.type == "cuda" and b.device.type == "cuda"
+    assert scale_a.dtype == torch.float32 and scale_b.dtype == torch.float32
+    assert scale_a.device.type == "cuda" and scale_b.device.type == "cuda"
+
+    output = bmm_fp8(
+        a.unsqueeze(0),
+        b.unsqueeze(0),
+        scale_a,
+        scale_b,
+        out_dtype,
+        "auto",
+    ).view(a.shape[0], b.shape[1])
+
+    if bias is not None:
+        output = output + bias
+    return output
+
+
 __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
@@ -302,4 +367,5 @@ __all__ = [
     "supports_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_scaled_fp4_mm",
+    "flashinfer_scaled_fp8_mm",
 ]

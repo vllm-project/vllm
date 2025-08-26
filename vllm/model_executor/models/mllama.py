@@ -17,7 +17,7 @@
 """PyTorch Mllama model."""
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Literal, Optional, TypedDict, Union
+from typing import Annotated, Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -64,6 +64,7 @@ from vllm.multimodal.processing import (BaseProcessingInfo,
                                         EncDecMultiModalProcessor,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal, SupportsV0Only
@@ -73,15 +74,30 @@ from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 logger = init_logger(__name__)
 
 
-class MllamaImagePixelInputs(TypedDict):
-    type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: """
-    """(batch_size, max_num_image, max_num_chunk, num_channel, height, width)"""
-    aspect_ratio_ids: torch.Tensor
-    """Shape: `(batch_size, max_num_image)`"""
-    aspect_ratio_mask: torch.Tensor
-    """Shape: `(batch_size, max_num_image, max_num_tiles)`"""
+class MllamaImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - batch_size: Batch size
+        - max_num_image: Max number of images
+        - max_num_chunk: Max number of chunks
+        - max_num_tiles: Max number of tiles per image
+        - num_channel: Number of channels
+        - height: Height
+        - width: Width
+    """
+
+    type: Literal["pixel_values"] = "pixel_values"
+
+    data: Annotated[torch.Tensor,
+                    TensorShape("batch_size", "max_num_image", "max_num_chunk",
+                                "num_channel", "height", "width")]
+
+    aspect_ratio_ids: Annotated[torch.Tensor,
+                                TensorShape("batch_size", "max_num_image")]
+
+    aspect_ratio_mask: Annotated[
+        torch.Tensor,
+        TensorShape("batch_size", "max_num_image", "max_num_tiles")]
 
 
 # TODO: support LlamaImageEmbeddingInputs
@@ -168,10 +184,9 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        return_mm_hashes: bool = False,
     ) -> MultiModalEncDecInputs:
         mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
-                                  tokenization_kwargs, return_mm_hashes)
+                                  tokenization_kwargs)
 
         image_token_id = self.info.get_hf_config().image_token_index
         # Check that the number of image tokens in the decoder prompt matches
