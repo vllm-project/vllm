@@ -138,7 +138,7 @@ extra_css:
 extra_javascript:
   - mkdocs/javascript/run_llm_widget.js
   - mkdocs/javascript/mathjax.js
-  - https://unpkg.com/mathjax@3/es5/tex-mml-chtml.js
+  - https://unpkg.com/mathjax@3.2.2/es5/tex-mml-chtml.js
   - mkdocs/javascript/edit_and_feedback.js
   - mkdocs/javascript/slack_and_forum.js
 
