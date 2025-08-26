@@ -317,8 +317,7 @@ class ExaoneModel(nn.Module):
         self.config = config
         self.quant_config = quant_config
         # No additional vocabulary support for LoRA
-        lora_vocab = ((0 *
-                       (lora_config.max_loras or 1)) if lora_config else 0)
+        lora_vocab = 0
         self.vocab_size = config.vocab_size
         self.wte = config.vocab_size
         if get_pp_group().is_first_rank or (config.tie_word_embeddings

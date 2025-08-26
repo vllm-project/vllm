@@ -293,8 +293,7 @@ class JambaModel(nn.Module):
 
         self.config = config
         # No additional vocabulary support for LoRA
-        lora_vocab = ((0 *
-                       (lora_config.max_loras or 1)) if lora_config else 0)
+        lora_vocab = 0
         self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
 
