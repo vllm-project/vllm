@@ -271,6 +271,9 @@ class SeedOssToolParser(ToolParser):
             # Extract content after think end token
             result_content = model_output[think_end_index:]
             thinking_content = model_output[:think_end_index]
+        else:
+            thinking_content = ""
+            result_content = model_output
 
         try:
             function_calls = self._get_function_calls(result_content)
