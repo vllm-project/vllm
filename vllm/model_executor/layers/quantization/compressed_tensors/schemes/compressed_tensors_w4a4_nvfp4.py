@@ -112,13 +112,12 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                 torch.uint8), epilogue_tile_m).reshape(
                     weight_scale.shape).view(torch.float8_e4m3fn))
 
-            layer.weight_scale_swizzled = Parameter(weight_scale,
-                                                    requires_grad=False)
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.weight_packed = Parameter(weight, requires_grad=False)
         else:
             swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
-            layer.weight_scale_swizzled = Parameter(swizzled_weight_scale,
-                                                    requires_grad=False)
+            layer.weight_scale = Parameter(swizzled_weight_scale,
+                                           requires_grad=False)
             layer.weight_packed = Parameter(layer.weight_packed.data,
                                             requires_grad=False)
 
@@ -136,7 +135,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
                 x=x,
                 input_global_scale=layer.input_global_scale,
                 weight=layer.weight_packed,
-                weight_scale_swizzled=layer.weight_scale_swizzled,
+                weight_scale_swizzled=layer.weight_scale,
                 weight_global_scale=layer.weight_global_scale)
             if bias is not None:
                 out = out + bias
@@ -149,7 +148,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_global_scale)
 
         mm_args = (x_fp4, layer.weight_packed, x_blockscale,
-                   layer.weight_scale_swizzled, layer.alpha, output_dtype)
+                   layer.weight_scale, layer.alpha, output_dtype)
         if self.backend == "flashinfer-trtllm":
             out = flashinfer_scaled_fp4_mm(*mm_args, backend="trtllm")
         elif self.backend == "flashinfer-cutlass":
