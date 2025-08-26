@@ -321,7 +321,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             (self.max_model_len, 1),
             dtype=torch.int64,
             device="cpu",
-            pin_memory=True)
+            pin_memory=self.pin_memory)
 
     def _make_buffer(self, *args, dtype: torch.dtype) -> CpuGpuBuffer:
         return CpuGpuBuffer(*args,
