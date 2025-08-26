@@ -292,7 +292,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
-        layer: Any,
+        layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         """Return the appropriate GEMM experts implementation."""
         experts = select_nvfp4_gemm_impl(
