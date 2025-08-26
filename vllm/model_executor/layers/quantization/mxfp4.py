@@ -6,6 +6,8 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import envs
+from vllm.config import get_current_vllm_config
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
@@ -26,12 +28,38 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils import (has_triton_kernels, is_torch_equal_or_newer,
                         next_power_of_2, round_up)
+from vllm.utils.flashinfer import has_flashinfer
 
-if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-        or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
-    # from flashinfer.fused_moe import cutlass_fused_moe
-    from flashinfer import (mxfp8_quantize, shuffle_matrix_a,
-                            shuffle_matrix_sf_a, trtllm_fp4_block_scale_moe)
+logger = init_logger(__name__)
+
+
+def _should_use_flashinfer_mxfp4_bf16():
+    """Determine if FlashInfer MXFP4 BF16 should be used."""
+    # If explicitly set, respect the setting
+    if envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16"):
+        return envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
+
+    # Enable by default on SM100 if MXFP8 is not explicitly enabled
+    if (current_platform.is_device_capability(100) and has_flashinfer()
+            and not envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8")):
+        logger.info_once(
+            "Enabling FlashInfer MXFP4 BF16 backend by default for Blackwell. "
+            "For faster performance, consider setting "
+            "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1, "
+            "though this may impact accuracy.")
+        return True
+
+    return False
+
+
+def _should_use_flashinfer_mxfp4_mxfp8():
+    """Determine if FlashInfer MXFP4 MXFP8 should be used."""
+    return envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+
+
+def should_use_flashinfer_mxfp4():
+    return (_should_use_flashinfer_mxfp4_mxfp8()
+            or _should_use_flashinfer_mxfp4_bf16())
 
 
 class Mxfp4Config(QuantizationConfig):
@@ -86,13 +114,21 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.topk_indices_dtype = None
         self.moe = moe
         self.use_marlin = self._should_use_marlin()
+        self.max_capture_size = get_current_vllm_config(
+        ).compilation_config.max_capture_size
+
+        if current_platform.is_device_capability(100) and not has_flashinfer():
+            logger.warning_once(
+                "MXFP4 MoE is enabled on Blackwell but FlashInfer "
+                "is not available. This may result in degraded performance. "
+                "Please `pip install vllm[flashinfer]` for best results.")
 
     def _should_use_marlin(self):
         if envs.VLLM_MXFP4_USE_MARLIN is not None:
             return envs.VLLM_MXFP4_USE_MARLIN
         if current_platform.is_cuda() and \
-                not current_platform.has_device_capability(100):
-            if not current_platform.is_device_capability(90):
+                not current_platform.is_device_capability(100):
+            if not current_platform.has_device_capability(90):
                 # marlin kernel has better performance on ampere
                 return True
             if not has_triton_kernels():
@@ -138,8 +174,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.hidden_size = hidden_size
             layer.intermediate_size_per_partition = \
                 intermediate_size_per_partition_after_pad
-        elif (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-              or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+        elif should_use_flashinfer_mxfp4():
             # pad the intermediate size to be a multiple of 2 * mxfp4_block
             # for to hold non-uniform sharded tensor as well as swizzling
             # other padding to increase performance
@@ -230,8 +265,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer):
         if self.use_marlin:
             prepare_moe_fp4_layer_for_marlin(layer)
-        elif (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-              or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+        elif should_use_flashinfer_mxfp4():
+            from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
             layer.gemm1_alpha = Parameter(torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32).cuda(),
                                           requires_grad=False)
@@ -478,17 +513,18 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             logical_replica_count), (
                 "MXFP4 are not supported with this configuration.")
 
-        if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+        if should_use_flashinfer_mxfp4():
+            from flashinfer import mxfp8_quantize, trtllm_fp4_block_scale_moe
             assert not self.moe.use_ep, (
                 "EP is not supported for flashinfer mxfp4 moe backend yet.")
-            if envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16:
+            if _should_use_flashinfer_mxfp4_bf16():
                 assert x.dtype == torch.bfloat16
                 x_quant = x
                 x_scale = None
             else:
                 x_quant, x_scale = mxfp8_quantize(x, False)  # to mxfp8
-                x_scale = x_scale.view(torch.float8_e4m3fn).reshape(-1)
+                x_scale = x_scale.view(torch.float8_e4m3fn).reshape(
+                    *x.shape[:-1], -1)
             trtllm_gen_output = trtllm_fp4_block_scale_moe(
                 router_logits.to(torch.bfloat16),
                 None,  # routing_bias
@@ -517,6 +553,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 self._get_tile_tokens_dim(x, top_k),
                 1 if renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
+                tune_max_num_tokens=self.max_capture_size,
             )[0]
             return trtllm_gen_output
         else:
