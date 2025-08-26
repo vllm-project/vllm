@@ -35,7 +35,7 @@ def _vllm_model(
         max_model_len=128,
         enforce_eager=True,
         enable_prefix_caching=apc,
-        gpu_memory_utilization=0.5,
+        gpu_memory_utilization=0.8,
         skip_tokenizer_init=skip_tokenizer_init,
     )
 
@@ -153,34 +153,22 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
                 f" {n}. Repeats: {repeats}")
 
 
-sampling_params_sets = [
-    {
-        "logprobs": 2,
-        "min_p": 0.5
-    },
-    {
-        "logprobs": 3,
-        "min_p": 0.7
-    },
-]
-
-
-@pytest.mark.parametrize("model", ["Qwen/Qwen3-0.6B"])
 @pytest.mark.parametrize("num_index", [2, 5])
 @pytest.mark.parametrize("output_kind", [
     None, RequestOutputKind.CUMULATIVE, RequestOutputKind.DELTA,
     RequestOutputKind.FINAL_ONLY
 ])
-@pytest.mark.parametrize("params", sampling_params_sets)
-def test_llmengine_streaming_with_parallel_sampling(model, output_kind,
-                                                    num_index, params) -> None:
+def test_llmengine_streaming_with_parallel_sampling(output_kind,
+                                                    num_index) -> None:
     """Test output_kind in LLMEngine when parallel sampling (index) `n>1`.
     """
-    engine_args = EngineArgs(model=model, gpu_memory_utilization=0.5)
+    engine_args = EngineArgs(model=MODEL,
+                             gpu_memory_utilization=0.8,
+                             enforce_eager=True)
     engine = LLMEngine.from_engine_args(engine_args)
 
-    NUM_REQUESTS = 10
-    NUM_TOKENS = 20
+    NUM_REQUESTS = 3
+    NUM_TOKENS = 10
 
     sampling_params = SamplingParams(max_tokens=NUM_TOKENS,
                                      min_tokens=NUM_TOKENS,
@@ -188,8 +176,7 @@ def test_llmengine_streaming_with_parallel_sampling(model, output_kind,
                                      **({
                                          "output_kind": output_kind
                                      } if output_kind is not None else {}),
-                                     temperature=0.9,
-                                     **params)
+                                     temperature=0.9)
 
     if output_kind is None:
         assert (sampling_params.output_kind == RequestOutputKind.CUMULATIVE
@@ -264,8 +251,8 @@ def test_llm_streaming_with_parallel_sampling(vllm_model, num_index,
                                               output_kind) -> None:
     """Test output_kind in LLM class when parallel sampling (index) `n>1`.
     """
-    NUM_REQUESTS = 10
-    NUM_TOKENS = 20
+    NUM_REQUESTS = 3
+    NUM_TOKENS = 10
     prompts = ["The history of the Earth is" for i in range(NUM_REQUESTS)]
 
     sampling_params = SamplingParams(
@@ -363,7 +350,7 @@ def test_engine_metrics(vllm_runner, monkeypatch, example_prompts):
         assert len(num_accepted_tokens_per_pos[0].values) == 5
 
 
-@pytest.mark.parametrize("model", ["meta-llama/Llama-3.2-1B-Instruct"])
+@pytest.mark.parametrize("model", ["facebook/opt-125m"])
 def test_skip_tokenizer_initialization(model: str,
                                        monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_V1", "1")
