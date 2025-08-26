@@ -50,6 +50,7 @@ class Scheduler(SchedulerInterface):
         log_stats: bool = False,
     ) -> None:
         self.vllm_config = vllm_config
+        self.vllm_config.kv_cache_config = kv_cache_config
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
@@ -58,11 +59,7 @@ class Scheduler(SchedulerInterface):
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
-<<<<<<< HEAD
-        self.vllm_config.kv_cache_config = kv_cache_config
-=======
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
->>>>>>> main
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -85,15 +82,9 @@ class Scheduler(SchedulerInterface):
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
         if self.vllm_config.kv_transfer_config is not None:
-<<<<<<< HEAD
-=======
-            assert len(self.kv_cache_config.kv_cache_groups) == 1, (
-                "Multiple KV cache groups are not currently supported "
-                "with KV connectors")
             assert not self.is_encoder_decoder, (
                 "Encoder-decoder models are not currently supported "
                 "with KV connectors")
->>>>>>> main
             self.connector = KVConnectorFactory.create_connector(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
 
@@ -442,28 +433,6 @@ class Scheduler(SchedulerInterface):
                                               == 0 else
                                               self.num_lookahead_tokens)
 
-<<<<<<< HEAD
-                if all([
-                        self.connector is not None,
-                        num_external_computed_tokens > 0
-                ]):
-                    # Since external computed tokens can be very large,
-                    # We want to only allocate tokens inside the sliding
-                    # window. This is done by
-                    # `allocate_slots_and_remove_unnecessary_blocks`.
-                    # FIXME(Kuntai): need to handle rollback when allocation
-                    # fails.
-                    manager = self.kv_cache_manager
-                    new_blocks = (
-                        manager.allocate_slots_and_remove_unnecessary_blocks(
-                            request,
-                            num_external_computed_tokens,
-                            num_new_local_computed_tokens,
-                            new_computed_blocks,
-                            delay_cache_blocks=load_kv_async,
-                            chunk_size=self.max_num_scheduled_tokens,
-                        ))
-=======
                 # Determine if we need to allocate cross-attention blocks.
                 if self.is_encoder_decoder and request.has_encoder_inputs:
                     # TODO(russellb): For Whisper, we know that the input is
@@ -480,16 +449,34 @@ class Scheduler(SchedulerInterface):
                 else:
                     num_encoder_tokens = 0
 
-                new_blocks = self.kv_cache_manager.allocate_slots(
-                    request,
-                    num_new_tokens + num_external_computed_tokens,
-                    num_new_local_computed_tokens,
-                    new_computed_blocks,
-                    num_lookahead_tokens=effective_lookahead_tokens,
-                    delay_cache_blocks=load_kv_async,
-                    num_encoder_tokens=num_encoder_tokens,
-                )
->>>>>>> main
+                if all([
+                        self.connector is not None,
+                        num_external_computed_tokens > 0,
+                        num_encoder_tokens == 0,
+                ]):
+                    # NOTE(Kuntai): the current implementation of
+                    # `allocate_slots_and_remove_unnecessary_blocks` is not
+                    # tested with encoder-decoder models.
+                    # So we fall back to default code path when
+                    # `num_encoder_tokens > 0`.
+
+                    # Since external computed tokens can be very large,
+                    # We want to only allocate tokens inside the sliding
+                    # window. This is done by
+                    # `allocate_slots_and_remove_unnecessary_blocks`.
+
+                    # FIXME(Kuntai): need to handle rollback when allocation
+                    # fails.
+                    manager = self.kv_cache_manager
+                    new_blocks = (
+                        manager.allocate_slots_and_remove_unnecessary_blocks(
+                            request,
+                            num_external_computed_tokens,
+                            num_new_local_computed_tokens,
+                            new_computed_blocks,
+                            delay_cache_blocks=load_kv_async,
+                            chunk_size=self.max_num_scheduled_tokens,
+                        ))
 
                     if new_blocks is None:
                         # The request cannot be scheduled.
@@ -513,6 +500,8 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens,
                         new_computed_blocks,
                         num_lookahead_tokens=effective_lookahead_tokens,
+                        delay_cache_blocks=load_kv_async,
+                        num_encoder_tokens=num_encoder_tokens,
                     )
                     if new_blocks is None:
                         # The request cannot be scheduled.
