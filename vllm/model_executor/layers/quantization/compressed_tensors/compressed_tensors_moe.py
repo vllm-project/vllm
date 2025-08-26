@@ -3,7 +3,7 @@
 
 import enum
 from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 import torch
 from compressed_tensors import CompressionFormat
@@ -689,9 +689,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 device=device,
                 dtype=torch.int64)
 
-    def select_gemm_impl(self, prepare_finalize: FusedMoEPrepareAndFinalize,
-                         moe: FusedMoEConfig,
-                         layer: Any) -> FusedMoEPermuteExpertsUnpermute:
+    def select_gemm_impl(
+            self, prepare_finalize: FusedMoEPrepareAndFinalize,
+            moe: FusedMoEConfig,
+            layer: torch.nn.Module) -> FusedMoEPermuteExpertsUnpermute:
         # cutlass path
         if self.use_cutlass:
             from vllm.model_executor.layers.fused_moe import (

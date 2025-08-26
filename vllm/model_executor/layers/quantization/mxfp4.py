@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 import torch
 from torch.nn.parameter import Parameter
@@ -453,7 +453,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
-        layer: Any,
+        layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         if (prepare_finalize.activation_format ==
                 mk.FusedMoEActivationFormat.BatchedExperts):
