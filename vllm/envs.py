@@ -988,7 +988,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # This is separate from the TRTLLMGEN path controlled by
     # VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8.
     "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS":
-    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS", "0"))),
+    lambda: bool(int(
+        os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS", "0")
+        )),
 
     # If set to 1, use the FlashInfer
     # BF16 (activation) x MXFP4 (weight) MoE backend.

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, Optional
 from enum import Enum
+from typing import Callable, Optional
 
 import torch
 from torch.nn.parameter import Parameter
@@ -34,50 +34,69 @@ from vllm.utils.flashinfer import has_flashinfer
 logger = init_logger(__name__)
 
 
-# enum for flashinfer backend
-class FlashInferBackend(Enum):
-    BW_MXFP4_MXFP8_TRTLLM = 1
-    BW_MXFP4_MXFP8_CUTLASS = 2
-    BW_MXFP4_BF16 = 3
-    SM90_MXFP4_BF16 = 4
+# enum for mxfp4 backend
+class Mxfp4Backend(Enum):
+    NONE = 0
+
+    # FlashInfer Backend
+    SM100_FI_MXFP4_MXFP8_TRTLLM = 1
+    SM100_FI_MXFP4_MXFP8_CUTLASS = 2
+    SM100_FI_MXFP4_BF16 = 3
+    SM90_FI_MXFP4_BF16 = 4
+
+    # Marlin Backend
+    MARLIN = 5
+
+    # Triton Backend
+    TRITON = 6
 
 
-def should_use_flashinfer_mxfp4_bf16():
-    """Determine if FlashInfer MXFP4 BF16 should be used."""
-    # If explicitly set, respect the setting
-    if envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16"):
-        return envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
-
-    # Enable by default on SM100 if MXFP8 is not explicitly enabled
-    if ((current_platform.is_device_capability(100)
-            or current_platform.is_device_capability(90) and has_flashinfer())
-            and not envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8")
-            and not envs.is_set("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS")):
+def get_mxfp4_backend():
+    # Backend Selection
+    if current_platform.is_device_capability(90) and has_flashinfer():
+        logger.info_once("Using FlashInfer MXFP4 BF16 backend for SM90")
+        return Mxfp4Backend.SM90_FI_MXFP4_BF16
+    elif (current_platform.is_device_capability(100) and has_flashinfer()
+          and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8):
         logger.info_once(
-            "Enabling FlashInfer MXFP4 BF16 backend by "
-            "default for Blackwell and Hopper. "
-            "For faster performance on Blackwell, consider setting "
-            "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1, "
-            "though this may impact accuracy.")
-        return True
+            "Using FlashInfer MXFP4 MXFP8 TRTLLM backend for SM100, "
+            "for high concurrency throughput workloads consider setting "
+            "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS=1 for better "
+            "performance")
+        return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+    elif (current_platform.is_device_capability(100) and has_flashinfer()
+          and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS):
+        logger.info_once(
+            "Using FlashInfer MXFP4 MXFP8 CUTLASS backend for SM100")
+        return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
+    elif current_platform.is_device_capability(100) and has_flashinfer():
+        logger.info_once(
+            "Using FlashInfer MXFP4 BF16 backend for SM100, "
+            "For faster performance on SM100, consider setting "
+            "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1, though this may impact "
+            "accuracy.")
+        return Mxfp4Backend.SM100_FI_MXFP4_BF16
+    elif ((current_platform.is_device_capability(100)
+           or current_platform.is_device_capability(90))
+          and not has_flashinfer()):
+        logger.warning_once(
+            "MXFP4 MoE is enabled on Blackwell or Hopper but FlashInfer "
+            "is not available. This may result in degraded performance. "
+            "Please `pip install vllm[flashinfer]` for best results.")
 
-    return False
+    # If FlashInfer is not available, try either Marlin or Triton
+    if current_platform.is_cuda() and current_platform.get_device_capability(
+    ) < 90:
+        logger.info_once("Using Marlin backend")
+        return Mxfp4Backend.MARLIN
+    elif has_triton_kernels():
+        logger.info_once("Using Triton backend")
+        return Mxfp4Backend.TRITON
+    elif not is_torch_equal_or_newer("2.8.0"):
+        logger.info_once("Using Marlin backend")
+        return Mxfp4Backend.MARLIN
 
-
-def _should_use_flashinfer_mxfp4_mxfp8():
-    """Determine if FlashInfer MXFP4 MXFP8 should be used."""
-    return envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-
-
-def should_use_flashinfer_mxfp4():
-    return (_should_use_flashinfer_mxfp4_mxfp8()
-            or should_use_flashinfer_mxfp4_bf16())
-
-
-def should_use_flashinfer_mxfp4_mxfp8_cutlass():
-    """Determine if FlashInfer MXFP4 MXFP8 CUTLASS should be used."""
-    logger.info_once(f"Enabling FlashInfer MXFP4 MXFP8 CUTLASS backend")
-    return envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS
+    return Mxfp4Backend.NONE
 
 
 class Mxfp4Config(QuantizationConfig):
@@ -131,30 +150,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         super().__init__(moe)
         self.topk_indices_dtype = None
         self.moe = moe
-        self.use_marlin = self._should_use_marlin()
+        self.mxfp4_backend = get_mxfp4_backend()
         self.flashinfer_autotune = True
         self.max_capture_size = get_current_vllm_config(
         ).compilation_config.max_capture_size
 
-        if current_platform.is_device_capability(100) and not has_flashinfer():
-            logger.warning_once(
-                "MXFP4 MoE is enabled on Blackwell but FlashInfer "
-                "is not available. This may result in degraded performance. "
-                "Please `pip install vllm[flashinfer]` for best results.")
-
-    def _should_use_marlin(self):
-        if envs.VLLM_MXFP4_USE_MARLIN is not None:
-            return envs.VLLM_MXFP4_USE_MARLIN
-        if current_platform.is_cuda() and \
-                not current_platform.is_device_capability(100):
-            if not current_platform.has_device_capability(90):
-                # marlin kernel has better performance on ampere
-                return True
-            if not has_triton_kernels():
-                return True
-            if not is_torch_equal_or_newer("2.8.0"):
-                return True
-        return False
+        assert self.mxfp4_backend != Mxfp4Backend.NONE, (
+            f"No FlashInfer or Marlin/Triton backend available. "
+            f"MXFP4 MoE will be disabled. "
+            f"Current backend: {self.mxfp4_backend}")
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,
@@ -175,7 +179,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         intermediate_size_per_partition_after_pad = \
             intermediate_size_per_partition
-        if self.use_marlin:
+        if self.mxfp4_backend == Mxfp4Backend.MARLIN:
             # The moe marlin kernel requires that for each linear
             # n % 256 == 0 and k % 128 == 0.
             # In gate_up_proj:
@@ -193,21 +197,17 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.hidden_size = hidden_size
             layer.intermediate_size_per_partition = \
                 intermediate_size_per_partition_after_pad
-        elif should_use_flashinfer_mxfp4(
-        ) and current_platform.is_device_capability(100):
+        elif (self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+              or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
             # pad the intermediate size to be a multiple of 2 * mxfp4_block
             # for to hold non-uniform sharded tensor as well as swizzling
             # other padding to increase performance
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 256)
             hidden_size = round_up(hidden_size, 256)
-        elif should_use_flashinfer_mxfp4_bf16(
-        ) and current_platform.is_device_capability(
-                90) or current_platform.is_rocm():
-            intermediate_size_per_partition_after_pad = round_up(
-                intermediate_size_per_partition, 128)
-            hidden_size = round_up(hidden_size, 128)
-        elif should_use_flashinfer_mxfp4_mxfp8_cutlass():
+        elif current_platform.is_rocm() or (
+                self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
+                or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16):
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 128)
             hidden_size = round_up(hidden_size, 128)
@@ -289,12 +289,19 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_bias", w2_bias)
         set_weight_attrs(w2_bias, extra_weight_attrs)
 
+    def _prepare_flashinfer_mxfp4_weight_layout(self, layer: torch.nn.Module,
+                                                backend: Mxfp4Backend) -> None:
+        """Prepare weight/bias/scale layout for FlashInfer CUTLASS and SM90.
+
+        This consolidates common de-interleave and swap steps while preserving
+        backend-specific scale interleaving differences.
+        """
+
     def process_weights_after_loading(self, layer):
-        if self.use_marlin:
+        if self.mxfp4_backend == Mxfp4Backend.MARLIN:
             prepare_moe_fp4_layer_for_marlin(layer)
-        elif should_use_flashinfer_mxfp4(
-        ) and current_platform.is_device_capability(100):
-            logger.info_once(f"Running FlashInfer MXFP4 MXFP8 TRTLLM backend weight loading")
+        elif (self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+              or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
             from flashinfer import shuffle_matrix_a, shuffle_matrix_sf_a
             layer.gemm1_alpha = Parameter(torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32).cuda(),
@@ -416,10 +423,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w2_bias = Parameter(torch.stack(gemm2_bias_shuffled).reshape(
                 self.num_experts, -1),
                                       requires_grad=False)
-        elif should_use_flashinfer_mxfp4_mxfp8_cutlass() and \
-                current_platform.is_device_capability(100):
-            logger.info_once(f"Running FlashInfer MXFP4 MXFP8 CUTLASS backend weight loading")
-            # CUTLASS MXFP8xMXFP4: prepare data layout without shuffling
+        elif (self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
+              or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16):
             layer.gemm1_alpha = Parameter(torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32).cuda(),
                                           requires_grad=False)
@@ -429,88 +434,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.gemm1_clamp_limit = Parameter(torch.tensor(
                 [7.0] * self.num_experts, dtype=torch.float32).cuda(),
                                                 requires_grad=False)
-            sf_block_size = 32
 
-            assert (layer.w13_weight.dim() == 3
-                    and layer.w13_weight.shape[0] == self.num_experts
-                    and layer.w13_weight.shape[1] == self.intermediate_size * 2
-                    and layer.w13_weight.shape[2] == self.hidden_size // 2)
-            assert (layer.w13_weight_scale.dim() == 3
-                    and layer.w13_weight_scale.shape[0] == self.num_experts
-                    and layer.w13_weight_scale.shape[1]
-                    == self.intermediate_size * 2
-                    and layer.w13_weight_scale.shape[2]
-                    == self.hidden_size // sf_block_size)
-
-            # De-interleave gate/up rows, then make contiguous halves [w3; w1]
-            w13_w = layer.w13_weight.data
-            gate_w, up_w = w13_w[:, ::2, :], w13_w[:, 1::2, :]
-            deinterleaved_w13_w = torch.cat([gate_w, up_w], dim=1)
-            w1_w, w3_w = torch.chunk(deinterleaved_w13_w, 2, dim=1)
-            w13_weight_swapped = torch.cat([w3_w, w1_w], dim=1)
-
-            w13_b = layer.w13_bias.data.to(torch.float32)
-            gate_b, up_b = w13_b[:, ::2], w13_b[:, 1::2]
-            deinterleaved_w13_b = torch.cat([gate_b, up_b], dim=1)
-            b1, b3 = torch.chunk(deinterleaved_w13_b, 2, dim=-1)
-            w13_bias_swapped = torch.cat([b3, b1], dim=-1).to(torch.bfloat16)
-
-            w13_s = layer.w13_weight_scale.data
-            gate_s, up_s = w13_s[:, ::2, :], w13_s[:, 1::2, :]
-            deinterleaved_w13_s = torch.cat([gate_s, up_s], dim=1)
-            s1, s3 = torch.chunk(deinterleaved_w13_s, 2, dim=1)
-            w13_scale_swapped = torch.cat([s3, s1], dim=1)
-
-            from flashinfer import block_scale_interleave
-            # Interleave returns a padded, flattened uint8 buffer. Keep it 1D.
-            orig_shape = w13_scale_swapped.shape
-            w13_scale_interleaved = block_scale_interleave(
-                w13_scale_swapped.view(torch.uint8)).reshape(orig_shape)
-
-            # Interleave w2 scales too (no reordering needed for w2 weights)
-            w2_s = layer.w2_weight_scale.data
-            orig_shape = w2_s.shape
-            w2_scale_interleaved = block_scale_interleave(w2_s.view(torch.uint8)).reshape(orig_shape)
-
-            layer.w13_weight = Parameter(w13_weight_swapped, requires_grad=False)
-            layer.w13_weight_scale = Parameter(w13_scale_interleaved,
-                                               requires_grad=False)
-            layer.w13_bias = Parameter(w13_bias_swapped.cuda(),
-                                       requires_grad=False)
-            layer.w2_weight_scale = Parameter(w2_scale_interleaved,
-                                              requires_grad=False)
-        elif should_use_flashinfer_mxfp4_bf16(
-        ) and current_platform.is_device_capability(90):
-            assert layer.w13_weight.dtype == torch.uint8, (
-                f"layer.w13_weight.dtype: {layer.w13_weight.dtype}, "
-                f"expected: {torch.uint8}")
-            assert layer.w2_weight.dtype == torch.uint8, (
-                f"layer.w2_weight.dtype: {layer.w2_weight.dtype}, "
-                f"expected: {torch.uint8}")
-            assert layer.w13_weight_scale.dtype == torch.uint8, (
-                f"layer.w13_weight_scale.dtype: {layer.w13_weight_scale.dtype}, "  # noqa: E501
-                f"expected: {torch.uint8}")
-            assert layer.w2_weight_scale.dtype == torch.uint8, (
-                f"layer.w2_weight_scale.dtype: {layer.w2_weight_scale.dtype}, "  # noqa: E501
-                f"expected: {torch.uint8}")
-            assert layer.w13_bias.dtype == torch.bfloat16, (
-                f"layer.w13_bias.dtype: {layer.w13_bias.dtype}, "
-                f"expected: {torch.bfloat16}")
-            assert layer.w2_bias.dtype == torch.bfloat16, (
-                f"layer.w2_bias.dtype: {layer.w2_bias.dtype}, "
-                f"expected: {torch.bfloat16}")
-
-            layer.gemm1_alpha = Parameter(torch.tensor(
-                [1.702] * self.num_experts, dtype=torch.float32).cuda(),
-                                          requires_grad=False)
-            layer.gemm1_beta = Parameter(torch.tensor(
-                [1.0] * self.num_experts, dtype=torch.float32).cuda(),
-                                         requires_grad=False)
-            layer.gemm1_clamp_limit = Parameter(torch.tensor(
-                [7.0] * self.num_experts, dtype=torch.float32).cuda(),
-                                                requires_grad=False)
             sf_block_size = 32  # mxfp4 block size
 
+            # Common shape assertions
             assert (layer.w13_weight.dim() == 3
                     and layer.w13_weight.shape[0] == self.num_experts
                     and layer.w13_weight.shape[1] == self.intermediate_size * 2
@@ -536,60 +463,76 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     and layer.w2_bias.shape[0] == self.num_experts
                     and layer.w2_bias.shape[1] == self.hidden_size)
 
-            # De-interleave weights, scales, and biases
-            w13_weight_data = layer.w13_weight.data
-            gate_w, up_w = w13_weight_data[:, ::2, :], w13_weight_data[:,
-                                                                       1::2, :]
-            deinterleaved_w13_weight = torch.cat([gate_w, up_w], dim=1)
-            w1_weight, w3_weight = torch.chunk(deinterleaved_w13_weight,
-                                               2,
-                                               dim=1)
-            layer.w13_weight = torch.nn.Parameter(torch.cat(
-                [w3_weight, w1_weight], dim=1).cuda(),
+            # De-interleave and swap for w13 weight, bias, and scales
+            w13_w = layer.w13_weight.data
+            gate_w, up_w = w13_w[:, ::2, :], w13_w[:, 1::2, :]
+            deinterleaved_w13_w = torch.cat([gate_w, up_w], dim=1)
+            w1_w, w3_w = torch.chunk(deinterleaved_w13_w, 2, dim=1)
+            w13_weight_swapped = torch.cat([w3_w, w1_w], dim=1)
+
+            w13_b = layer.w13_bias.data.to(torch.float32)
+            gate_b, up_b = w13_b[:, ::2], w13_b[:, 1::2]
+            deinterleaved_w13_b = torch.cat([gate_b, up_b], dim=1)
+            b1, b3 = torch.chunk(deinterleaved_w13_b, 2, dim=-1)
+            w13_bias_swapped = torch.cat([b3, b1], dim=-1).to(torch.bfloat16)
+
+            w13_s = layer.w13_weight_scale.data
+            gate_s, up_s = w13_s[:, ::2, :], w13_s[:, 1::2, :]
+            deinterleaved_w13_s = torch.cat([gate_s, up_s], dim=1)
+            s1, s3 = torch.chunk(deinterleaved_w13_s, 2, dim=1)
+            w13_scale_swapped = torch.cat([s3, s1], dim=1)
+
+            if self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS:
+                from flashinfer import block_scale_interleave
+
+                orig_shape = w13_scale_swapped.shape
+                w13_scale_interleaved = block_scale_interleave(
+                    w13_scale_swapped.view(torch.uint8)).reshape(orig_shape)
+
+                w2_s = layer.w2_weight_scale.data
+                orig_shape = w2_s.shape
+                w2_scale_interleaved = block_scale_interleave(
+                    w2_s.view(torch.uint8)).reshape(orig_shape)
+
+                layer.w13_weight = Parameter(w13_weight_swapped,
+                                             requires_grad=False)
+                layer.w13_weight_scale = Parameter(w13_scale_interleaved,
+                                                   requires_grad=False)
+                layer.w13_bias = Parameter(w13_bias_swapped,
+                                           requires_grad=False)
+                layer.w2_weight_scale = Parameter(w2_scale_interleaved,
                                                   requires_grad=False)
+            elif self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16:
 
-            w13_bias_data = layer.w13_bias.data.to(torch.float32)
-            gate_b, up_b = w13_bias_data[:, ::2], w13_bias_data[:, 1::2]
-            deinterleaved_w13_bias = torch.cat([gate_b, up_b], dim=1)
-            b1, b3 = torch.chunk(deinterleaved_w13_bias, 2, dim=-1)
-            b = torch.cat([b3, b1], dim=-1)
-            layer.w13_bias = torch.nn.Parameter(b.to(torch.bfloat16).cuda(),
-                                                requires_grad=False)
+                def _interleave_mxfp4_cutlass_sm90(w):
+                    w_shape = w.shape
+                    w_interleaved = w.reshape(w_shape[0], w_shape[1],
+                                              (w_shape[2] // 4), 4)
+                    w_interleaved = w_interleaved.permute(0, 2, 1, 3)
+                    w_interleaved = w_interleaved.reshape(
+                        w_shape[0], w_shape[2] // 4, w_shape[1] * 4)
+                    return w_interleaved
 
-            # Scale
-            w13_scale_data = layer.w13_weight_scale.data
-            gate_s, up_s = w13_scale_data[:, ::2, :], w13_scale_data[:,
-                                                                     1::2, :]
-            deinterleaved_w13_scale = torch.cat([gate_s, up_s], dim=1)
-            w1_weight_scale, w3_weight_scale = torch.chunk(
-                deinterleaved_w13_scale, 2, dim=1)
-            all_w31_scales = torch.cat([w3_weight_scale, w1_weight_scale],
-                                       dim=1)
+                w31_scales = w13_scale_swapped.to(torch.uint8).view(
+                    torch.uint8)
+                w31_scales_interleaved = _interleave_mxfp4_cutlass_sm90(
+                    w31_scales)
 
-            w31_scales = all_w31_scales.to(torch.uint8).view(torch.uint8)
-            w31_s_shape = w31_scales.shape
-            w31_scales_interleaved = w31_scales.reshape(
-                w31_s_shape[0], w31_s_shape[1], (w31_s_shape[2] // 4), 4)
-            w31_scales_interleaved = w31_scales_interleaved.permute(0, 2, 1, 3)
-            w31_scales_interleaved = w31_scales_interleaved.reshape(
-                w31_s_shape[0], w31_s_shape[2] // 4, w31_s_shape[1] * 4)
+                w2_weight_scale = layer.w2_weight_scale.data
+                w2_scales = w2_weight_scale.to(torch.uint8).view(torch.uint8)
+                w2_scales_interleaved = _interleave_mxfp4_cutlass_sm90(
+                    w2_scales)
 
-            layer.w13_weight_scale = torch.nn.Parameter(
-                w31_scales_interleaved.cuda(), requires_grad=False)
-
-            w2_weight_scale = layer.w2_weight_scale.data
-            w2_scales = w2_weight_scale.to(torch.uint8).view(torch.uint8)
-            w2_s_shape = w2_scales.shape
-            w2_scales_interleaved = w2_scales.reshape(w2_s_shape[0],
-                                                      w2_s_shape[1],
-                                                      (w2_s_shape[2] // 4), 4)
-            w2_scales_interleaved = w2_scales_interleaved.permute(0, 2, 1, 3)
-            w2_scales_interleaved = w2_scales_interleaved.reshape(
-                w2_s_shape[0], w2_s_shape[2] // 4, w2_s_shape[1] * 4)
-
-            layer.w2_weight_scale = torch.nn.Parameter(
-                w2_scales_interleaved.cuda(), requires_grad=False)
-        else:
+                layer.w13_weight = torch.nn.Parameter(torch.cat([w3_w, w1_w],
+                                                                dim=1),
+                                                      requires_grad=False)
+                layer.w13_bias = torch.nn.Parameter(w13_bias_swapped,
+                                                    requires_grad=False)
+                layer.w13_weight_scale = torch.nn.Parameter(
+                    w31_scales_interleaved, requires_grad=False)
+                layer.w2_weight_scale = torch.nn.Parameter(
+                    w2_scales_interleaved, requires_grad=False)
+        elif self.mxfp4_backend == Mxfp4Backend.TRITON:
             from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
             w13_bias = layer.w13_bias.to(torch.float32)
@@ -624,6 +567,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.w13_weight = None
             layer.w2_weight = None
             torch.cuda.empty_cache()
+        else:
+            raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
 
     def _get_tile_tokens_dim(self, x: torch.Tensor, top_k: int):
         # Number of tokens in the input tensor.
@@ -675,7 +620,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         if enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
-        if self.use_marlin:
+        if self.mxfp4_backend == Mxfp4Backend.MARLIN:
             topk_weights, topk_ids = FusedMoE.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
@@ -715,20 +660,22 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             logical_replica_count), (
                 "MXFP4 are not supported with this configuration.")
 
-        if should_use_flashinfer_mxfp4(
-        ) and current_platform.is_device_capability(100):
-            logger.info_once(f"Running FlashInfer MXFP4 MXFP8 TRTLLM backend")
+        if (self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+                or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
             from flashinfer import mxfp8_quantize, trtllm_fp4_block_scale_moe
             assert not self.moe.use_ep, (
                 "EP is not supported for flashinfer mxfp4 moe backend yet.")
-            if should_use_flashinfer_mxfp4_bf16():
+            if self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16:
                 assert x.dtype == torch.bfloat16
                 x_quant = x
                 x_scale = None
-            else:
+            elif self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM:
                 x_quant, x_scale = mxfp8_quantize(x, False)  # to mxfp8
                 x_scale = x_scale.view(torch.float8_e4m3fn).reshape(
                     *x.shape[:-1], -1)
+            else:
+                raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
+
             trtllm_gen_output = trtllm_fp4_block_scale_moe(
                 router_logits.to(torch.bfloat16),
                 None,  # routing_bias
@@ -760,80 +707,13 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 tune_max_num_tokens=self.max_capture_size,
             )[0]
             return trtllm_gen_output
-        elif should_use_flashinfer_mxfp4_mxfp8_cutlass() and \
-                current_platform.is_device_capability(100):
-            logger.info_once(f"Running FlashInfer MXFP4 MXFP8 CUTLASS backend")
-            # CUTLASS MXFP8 x MXFP4 path gated by flag
-            from vllm.utils.flashinfer import (autotune,
-                                               flashinfer_cutlass_fused_moe)
-            from flashinfer import mxfp8_quantize
-
+        elif (self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
+              or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16):
             assert not self.moe.use_ep, (
                 "EP is not supported for flashinfer mxfp4 moe backend yet.")
-
-            topk_weights, topk_ids = FusedMoE.select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                use_grouped_topk=use_grouped_topk,
-                top_k=top_k,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-            )
-
-            x_quant, x_scale = mxfp8_quantize(x, True, 32)
-
-            fake_input_scale = torch.ones(self.num_experts, device=x.device)
-            # Pass 3D scales as int32 views (no interleave) to match unit test
-            quant_scales = [
-                layer.w13_weight_scale.contiguous().view(torch.int32),
-                fake_input_scale,
-                layer.w2_weight_scale.contiguous().view(torch.int32),
-                fake_input_scale,
-            ]
-
-            output = torch.empty_like(x, dtype=torch.bfloat16)
-            with autotune(self.flashinfer_autotune):
-                _ = flashinfer_cutlass_fused_moe(
-                    input=x_quant,
-                    token_selected_experts=topk_ids.to(torch.int).contiguous(),
-                    token_final_scales=topk_weights,
-                    fc1_expert_weights=layer.w13_weight.contiguous().view(torch.long),
-                    fc2_expert_weights=layer.w2_weight.contiguous().view(torch.long),
-                    output_dtype=torch.bfloat16,
-                    output=output,
-                    quant_scales=quant_scales,
-                    fc1_expert_biases=layer.w13_bias,
-                    fc2_expert_biases=layer.w2_bias,
-                    swiglu_alpha=layer.gemm1_alpha,
-                    swiglu_beta=layer.gemm1_beta,
-                    swiglu_limit=layer.gemm1_clamp_limit,
-                    tp_size=self.moe.tp_size,
-                    tp_rank=self.moe.tp_rank,
-                    ep_size=self.moe.ep_size,
-                    ep_rank=self.moe.ep_rank,
-                    use_mxfp8_act_scaling=True,
-                    input_sf=x_scale,
-                    tune_max_num_tokens=self.max_capture_size,
-                )
-
-            self.flashinfer_autotune = False
-            return output
-        elif should_use_flashinfer_mxfp4_bf16(
-        ) and current_platform.is_device_capability(90):
             from vllm.utils.flashinfer import (autotune,
                                                flashinfer_cutlass_fused_moe)
 
-            assert x.dtype == torch.bfloat16
-
-            quant_scales = [
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-            ]
-
             topk_weights, topk_ids = FusedMoE.select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
@@ -847,14 +727,56 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 e_score_correction_bias=e_score_correction_bias,
             )
 
+            # Backend-specific preparation
+            if self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS:
+
+                from flashinfer import mxfp8_quantize
+
+                x_quant, x_scale = mxfp8_quantize(x, True, 32)
+
+                fake_input_scale = torch.ones(self.num_experts,
+                                              device=x.device)
+                quant_scales = [
+                    layer.w13_weight_scale.contiguous().view(torch.int32),
+                    fake_input_scale,
+                    layer.w2_weight_scale.contiguous().view(torch.int32),
+                    fake_input_scale,
+                ]
+
+                fi_input = x_quant
+                extra_kwargs = dict(
+                    use_mxfp8_act_scaling=True,
+                    input_sf=x_scale,
+                    fc1_expert_weights=layer.w13_weight.contiguous().view(
+                        torch.long),
+                    fc2_expert_weights=layer.w2_weight.contiguous().view(
+                        torch.long),
+                )
+            elif self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16:
+                assert x.dtype == torch.bfloat16
+
+                quant_scales = [
+                    layer.w13_weight_scale,
+                    layer.w2_weight_scale,
+                ]
+
+                fi_input = x
+                extra_kwargs = dict(
+                    use_w4_group_scaling=True,
+                    fc1_expert_weights=layer.w13_weight,
+                    fc2_expert_weights=layer.w2_weight,
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported CUTLASS backend: {self.mxfp4_backend}")
+
+            # Allocate output and invoke kernel under autotune context
             output = torch.empty_like(x, dtype=torch.bfloat16)
             with autotune(self.flashinfer_autotune):
                 _ = flashinfer_cutlass_fused_moe(
-                    input=x,
+                    input=fi_input,
                     token_selected_experts=topk_ids.to(torch.int).contiguous(),
                     token_final_scales=topk_weights,
-                    fc1_expert_weights=layer.w13_weight,
-                    fc2_expert_weights=layer.w2_weight,
                     output_dtype=torch.bfloat16,
                     output=output,
                     quant_scales=quant_scales,
@@ -867,13 +789,13 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     tp_rank=self.moe.tp_rank,
                     ep_size=self.moe.ep_size,
                     ep_rank=self.moe.ep_rank,
-                    use_w4_group_scaling=True,
                     tune_max_num_tokens=self.max_capture_size,
+                    **extra_kwargs,
                 )
 
             self.flashinfer_autotune = False
             return output
-        else:
+        elif self.mxfp4_backend == Mxfp4Backend.TRITON:
             return triton_kernel_moe_forward(
                 hidden_states=x,
                 w1=self.w13_weight_triton_tensor,
@@ -889,3 +811,5 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_precision=self.w2_precision_config,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
+        else:
+            raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")

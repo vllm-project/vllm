@@ -629,8 +629,8 @@ def test_flashinfer_cutlass_mxfp4_fused_moe(
 @pytest.mark.parametrize("alpha,beta,limit", [(1.0, 1.0, None),
                                               (1.702, 1.0, 7.0)])
 @pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.is_device_capability(100)
-         and has_flashinfer()),
+    not (current_platform.is_cuda()
+         and current_platform.is_device_capability(100) and has_flashinfer()),
     reason="NVIDIA GPU sm100 and flashinfer are required for this test",
 )
 def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
@@ -652,17 +652,23 @@ def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
                                 device=device,
                                 dtype=torch.bfloat16)
     # Float weights in w13 format [w1; w3]
-    w13 = (torch.randn(num_experts, 2 * intermediate_size, hidden_size,
-                       device=device, dtype=torch.bfloat16) / 10)
-    w2 = (torch.randn(num_experts, hidden_size, intermediate_size,
-                      device=device, dtype=torch.bfloat16) / 10)
+    w13 = (torch.randn(num_experts,
+                       2 * intermediate_size,
+                       hidden_size,
+                       device=device,
+                       dtype=torch.bfloat16) / 10)
+    w2 = (torch.randn(num_experts,
+                      hidden_size,
+                      intermediate_size,
+                      device=device,
+                      dtype=torch.bfloat16) / 10)
     # Bias contiguous [b1; b3]
     bias13 = (torch.randn(num_experts,
                           2 * intermediate_size,
                           device=device,
                           dtype=torch.bfloat16) * 10)
-    bias2 = (torch.randn(num_experts, hidden_size, device=device,
-                         dtype=torch.bfloat16) * 10)
+    bias2 = (torch.randn(
+        num_experts, hidden_size, device=device, dtype=torch.bfloat16) * 10)
     router_logits = torch.rand(num_tokens,
                                num_experts,
                                dtype=torch.float32,
@@ -679,7 +685,8 @@ def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
             sfs.append(sf)
         return torch.stack(qs), torch.stack(sfs)
 
-    def dequant_mxfp4_batches(mat_fp4: torch.Tensor, scale_tensor: torch.Tensor):
+    def dequant_mxfp4_batches(mat_fp4: torch.Tensor,
+                              scale_tensor: torch.Tensor):
         num_batches = mat_fp4.size(0)
         scale_tensor = scale_tensor.view(num_batches, -1)
         from flashinfer import mxfp4_dequantize
@@ -692,26 +699,27 @@ def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
     w2_q, w2_scale = quant_mxfp4_batches(w2, num_experts)
 
     # Reference result using dequantized tensors and reference_moe
-    w13_ref = dequant_mxfp4_batches(w13_q.cpu().view(torch.uint8),
-                                    w13_scale.cpu().view(torch.uint8).reshape(-1)
-                                    ).cuda().to(torch.float32).reshape(
-                                        num_experts, 2 * intermediate_size,
-                                        hidden_size)
-    w2_ref = dequant_mxfp4_batches(w2_q.cpu().view(torch.uint8),
-                                   w2_scale.cpu().view(torch.uint8).reshape(-1)
-                                   ).cuda().to(torch.float32).reshape(
-                                       num_experts, hidden_size, intermediate_size)
+    w13_ref = dequant_mxfp4_batches(
+        w13_q.cpu().view(torch.uint8),
+        w13_scale.cpu().view(torch.uint8).reshape(-1)).cuda().to(
+            torch.float32).reshape(num_experts, 2 * intermediate_size,
+                                   hidden_size)
+    w2_ref = dequant_mxfp4_batches(
+        w2_q.cpu().view(torch.uint8),
+        w2_scale.cpu().view(torch.uint8).reshape(-1)).cuda().to(
+            torch.float32).reshape(num_experts, hidden_size, intermediate_size)
 
     # Quantize activations for SM100 path and dequantize for reference
     hidden_states_q, hidden_states_sf = mxfp8_quantize(hidden_states, True, 32)
     # Reference uses BF16 input but quantizes intermediate activation to MXFP8
     ref = reference_moe(router_logits.to(torch.float32), topk, num_experts,
                         hidden_states.to(torch.float32), w13_ref,
-                        bias13.to(torch.float32), w2_ref, bias2.to(torch.float32),
-                        alpha, beta, limit, 'mxfp8')
+                        bias13.to(torch.float32), w2_ref,
+                        bias2.to(torch.float32), alpha, beta, limit, 'mxfp8')
 
     # Prepare inputs for FlashInfer CUTLASS fused MoE
     from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
+
     # Swap halves to arrange as [w3; w1] (kernel expectation)
     w1_w, w3_w = torch.chunk(w13_q, 2, dim=1)
     w13_q_swapped = torch.cat([w3_w, w1_w], dim=1)
@@ -736,7 +744,9 @@ def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
 
     out = torch.empty_like(hidden_states, dtype=torch.bfloat16)
     if alpha is not None:
-        alpha_t = torch.full((num_experts, ), alpha, device=hidden_states.device)
+        alpha_t = torch.full((num_experts, ),
+                             alpha,
+                             device=hidden_states.device)
     else:
         alpha_t = None
     if beta is not None:
@@ -744,7 +754,9 @@ def test_flashinfer_cutlass_mxfp4_mxfp8_fused_moe(
     else:
         beta_t = None
     if limit is not None:
-        limit_t = torch.full((num_experts, ), limit, device=hidden_states.device)
+        limit_t = torch.full((num_experts, ),
+                             limit,
+                             device=hidden_states.device)
     else:
         limit_t = None
 
