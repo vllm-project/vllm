@@ -634,6 +634,7 @@ class LLM:
         params: BeamSearchParams,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         use_tqdm: bool = False,
+        concurency_limit: Optional[int] = None,
     ) -> list[BeamSearchOutput]:
         """
         Generate sequences using beam search.
@@ -644,6 +645,8 @@ class LLM:
             params: The beam search parameters.
             lora_request: LoRA request to use for generation, if any.
             use_tqdm: Whether to use tqdm to display the progress bar.
+            concurency_limit: The maximum number of concurrent requests.
+                If None, the number of concurrent requests is unlimited.
         """
         # TODO: how does beam search work together with length penalty,
         # frequency, penalty, and stopping criteria, etc.?
@@ -661,6 +664,15 @@ class LLM:
             tokenizer.eos_token_id,
             length_penalty,
         )
+
+        if use_tqdm and concurency_limit is not None:
+            logger.warning(
+                "Progress bar is not supported when using concurency_limit. "
+                "Disabling progress bar.")
+            use_tqdm = False
+
+        if concurency_limit is None:
+            concurency_limit = len(prompts)
 
         def create_tokens_prompt_from_beam(
                 beam: BeamSearchSequence) -> TokensPrompt:
@@ -706,73 +718,78 @@ class LLM:
                     **mm_kwargs,
                 ), )
 
-        token_iter = range(max_tokens)
-        if use_tqdm:
-            token_iter = tqdm(token_iter,
-                              desc="Beam search",
-                              unit="token",
-                              unit_scale=False)
-            logger.warning(
-                "The progress bar shows the upper bound on token steps and "
-                "may finish early due to stopping conditions. It does not "
-                "reflect instance-level progress.")
+        for i in range(0, len(prompts), concurency_limit):
+            instances_batch = instances[i:i + concurency_limit]
 
-        for _ in token_iter:
-            all_beams: list[BeamSearchSequence] = list(
-                sum((instance.beams for instance in instances), []))
-            pos = [0] + list(
-                itertools.accumulate(
-                    len(instance.beams) for instance in instances))
-            instance_start_and_end: list[tuple[int, int]] = list(
-                zip(pos[:-1], pos[1:]))
+            token_iter = range(max_tokens)
+            if use_tqdm:
+                token_iter = tqdm(token_iter,
+                                  desc="Beam search",
+                                  unit="token",
+                                  unit_scale=False)
+                logger.warning(
+                    "The progress bar shows the upper bound on token steps and "
+                    "may finish early due to stopping conditions. It does not "
+                    "reflect instance-level progress.")
+            for _ in token_iter:
+                all_beams: list[BeamSearchSequence] = list(
+                    sum((instance.beams for instance in instances_batch), []))
+                pos = [0] + list(
+                    itertools.accumulate(
+                        len(instance.beams) for instance in instances_batch))
+                instance_start_and_end: list[tuple[int, int]] = list(
+                    zip(pos[:-1], pos[1:]))
 
-            if len(all_beams) == 0:
-                break
+                if len(all_beams) == 0:
+                    break
 
-            # create the corresponding batch entries for prompt & optional lora
-            prompts_batch, lora_req_batch = zip(
-                *[(create_tokens_prompt_from_beam(beam), beam.lora_request)
-                  for beam in all_beams])
+                # create corresponding batch entries for prompt & optional lora
+                prompts_batch, lora_req_batch = zip(
+                    *[(create_tokens_prompt_from_beam(beam), beam.lora_request)
+                      for beam in all_beams])
 
-            # only runs for one step
-            # we don't need to use tqdm here
-            output = self.generate(prompts_batch,
-                                   sampling_params=beam_search_params,
-                                   use_tqdm=False,
-                                   lora_request=lora_req_batch)
+                # only runs for one step
+                # we don't need to use tqdm here
+                output = self.generate(prompts_batch,
+                                       sampling_params=beam_search_params,
+                                       use_tqdm=False,
+                                       lora_request=lora_req_batch)
 
-            for (start, end), instance in zip(instance_start_and_end,
-                                              instances):
-                instance_new_beams = []
-                for i in range(start, end):
-                    current_beam = all_beams[i]
-                    result = output[i]
+                for (start, end), instance in zip(instance_start_and_end,
+                                                  instances_batch):
+                    instance_new_beams = []
+                    for i in range(start, end):
+                        current_beam = all_beams[i]
+                        result = output[i]
 
-                    if result.outputs[0].logprobs is not None:
-                        # if `result.outputs[0].logprobs` is None, it means
-                        # the sequence is completed because of the max-model-len
-                        # or abortion. we don't need to add it to the new beams.
-                        logprobs = result.outputs[0].logprobs[0]
-                        for token_id, logprob_obj in logprobs.items():
-                            new_beam = BeamSearchSequence(
-                                tokens=current_beam.tokens + [token_id],
-                                logprobs=current_beam.logprobs + [logprobs],
-                                lora_request=current_beam.lora_request,
-                                cum_logprob=current_beam.cum_logprob +
-                                logprob_obj.logprob,
-                                multi_modal_data=current_beam.multi_modal_data,
-                                mm_processor_kwargs=current_beam.
-                                mm_processor_kwargs)
+                        if result.outputs[0].logprobs is not None:
+                            # if `result.outputs[0].logprobs` is None, it means
+                            # the sequence is completed because of the
+                            # max-model-len or abortion. we don't need to add
+                            # it to the new beams.
+                            logprobs = result.outputs[0].logprobs[0]
+                            for token_id, logprob_obj in logprobs.items():
+                                new_beam = BeamSearchSequence(
+                                    tokens=current_beam.tokens + [token_id],
+                                    logprobs=current_beam.logprobs +
+                                    [logprobs],
+                                    lora_request=current_beam.lora_request,
+                                    cum_logprob=current_beam.cum_logprob +
+                                    logprob_obj.logprob,
+                                    multi_modal_data=current_beam.
+                                    multi_modal_data,
+                                    mm_processor_kwargs=current_beam.
+                                    mm_processor_kwargs)
 
-                            if token_id == tokenizer.eos_token_id and \
-                                not ignore_eos:
-                                instance.completed.append(new_beam)
-                            else:
-                                instance_new_beams.append(new_beam)
-                sorted_beams = sorted(instance_new_beams,
-                                      key=sort_beams_key,
-                                      reverse=True)
-                instance.beams = sorted_beams[:beam_width]
+                                if token_id == tokenizer.eos_token_id and \
+                                    not ignore_eos:
+                                    instance.completed.append(new_beam)
+                                else:
+                                    instance_new_beams.append(new_beam)
+                    sorted_beams = sorted(instance_new_beams,
+                                          key=sort_beams_key,
+                                          reverse=True)
+                    instance.beams = sorted_beams[:beam_width]
 
         outputs = []
         for instance in instances:
