@@ -994,10 +994,6 @@ class MiniMaxText01Model(nn.Module):
             self.minimax_cache = MinimaxCacheManager(
                 dtype=torch.float32, cache_shape=self.cache_shape)
 
-        head_dim = getattr(config, "head_dim", None)
-        if head_dim is None:
-            head_dim = config.hidden_size // config.num_attention_heads
-
         norm_kwargs = {}
         if hasattr(config, "rms_norm_eps"):
             norm_kwargs["eps"] = config.rms_norm_eps
