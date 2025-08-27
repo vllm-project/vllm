@@ -93,35 +93,13 @@ class DPMetadata:
         return num_tokens_tensor
 
     @staticmethod
-    def should_ubatch_across_dp(should_ubatch: bool, dp_size: int,
-                                dp_rank: int) -> bool:
-        should_ubatch_across_dp = [0] * dp_size
-        should_ubatch_across_dp[dp_rank] = 1 if should_ubatch else 0
-        should_ubatch_tensor = torch.tensor(should_ubatch_across_dp,
-                                            device="cpu",
-                                            dtype=torch.int32)
-        from vllm.distributed.parallel_state import get_dp_group
-        dist.all_reduce(should_ubatch_tensor, group=get_dp_group().cpu_group)
-
-        # This function uses the same ProcessGroup for all reduce as
-        # num_tokens_across_dp. If there's an incorrect ordering of ARs
-        # across DP ranks, this tensor can end up containing the number
-        # of padded tokens for a DP rank.
-        assert torch.all((should_ubatch_tensor == 0)
-                         | (should_ubatch_tensor == 1))
-
-        result: bool = bool(torch.all(should_ubatch_tensor == 1).item())
-        return result
-
-    @staticmethod
-    def should_ubatch_across_dp2(should_ubatch: bool, num_tokens_per_ubatch: int, dp_size: int,
+    def should_ubatch_across_dp(should_ubatch: bool, num_tokens_per_ubatch: int, dp_size: int,
                                 dp_rank: int) -> tuple[bool, Optional[torch.Tensor]]:
-        # if not should_ubatch:
-        #     assert num_tokens_per_ubatch == 0
 
-        tensor = torch.zeros(2, dp_size, device="cpu", dtype=torch.int32)
+        tensor = torch.zeros(3, dp_size, device="cpu", dtype=torch.int32)
         tensor[0][dp_rank] = num_tokens_per_ubatch
         tensor[1][dp_rank] = 1 if should_ubatch else 0
+
 
         from vllm.distributed.parallel_state import get_dp_group
         dist.all_reduce(tensor, group=get_dp_group().cpu_group)
@@ -129,6 +107,12 @@ class DPMetadata:
         result: bool = bool(torch.all(tensor[1]== 1).item())
         if not result:
             return result, None
+        
+        min_num_tokens_per_ubatch = tensor[0].min().item()
+        max_num_tokens_per_ubatch = tensor[0].max().item()
+        if max_num_tokens_per_ubatch >= 2 * min_num_tokens_per_ubatch:
+            logger.debug(f"Aborting ubatching {min_num_tokens_per_ubatch} {max_num_tokens_per_ubatch}")
+            return False, None
         return result, tensor[0, :]
 
     @staticmethod
