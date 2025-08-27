@@ -27,12 +27,13 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import (SupportsQuant,
-                                                   default_pooling_type)
 from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+
+from .interfaces import SupportsQuant
+from .interfaces_base import default_pooling_type
 
 
 class BertWithRopeEmbedding(nn.Module):

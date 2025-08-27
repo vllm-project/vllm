@@ -18,7 +18,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP, default_pooling_type
+from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces_base import default_pooling_type
 from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, maybe_prefix
 
