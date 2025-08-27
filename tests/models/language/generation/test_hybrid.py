@@ -100,16 +100,17 @@ def test_models(
         else:
             hf_outputs = None
 
-    if model not in V0_UNSUPPORTED_MODELS:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-            vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
-                example_prompts, max_tokens, num_logprobs)
-    else:
-        vllm_v0_outputs = None
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "0")
+        if model not in V0_UNSUPPORTED_MODELS:
+            with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+                vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
+                    example_prompts, max_tokens, num_logprobs)
+        else:
+            vllm_v0_outputs = None
 
     if model in V1_SUPPORTED_MODELS:
         with monkeypatch.context() as m:
-            m.setenv("VLLM_USE_V1", "1")
             with vllm_runner(model,
                              max_num_seqs=MAX_NUM_SEQS,
                              enable_prefix_caching=False) as vllm_model:
@@ -402,24 +403,21 @@ def test_full_cuda_graph(
         else:
             hf_outputs = None
 
-    if model not in V0_UNSUPPORTED_MODELS:
-        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-            vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
-                example_prompts, max_tokens, num_logprobs)
-    else:
-        vllm_v0_outputs = None
-
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        if model in HYBRID_MODELS:
-            # required due to reorder_batch behaviour
-            m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
-        with vllm_runner(model,
-                         max_num_seqs=MAX_NUM_SEQS,
-                         compilation_config={'full_cuda_graph': True},
-                         enable_prefix_caching=False) as vllm_model:
-            vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
-                example_prompts, max_tokens, num_logprobs)
+        m.setenv("VLLM_USE_V1", "0")
+        if model not in V0_UNSUPPORTED_MODELS:
+            with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+                vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
+                    example_prompts, max_tokens, num_logprobs)
+        else:
+            vllm_v0_outputs = None
+
+    with vllm_runner(model,
+                        max_num_seqs=MAX_NUM_SEQS,
+                        compilation_config={'full_cuda_graph': True},
+                        enable_prefix_caching=False) as vllm_model:
+        vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
 
     if hf_outputs is not None and vllm_v0_outputs is not None:
         check_logprobs_close(
@@ -466,23 +464,21 @@ def test_fp32_state(
         else:
             hf_outputs = None
 
-    with vllm_runner(model,
-                     max_num_seqs=MAX_NUM_SEQS,
-                     mamba_ssm_cache_dtype="float32") as vllm_model:
-        vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
-
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        if model in HYBRID_MODELS:
-            # required due to reorder_batch behaviour
-            m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
+        m.setenv("VLLM_USE_V1", "0")
         with vllm_runner(model,
-                         max_num_seqs=MAX_NUM_SEQS,
-                         mamba_ssm_cache_dtype="float32",
-                         enable_prefix_caching=False) as vllm_model:
-            vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+                        max_num_seqs=MAX_NUM_SEQS,
+                        mamba_ssm_cache_dtype="float32") as vllm_model:
+            vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, num_logprobs)
+
+    
+    with vllm_runner(model,
+                        max_num_seqs=MAX_NUM_SEQS,
+                        mamba_ssm_cache_dtype="float32",
+                        enable_prefix_caching=False) as vllm_model:
+        vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs)
 
     if hf_outputs is not None:
         check_logprobs_close(
