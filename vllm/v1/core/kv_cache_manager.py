@@ -309,14 +309,14 @@ class KVCacheManager:
         `allocate_slots` will require us to allocate all prefix tokens
         for all layers (including sliding window layer).
 
-        This makes vLLM unable to allocate for long request, even they
-        can fit into the GPU memory after evicting tokens outside 
-        sliding window.
+        This makes vLLM unable to allocate for long request, even when
+        they can fit into the GPU memory after evicting tokens outside
+        the sliding window.
         
         This function provides a workaround:
-        It allocates the blocks chunk-by-chunk. As a result, the 
-        allocation of this chunk will evict the blocks outside 
-        sliding window created by previous chunks.
+        It allocates the blocks chunk-by-chunk. As a result, the
+        allocation of this chunk will evict the blocks outside
+        the sliding window created by previous chunks.
 
         NOTE(Kuntai):
         - `num_new_computed_tokens` and `new_computed_blocks` are applied 
