@@ -41,7 +41,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import (IsAttentionFree, MultiModalEmbeddings,
-                         SupportsMultiModalWithRawInput)
+                         SupportsMultiModal)
 from .interfaces_base import default_pooling_type
 
 
@@ -174,10 +174,10 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
     info=PrithviGeoSpatialMAEProcessingInfo,
     dummy_inputs=PrithviGeoSpatialMAEInputBuilder,
 )
-class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
-                           SupportsMultiModalWithRawInput):
+class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal):
     """Prithvi Masked Autoencoder"""
 
+    supports_multimodal_raw_input_only = True
     is_pooling_model = True
 
     @classmethod
