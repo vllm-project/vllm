@@ -11,7 +11,8 @@ from transformers import GptOssConfig
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_ep_group, get_pp_group, get_tensor_model_parallel_rank,
+from vllm.distributed import (get_ep_group, get_pp_group,
+                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -28,8 +29,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import cdiv
 
 from .interfaces import SupportsPP
-from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper, extract_layer_index, is_pp_missing_parameter,
-                    maybe_prefix, make_empty_intermediate_tensors_factory, make_layers)
+from .utils import (AutoWeightsLoader, WeightsMapper, extract_layer_index,
+                    is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class OAIAttention(nn.Module):
@@ -214,11 +217,11 @@ class GptOssModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
             lambda prefix: TransformerBlock(
-                    self.config,
-                    quant_config=self.quant_config,
-                    prefix=prefix,
-                prefix=maybe_prefix(prefix, "block."),
-            )
+                self.config,
+                quant_config=self.quant_config,
+                prefix=prefix,
+            ),
+            prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(self.config.hidden_size, eps=1e-5)
         self.make_empty_intermediate_tensors = (
@@ -228,10 +231,13 @@ class GptOssModel(nn.Module):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embedding(input_ids)
 
-    def forward(self, input_ids: torch.Tensor,
-                positions: torch.Tensor,
-                intermediate_tensors: Optional[IntermediateTensors] = None,
-                inputs_embeds: Optional[torch.Tensor] = None,) -> torch.Tensor:
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 x = inputs_embeds
@@ -246,6 +252,11 @@ class GptOssModel(nn.Module):
 
         for layer in self.layers:
             x, residual = layer(x, positions, residual)
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({
+                "hidden_states": x,
+                "residual": residual
+            })
         x, _ = self.norm(x, residual)
         return x
 
@@ -281,6 +292,10 @@ class GptOssModel(nn.Module):
                           intermediate_size)
 
         for name, weight in weights:
+            # Skip layers on other devices.
+            if is_pp_missing_parameter(name, self):
+                continue
+
             # FIXME(woosuk): Remove this after testing.
             weight = weight.cuda()
 
@@ -462,6 +477,10 @@ class GptOssModel(nn.Module):
                           intermediate_size)
 
         for name, weight in weights:
+            # Skip layers on other devices.
+            if is_pp_missing_parameter(name, self):
+                continue
+
             if ".w13_weight" in name:
                 # Handle MLP gate and up projection weights
                 # Extract gate and up projection parts
@@ -628,7 +647,7 @@ class GptOssForCausalLM(nn.Module, SupportsPP):
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-    
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
