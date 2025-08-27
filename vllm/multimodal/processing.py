@@ -24,7 +24,8 @@ from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                      MultiModalFieldConfig, MultiModalInputs,
                      MultiModalKwargsItem, MultiModalKwargsItems,
-                     MultiModalUUIDs, MultiModalKwargsOptionalItems, PlaceholderRange)
+                     MultiModalKwargsOptionalItems, MultiModalUUIDs,
+                     PlaceholderRange)
 from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
                     MultiModalDataParser)
 
@@ -1362,7 +1363,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
         *,
-        mm_uuids: Optional[MultiModalUUIDs] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDs]] = None,
     ) -> MultiModalHashes:
         """Create MM hashes to be returned (only used in V1).
 
@@ -1373,27 +1375,27 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         model_id = self.info.model_id
 
         hashes: MultiModalHashes = {}
-        mm_uuids = mm_uuids or {}
+        mm_hash_overrides = mm_hash_overrides or {}
 
         for modality, items in mm_items.items():
-            if modality in mm_uuids:
-                mm_uuid_list = mm_uuids[modality]
+            if modality in mm_hash_overrides:
+                mm_hash_list = mm_hash_overrides[modality]
                 # For None entries, compute a hash; otherwise, use provided ID.
                 computed: list[str] = []
                 for i, item in enumerate(items):
-                    mm_uuid = mm_uuid_list[i]
+                    mm_hash = mm_hash_list[i]
 
-                    # NOTE: Even if `mm_uuid` is provided, we still compute a
+                    # NOTE: Even if a mm_hash is provided, we still compute a
                     # hash if `hf_processor_mm_kwargs` or `tokenization_kwargs`
                     # are provided. This is because the processed multimodal
                     # inputs can be different depending on the processor kwargs.
-                    if mm_uuid is None or \
+                    if mm_hash is None or \
                         hf_processor_mm_kwargs or \
                         tokenization_kwargs:
 
-                        # NOTE: use uuid to hash if available for better
-                        # performance.
-                        item = mm_uuid if mm_uuid is not None else item
+                        # NOTE: use provided hash string to hash with kwargs
+                        # if available for better performance.
+                        item = mm_hash if mm_hash is not None else item
                         computed.append(
                             MultiModalHasher.hash_kwargs(
                                 model_id=model_id,
@@ -1401,7 +1403,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                                 **hf_processor_mm_kwargs,
                                 **tokenization_kwargs))
                     else:
-                        computed.append(mm_uuid)
+                        computed.append(mm_hash)
                 hashes[modality] = computed
             else:
                 hashes[modality] = [
@@ -1508,7 +1510,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
         *,
-        mm_hash_overrides: Optional[MultiModalHashes] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDs]] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         (
             prompt_ids,
@@ -1555,7 +1558,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
         *,
-        mm_hash_overrides: Optional[MultiModalHashes] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDs]] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         """
         Apply the HF processor on the full prompt text,
@@ -1777,7 +1781,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDs]] = None,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.

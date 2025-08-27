@@ -332,20 +332,24 @@ class Processor:
         if arrival_time is None:
             arrival_time = time.time()
 
-        # Validate multimodal ids alignment with mm_data at request layer
-        self._validate_multi_modal_uuids(prompt)
+        # Optionally generate multimodal hash overrides to avoid hashing
+        # multimodal data items by their content as their identifiers.
 
-        # Optionally generate multimodal hash overrides based on request id.
         # NOTE: when users explicitly turn off BOTH prefix caching and input
         # processing caching, no multimodal features or embeddings will be
-        # reused across requests, therefore hashing is no longer necessary.
+        # reused across requests, therefore identifying multimodal data items
+        # by their content is no longer necessary, and we create uuids with
+        # request id-modality-index as multimodal hash overrides.
         if (self.model_config.multimodal_config and
                 self.model_config.multimodal_config.mm_processor_cache_gb == 0
                 and not self.cache_config.enable_prefix_caching):
             mm_hash_overrides = self._maybe_build_mm_hash_overrides(
                 request_id, prompt)
         else:
-            mm_hash_overrides = None
+            # Otherwise, use user-provided uuids as multimodal hash overrides
+            # if provided.
+            self._validate_multi_modal_uuids(prompt)
+            mm_hash_overrides = prompt.get("multi_modal_uuids")
 
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
