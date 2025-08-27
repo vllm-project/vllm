@@ -1117,10 +1117,3 @@ class AsyncLLMEngine(EngineClient):
         """
         return await self.engine.collective_rpc_async(method, timeout, args,
                                                       kwargs)
-
-
-# TODO(v1): Remove this class proxy when V1 goes default.
-if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
-    from vllm.v1.engine.async_llm import AsyncLLM
-
-    AsyncLLMEngine = AsyncLLM  # type: ignore
