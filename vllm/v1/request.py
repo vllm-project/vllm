@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.utils import is_list_of
 from vllm.v1.engine import (EngineCoreEvent, EngineCoreEventType,
                             EngineCoreRequest, FinishReason)
 from vllm.v1.structured_output.request import StructuredOutputRequest
@@ -31,7 +30,7 @@ class Request:
         eos_token_id: Optional[int],
         client_index: int = 0,
         arrival_time: Optional[float] = None,
-        multimodal_features: Optional[list[MultiModalFeatureSpec]] = None,        
+        mm_features: Optional[list[MultiModalFeatureSpec]] = None,
         lora_request: Optional["LoRARequest"] = None,
         structured_output_request: Optional["StructuredOutputRequest"] = None,
         cache_salt: Optional[str] = None,
@@ -87,14 +86,14 @@ class Request:
         self.cache_salt: Optional[str] = cache_salt
 
         # Multi-modal features
-        self.multimodal_features = multimodal_features or []
-        self.num_encoder_inputs = len(self.multimodal_features)
+        self.mm_features = mm_features or []
+        self.num_encoder_inputs = len(self.mm_features)
         self.has_encoder_inputs = self.num_encoder_inputs > 0
-        
-        # Extract legacy format for backward compatibility with existing code
-        self.mm_positions = [f.mm_position for f in self.multimodal_features]
-        self.mm_kwargs = [f.data for f in self.multimodal_features]
-        self.mm_hashes = [f.mm_identifier for f in self.multimodal_features]
+        # TODO(sfeng33): Remove these legacy fields after clearing out all
+        # references in scheduler and model runner
+        self.mm_positions = [f.mm_position for f in self.mm_features]
+        self.mm_kwargs = [f.data for f in self.mm_features]
+        self.mm_hashes = [f.identifier for f in self.mm_features]
 
         # Read-only views
         # Prevent directly appending to these lists since
@@ -126,7 +125,7 @@ class Request:
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
-            multimodal_features=request.multimodal_features,
+            mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
             eos_token_id=request.eos_token_id,

@@ -12,9 +12,9 @@ from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, LRUCache
 from vllm.utils.jsontree import json_map_leaves, json_reduce_leaves
 
-from .inputs import (MultiModalFieldElem, MultiModalKwargs,
-                     MultiModalKwargsItem, MultiModalKwargsItems,
-                     NestedTensors)
+from .inputs import (MultiModalFeatureSpec, MultiModalFieldElem,
+                     MultiModalKwargs, MultiModalKwargsItem,
+                     MultiModalKwargsItems, NestedTensors)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -221,47 +221,23 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
             for mm_item, mm_hash in zip(mm_items, mm_hashes)
         ]
 
-    def update_multimodal_feature(
+    def get_and_update_features(
         self,
-        feature: "MultiModalFeatureSpec",
-    ) -> "MultiModalFeatureSpec":
-        """
-        Update a single multimodal feature with cached data from this cache.
-        
-        Args:
-            feature: The MultiModalFeatureSpec to update
-            
-        Returns:
-            Updated MultiModalFeatureSpec with cached data
-        """
-        from .inputs import MultiModalFeatureSpec
-        
-        # Extract data and hash for cache lookup
-        updated_data = self.get_and_update_item(feature.data, feature.mm_identifier)
-        return MultiModalFeatureSpec(
-            data=updated_data,
-            modality=feature.modality,
-            mm_identifier=feature.mm_identifier,
-            mm_position=feature.mm_position
-        )
-
-    def update_multimodal_features(
-        self,
-        multimodal_features: list["MultiModalFeatureSpec"],
+        mm_features: list["MultiModalFeatureSpec"],
     ) -> list["MultiModalFeatureSpec"]:
         """
         Update multimodal features with cached data from this cache.
         
         Args:
-            multimodal_features: List of MultiModalFeatureSpec to update
+            mm_features: List of MultiModalFeatureSpec to update
             
         Returns:
-            A new list of MultiModalFeatureSpec with cached data
+            The same list with updated data fields
         """
-        return [
-            self.update_multimodal_feature(feature)
-            for feature in multimodal_features
-        ]
+        for feature in mm_features:
+            feature.data = self.get_and_update_item(feature.data,
+                                                    feature.identifier)
+        return mm_features
 
     @abstractmethod
     def clear_cache(self) -> None:

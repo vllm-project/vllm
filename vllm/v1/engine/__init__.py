@@ -3,7 +3,6 @@
 
 import enum
 import time
-from collections.abc import Sequence
 from typing import Any, Optional, Union
 
 import msgspec
@@ -48,7 +47,7 @@ class EngineCoreRequest(
 
     request_id: str
     prompt_token_ids: list[int]
-    multimodal_features: Optional[list[MultiModalFeatureSpec]]
+    mm_features: Optional[list[MultiModalFeatureSpec]]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     eos_token_id: Optional[int]

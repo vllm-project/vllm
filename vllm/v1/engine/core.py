@@ -23,7 +23,6 @@ from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import receiver_cache_from_config
-from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -438,9 +437,10 @@ class EngineCore:
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
         # and will only accessed in the input processing thread afterwards.
-        if self.mm_receiver_cache is not None and request.multimodal_features:
-            request.multimodal_features = self.mm_receiver_cache.update_multimodal_features(
-                request.multimodal_features)
+        if self.mm_receiver_cache is not None and request.mm_features:
+            request.mm_features = (
+                self.mm_receiver_cache.get_and_update_features(
+                    request.mm_features))
 
         req = Request.from_engine_core_request(request,
                                                self.request_block_hasher)

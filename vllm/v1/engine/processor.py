@@ -298,8 +298,8 @@ class Processor:
             pooling_params = params.clone()
 
         # Multimodal related.
-        multimodal_features: Optional[list[MultiModalFeatureSpec]] = None
-        
+        mm_features: Optional[list[MultiModalFeatureSpec]] = None
+
         if decoder_inputs["type"] == "multimodal":
             decoder_mm_inputs = decoder_inputs["mm_kwargs"]
             decoder_mm_positions = decoder_inputs["mm_placeholders"]
@@ -310,21 +310,19 @@ class Processor:
             # in the input sequence.
             sorted_mm_idxs = argsort_mm_positions(decoder_mm_positions)
 
-            multimodal_features = []
+            mm_features = []
             for modality, idx in sorted_mm_idxs:
-                multimodal_features.append(
+                mm_features.append(
                     MultiModalFeatureSpec(
                         data=decoder_mm_inputs[modality][idx],
                         modality=modality,
-                        mm_identifier=decoder_mm_hashes[modality][idx],
-                        mm_position=decoder_mm_positions[modality][idx]
-                    )
-                )
+                        identifier=decoder_mm_hashes[modality][idx],
+                        mm_position=decoder_mm_positions[modality][idx]))
 
         return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=decoder_inputs["prompt_token_ids"],
-            multimodal_features=multimodal_features,
+            mm_features=mm_features,
             sampling_params=sampling_params,
             pooling_params=pooling_params,
             eos_token_id=eos_token_id,

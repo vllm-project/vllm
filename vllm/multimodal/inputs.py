@@ -201,32 +201,25 @@ A dictionary containing nested tensors which have been batched via
 @dataclass
 class MultiModalFeatureSpec:
     """
-    Encapsulates multimodal related inputs and metadata required by the EngineCore.
+    Represents a single multimodal input with its processed data and metadata.
     
-    MultiModalFeatureSpec corresponds to individual mm data items (e.g., one image).
-    For instance, a request with 5 images will return a list of 5 MultiModalFeatureSpec's.
+    Used by the V1 engine to track multimodal data through processing and
+    caching. A request containing multiple multimodal items will have one
+    MultiModalFeatureSpec per item.
     """
-    
-    data: Optional[dict[str, Union[torch.Tensor, Sequence[torch.Tensor]]]]
-    """e.g., {"pixel_values": ..., "image_grid_thw": ...}"""
-    
+
+    data: Optional["MultiModalKwargsItem"]
+    """Multimodal data for this feature"""
+
     modality: str
     """Based on the input, e.g., "image", "audio", "video"."""
-    
-    mm_identifier: str
+
+    identifier: str
     """mm_hash or uuid for caching encoder outputs."""
-    
+
     mm_position: PlaceholderRange
     """e.g., PlaceholderRange(offset=2, length=336)"""
-    
-    def get_num_tokens(self) -> int:
-        """Return the number of tokens this multimodal input will occupy."""
-        return self.mm_position.length
-    
-    def get_num_embeds(self) -> int:
-        """Return the actual number of embeddings to be filled."""
-        return self.mm_position.get_num_embeds()
-    
+
 
 @dataclass
 class MultiModalFieldElem:
