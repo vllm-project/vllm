@@ -772,6 +772,7 @@ class AsyncMPClient(MPClient):
             client_addresses=client_addresses,
         )
 
+        self.client_count = client_count
         self.client_index = client_index
         self.outputs_queue = asyncio.Queue[Union[EngineCoreOutputs,
                                                  Exception]]()

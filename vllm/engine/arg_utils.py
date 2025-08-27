@@ -303,6 +303,8 @@ class EngineArgs:
     data_parallel_rpc_port: Optional[int] = None
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
+    api_process_count: int = ParallelConfig.api_process_count
+    api_process_rank: int = ParallelConfig.api_process_rank
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
@@ -895,7 +897,10 @@ class EngineArgs:
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
-        engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
+        engine_args = cls(**{
+            attr: getattr(args, attr)
+            for attr in attrs if hasattr(args, attr)
+        })
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
@@ -1280,6 +1285,8 @@ class EngineArgs:
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
+            api_process_count=self.api_process_count,
+            api_process_rank=self.api_process_rank,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
