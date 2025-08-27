@@ -509,7 +509,7 @@ def get_config(
         scale_fmt = quantization_config.get("scale_fmt", None)
         if scale_fmt in ("ue8m0"):
             if not envs.is_set("VLLM_USE_DEEP_GEMM_E8M0_HOPPER"):
-                envs.VLLM_USE_DEEP_GEMM_E8M0_HOPPER = True
+                os.environ["VLLM_USE_DEEP_GEMM_E8M0_HOPPER"] = "1"
                 logger.info_once(
                     ("Detected quantization_config.scale_fmt=%s; "
                      "enabling Hopper UE8M0."),
