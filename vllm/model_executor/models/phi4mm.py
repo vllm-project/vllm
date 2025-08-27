@@ -27,7 +27,7 @@ from vllm.multimodal.parse import (AudioProcessorItems, ImageEmbeddingItems,
                                    MultiModalDataItems, MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate)
+                                        PromptUpdate, ResolvedPromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
@@ -849,6 +849,25 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
                 replacement=get_audio_replacement_phi4mm,
             ),
         ]
+
+    def _recompute_cached_prompt_update(
+        self,
+        cached_update: ResolvedPromptUpdate,
+        new_item_idx: int,
+    ) -> ResolvedPromptUpdate:
+        new_update = super()._recompute_cached_prompt_update(
+            cached_update,
+            new_item_idx,
+        )
+
+        if cached_update.modality == "image":
+            image_tokens: list[str] = self.info.image_tokens  # type: ignore
+            new_update = new_update.with_target(image_tokens[new_item_idx])
+        elif cached_update.modality == "audio":
+            audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
+            new_update = new_update.with_target(audio_tokens[new_item_idx])
+
+        return new_update
 
 
 @MULTIMODAL_REGISTRY.register_processor(
