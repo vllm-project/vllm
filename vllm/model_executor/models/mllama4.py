@@ -778,6 +778,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         flat_pixel_values = flatten_bn(pixel_values, concat=True)
         patches_per_image = flatten_bn(kwargs.pop("patches_per_image"))
         aspect_ratios = kwargs.pop("aspect_ratios")
+        if aspect_ratios.ndim == 3:
+            aspect_ratios = aspect_ratios.squeeze(1)
 
         return Llama4ImagePatchInputs(
             type="pixel_values",
