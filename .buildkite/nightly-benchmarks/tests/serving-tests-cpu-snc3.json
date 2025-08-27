@@ -215,6 +215,7 @@
         },
         "server_parameters": {
             "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+	    "quantization": "awq",
             "pipeline_parallel_size": 1,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -247,6 +248,7 @@
         },
         "server_parameters": {
             "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+	    "quantization": "awq",
             "pipeline_parallel_size": 3,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -279,6 +281,7 @@
         },
         "server_parameters": {
             "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+	    "quantization": "awq",
             "tensor_parallel_size": 2,
             "pipeline_parallel_size": 3,
 	    "dtype": "bfloat16",
@@ -312,6 +315,7 @@
         },
         "server_parameters": {
             "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+	    "quantization": "awq",
             "pipeline_parallel_size": 1,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -347,6 +351,7 @@
         },
         "server_parameters": {
             "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+	    "quantization": "awq",
             "pipeline_parallel_size": 3,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
@@ -382,6 +387,7 @@
         },
         "server_parameters": {
             "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
+	    "quantization": "awq",
             "tensor_parallel_size": 2,
             "pipeline_parallel_size": 3,
 	    "dtype": "bfloat16",
