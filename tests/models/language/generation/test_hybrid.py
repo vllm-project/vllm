@@ -102,7 +102,6 @@ def test_models(
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "0")
-        m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
         if model not in V0_UNSUPPORTED_MODELS:
             with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
                 vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
