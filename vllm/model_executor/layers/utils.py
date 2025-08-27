@@ -110,7 +110,10 @@ def rocm_unquantized_gemm_impl(
     from vllm.platforms.rocm import on_gfx9
     k = weight.shape[1]
     m = weight.shape[0]
-    x_view = x.view(-1, x.size(-1))
+    if x.is_contiguous():
+        x_view = x.view(-1, x.size(-1))
+    else:
+        x_view = x.reshape(-1, x.size(-1))
     n = x_view.shape[0]
     use_skinny = (envs.VLLM_ROCM_USE_SKINNY_GEMM and on_gfx9() and \
                     x.dtype in [torch.float16, torch.bfloat16] \
