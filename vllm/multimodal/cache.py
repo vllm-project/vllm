@@ -221,30 +221,6 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
             for mm_item, mm_hash in zip(mm_items, mm_hashes)
         ]
 
-    def get_and_update_features(
-        self,
-        mm_features: list["MultiModalFeatureSpec"],
-    ) -> list["MultiModalFeatureSpec"]:
-        """
-        Update multimodal features with cached encoder outputs.
-        
-        For each feature, attempts to retrieve cached encoder outputs using the 
-        feature's identifier. If cached data exists, replaces the feature's data
-        with the cached version. Otherwise, stores the current data in the cache
-        for future use.
-
-        Args:
-            mm_features: List of MultiModalFeatureSpec objects to process
-            
-        Returns:
-            The same list of features with data fields updated from cache
-        """
-        for feature in mm_features:
-            if feature.data is not None:
-                feature.data = self.get_and_update_item(
-                    feature.data, feature.identifier)
-        return mm_features
-
     @abstractmethod
     def clear_cache(self) -> None:
         """Clear the underlying cache."""
@@ -441,6 +417,16 @@ class BaseMultiModalReceiverCache(
         BaseMultiModalCache[Optional[MultiModalKwargsItem],
                             MultiModalKwargsItem]):
     """The required interface for caches on P1."""
+
+    def get_and_update_features(
+        self,
+        mm_features: list["MultiModalFeatureSpec"],
+    ) -> list["MultiModalFeatureSpec"]:
+        """Update multimodal features with cached encoder outputs."""
+        for feature in mm_features:
+            feature.data = self.get_and_update_item(feature.data,
+                                                    feature.identifier)
+        return mm_features
 
 
 class MultiModalReceiverCache(BaseMultiModalReceiverCache):
