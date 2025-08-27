@@ -437,7 +437,7 @@ class ModelConfig:
     from `AutoProcessor.from_pretrained`. The available overrides depend on the
     model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
     """
-    mm_processor_cache_gb: int = 4
+    mm_processor_cache_gb: float = 4
     """The size (in GiB) of the multi-modal processor cache, which is used to
     avoid re-processing past multi-modal inputs.
 
@@ -872,6 +872,13 @@ class ModelConfig:
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self._model_info.supports_multimodal:
+            if (self.mm_encoder_tp_mode == "data" and
+                    not self._model_info.supports_multimodal_encoder_tp_data):
+                logger.warning_once(
+                    "This model does not support `--mm-encoder-tp-mode data`. "
+                    "Falling back to `--mm-encoder-tp-mode weights`.")
+                self.mm_encoder_tp_mode = "weights"
+
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
@@ -883,12 +890,6 @@ class ModelConfig:
             )
 
         return None
-
-    def set_mm_processor_cache_gb(self, value: int) -> None:
-        mm_config = self.get_multimodal_config()
-
-        self.mm_processor_cache_gb = value
-        mm_config.mm_processor_cache_gb = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -1698,20 +1699,8 @@ class ModelConfig:
         return self.multimodal_config is not None
 
     @property
-    def enable_mm_processor_cache(self) -> bool:
-        """Whether the multi-modal processor cache should be enabled."""
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return False
-
-        return mm_config.mm_processor_cache_gb > 0
-
-    def get_mm_input_cache_gb(self) -> int:
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return 0
-
-        return envs.VLLM_MM_INPUT_CACHE_GIB
+    def is_multimodal_raw_input_only_model(self) -> bool:
+        return self._model_info.supports_multimodal_raw_input_only
 
     @property
     def is_cross_encoder(self) -> bool:
@@ -1721,10 +1710,6 @@ class ModelConfig:
     @property
     def is_pp_supported(self) -> bool:
         return self._model_info.supports_pp
-
-    @property
-    def is_multimodal_raw_input_supported(self) -> bool:
-        return self._model_info.supports_multimodal_raw_input
 
     @property
     def is_attention_free(self) -> bool:
@@ -2561,7 +2546,7 @@ class MultiModalConfig:
     `{"num_crops": 4}`.
     """
 
-    mm_processor_cache_gb: int = 4
+    mm_processor_cache_gb: float = 4
     """
     The size (in GiB) of the multi-modal processor cache, which is used to
 
