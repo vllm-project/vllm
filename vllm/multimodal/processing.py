@@ -1709,7 +1709,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
         *,
-        mm_hash_overrides: Optional[MultiModalHashes] = None,
+        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
