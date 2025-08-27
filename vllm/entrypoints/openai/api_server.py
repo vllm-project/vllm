@@ -166,8 +166,11 @@ async def build_async_engine_client(
 
 def run_mp_engine_with_device(vllm_config, usage_context, ipc_path,
                               disable_log_stats, disable_log_requests,
-                              engine_alive, rank):
-    os.environ["HABANA_VISIBLE_DEVICES"] = str(rank)
+                              engine_alive, rank, tp_size):
+    start_device = rank * tp_size
+    end_device = start_device + tp_size - 1
+    visible_devices = ",".join(map(str, range(start_device, end_device + 1)))
+    os.environ["HABANA_VISIBLE_DEVICES"] = visible_devices
     os.environ.pop("MASTER_ADDR", None)
     os.environ.pop("MASTER_PORT", None)
     os.environ.pop("RANK", None)
@@ -219,7 +222,8 @@ async def build_async_engine_client_from_engine_args(
             # Each worker will think it's a single, standalone engine.
             worker_config = engine_args.create_engine_config()
             worker_config.parallel_config.data_parallel_size = 1
-            worker_config.parallel_config.world_size = 1
+            worker_config.parallel_config.world_size = (
+                worker_config.parallel_config.tensor_parallel_size)
             ipc_path = get_open_zmq_ipc_path()
             engine_alive = context.Value('b', True, lock=False)
 
@@ -227,8 +231,9 @@ async def build_async_engine_client_from_engine_args(
                 target=run_mp_engine_with_device,
                 args=(worker_config, UsageContext.OPENAI_API_SERVER, ipc_path,
                       engine_args.disable_log_stats,
-                      engine_args.disable_log_requests, engine_alive, rank),
-                daemon=True,
+                      engine_args.disable_log_requests, engine_alive, rank,
+                      worker_config.parallel_config.tensor_parallel_size),
+                daemon=False,
                 name=f"vllm-independent-engine-{rank}")
             process.start()
             engine_processes.append(process)
