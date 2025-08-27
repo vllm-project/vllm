@@ -96,7 +96,6 @@ class ParallelConfig:
     between local data parallel ranks, but an external LB balances
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
-
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
@@ -426,8 +425,7 @@ class ParallelConfig:
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
 
-        if (self._api_process_count > 1 and
-                not -1 <= self._api_process_rank < self._api_process_count):
+        if not -1 <= self._api_process_rank < self._api_process_count:
             raise ValueError(
                 "Invalid value of `_api_process_rank`. "
                 f"Expected to be `-1` or `[0, {self._api_process_count})`, "
