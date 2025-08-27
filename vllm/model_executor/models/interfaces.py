@@ -52,6 +52,12 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
+    supports_encoder_tp_data: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `multimodal_config.mm_encoder_tp_mode="data"`.
+    """
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         """
@@ -135,6 +141,11 @@ def supports_multimodal(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsMultiModal]], TypeIs[SupportsMultiModal]]:
     return getattr(model, "supports_multimodal", False)
+
+
+def supports_multimodal_encoder_tp_data(
+        model: Union[type[object], object]) -> bool:
+    return getattr(model, "supports_encoder_tp_data", False)
 
 
 @runtime_checkable
@@ -639,20 +650,6 @@ def supports_cross_encoding(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
     return is_pooling_model(model) and _supports_cross_encoding(model)
-
-
-def default_pooling_type(pooling_type: str) -> object:
-    """Set default_pooling_type decorator. """
-
-    def func(model: object):
-        model.default_pooling_type = pooling_type
-        return model
-
-    return func
-
-
-def get_default_pooling_type(model: Union[type[object], object]) -> str:
-    return getattr(model, "default_pooling_type", "LAST")
 
 
 class SupportsQuant:

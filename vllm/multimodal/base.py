@@ -99,7 +99,7 @@ class MultiModalPlaceholderMap:
         seq_mm_placeholders = seq_group.multi_modal_placeholders
 
         if not seq_mm_data or not seq_mm_placeholders:
-            return MultiModalKwargs({}), {}
+            return MultiModalKwargs(), {}
 
         placeholder_maps = dict[str, MultiModalPlaceholderMap]()
 

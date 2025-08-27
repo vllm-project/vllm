@@ -138,6 +138,8 @@ void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void fatrelu_and_mul(torch::Tensor& out, torch::Tensor& input,
                      double threshold);
+void swigluoai_and_mul(torch::Tensor& out, torch::Tensor& input,
+                       double alpha = 1.702, double limit = 7.0);
 
 void gelu_new(torch::Tensor& out, torch::Tensor& input);
 
@@ -154,15 +156,6 @@ void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
 #ifndef USE_ROCM
-torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
-                        const torch::Tensor& codebooks,
-                        const torch::Tensor& scales,
-                        const std::vector<int64_t>& codebook_partition_sizes,
-                        const std::optional<torch::Tensor>& bias);
-
-torch::Tensor aqlm_dequant(
-    const torch::Tensor& codes, const torch::Tensor& codebooks,
-    const std::vector<int64_t>& codebook_partition_sizes);
 
 torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
                        torch::Tensor _scaling_factors, torch::Tensor _zeros,
@@ -235,6 +228,11 @@ void get_cutlass_moe_mm_data(
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
     const int64_t num_experts, const int64_t n, const int64_t k,
     const std::optional<torch::Tensor>& blockscale_offsets);
+
+void get_cutlass_moe_mm_problem_sizes(
+    const torch::Tensor& topk_ids, torch::Tensor& problem_sizes1,
+    torch::Tensor& problem_sizes2, const int64_t num_experts, const int64_t n,
+    const int64_t k, const std::optional<torch::Tensor>& blockscale_offsets);
 
 void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
                                   torch::Tensor& problem_sizes1,
