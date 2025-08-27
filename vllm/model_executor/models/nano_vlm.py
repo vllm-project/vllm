@@ -554,7 +554,6 @@ class CustomMultiModalProcessor(BaseMultiModalProcessor[CustomProcessingInfo]):
             image_num_patches = []
 
         def get_replacement_custom(item_idx: int):
-            print(f"====> item_idx: {item_idx}")
             images = mm_items.get_items(
                 "image", (ImageEmbeddingItems, ImageProcessorItems))
 
@@ -942,7 +941,8 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
                 radio_kv[vllm_key] = t
                 return
 
-            # Encoder blocks: HF 'model.blocks.{i}.' -> VLLM 'model.encoder.layers.{i}.'
+            # Encoder blocks:
+            # HF 'model.blocks.{i}.' -> VLLM 'model.encoder.layers.{i}.'
             if sub.startswith("model.blocks."):
                 parts = sub.split(".")
                 if len(parts) >= 4:

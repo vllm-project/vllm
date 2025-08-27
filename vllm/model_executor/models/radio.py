@@ -11,7 +11,7 @@
 import math
 from collections.abc import Iterable
 from itertools import repeat
-from typing import Callable, Optional, Tuple, Union
+from typing import Callable, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -23,8 +23,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.intern_vit import InternVisionEncoder
 
-input_dim_t = Union[int, Tuple[int, int]]
-norm_t = Union[Tuple[float, float, float], torch.Tensor]
+input_dim_t = Union[int, tuple[int, int]]
+norm_t = Union[tuple[float, float, float], torch.Tensor]
 
 
 def _ntuple(n):
@@ -296,7 +296,7 @@ class ViTPatchGenerator(nn.Module):
         self,
         patches: torch.Tensor,
         patch_idxs: Optional[torch.Tensor] = None,
-        input_size: Optional[Tuple[int, int]] = None,
+        input_size: Optional[tuple[int, int]] = None,
     ) -> torch.Tensor:
         if not self.abs_pos:
             return patches
@@ -319,7 +319,7 @@ class ViTPatchGenerator(nn.Module):
         self,
         batch_size: int,
         patch_idxs: Optional[torch.Tensor] = None,
-        input_size: Optional[Tuple[int, int]] = None,
+        input_size: Optional[tuple[int, int]] = None,
     ) -> torch.Tensor:
         if input_size is None:
             input_dims = self.input_dims
@@ -339,7 +339,7 @@ class ViTPatchGenerator(nn.Module):
                                  index=exp_patch_idxs)
         return pos_embed
 
-    def _get_pos_embeddings(self, batch_size: int, input_dims: Tuple[int,
+    def _get_pos_embeddings(self, batch_size: int, input_dims: tuple[int,
                                                                      int]):
         if (self.num_rows, self.num_cols) == input_dims:
             return self.pos_embed
@@ -402,7 +402,8 @@ class ViTPatchGenerator(nn.Module):
                 # if i_rows <= p_rows and i_cols <= p_cols:
                 #     left = (p_cols - i_cols) // 2
                 #     top = (p_rows - i_rows) // 2
-                #     pos_embed = pos_embed[..., top:top+i_rows, left:left+i_cols]
+                #     pos_embed = pos_embed[..., top:top+i_rows,
+                #                          left:left+i_cols]
                 # else:
                 max_dim = max(input_dims)
                 pos_embed = F.interpolate(pos_embed.float(),
@@ -498,7 +499,7 @@ class RadioInternVisionModel(nn.Module):
             prefix=f"{prefix}.encoder",
         )
 
-    def _init_img_size(self, patch_size, img_size: Union[int, Tuple[int,
+    def _init_img_size(self, patch_size, img_size: Union[int, tuple[int,
                                                                     int]]):
         if img_size is None:
             return None, None, None
