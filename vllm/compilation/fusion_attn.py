@@ -73,7 +73,6 @@ class AttentionQuantPattern(ABC):
         if self.layer.impl.fused_output_quant_supported(self.quant_key):
             self._register(pm_pass)
 
-    @enable_fake_mode
     @abstractmethod
     def _register(self, pm_pass: PatternMatcherPass):
         raise NotImplementedError
@@ -234,22 +233,6 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
                 AttentionQuantPattern.fx_view_to_reshape, pm.fwd_only),
             pm_pass)
 
-        def wrap_trace_fn(process_fx, trace_fn):
-
-            def wrapped(*args, **kwargs):
-                return process_fx(trace_fn(*args, **kwargs))
-
-            return wrapped
-
-        def fx_view_to_reshape(gm: torch.fx.GraphModule):
-            from torch._inductor.fx_passes.post_grad import view_to_reshape
-            view_to_reshape(gm)
-            return gm
-
-        pm.register_replacement(pattern, replacement, inputs,
-                                wrap_trace_fn(fx_view_to_reshape, pm.fwd_only),
-                                pm_pass)
-
 
 class AttnFusionPass(VllmInductorPass):
     """
@@ -264,6 +247,7 @@ class AttnFusionPass(VllmInductorPass):
     support are attention kernels, which need to support fusing output quant.
     """
 
+    @enable_fake_mode
     def __init__(self, config: VllmConfig):
         super().__init__(config)
 

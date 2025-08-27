@@ -1070,7 +1070,6 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
 
 class AllReduceFusionPass(VllmInductorPass):
 
-    @enable_fake_mode
     def __init__(self, config: VllmConfig):
         super().__init__(config)
         self.disabled = True
@@ -1124,6 +1123,10 @@ class AllReduceFusionPass(VllmInductorPass):
             # in fallback path, when we don't use flashinfer
             fuse_rms_quant=config.compilation_config.pass_config.enable_fusion)
 
+        self.register_patterns()
+
+    @enable_fake_mode
+    def register_patterns(self):
         for epsilon in [1e-5, 1e-6]:
             AllReduceFusedRMSNormStaticQuantFP8Pattern(
                 epsilon,
