@@ -306,6 +306,7 @@ class EngineArgs:
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
+    enable_zigzag_expert_placement: bool = ParallelConfig.enable_zigzag_expert_placement
     num_redundant_experts: int = EPLBConfig.num_redundant_experts
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
@@ -666,6 +667,9 @@ class EngineArgs:
                                     **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--eplb-config",
                                     **parallel_kwargs["eplb_config"])
+        parallel_group.add_argument(
+            "--enable-zigzag-expert-placement",
+            **parallel_kwargs["enable_zigzag_expert_placement"])
         parallel_group.add_argument(
             "--num-redundant-experts",
             type=int,
@@ -1283,6 +1287,7 @@ class EngineArgs:
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
+            enable_zigzag_expert_placement=self.enable_zigzag_expert_placement,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
