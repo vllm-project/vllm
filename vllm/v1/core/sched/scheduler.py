@@ -253,6 +253,7 @@ class Scheduler(SchedulerInterface):
                             key=lambda r: (r.priority, r.arrival_time),
                         )
                         self.running.remove(preempted_req)
+                        scheduled_running_reqs.remove(preempted_req)
                     else:
                         preempted_req = self.running.pop()
 
