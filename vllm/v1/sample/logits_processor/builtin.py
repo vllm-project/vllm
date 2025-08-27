@@ -1,16 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional, TypeVar
 
 import torch
 
+from vllm import SamplingParams
 from vllm.v1.sample.logits_processor.interface import (BatchUpdate,
                                                        LogitsProcessor,
                                                        MoveDirectionality)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+T = TypeVar("T")
 
 
 class MinPLogitsProcessor(LogitsProcessor):
@@ -130,49 +133,15 @@ class LogitBiasLogitsProcessor(LogitsProcessor):
         return False
 
     def update_state(self, batch_update: Optional[BatchUpdate]):
-        if not batch_update:
-            return
-
-        needs_update: bool = False
-        # Process added requests.
-        for index, params, _, _ in batch_update.added:
-            if lb := params.logit_bias:
-                self.biases[index] = lb
-                needs_update = True
-            else:
-                # Drop biases metadata at batch index
-                if self.biases.pop(index, None) is not None:
-                    # If a new request replaces an old request which
-                    # specified biases, we should update processor tensors
-                    needs_update = True
-
-        if self.biases:
-            # Process removed requests.
-            for index in batch_update.removed:
-                if self.biases.pop(index, None):
-                    needs_update = True
-
-            # Process moved requests, unidirectional (a->b) and swap (a<->b)
-            for a_index, b_index, direct in batch_update.moved:
-                if direct == MoveDirectionality.UNIDIRECTIONAL:
-                    if (a_entry := self.biases.pop(a_index, None)) is None:
-                        if self.biases.pop(b_index, None) is not None:
-                            needs_update = True
-                    else:
-                        self.biases[b_index] = a_entry
-                        needs_update = True
-                else:
-                    a_entry = self.biases.pop(a_index, None)
-                    if (b_entry := self.biases.pop(b_index, None)) is not None:
-                        self.biases[a_index] = b_entry
-                        needs_update = True
-                    if a_entry is not None:
-                        self.biases[b_index] = a_entry
-                        needs_update = True
+        needs_update = process_dict_updates(
+            self.biases, batch_update,
+            lambda params, _, __: params.logit_bias or None)
 
         # Update tensors if needed.
         if needs_update:
-            reqs, tok_ids, biases = [], [], []
+            reqs: list[int] = []
+            tok_ids: list[int] = []
+            biases: list[float] = []
             for req, lb in self.biases.items():
                 reqs.extend([req] * len(lb))
                 tok_ids.extend(lb.keys())
@@ -216,52 +185,18 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         of the argmax operation in greedy sampling."""
         return False
 
+    @staticmethod
+    def add_request(
+        params: SamplingParams, _: list[int], output_tok_ids: list[int]
+    ) -> Optional[tuple[int, Sequence[int], set[int]]]:
+        min_tokens = params.min_tokens
+        if not min_tokens or len(output_tok_ids) >= min_tokens:
+            return None
+        return min_tokens, output_tok_ids, params.all_stop_token_ids
+
     def update_state(self, batch_update: Optional[BatchUpdate]):
-        needs_update = False
-
-        if batch_update:
-            # Process added requests.
-            for index, params, _, output_tok_ids in batch_update.added:
-                if ((min_tokens := params.min_tokens)
-                        and len(output_tok_ids) < min_tokens):
-                    # Replace request metadata at batch index
-                    self.min_toks[index] = (min_tokens, output_tok_ids,
-                                            params.all_stop_token_ids)
-                    needs_update = True
-                else:
-                    # Drop min_toks metadata at batch index
-                    if self.min_toks.pop(index, None) is not None:
-                        # If a new request replaces an old request which
-                        # specified min_toks, we should update processor tensors
-                        needs_update = True
-
-            if self.min_toks:
-                # Process removed requests.
-                for index in batch_update.removed:
-                    if self.min_toks.pop(index, None):
-                        needs_update = True
-
-                # Process moved requests, unidirectional (a->b) and
-                # swapped (a<->b)
-                for a_index, b_index, direct in batch_update.moved:
-                    if direct == MoveDirectionality.UNIDIRECTIONAL:
-                        if (a_entry := self.min_toks.pop(a_index,
-                                                         None)) is None:
-                            if self.min_toks.pop(b_index, None) is not None:
-                                needs_update = True
-                        else:
-                            self.min_toks[b_index] = a_entry
-                            needs_update = True
-                    else:
-                        a_entry = self.min_toks.pop(a_index, None)
-                        if (b_entry := self.min_toks.pop(b_index,
-                                                         None)) is not None:
-                            self.min_toks[a_index] = b_entry
-                            needs_update = True
-                        if a_entry is not None:
-                            self.min_toks[b_index] = a_entry
-                            needs_update = True
-
+        needs_update = process_dict_updates(self.min_toks, batch_update,
+                                            self.add_request)
         if self.min_toks:
             # Check for any requests that have attained their min tokens.
             to_remove = tuple(index for index, (min_toks, out_tok_ids,
@@ -295,3 +230,44 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             # Inhibit EOS token for requests which have not reached min length
             logits[self.logits_slice] = -float("inf")
         return logits
+
+
+def process_dict_updates(
+    req_entries: dict[int, T], batch_update: Optional[BatchUpdate],
+    new_state: Callable[[SamplingParams, list[int], list[int]], Optional[T]]
+) -> bool:
+    """Utility function to update dict state for sparse LogitsProcessors."""
+
+    if not batch_update:
+        # Nothing to do.
+        return False
+
+    updated = False
+    for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
+        if (state := new_state(params, prompt_tok_ids,
+                               output_tok_ids)) is not None:
+            req_entries[index] = state
+            updated = True
+        elif req_entries.pop(index, None) is not None:
+            updated = True
+
+    if req_entries:
+        # Process removed requests.
+        for index in batch_update.removed:
+            if req_entries.pop(index, None):
+                updated = True
+
+        # Process moved requests, unidirectional (a->b) and
+        # swapped (a<->b)
+        for a_index, b_index, direct in batch_update.moved:
+            a_entry = req_entries.pop(a_index, None)
+            b_entry = req_entries.pop(b_index, None)
+            if a_entry is not None:
+                req_entries[b_index] = a_entry
+                updated = True
+            if b_entry is not None:
+                updated = True
+                if direct == MoveDirectionality.SWAP:
+                    req_entries[a_index] = b_entry
+
+    return updated
