@@ -347,7 +347,6 @@ class ParallelConfig:
             if self.data_parallel_external_lb:
                 raise ValueError("data_parallel_external_lb can only "
                                  "be set when data_parallel_size > 1")
-        logger.info(f'>>>>> init data_parallel_size_local={self.data_parallel_size_local}, data_parallel_size={self.data_parallel_size}, data_parallel_rank={self.data_parallel_rank}, data_parallel_rank_local={self.data_parallel_rank_local}')
 
         if self.distributed_executor_backend == "external_launcher":
             import os
