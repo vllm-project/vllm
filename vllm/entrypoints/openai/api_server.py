@@ -17,7 +17,6 @@ import uuid
 from argparse import Namespace
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
-from copy import deepcopy
 from functools import partial
 from http import HTTPStatus
 from typing import Annotated, Any, Callable, Literal, Optional
@@ -172,6 +171,9 @@ async def build_async_engine_client(
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
+    if client_config:
+        engine_args._api_process_count = client_config.get("client_count", 1)
+        engine_args._api_process_rank = client_config.get("client_index", 0)
 
     if disable_frontend_multiprocessing is None:
         disable_frontend_multiprocessing = bool(
@@ -201,6 +203,7 @@ async def build_async_engine_client_from_engine_args(
 
     Returns the Client or None if the creation failed.
     """
+    client_config = dict(client_config) if client_config else {}
 
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
@@ -214,10 +217,10 @@ async def build_async_engine_client_from_engine_args(
 
         from vllm.v1.engine.async_llm import AsyncLLM
         async_llm: Optional[AsyncLLM] = None
-        client_count = client_config.pop(
-            "client_count") if client_config else 1
-        client_index = client_config.pop(
-            "client_index") if client_config else 0
+        print("client_config before", client_config)
+        client_count = client_config.pop("client_count", 1)
+        client_index = client_config.pop("client_index", 0)
+        print("client_config after", client_config)
         try:
             async_llm = AsyncLLM.from_vllm_config(
                 vllm_config=vllm_config,
@@ -1951,11 +1954,6 @@ async def run_server_worker(listen_address,
                             client_config=None,
                             **uvicorn_kwargs) -> None:
     """Run a single API server worker."""
-    client_config = client_config or {}
-
-    args = deepcopy(args)
-    args._api_process_count = client_config.get("client_count", 1)
-    args._api_process_rank = client_config.get("client_index", 0)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
@@ -1975,8 +1973,8 @@ async def run_server_worker(listen_address,
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
 
-        logger.info("Starting vLLM API server %d/%d on %s",
-                    args._api_process_rank, args._api_server_count,
+        logger.info("Starting vLLM API server %d on %s",
+                    vllm_config.parallel_config._api_process_rank,
                     listen_address)
         shutdown_task = await serve_http(
             app,
