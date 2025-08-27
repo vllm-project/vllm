@@ -121,7 +121,6 @@ fi
 if [[ $commands == *" kernels/quantization"* ]]; then
   commands="${commands} \
   --ignore=kernels/quantization/test_int8_quant.py \
-  --ignore=kernels/quantization/test_aqlm.py \
   --ignore=kernels/quantization/test_machete_mm.py \
   --ignore=kernels/quantization/test_block_fp8.py \
   --ignore=kernels/quantization/test_block_int8.py \

@@ -5,6 +5,7 @@ import io
 import json
 import sys
 import time
+import traceback
 from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
@@ -205,6 +206,7 @@ class OpenAIServing:
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
         enable_force_include_usage: bool = False,
+        log_error_stack: bool = False,
     ):
         super().__init__()
 
@@ -222,6 +224,7 @@ class OpenAIServing:
 
         self._async_tokenizer_pool: dict[AnyTokenizer,
                                          AsyncMicrobatchTokenizer] = {}
+        self.log_error_stack = log_error_stack
 
     def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
         """
@@ -412,6 +415,12 @@ class OpenAIServing:
             message: str,
             err_type: str = "BadRequestError",
             status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
+        if self.log_error_stack:
+            exc_type, _, _ = sys.exc_info()
+            if exc_type is not None:
+                traceback.print_exc()
+            else:
+                traceback.print_stack()
         return ErrorResponse(error=ErrorInfo(
             message=message, type=err_type, code=status_code.value))
 
@@ -1006,8 +1015,8 @@ class OpenAIServing:
             # OPTIMIZATION
             priority = orig_priority - 1
 
+    @staticmethod
     def _load_prompt_embeds(
-        self,
         prompt_embeds: Optional[Union[bytes, list[bytes]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
     ) -> list[EmbedsPrompt]:
@@ -1015,12 +1024,14 @@ class OpenAIServing:
         def _load_and_validate_embed(embed: bytes) -> EmbedsPrompt:
             tensor = torch.load(io.BytesIO(
                 pybase64.b64decode(embed, validate=True)),
-                                weights_only=True)
+                                weights_only=True,
+                                map_location=torch.device("cpu"))
             assert isinstance(tensor, torch.Tensor) and tensor.dtype in (
                 torch.float32,
                 torch.bfloat16,
                 torch.float16,
             )
+            tensor = tensor.to_dense()
             if tensor.dim() > 2:
                 tensor = tensor.squeeze(0)
                 assert tensor.dim() == 2
