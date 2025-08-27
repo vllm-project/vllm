@@ -182,29 +182,32 @@ def test_chunked_prefill(
     max_tokens: int,
     num_logprobs: int,
     chunked_prefill_token_size: int,
+    monkeypatch,
 ) -> None:
     max_num_seqs = chunked_prefill_token_size
     max_num_batched_tokens = chunked_prefill_token_size
 
-    with vllm_runner(model,
-                     enable_chunked_prefill=True,
-                     max_num_batched_tokens=max_num_batched_tokens,
-                     max_num_seqs=max_num_seqs) as vllm_model:
-        chunked = vllm_model.generate_greedy_logprobs(example_prompts,
-                                                      max_tokens, num_logprobs)
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "0")
+        with vllm_runner(model,
+                         enable_chunked_prefill=True,
+                         max_num_batched_tokens=max_num_batched_tokens,
+                         max_num_seqs=max_num_seqs) as vllm_model:
+            chunked = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens, num_logprobs)
 
-    with vllm_runner(model,
-                     enable_chunked_prefill=False,
-                     max_num_seqs=max_num_seqs) as vllm_model:
-        non_chunked = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens, num_logprobs)
+        with vllm_runner(model,
+                         enable_chunked_prefill=False,
+                         max_num_seqs=max_num_seqs) as vllm_model:
+            non_chunked = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens, num_logprobs)
 
-    check_logprobs_close(
-        outputs_0_lst=chunked,
-        outputs_1_lst=non_chunked,
-        name_0="chunked",
-        name_1="non_chunked",
-    )
+        check_logprobs_close(
+            outputs_0_lst=chunked,
+            outputs_1_lst=non_chunked,
+            name_0="chunked",
+            name_1="non_chunked",
+        )
 
 
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
@@ -275,25 +278,29 @@ def test_models_preemption_recompute(
     example_prompts,
     model: str,
     max_tokens: int,
+    monkeypatch,
 ) -> None:
     """
     Tests that outputs are identical with and w/o preemptions (recompute).
     """
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
-        scheduler = vllm_model.llm.llm_engine.scheduler[0]
-        scheduler.ENABLE_ARTIFICIAL_PREEMPT = True
-        preempt_vllm_outputs = vllm_model.generate_greedy(
-            example_prompts, max_tokens)
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "0")
+        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+            scheduler = vllm_model.llm.llm_engine.scheduler[0]
+            scheduler.ENABLE_ARTIFICIAL_PREEMPT = True
+            preempt_vllm_outputs = vllm_model.generate_greedy(
+                example_prompts, max_tokens)
 
-        scheduler.ENABLE_ARTIFICIAL_PREEMPT = False
-        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+            scheduler.ENABLE_ARTIFICIAL_PREEMPT = False
+            vllm_outputs = vllm_model.generate_greedy(example_prompts,
+                                                      max_tokens)
 
-    check_outputs_equal(
-        outputs_0_lst=preempt_vllm_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="vllm_preepmtions",
-        name_1="vllm",
-    )
+        check_outputs_equal(
+            outputs_0_lst=preempt_vllm_outputs,
+            outputs_1_lst=vllm_outputs,
+            name_0="vllm_preepmtions",
+            name_1="vllm",
+        )
 
 
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
