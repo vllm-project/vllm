@@ -84,7 +84,7 @@ def get_mxfp4_backend():
 
     # If FlashInfer is not available, try either Marlin or Triton
     if current_platform.is_cuda() and current_platform.get_device_capability(
-    ) < 90:
+    )[0] < 9:
         logger.info_once("Using Marlin backend")
         return Mxfp4Backend.MARLIN
     elif has_triton_kernels():
@@ -149,7 +149,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.topk_indices_dtype = None
         self.moe = moe
         self.mxfp4_backend = get_mxfp4_backend()
-        self.flashinfer_autotune = True
         self.max_capture_size = get_current_vllm_config(
         ).compilation_config.max_capture_size
 
@@ -701,8 +700,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
               or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16):
             assert not self.moe.use_ep, (
                 "EP is not supported for flashinfer mxfp4 moe backend yet.")
-            from vllm.utils.flashinfer import (autotune,
-                                               flashinfer_cutlass_fused_moe)
+            from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
 
             topk_weights, topk_ids = FusedMoE.select_experts(
                 hidden_states=x,
@@ -757,30 +755,27 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     fc2_expert_weights=layer.w2_weight,
                 )
 
-            # Allocate output and invoke kernel under autotune context
             output = torch.empty_like(x, dtype=torch.bfloat16)
-            with autotune(self.flashinfer_autotune):
-                _ = flashinfer_cutlass_fused_moe(
-                    input=fi_input,
-                    token_selected_experts=topk_ids.to(torch.int).contiguous(),
-                    token_final_scales=topk_weights,
-                    output_dtype=torch.bfloat16,
-                    output=output,
-                    quant_scales=quant_scales,
-                    fc1_expert_biases=layer.w13_bias,
-                    fc2_expert_biases=layer.w2_bias,
-                    swiglu_alpha=layer.gemm1_alpha,
-                    swiglu_beta=layer.gemm1_beta,
-                    swiglu_limit=layer.gemm1_clamp_limit,
-                    tp_size=self.moe.tp_size,
-                    tp_rank=self.moe.tp_rank,
-                    ep_size=self.moe.ep_size,
-                    ep_rank=self.moe.ep_rank,
-                    tune_max_num_tokens=self.max_capture_size,
-                    **extra_kwargs,
-                )
+            _ = flashinfer_cutlass_fused_moe(
+                input=fi_input,
+                token_selected_experts=topk_ids.to(torch.int).contiguous(),
+                token_final_scales=topk_weights,
+                output_dtype=torch.bfloat16,
+                output=output,
+                quant_scales=quant_scales,
+                fc1_expert_biases=layer.w13_bias,
+                fc2_expert_biases=layer.w2_bias,
+                swiglu_alpha=layer.gemm1_alpha,
+                swiglu_beta=layer.gemm1_beta,
+                swiglu_limit=layer.gemm1_clamp_limit,
+                tp_size=self.moe.tp_size,
+                tp_rank=self.moe.tp_rank,
+                ep_size=self.moe.ep_size,
+                ep_rank=self.moe.ep_rank,
+                tune_max_num_tokens=self.max_capture_size,
+                **extra_kwargs,
+            )
 
-            self.flashinfer_autotune = False
             return output
         elif self.mxfp4_backend == Mxfp4Backend.TRITON:
             from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
