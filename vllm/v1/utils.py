@@ -135,7 +135,7 @@ class APIServerProcessManager:
             target_server_fn: Function to call for each API server process
             listen_address: Address to listen for client connections
             sock: Socket for client connections
-            args_per_server: Command line arguments for each API server
+            args: Command line arguments
             num_servers: Number of API server processes to start
             input_addresses: Input addresses for each API server
             output_addresses: Output addresses for each API server
