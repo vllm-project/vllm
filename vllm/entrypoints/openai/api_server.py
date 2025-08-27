@@ -1975,7 +1975,6 @@ async def run_server_worker(listen_address,
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
 
-        print(vllm_config)
         logger.info("Starting vLLM API server %d/%d on %s",
                     args._api_process_rank, args._api_server_count,
                     listen_address)
