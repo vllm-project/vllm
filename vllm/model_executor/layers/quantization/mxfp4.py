@@ -289,14 +289,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_bias", w2_bias)
         set_weight_attrs(w2_bias, extra_weight_attrs)
 
-    def _prepare_flashinfer_mxfp4_weight_layout(self, layer: torch.nn.Module,
-                                                backend: Mxfp4Backend) -> None:
-        """Prepare weight/bias/scale layout for FlashInfer CUTLASS and SM90.
-
-        This consolidates common de-interleave and swap steps while preserving
-        backend-specific scale interleaving differences.
-        """
-
     def process_weights_after_loading(self, layer):
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
             prepare_moe_fp4_layer_for_marlin(layer)
@@ -766,9 +758,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     fc1_expert_weights=layer.w13_weight,
                     fc2_expert_weights=layer.w2_weight,
                 )
-            else:
-                raise ValueError(
-                    f"Unsupported CUTLASS backend: {self.mxfp4_backend}")
 
             # Allocate output and invoke kernel under autotune context
             output = torch.empty_like(x, dtype=torch.bfloat16)

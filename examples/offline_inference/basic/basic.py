@@ -11,12 +11,12 @@ prompts = [
     "The future of AI is",
 ]
 # Create a sampling params object.
-sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=1024)
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 
 def main():
     # Create an LLM.
-    llm = LLM(model="/workspace/scratch/repos/orangina/model/gpt-oss-20b")
+    llm = LLM(model="facebook/opt-125m")
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
