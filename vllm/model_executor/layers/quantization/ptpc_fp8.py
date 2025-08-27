@@ -97,8 +97,8 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         self.quant_config.is_checkpoint_fp8_serialized = False
         self.fp8_linear = Fp8LinearOp(
             act_quant_static=False,
-            cutlass_fp8_supported=False,
-            act_quant_group_shape=GroupShape.PER_TOKEN)
+            act_quant_group_shape=GroupShape.PER_TOKEN,
+            force_fp8_e4m3fnuz=True)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data,
