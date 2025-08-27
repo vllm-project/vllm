@@ -806,8 +806,11 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             image_height=-1,
         )
 
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
-                               tokenization_kwargs, mm_hash_overrides)
+        result = super().apply(prompt,
+                               mm_data,
+                               hf_processor_mm_kwargs,
+                               tokenization_kwargs,
+                               mm_hash_overrides=mm_hash_overrides)
 
         mm_items = self._to_mm_items(mm_data)
         mm_item_counts = mm_items.get_all_counts()
