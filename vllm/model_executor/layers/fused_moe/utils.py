@@ -6,12 +6,15 @@ from typing import Optional, Union
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
@@ -99,106 +102,6 @@ def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     return x.flatten()[:prod(v)].view(*v)
 
 
-def _fp4_quantize(
-    A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    is_sf_swizzled_layout: bool,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return fp4_quantize(A,
-                        A_scale,
-                        is_sf_swizzled_layout=is_sf_swizzled_layout)
-
-
-def _fp8_quantize(
-    A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    per_act_token: bool,
-    block_shape: Optional[list[int]] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Perform fp8 quantization on the inputs.  If a block_shape
-    is provided, the output will be blocked.
-    """
-    if block_shape is None:
-        # TODO(luka): use QuantFP8 custom op
-        #  https://github.com/vllm-project/vllm/issues/20711
-        A, A_scale = ops.scaled_fp8_quant(
-            A, A_scale, use_per_token_if_dynamic=per_act_token)
-    else:
-        assert not per_act_token
-        assert len(block_shape) == 2
-        _, block_k = block_shape[0], block_shape[1]
-        A, A_scale = per_token_group_quant_fp8(A, block_k)
-        assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
-
-    return A, A_scale
-
-
-def _int8_quantize(
-    A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    per_act_token: bool,
-    block_shape: Optional[list[int]] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Perform int8 quantization on the inputs.  If a block_shape
-    is provided, the output will be blocked.
-    """
-
-    # If weights are per-channel (per_channel_quant=True), then
-    # activations apply per-token quantization. Otherwise, assume
-    # activation tensor-wise fp8/int8 quantization, dynamic or static
-    if block_shape is None:
-        assert per_act_token, \
-            "int8 quantization only supports block or channel-wise"
-        A, A_scale = per_token_quant_int8(A)
-    else:
-        assert not per_act_token
-        assert len(block_shape) == 2
-        _, block_k = block_shape[0], block_shape[1]
-        A, A_scale = per_token_group_quant_int8(A, block_k)
-        assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
-
-    return A, A_scale
-
-
-def _mxfp4_quantize(
-    A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
-) -> tuple[torch.Tensor, None]:
-    assert block_shape is None
-    if not current_platform.supports_mx():
-        A = quant_dequant_mxfp4(A)
-    else:
-        raise NotImplementedError()
-
-    return A, None
-
-
-def moe_kernel_quantize_input(
-    A: torch.Tensor,
-    A_scale: Optional[torch.Tensor],
-    quant_dtype: Union[None, torch.dtype, str],
-    per_act_token_quant: bool,
-    block_shape: Optional[list[int]] = None,
-    is_fp4_scale_swizzled: bool = True,
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    if quant_dtype == torch.float8_e4m3fn:
-        return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
-    elif quant_dtype == torch.int8:
-        return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
-    elif quant_dtype == "nvfp4":
-        return _fp4_quantize(A,
-                             A_scale,
-                             is_sf_swizzled_layout=is_fp4_scale_swizzled)
-    elif quant_dtype == "mxfp4":
-        return _mxfp4_quantize(A, A_scale, per_act_token_quant, block_shape)
-    else:
-        return A, A_scale
-
-
 def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
     """
     A permutation routine that works on fp8 types.
@@ -252,3 +155,251 @@ def _validate_scale_shape(
         assert block_shape is not None
         expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
         assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"
+
+
+class MoEInputQuantizer:
+    """
+    Quantize MoE activations via a unified API.
+
+    When configured for FP8 without block quantization, initializes a `QuantFP8`
+    `CustomOp` for Inductor-friendly FP8. Otherwise, defers to native paths for
+    FP8, INT8, NVFP4, or MXFP4.
+    """
+
+    def __init__(
+        self,
+        per_act_token_quant: bool = False,
+        quant_dtype: Optional[torch.dtype] = None,
+        block_shape: Optional[list[int]] = None,
+        num_token_padding: Optional[int] = None,
+    ) -> None:
+        """
+        Configure the quantizer for a specific activation quantization mode.
+
+        :param per_act_token_quant: Enable per-token dynamic activation
+                                     quantization where supported (e.g., FP8
+                                     dynamic).
+        :param quant_dtype: Target activation quant type. Supported values
+                            include torch.float8_e4m3fn, torch.int8,
+                            "nvfp4", "mxfp4", or None (no quantization).
+        :param block_shape: Optional [block_m, block_k] for group/block
+                            quantization. Only the K dimension is used by
+                            current implementations.
+        :param num_token_padding: Optional padding for the token dimension used
+                                  by the FP8 CustomOp to improve
+                                  fusion/capturability.
+        """
+        self.quant_fp8: Optional[QuantFP8] = None
+
+        if quant_dtype == torch.float8_e4m3fn and block_shape is None:
+            group_shape = (GroupShape.PER_TOKEN
+                           if per_act_token_quant else GroupShape.PER_TENSOR)
+
+            self.quant_fp8 = QuantFP8(
+                static=not per_act_token_quant,
+                group_shape=group_shape,
+                num_token_padding=num_token_padding,
+            )
+
+    def __call__(
+        self,
+        A: torch.Tensor,
+        A_scale: Optional[torch.Tensor],
+        quant_dtype: Union[None, torch.dtype, str],
+        per_act_token_quant: bool,
+        block_shape: Optional[list[int]] = None,
+        is_fp4_scale_swizzled: bool = True,
+    ):
+        """
+        Quantize activations and return (quantized, scale).
+
+        Uses the FP8 `CustomOp` when available; otherwise selects the native
+        path based on the requested quantization type.
+
+        :param A: Input activations of shape [tokens, hidden_dim].
+        :param A_scale: Optional input scale (shape depends on mode).
+        :param quant_dtype: torch.float8_e4m3fn, torch.int8, "nvfp4",
+                            "mxfp4", or None for passthrough.
+        :param per_act_token_quant: Enable per-token dynamic quantization when
+                                    supported (non-blocked paths).
+        :param block_shape: Optional [block_m, block_k] for group/block
+                            quantization.
+        :param is_fp4_scale_swizzled: Whether NVFP4 scales use the swizzled
+                                       layout.
+        :return: (A_q, A_scale_out), where A_scale_out may be None (e.g.,
+                 MXFP4).
+        """
+        if self.quant_fp8 is not None:
+            return self.forward_custom(A=A, A_scale=A_scale)
+        else:
+            return self.forward_native(
+                A=A,
+                A_scale=A_scale,
+                quant_dtype=quant_dtype,
+                per_act_token_quant=per_act_token_quant,
+                block_shape=block_shape,
+                is_fp4_scale_swizzled=is_fp4_scale_swizzled,
+            )
+
+    def forward_custom(
+        self,
+        A: torch.Tensor,
+        A_scale: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Apply the configured FP8 `CustomOp` (`QuantFP8`).
+
+        Requires the instance to be configured for FP8 without block
+        quantization. Uses dynamic per-token quantization if enabled;
+        otherwise uses static per-tensor quantization when a scale is
+        provided.
+
+        :param A: Input activations of shape [tokens, hidden_dim].
+        :param A_scale: Optional static/per-tensor scale for FP8.
+        :return: (A_q, A_scale_out) FP8-quantized activations and scale.
+        """
+        assert self.quant_fp8 is not None, (
+            "QuantFP8 quantizer not initialized, " +
+            "QuantFP8 is supported only with " +
+            "quant_dtype=torch.float8_e4m3fn and block_shape=None", )
+        return self.quant_fp8(A, A_scale)
+
+    def forward_native(
+        self,
+        A: torch.Tensor,
+        A_scale: Optional[torch.Tensor],
+        quant_dtype: Union[None, torch.dtype, str],
+        per_act_token_quant: bool,
+        block_shape: Optional[list[int]] = None,
+        is_fp4_scale_swizzled: bool = True,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Native quantization fallback for FP8/INT8/NVFP4/MXFP4 or blocked modes.
+
+        - FP8: uses scaled FP8 quantization; group quant when block_shape is
+                set.
+        - INT8: per-token quant (no blocks) or group quant with block_shape.
+        - NVFP4: uses fp4_quantize with associated scales (swizzled layout
+                  optional).
+        - MXFP4: uses quant_dequant_mxfp4 on non-MX platforms (scale is None).
+        - None: passthrough.
+
+        :param A: Input activations of shape [tokens, hidden_dim].
+        :param A_scale: Optional input scale (shape depends on mode).
+        :param quant_dtype: Target quantization type or None.
+        :param per_act_token_quant: Enable per-token quantization when
+                                    applicable.
+        :param block_shape: Optional [block_m, block_k] for group/block
+                            quantization.
+        :param is_fp4_scale_swizzled: Whether NVFP4 scales use the swizzled
+                                       layout.
+        :return: (A_q, A_scale_out) quantized activations and scale, or
+                 (A, A_scale) for passthrough.
+        """
+        if quant_dtype == torch.float8_e4m3fn:
+            return MoEInputQuantizer._fp8_quantize(
+                A,
+                A_scale,
+                per_act_token_quant,
+                block_shape,
+            )
+        elif quant_dtype == torch.int8:
+            return MoEInputQuantizer._int8_quantize(
+                A,
+                A_scale,
+                per_act_token_quant,
+                block_shape,
+            )
+        elif quant_dtype == "nvfp4":
+            return MoEInputQuantizer._fp4_quantize(
+                A,
+                A_scale,
+                is_sf_swizzled_layout=is_fp4_scale_swizzled,
+            )
+        elif quant_dtype == "mxfp4":
+            return MoEInputQuantizer._mxfp4_quantize(
+                A,
+                A_scale,
+                per_act_token_quant,
+                block_shape,
+            )
+        else:
+            return A, A_scale
+
+    @staticmethod
+    def _fp8_quantize(
+        A: torch.Tensor,
+        A_scale: Optional[torch.Tensor],
+        per_act_token: bool,
+        block_shape: Optional[list[int]] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Perform fp8 quantization on the inputs. If a block_shape
+        is provided, the output will be blocked.
+        """
+        if block_shape is None:
+            A, A_scale = ops.scaled_fp8_quant(
+                A, A_scale, use_per_token_if_dynamic=per_act_token)
+        else:
+            assert not per_act_token
+            assert len(block_shape) == 2
+            _, block_k = block_shape[0], block_shape[1]
+            A, A_scale = per_token_group_quant_fp8(A, block_k)
+            assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
+
+        return A, A_scale
+
+    @staticmethod
+    def _int8_quantize(
+        A: torch.Tensor,
+        A_scale: Optional[torch.Tensor],
+        per_act_token: bool,
+        block_shape: Optional[list[int]] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Perform int8 quantization on the inputs.  If a block_shape
+        is provided, the output will be blocked.
+        """
+
+        # If weights are per-channel (per_channel_quant=True), then
+        # activations apply per-token quantization. Otherwise, assume
+        # activation tensor-wise fp8/int8 quantization, dynamic or static
+        if block_shape is None:
+            assert per_act_token, \
+                "int8 quantization only supports block or channel-wise"
+            A, A_scale = per_token_quant_int8(A)
+        else:
+            assert not per_act_token
+            assert len(block_shape) == 2
+            _, block_k = block_shape[0], block_shape[1]
+            A, A_scale = per_token_group_quant_int8(A, block_k)
+            assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
+
+        return A, A_scale
+
+    @staticmethod
+    def _mxfp4_quantize(
+        A: torch.Tensor,
+        A_scale: Optional[torch.Tensor],
+        per_act_token_quant: bool,
+        block_shape: Optional[list[int]] = None,
+    ) -> tuple[torch.Tensor, None]:
+        assert block_shape is None
+        if not current_platform.supports_mx():
+            A = quant_dequant_mxfp4(A)
+        else:
+            raise NotImplementedError()
+
+        return A, None
+
+    @staticmethod
+    def _fp4_quantize(
+        A: torch.Tensor,
+        A_scale: Optional[torch.Tensor],
+        is_sf_swizzled_layout: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return fp4_quantize(
+            A,
+            A_scale,
+            is_sf_swizzled_layout=is_sf_swizzled_layout,
+        )

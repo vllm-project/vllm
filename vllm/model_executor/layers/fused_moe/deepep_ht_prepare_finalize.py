@@ -9,8 +9,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+from vllm.model_executor.layers.fused_moe.utils import MoEInputQuantizer
 
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -18,8 +17,16 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     Prepare/Finalize using DeepEP High-Throughput kernels.
     """
 
-    def __init__(self, buffer: deep_ep.Buffer, num_dispatchers: int,
-                 dp_size: int, rank_expert_offset: int):
+    def __init__(
+        self,
+        buffer: deep_ep.Buffer,
+        num_dispatchers: int,
+        dp_size: int,
+        rank_expert_offset: int,
+        quant_dtype: Optional[torch.dtype] = None,
+        per_act_token_quant: bool = False,
+        block_shape: Optional[list[int]] = None,
+    ) -> None:
         super().__init__()
         self.buffer = buffer
         self.num_dispatchers_ = num_dispatchers
@@ -32,6 +39,12 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
+
+        self.quantizer = MoEInputQuantizer(
+            per_act_token_quant=per_act_token_quant,
+            quant_dtype=quant_dtype,
+            block_shape=block_shape,
+        )
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -150,7 +163,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         if quant_config.is_block_quantized:
             # Quant and Dispatch
-            a1q, a1q_scale = moe_kernel_quantize_input(
+            a1q, a1q_scale = self.quantizer(
                 a1,
                 a1_scale,
                 quant_dtype=quant_config.quant_dtype,
@@ -181,7 +194,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # Quantize after dispatch.
             expert_x_scale = None
             if expert_x.numel() != 0:
-                expert_x, expert_x_scale = moe_kernel_quantize_input(
+                expert_x, expert_x_scale = self.quantizer(
                     expert_x,
                     a1_scale,
                     quant_dtype=quant_config.quant_dtype,

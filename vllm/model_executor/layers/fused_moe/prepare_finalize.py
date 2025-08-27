@@ -8,11 +8,23 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+from vllm.model_executor.layers.fused_moe.utils import MoEInputQuantizer
 
 
 class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
+
+    def __init__(
+        self,
+        quant_dtype: Optional[torch.dtype] = None,
+        per_act_token_quant: bool = False,
+        block_shape: Optional[list[int]] = None,
+    ):
+        super().__init__()
+        self.quantizer = MoEInputQuantizer(
+            per_act_token_quant=per_act_token_quant,
+            quant_dtype=quant_dtype,
+            block_shape=block_shape,
+        )
 
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
@@ -49,9 +61,13 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
                 "apply_router_weight_on_input is only implemented for topk=1"
             a1.mul_(topk_weights.to(a1.dtype))
 
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1, a1_scale, quant_config.quant_dtype,
-            quant_config.per_act_token_quant, quant_config.block_shape)
+        a1q, a1q_scale = self.quantizer(
+            a1,
+            a1_scale,
+            quant_config.quant_dtype,
+            quant_config.per_act_token_quant,
+            quant_config.block_shape,
+        )
 
         return a1q, a1q_scale, None, None, None
 

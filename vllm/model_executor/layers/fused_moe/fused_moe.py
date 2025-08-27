@@ -32,7 +32,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP)
 from vllm.model_executor.layers.fused_moe.utils import (
-    _resize_cache, moe_kernel_quantize_input, per_token_group_quant_fp8)
+    MoEInputQuantizer, _resize_cache, per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     calculate_tile_tokens_dim)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
@@ -1243,11 +1243,13 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
     num_expert_group = num_expert_group if num_expert_group is not None else 0
     topk_group = topk_group if topk_group is not None else 0
 
-    quant_hidden_states, _ = moe_kernel_quantize_input(
+    quantizer = MoEInputQuantizer()
+    quant_hidden_states, _ = quantizer(
         hidden_states,
         input_scale,
         quant_dtype=torch.float8_e4m3fn,
-        per_act_token_quant=False)
+        per_act_token_quant=False,
+    )
 
     from vllm.utils.flashinfer import (
         flashinfer_trtllm_fp8_per_tensor_scale_moe)
@@ -1608,6 +1610,8 @@ def fused_experts_impl(
         w2 = dequant_mxfp4(w2, w2_scale, hidden_states.dtype)
         w2_scale = None
 
+    quantizer = MoEInputQuantizer()
+
     for chunk in range((num_tokens // CHUNK_SIZE) + 1):
         begin_chunk_idx, end_chunk_idx = (chunk * CHUNK_SIZE,
                                           min((chunk + 1) * CHUNK_SIZE,
@@ -1631,12 +1635,13 @@ def fused_experts_impl(
 
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
-        qcurr_hidden_states, a1q_scale = moe_kernel_quantize_input(
+        qcurr_hidden_states, a1q_scale = quantizer(
             A=curr_hidden_states,
             A_scale=a1_scale,
             quant_dtype=qtype,
             per_act_token_quant=per_channel_quant,
-            block_shape=block_shape)
+            block_shape=block_shape,
+        )
 
         sorted_token_ids, expert_ids, num_tokens_post_padded = (
             moe_align_block_size(curr_topk_ids, config['BLOCK_SIZE_M'],
@@ -1685,12 +1690,13 @@ def fused_experts_impl(
             raise ValueError(f"Unsupported FusedMoe activation: {activation}, "
                              f"with is_act_and_mul={is_act_and_mul}.")
 
-        qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
+        qintermediate_cache2, a2q_scale = quantizer(
             A=intermediate_cache2,
             A_scale=a2_scale,
             quant_dtype=qtype,
             per_act_token_quant=per_channel_quant,
-            block_shape=block_shape)
+            block_shape=block_shape,
+        )
 
         invoke_fused_moe_kernel(qintermediate_cache2,
                                 w2,
@@ -1879,6 +1885,12 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.use_int8_w8a16 = use_int8_w8a16
         self.use_mxfp4_w4a4 = use_mxfp4_w4a4
 
+        self.quantizer = MoEInputQuantizer(
+            per_act_token_quant=not self.quant_config.is_per_tensor,
+            quant_dtype=self.quant_config.quant_dtype,
+            block_shape=self.quant_config.block_shape,
+        )
+
     @property
     def activation_formats(
         self
@@ -2026,7 +2038,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         a2q_scale: Optional[torch.Tensor] = None
 
-        qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
+        qintermediate_cache2, a2q_scale = self.quantizer(
             intermediate_cache2, a2_scale, self.quant_dtype,
             self.per_act_token_quant, self.block_shape)
 
@@ -2067,7 +2079,17 @@ def modular_triton_fused_moe(
     block_shape: Optional[list[int]] = None,
 ) -> mk.FusedMoEModularKernel:
     return mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),
+        MoEPrepareAndFinalizeNoEP(
+            quant_dtype=get_config_quant_dtype(
+                use_fp8_w8a8,
+                use_int8_w8a8,
+                use_int8_w8a16,
+                use_int4_w4a16,
+                use_mxfp4_w4a4,
+            ),
+            per_act_token_quant=per_act_token_quant,
+            block_shape=block_shape,
+        ),
         TritonExperts(
             use_fp8_w8a8=use_fp8_w8a8,
             use_int8_w8a8=use_int8_w8a8,
