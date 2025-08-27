@@ -439,12 +439,12 @@ class Processor:
 
             gpu_allocation = allocate_gpu_mm_processors(
                 mm_config.mm_processing_device,
-                parallel_config.api_process_count,
+                parallel_config._api_process_count,
                 available_device_count=device_count,
                 engine_device_count=parallel_config.world_size_across_dp,
             )
 
-            api_process_rank = parallel_config.api_process_rank
+            api_process_rank = parallel_config._api_process_rank
             new_device = gpu_allocation[api_process_rank]
 
             logger.info("Multi-modal processor will be run on device %s",

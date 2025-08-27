@@ -314,8 +314,6 @@ class EngineArgs:
     data_parallel_rpc_port: Optional[int] = None
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
-    api_process_count: int = ParallelConfig.api_process_count
-    api_process_rank: int = ParallelConfig.api_process_rank
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
