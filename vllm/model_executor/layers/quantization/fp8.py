@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 import torch
@@ -501,13 +502,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
             )
-        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
-        # kernel for fast weight-only FP8 quantization
-        self.use_marlin = (not current_platform.has_device_capability(89)
-                           or envs.VLLM_TEST_FORCE_FP8_MARLIN)
-        # Disable marlin for rocm
-        if current_platform.is_rocm():
-            self.use_marlin = False
 
         # Check for DeepGemm support.
         self.allow_deep_gemm = False
@@ -529,8 +523,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if not self.block_quant:
             logger.debug_once("Model is not block quantized. Not using "
                               "CutlassBlockScaledGroupedGemm kernels")
-        elif (current_platform.is_cuda()
-              and current_platform.is_device_capability(100)):
+        elif (ops.cutlass_blockwise_group_gemm_supported(
+                current_platform.get_device_capability().to_int())):
             logger.info_once(
                 "Using CutlassBlockScaledGroupedGemm kernels for Fp8MoEMethod."
             )
@@ -539,6 +533,24 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             logger.warning_once(
                 "CutlassBlockScaledGroupedGemm not supported on the current "
                 "platform.")
+
+        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
+        # kernel for fast weight-only FP8 quantization
+        self.use_marlin = (not self.allow_cutlass_block_scaled_grouped_gemm
+                           and not current_platform.has_device_capability(89)
+                           or envs.VLLM_TEST_FORCE_FP8_MARLIN)
+        # Disable marlin for rocm
+        if current_platform.is_rocm():
+            self.use_marlin = False
+
+        self.topk_indices_dtype = None
+
+        from vllm.model_executor.layers.fused_moe import fused_experts
+        self.fused_experts = functools.partial(  # type: ignore
+            fused_experts,
+            use_fp8_w8a8=True,
+            block_shape=self.quant_config.weight_block_size,
+            allow_deep_gemm=self.allow_deep_gemm)
 
     def maybe_make_prepare_finalize(
         self,
@@ -871,6 +883,35 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             del layer.w13_input_scale
             del layer.w2_input_scale
 
+        if (not self.rocm_aiter_moe_enabled
+                and self.allow_cutlass_block_scaled_grouped_gemm):
+            device = w13_weight.device
+            layer.ab_strides1 = torch.full((layer.local_num_experts, ),
+                                           layer.hidden_size,
+                                           device=device,
+                                           dtype=torch.int64)
+            layer.c_strides1 = torch.full(
+                (layer.local_num_experts, ),
+                2 * layer.intermediate_size_per_partition,
+                device=device,
+                dtype=torch.int64)
+            layer.ab_strides2 = torch.full(
+                (layer.local_num_experts, ),
+                layer.intermediate_size_per_partition,
+                device=device,
+                dtype=torch.int64)
+            layer.c_strides2 = torch.full((layer.local_num_experts, ),
+                                          layer.hidden_size,
+                                          device=device,
+                                          dtype=torch.int64)
+            if current_platform.is_device_capability(90):
+                layer.w13_weight_scale_inv = Parameter(
+                    layer.w13_weight_scale_inv.transpose(1, 2).contiguous(),
+                    requires_grad=False)
+                layer.w2_weight_scale_inv = Parameter(
+                    layer.w2_weight_scale_inv.transpose(1, 2).contiguous(),
+                    requires_grad=False)
+
         if is_blackwell_deep_gemm_e8m0_used():
             assert layer.weight_block_size is not None
             # Re-quantise the expert weights so their scales are UE8M0.
@@ -1049,6 +1090,33 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 a2_scale=layer.w2_input_scale,
                 block_shape=self.quant_config.weight_block_size,
                 expert_map=expert_map)
+        elif self.allow_cutlass_block_scaled_grouped_gemm:
+            from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+                block_scaled_cutlass_moe_fp8)
+            block_shape = self.quant_config.weight_block_size
+            assert block_shape is not None, "block_shape must not be None for blockwise MoE"  #noqa: E501
+            return block_scaled_cutlass_moe_fp8(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                layer.w13_weight_scale_inv,
+                layer.w2_weight_scale_inv,
+                block_shape,
+                layer.ab_strides1,
+                layer.ab_strides2,
+                layer.c_strides1,
+                layer.c_strides2,
+                activation,
+                layer.w13_input_scale,
+                layer.w2_input_scale,
+                expert_map,
+                apply_router_weight_on_input,
+                global_num_experts=(global_num_experts if global_num_experts
+                                    != -1 else layer.w13_weight.shape[0]),
+                per_act_block=(layer.w13_input_scale is None
+                               or layer.w13_input_scale.shape[0] == 1))
         elif self.use_marlin:
             assert activation == "silu", (
                 f"{activation} not supported for Marlin MoE.")
@@ -1106,7 +1174,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                inplace=True,
+                inplace=False,
                 activation=activation,
                 global_num_experts=global_num_experts,
                 apply_router_weight_on_input=apply_router_weight_on_input,

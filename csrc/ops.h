@@ -197,6 +197,7 @@ bool cutlass_scaled_mm_supports_fp4(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 bool cutlass_scaled_mm_supports_block_fp8(int64_t cuda_device_capability);
 bool cutlass_group_gemm_supported(int64_t cuda_device_capability);
+bool cutlass_blockwise_group_gemm_supported(int64_t cuda_device_capability);
 
 void cutlass_scaled_fp4_mm(torch::Tensor& D, torch::Tensor const& A,
                            torch::Tensor const& B, torch::Tensor const& A_sf,
@@ -216,6 +217,14 @@ void cutlass_moe_mm(
     torch::Tensor const& b_strides, torch::Tensor const& c_strides,
     bool per_act_token, bool per_out_ch);
 
+void cutlass_blockwise_scaled_grouped_mm_sm90(
+    torch::Tensor& out_tensors, torch::Tensor const& a_tensors,
+    torch::Tensor const& b_tensors, torch::Tensor const& a_scales,
+    torch::Tensor const& b_scales, torch::Tensor const& expert_offsets,
+    torch::Tensor const& problem_sizes, torch::Tensor const& a_strides,
+    torch::Tensor const& b_strides, torch::Tensor const& c_strides,
+    bool per_act_block);
+
 void cutlass_fp4_group_mm(
     torch::Tensor& output, const torch::Tensor& a, const torch::Tensor& b,
     const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
@@ -227,7 +236,8 @@ void get_cutlass_moe_mm_data(
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     torch::Tensor& input_permutation, torch::Tensor& output_permutation,
     const int64_t num_experts, const int64_t n, const int64_t k,
-    const std::optional<torch::Tensor>& blockscale_offsets);
+    const std::optional<torch::Tensor>& blockscale_offsets, bool force_no_swap,
+    bool should_fuse);
 
 void get_cutlass_moe_mm_problem_sizes(
     const torch::Tensor& topk_ids, torch::Tensor& problem_sizes1,
@@ -241,6 +251,10 @@ void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
                                   const int64_t num_local_experts,
                                   const int64_t padded_m, const int64_t n,
                                   const int64_t k);
+
+torch::Tensor transpose_cutlass_moe_a_scales(torch::Tensor& a_scales,
+                                             torch::Tensor& expert_offsets,
+                                             torch::Tensor& problem_sizes);
 
 void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,
@@ -273,7 +287,10 @@ void scaled_fp4_experts_quant(
 void per_token_group_quant_fp8(const torch::Tensor& input,
                                torch::Tensor& output_q, torch::Tensor& output_s,
                                int64_t group_size, double eps, double fp8_min,
-                               double fp8_max, bool scale_ue8m0);
+                               double fp8_max, bool scale_ue8m0, bool transpose,
+                               const torch::Tensor& expert_offsets,
+                               const torch::Tensor& problem_sizes, bool reorder,
+                               const torch::Tensor& a_map);
 
 void per_token_group_quant_int8(const torch::Tensor& input,
                                 torch::Tensor& output_q,

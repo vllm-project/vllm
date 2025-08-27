@@ -19,9 +19,6 @@ from vllm.logger import init_logger
 # yapf: disable
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig, get_config_quant_dtype)
-from vllm.model_executor.layers.fused_moe.cutlass_moe import (
-    _valid_cutlass_block_scaled_grouped_gemm,
-    run_cutlass_block_scaled_fused_experts)
 # yapf: enable
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm, deep_gemm_moe_fp8)
@@ -1453,18 +1450,6 @@ def fused_experts(hidden_states: torch.Tensor,
             a2_scale=a2_scale,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
-    elif (allow_cutlass_block_scaled_grouped_gemm and use_fp8_w8a8
-          and _valid_cutlass_block_scaled_grouped_gemm(
-              w1, w2, inplace, activation, apply_router_weight_on_input,
-              expert_map)):
-        return run_cutlass_block_scaled_fused_experts(
-            a=hidden_states,
-            w1=w1,
-            w2=w2,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids)
     else:
         return dispatch_fused_experts_func(inplace)(
             hidden_states=hidden_states,
