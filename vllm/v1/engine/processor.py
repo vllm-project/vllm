@@ -74,7 +74,8 @@ class Processor:
                 f"which is greater than max allowed: {max_logprobs}")
 
         # Validate prompt logprobs.
-        if params.prompt_logprobs and params.prompt_logprobs > max_logprobs:
+        if params.prompt_logprobs and (params.prompt_logprobs == -1 or
+                                       params.prompt_logprobs > max_logprobs):
             raise ValueError(
                 f"Requested prompt logprobs of {params.prompt_logprobs}, "
                 f"which is greater than max allowed: {max_logprobs}")
