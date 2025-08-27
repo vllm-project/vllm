@@ -8,6 +8,7 @@ import vllm._custom_ops as ops
 from tests.kernels.quant_utils import per_block_cast_to_int8
 from tests.kernels.quantization.nvfp4_utils import (FLOAT4_E2M1_MAX,
                                                     FLOAT8_E4M3_MAX)
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize, BatchedTritonExperts, NaiveBatchedExperts)
@@ -282,3 +283,52 @@ def per_token_cast_to_fp8(
     x_amax = x_view.abs().float().amax(dim=2).view(m, -1).clamp(1e-4)
     fp8_data = (x_view * (448.0 / x_amax.unsqueeze(2))).to(torch.float8_e4m3fn)
     return fp8_data.view(m, n + pad_size)[:, :n], (x_amax / 448.0).view(m, -1)
+
+
+# CustomOp?
+class BaselineMM(torch.nn.Module):
+
+    def __init__(
+        self,
+        b: torch.Tensor,
+        out_dtype: torch.dtype,
+    ):
+        super().__init__()
+        self.b = b.to(dtype=torch.float32)
+        self.out_dtype = out_dtype
+
+    def forward(
+            self,
+            a: torch.Tensor) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        return torch.mm(a.to(dtype=torch.float32),
+                        self.b).to(self.out_dtype), None
+
+
+class TestMLP(torch.nn.Module):
+
+    def __init__(
+        self,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        out_dtype: torch.dtype,
+    ):
+        super().__init__()
+        self.gate_up_proj = BaselineMM(w1, out_dtype)
+        self.down_proj = BaselineMM(w2, out_dtype)
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x):
+        x, _ = self.gate_up_proj(x)
+        x = self.act_fn(x)
+        x, _ = self.down_proj(x)
+        return x
+
+
+def make_shared_experts(
+    N: int,
+    K: int,
+    in_dtype: torch.dtype = torch.bfloat16,
+) -> torch.nn.Module:
+    w1 = torch.randn((K, N * 2), device="cuda", dtype=in_dtype) / 15
+    w2 = torch.randn((N, K), device="cuda", dtype=in_dtype) / 15
+    return TestMLP(w1, w2, out_dtype=in_dtype)

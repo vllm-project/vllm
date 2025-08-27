@@ -68,6 +68,8 @@ class SiluAndMul(CustomOp):
 
     def __init__(self):
         super().__init__()
+        self._forward_method = self.forward_native
+        return
         if current_platform.is_cuda_alike():
             self.op = torch.ops._C.silu_and_mul
         elif current_platform.is_xpu():
