@@ -290,7 +290,7 @@ class EngineArgs:
     # is intended for expert use only. The API may change without
     # notice.
     distributed_executor_backend: Optional[Union[
-        DistributedExecutorBackend,
+        str, DistributedExecutorBackend,
         Type[ExecutorBase]]] = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
@@ -351,7 +351,7 @@ class EngineArgs:
     mm_processor_kwargs: Optional[Dict[str, Any]] = \
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
-    mm_processor_cache_gb: int = MultiModalConfig.mm_processor_cache_gb
+    mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     # LoRA fields
@@ -455,8 +455,7 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(
                 **self.compilation_config)
         if isinstance(self.eplb_config, dict):
-            self.eplb_config = EPLBConfig.from_cli(json.dumps(
-                self.eplb_config))
+            self.eplb_config = EPLBConfig(**self.eplb_config)
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -605,7 +604,7 @@ class EngineArgs:
             **guided_decoding_kwargs["disable_additional_properties"])
         guided_decoding_group.add_argument(
             "--reasoning-parser",
-            # This choices is a special case because it's not static
+            # This choice is a special case because it's not static
             choices=list(ReasoningParserManager.reasoning_parsers),
             **guided_decoding_kwargs["reasoning_backend"])
 
@@ -1047,7 +1046,7 @@ class EngineArgs:
             # details from the config directly
             # no user input required / expected
             if isinstance(hf_config, SpeculatorsConfig):
-                # We create one since we dont create one
+                # We create one since we don't create one
                 self.speculative_config = {}
                 self.speculative_config[
                     "num_speculative_tokens"] = hf_config.num_lookahead_tokens
@@ -1294,18 +1293,6 @@ class EngineArgs:
             worker_extension_cls=self.worker_extension_cls,
         )
 
-        if model_config.is_multimodal_model:
-            dp_supports_mm_processor_cache = (self.data_parallel_size == 1
-                                              or data_parallel_external_lb)
-            if (not dp_supports_mm_processor_cache
-                    and model_config.mm_processor_cache_gb > 0):
-                logger.warning(
-                    "Multi-modal processor cache is disabled because "
-                    "it is not compatible with data parallelism when "
-                    "there does not exist a one-to-one correspondance "
-                    "between API and engine core processes.")
-                model_config.set_mm_processor_cache_gb(0)
-
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
@@ -1434,21 +1421,20 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        # Need at least Ampere for now (FA support required).
-        # Skip this check if we are running on a non-GPU platform,
-        # or if the device capability is not available
-        # (e.g. in a Ray actor without GPUs).
+        # Triton v3.3 has f16 conversion regression issue on Turing and Volta,
+        # which broke fp16 inference
+        # see: https://github.com/triton-lang/triton/issues/6698
         if (current_platform.is_cuda()
-                and current_platform.get_device_capability()
-                and current_platform.get_device_capability().major < 8):
-            _raise_or_fallback(feature_name="Compute Capability < 8.0",
-                               recommend_to_remove=False)
+                and not current_platform.has_device_capability(80)
+                and model_config.dtype == torch.float16):
+            _raise_or_fallback(
+                feature_name="Compute Capability < 8.0 with FP16",
+                recommend_to_remove=False)
             return False
 
-        # No Fp8 KV cache so far.
         if self.kv_cache_dtype != "auto":
             supported = current_platform.is_kv_cache_dtype_supported(
-                self.kv_cache_dtype)
+                self.kv_cache_dtype, model_config)
             if not supported:
                 _raise_or_fallback(feature_name="--kv-cache-dtype",
                                    recommend_to_remove=False)
@@ -1776,7 +1762,7 @@ class AsyncEngineArgs(EngineArgs):
     def add_cli_args(parser: FlexibleArgumentParser,
                      async_args_only: bool = False) -> FlexibleArgumentParser:
         # Initialize plugin to update the parser, for example, The plugin may
-        # adding a new kind of quantization method to --quantization argument or
+        # add a new kind of quantization method to --quantization argument or
         # a new device to --device argument.
         load_general_plugins()
         if not async_args_only:

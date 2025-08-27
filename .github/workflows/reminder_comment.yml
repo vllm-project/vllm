@@ -17,20 +17,18 @@ jobs:
               const prAuthor = context.payload.pull_request.user.login;
               
               // Check if this is the author's first PR in this repository
-              const { data: allPRs } = await github.rest.pulls.list({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                state: 'all',
-                per_page: 100
+              // Use GitHub's search API to find all PRs by this author
+              const { data: searchResults } = await github.rest.search.issuesAndPullRequests({
+                q: `repo:${context.repo.owner}/${context.repo.repo} type:pr author:${prAuthor}`,
+                per_page: 100  
               });
               
-              // Filter to find PRs by this author
-              const authorPRs = allPRs.filter(pr => pr.user.login === prAuthor);
+              const authorPRCount = searchResults.total_count;
               
-              console.log(`Found ${authorPRs.length} PRs by ${prAuthor}`);
+              console.log(`Found ${authorPRCount} PRs by ${prAuthor}`);
               
               // Only post comment if this is the first PR (only one PR by this author)
-              if (authorPRs.length === 1) {
+              if (authorPRCount === 1) {
                 console.log(`Posting welcome comment for first-time contributor: ${prAuthor}`);
                 await github.rest.issues.createComment({
                 owner: context.repo.owner,
@@ -46,7 +44,7 @@ jobs:
                   '🚀'
                 });
               } else {
-                console.log(`Skipping comment for ${prAuthor} - not their first PR (${authorPRs.length} PRs found)`);
+                console.log(`Skipping comment for ${prAuthor} - not their first PR (${authorPRCount} PRs found)`);
               }
             } catch (error) {
               console.error('Error checking PR history or posting comment:', error);
