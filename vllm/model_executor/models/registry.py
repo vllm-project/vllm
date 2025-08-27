@@ -187,6 +187,7 @@ _EMBEDDING_MODELS = {
     # Technically Terratoch models work on images, both in
     # input and output. I am adding it here because it piggy-backs on embedding
     # models for the time being.
+    "PrithviGeoSpatialMAE": ("terratorch", "Terratorch"),
     "Terratorch": ("terratorch", "Terratorch"),
 }
 
