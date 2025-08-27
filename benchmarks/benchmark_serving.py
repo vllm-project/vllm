@@ -5,8 +5,7 @@ r"""Benchmark online serving throughput.
 On the server side, run one of the following commands:
     vLLM OpenAI API server
     vllm serve <your_model> \
-        --swap-space 16 \
-        --disable-log-requests
+        --swap-space 16
 
 On the client side, run:
     python benchmarks/benchmark_serving.py \
@@ -16,11 +15,6 @@ On the client side, run:
         --dataset-path <path to dataset> \
         --request-rate <request_rate> \ # By default <request_rate> is inf
         --num-prompts <num_prompts> # By default <num_prompts> is 1000
-        
-    For load balancing across multiple servers, provide multiple base URLs:
-        --base-url http://server1:8000 http://server2:8000 http://server3:8000
-        
-    The script will test all URLs before starting the benchmark to ensure they're accessible.
 
     when using tgi backend, add
         --endpoint /generate_stream
@@ -30,7 +24,6 @@ On the client side, run:
 import argparse
 import asyncio
 import gc
-import itertools
 import json
 import os
 import random
@@ -44,6 +37,7 @@ from typing import Any, Literal, Optional
 import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
+from typing_extensions import deprecated
 
 from backend_request_func import (
     ASYNC_REQUEST_FUNCS,
@@ -234,8 +228,8 @@ def calculate_metrics(
 
 async def benchmark(
     backend: str,
-    api_urls: list[str],
-    base_urls: list[str],
+    api_url: str,
+    base_url: str,
     model_id: str,
     model_name: str,
     tokenizer: PreTrainedTokenizerBase,
@@ -261,65 +255,50 @@ async def benchmark(
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
-    print("Starting initial test run for all URLs...")
+    print("Starting initial single prompt test run...")
     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
         input_requests[0].prompt,
         input_requests[0].prompt_len,
         input_requests[0].expected_output_len,
         input_requests[0].multi_modal_data,
     )
-    
-    assert test_mm_content is None or isinstance(test_mm_content, dict)
-    
-    # Test all URLs to ensure they're working
-    failed_urls = []
-    for i, test_api_url in enumerate(api_urls, 1):
-        print(f"Testing URL {i}/{len(api_urls)}: {test_api_url}")
-        
-        test_input = RequestFuncInput(
-            model=model_id,
-            model_name=model_name,
-            prompt=test_prompt,
-            api_url=test_api_url,
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-            multi_modal_content=test_mm_content,
-            ignore_eos=ignore_eos,
-            extra_body=extra_body,
-        )
 
-        test_output = await request_func(request_func_input=test_input)
-        if not test_output.success:
-            failed_urls.append(test_api_url)
-    
-    if failed_urls:
+    assert test_mm_content is None or isinstance(test_mm_content, dict)
+    test_input = RequestFuncInput(
+        model=model_id,
+        model_name=model_name,
+        prompt=test_prompt,
+        api_url=api_url,
+        prompt_len=test_prompt_len,
+        output_len=test_output_len,
+        logprobs=logprobs,
+        multi_modal_content=test_mm_content,
+        ignore_eos=ignore_eos,
+        extra_body=extra_body,
+    )
+
+    test_output = await request_func(request_func_input=test_input)
+    if not test_output.success:
         raise ValueError(
-            f"Initial test run failed for {len(failed_urls)} URL(s): {failed_urls}. "
-            "Please make sure all URLs are accessible and benchmark arguments "
-            "are correctly specified."
+            "Initial test run failed - Please make sure benchmark arguments "
+            f"are correctly specified. Error: {test_output.error}"
         )
     else:
-        print(f"All {len(api_urls)} URL(s) passed initial test. Starting main benchmark run...")
+        print("Initial test run completed. Starting main benchmark run...")
 
     if lora_modules:
         # For each input request, choose a LoRA module at random.
         lora_modules = iter(
             [random.choice(lora_modules) for _ in range(len(input_requests))]
         )
-        
-    api_url_cycle = itertools.cycle(api_urls)
-    base_url_cycle = itertools.cycle(base_urls)
-    
+
     if profile:
         print("Starting profiler...")
-        # Get the first base URL from the cycle for profiling
-        profile_base_url = next(base_url_cycle)
         profile_input = RequestFuncInput(
             model=model_id,
             model_name=model_name,
             prompt=test_prompt,
-            api_url=profile_base_url + "/start_profile",
+            api_url=base_url + "/start_profile",
             prompt_len=test_prompt_len,
             output_len=test_output_len,
             logprobs=logprobs,
@@ -400,14 +379,11 @@ async def benchmark(
             req_lora_module = next(lora_modules)
             req_model_id, req_model_name = req_lora_module, req_lora_module
 
-        # Get the next URL from the cycle for round-robin load balancing
-        current_api_url = next(api_url_cycle)
-        
         request_func_input = RequestFuncInput(
             model=req_model_id,
             model_name=req_model_name,
             prompt=prompt,
-            api_url=current_api_url,
+            api_url=api_url,
             prompt_len=prompt_len,
             output_len=output_len,
             logprobs=logprobs,
@@ -418,20 +394,6 @@ async def benchmark(
         task = limited_request_func(request_func_input=request_func_input, pbar=pbar)
         tasks.append(asyncio.create_task(task))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
-
-    if profile:
-        print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=profile_base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
-            print("Profiler stopped")
 
     if pbar is not None:
         pbar.close()
@@ -450,6 +412,10 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    if max_concurrency is not None:
+        print("{:<40} {:<10}".format("Maximum request concurrency:", max_concurrency))
+    if request_rate != float("inf"):
+        print("{:<40} {:<10.2f}".format("Request rate configured (RPS):", request_rate))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
     print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
@@ -541,6 +507,20 @@ async def benchmark(
 
     print("=" * 50)
 
+    if profile:
+        print("Stopping profiler...")
+        profile_input = RequestFuncInput(
+            model=model_id,
+            prompt=test_prompt,
+            api_url=base_url + "/stop_profile",
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            logprobs=logprobs,
+        )
+        profile_output = await request_func(request_func_input=profile_input)
+        if profile_output.success:
+            print("Profiler stopped")
+
     return result
 
 
@@ -617,6 +597,10 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
+@deprecated(
+    "benchmark_serving.py is deprecated and will be removed in a future "
+    "version. Please use 'vllm bench serve' instead.",
+)
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
@@ -649,27 +633,11 @@ def main(args: argparse.Namespace):
             raise ValueError("For exponential ramp-up, the start RPS cannot be 0.")
 
     if args.base_url is not None:
-        # Handle multiple base URLs for round-robin load balancing
-        if isinstance(args.base_url, list):
-            api_urls = [f"{url}{args.endpoint}" for url in args.base_url]
-            base_urls = args.base_url
-        else:
-            # Single URL (backward compatibility)
-            api_urls = [f"{args.base_url}{args.endpoint}"]
-            base_urls = [args.base_url]
+        api_url = f"{args.base_url}{args.endpoint}"
+        base_url = f"{args.base_url}"
     else:
-        # Single host:port configuration
-        api_urls = [f"http://{args.host}:{args.port}{args.endpoint}"]
-        base_urls = [f"http://{args.host}:{args.port}"]
-    
-    
-    # Print the URLs that will be used for load balancing
-    if len(api_urls) > 1:
-        print(f"Round-robin load balancing enabled across {len(api_urls)} URLs:")
-        for i, url in enumerate(api_urls, 1):
-            print(f"  {i}. {url}")
-    else:
-        print(f"Single URL: {api_urls[0]}")
+        api_url = f"http://{args.host}:{args.port}{args.endpoint}"
+        base_url = f"http://{args.host}:{args.port}"
 
     tokenizer = get_tokenizer(
         tokenizer_id,
@@ -839,8 +807,8 @@ def main(args: argparse.Namespace):
     benchmark_result = asyncio.run(
         benchmark(
             backend=backend,
-            api_urls=api_urls,
-            base_urls=base_urls,
+            api_url=api_url,
+            base_url=base_url,
             model_id=model_id,
             model_name=model_name,
             tokenizer=tokenizer,
@@ -954,14 +922,12 @@ def create_argument_parser():
     parser.add_argument(
         "--base-url",
         type=str,
-        nargs='*',
         default=None,
-        help="Server or API base url(s) if not using http host and port. "
-        "Multiple URLs can be provided for round-robin load balancing.",
+        help="Server or API base url if not using http host and port.",
     )
     # Use 127.0.0.1 here instead of localhost to force the use of ipv4
     parser.add_argument("--host", type=str, default="127.0.0.1")
-    parser.add_argument("--ports", type=int, default=8000)
+    parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
         "--endpoint",
         type=str,

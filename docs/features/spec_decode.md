@@ -15,6 +15,10 @@ Speculative decoding is a technique which improves inter-token latency in memory
 
 The following code configures vLLM in an offline mode to use speculative decoding with a draft model, speculating 5 tokens at a time.
 
+!!! warning
+    In vllm v0.10.0, speculative decoding with a draft model is not supported.
+    If you use the following code, you will get a `NotImplementedError`.
+
 ??? code
 
     ```python

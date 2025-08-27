@@ -103,7 +103,10 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         mm_kwargs = {}
 
         for k, v in mm_data.items():
-            mm_kwargs[k] = v
+            if isinstance(v, dict) and k == "image":
+                mm_kwargs.update(v)
+            else:
+                mm_kwargs[k] = v
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         # This model receives in input a multi-dimensional tensor representing

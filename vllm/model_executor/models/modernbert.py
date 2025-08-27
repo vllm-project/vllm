@@ -8,7 +8,6 @@ from torch import nn
 from transformers import ModernBertConfig
 
 from vllm.attention import Attention, AttentionType
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
@@ -23,8 +22,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.pooling_params import PoolingTask
 from vllm.sequence import IntermediateTensors
+from vllm.tasks import PoolingTask
 
 from .interfaces import SupportsCrossEncoding, SupportsV0Only
 from .utils import WeightsMapper, maybe_prefix
@@ -200,7 +199,6 @@ class ModernBertEncoderLayer(nn.Module):
         return hidden_states
 
 
-@support_torch_compile
 class ModernBertModel(nn.Module):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={"layers.": "encoder_layer.layers."})

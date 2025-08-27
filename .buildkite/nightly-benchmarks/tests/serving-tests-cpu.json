@@ -6,6 +6,7 @@
             "VLLM_RPC_TIMEOUT": 100000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
 	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
+	    "VLLM_CPU_SGL_KERNEL": 1,
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
@@ -16,8 +17,9 @@
 	    "block_size": 128,
 	    "trust_remote_code": "",
             "disable_log_stats": "",
-            "disable_log_requests": "",
 	    "enforce_eager": "",
+	    "max_num_batched_tokens": 2048,
+	    "max_num_seqs": 256,
             "load_format": "dummy"
         },
         "client_parameters": {
@@ -36,6 +38,7 @@
             "VLLM_RPC_TIMEOUT": 100000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
 	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
+	    "VLLM_CPU_SGL_KERNEL": 1,
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
@@ -46,8 +49,9 @@
 	    "block_size": 128,
 	    "trust_remote_code": "",
             "disable_log_stats": "",
-            "disable_log_requests": "",
 	    "enforce_eager": "",
+	    "max_num_batched_tokens": 2048,
+	    "max_num_seqs": 256,
             "load_format": "dummy"
         },
         "client_parameters": {
@@ -66,6 +70,7 @@
             "VLLM_RPC_TIMEOUT": 100000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
 	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
+	    "VLLM_CPU_SGL_KERNEL": 1,
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
@@ -76,8 +81,9 @@
 	    "block_size": 128,
 	    "trust_remote_code": "",
             "disable_log_stats": "",
-            "disable_log_requests": "",
 	    "enforce_eager": "",
+	    "max_num_batched_tokens": 2048,
+	    "max_num_seqs": 256,
             "load_format": "dummy"
         },
         "client_parameters": {
@@ -96,6 +102,7 @@
             "VLLM_RPC_TIMEOUT": 100000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
 	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
+	    "VLLM_CPU_SGL_KERNEL": 1,
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
@@ -107,8 +114,9 @@
 	    "trust_remote_code": "",
 	    "enable_chunked_prefill": "",
             "disable_log_stats": "",
-            "disable_log_requests": "",
 	    "enforce_eager": "",
+	    "max_num_batched_tokens": 2048,
+	    "max_num_seqs": 256,
             "load_format": "dummy"
         },
         "client_parameters": {
@@ -129,6 +137,7 @@
             "VLLM_RPC_TIMEOUT": 100000,
 	    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
 	    "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
+	    "VLLM_CPU_SGL_KERNEL": 1,
 	    "VLLM_CPU_KVCACHE_SPACE": 40
         },
         "server_parameters": {
@@ -140,8 +149,9 @@
 	    "trust_remote_code": "",
 	    "enable_chunked_prefill": "",
             "disable_log_stats": "",
-            "disable_log_requests": "",
 	    "enforce_eager": "",
+	    "max_num_batched_tokens": 2048,
+	    "max_num_seqs": 256,
             "load_format": "dummy"
         },
         "client_parameters": {

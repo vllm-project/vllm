@@ -16,8 +16,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.pooling_params import PoolingTask
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
+from vllm.tasks import SupportedTask
 from vllm.utils import make_async
 from vllm.worker.worker_base import WorkerBase
 
@@ -35,6 +35,7 @@ class ExecutorBase(ABC):
     """
 
     uses_ray: bool  # whether the executor uses Ray for orchestration.
+    supports_pp: bool = False  # whether the executor supports PP
 
     def __init__(
         self,
@@ -136,9 +137,9 @@ class ExecutorBase(ABC):
         return self.collective_rpc(rpc_func)
 
     @cached_property  # Avoid unnecessary RPC calls
-    def supported_pooling_tasks(self) -> tuple[PoolingTask, ...]:
-        output = self.collective_rpc("get_supported_pooling_tasks")
-        return tuple({task for tasks in output for task in tasks})
+    def supported_tasks(self) -> tuple[SupportedTask, ...]:
+        output = self.collective_rpc("get_supported_tasks")
+        return output[0]
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest

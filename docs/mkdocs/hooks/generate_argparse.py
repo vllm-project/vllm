@@ -62,6 +62,11 @@ class MarkdownFormatter(HelpFormatter):
                 choices = f'`{"`, `".join(str(c) for c in choices)}`'
                 self._markdown_output.append(
                     f"Possible choices: {choices}\n\n")
+            elif ((metavar := action.metavar)
+                  and isinstance(metavar, (list, tuple))):
+                metavar = f'`{"`, `".join(str(m) for m in metavar)}`'
+                self._markdown_output.append(
+                    f"Possible choices: {metavar}\n\n")
 
             self._markdown_output.append(f"{action.help}\n\n")
 

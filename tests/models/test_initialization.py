@@ -7,13 +7,15 @@ import pytest
 from transformers import PretrainedConfig
 
 from vllm import LLM
+from vllm.config import ModelImpl
 from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
 from vllm.utils import GiB_bytes
 from vllm.v1.core.kv_cache_utils import get_kv_cache_config
 from vllm.v1.engine.core import EngineCore as V1EngineCore
 
 from ..utils import create_new_process_for_each_test
-from .registry import AUTO_EXAMPLE_MODELS, HF_EXAMPLE_MODELS, HfExampleModels
+from .registry import (_TRANSFORMERS_BACKEND_MODELS, AUTO_EXAMPLE_MODELS,
+                       HF_EXAMPLE_MODELS, HfExampleModels)
 
 
 @create_new_process_for_each_test()
@@ -30,12 +32,6 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
     model_info = EXAMPLE_MODELS.get_hf_info(model_arch)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
-
-    # FIXME: Possible memory leak in the previous tests?
-    if model_arch in ("Glm4vForConditionalGeneration",
-                      "GraniteSpeechForConditionalGeneration",
-                      "KimiVLForConditionalGeneration"):
-        pytest.skip("Avoid OOM")
 
     if model_arch in ("Llama4ForCausalLM", "EagleLlama4ForCausalLM"):
         from vllm.model_executor.models.llama4 import Llama4ForCausalLM
@@ -85,6 +81,14 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
                 "num_hidden_layers": 1,
             })
 
+        # e.g.: Qwen/Qwen2-Audio-7B-Instruct
+        if hasattr(hf_config, "audio_config"):
+            hf_config.audio_config.update({
+                "num_layers": 1,
+                "num_hidden_layers": 1,
+                "encoder_layers": 1,
+            })
+
         return hf_config
 
     # Avoid calling model.forward()
@@ -126,6 +130,8 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             # these tests seem to produce leftover memory
             gpu_memory_utilization=0.80,
             load_format="dummy",
+            model_impl=ModelImpl.TRANSFORMERS
+            if model_arch in _TRANSFORMERS_BACKEND_MODELS else ModelImpl.VLLM,
             hf_overrides=hf_overrides,
         )
 

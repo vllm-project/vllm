@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import fnmatch
 import multiprocessing as mp
 import os
 import shutil
@@ -64,9 +65,10 @@ def _run_writer(input_dir, output_dir, weights_patterns, **kwargs):
     # Copy metadata files to output directory
     for file in os.listdir(input_dir):
         if os.path.isdir(os.path.join(input_dir, file)):
-            continue
-        if not any(file.endswith(ext) for ext in weights_patterns):
-            shutil.copy(f"{input_dir}/{file}", output_dir)
+            shutil.copytree(os.path.join(input_dir, file),
+                            os.path.join(output_dir, file))
+        elif not any(fnmatch.fnmatch(file, ext) for ext in weights_patterns):
+            shutil.copy(os.path.join(input_dir, file), output_dir)
 
 
 def _run_generate(input_dir, queue: mp.Queue, **kwargs):

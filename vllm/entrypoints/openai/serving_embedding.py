@@ -163,8 +163,9 @@ class OpenAIServingEmbedding(EmbeddingMixin):
         for the API specification. This API mimics the OpenAI Embedding API.
         """
         model_name = self._get_model_name(request.model)
-        request_id = (f"{self.request_id_prefix}-"
-                      f"{self._base_request_id(raw_request)}")
+        request_id = (
+            f"{self.request_id_prefix}-"
+            f"{self._base_request_id(raw_request, request.request_id)}")
 
         ctx = EmbeddingServeContext(
             request=request,

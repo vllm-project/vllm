@@ -44,6 +44,15 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
         }
 
 
+class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        pooler_config = vllm_config.model_config.pooler_config
+        if pooler_config.activation is None:
+            pooler_config.activation = False
+
+
 class JinaRobertaModelConfig(VerifyAndUpdateConfig):
 
     @staticmethod
@@ -93,7 +102,7 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         config.num_hidden_layers = config.n_layer
 
         head_dim = config.hidden_size // config.num_attention_heads
-        rotary_emb_dim = head_dim * config.rotary_emb_fraction
+        rotary_emb_dim = int(head_dim * config.rotary_emb_fraction)
         max_trained_positions = getattr(config, "max_trained_positions", 2048)
         config.rotary_kwargs = {
             "head_size": head_dim,
@@ -153,6 +162,26 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
             model_config.encoder_config = encoder_config
 
             vllm_config.recalculate_max_model_len(max_model_len)
+
+
+class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        pooler_config = vllm_config.model_config.pooler_config
+
+        if pooler_config.step_tag_id is None:
+            pooler_config.step_tag_id = 151651
+
+
+class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        pooler_config = vllm_config.model_config.pooler_config
+
+        if pooler_config.softmax is None:
+            pooler_config.softmax = False
 
 
 class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
@@ -253,8 +282,10 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             dtype=kv_cache_dtype,
             use_mla=model_config.use_mla).page_size_bytes
 
-        model_cls = ModelRegistry.resolve_model_cls(
-            model_config._model_info.architecture)[0]
+        model_cls, _ = ModelRegistry.resolve_model_cls(
+            model_config.architecture,
+            model_config=model_config,
+        )
 
         # get mamba page size
         mamba_page_size = MambaSpec(
@@ -307,8 +338,11 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "NomicBertModel": NomicBertModelConfig,
+    "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
+    "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
+    "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "GraniteMoeHybridForCausalLM": GraniteMoeHybridModelConfig,
 }

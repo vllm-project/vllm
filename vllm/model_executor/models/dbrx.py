@@ -6,6 +6,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+from transformers import PretrainedConfig
 
 from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
@@ -24,7 +25,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
 from .interfaces import SupportsPP
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
@@ -39,7 +39,7 @@ class DbrxRouter(nn.Module):
 
     def __init__(
         self,
-        config: DbrxConfig,
+        config: PretrainedConfig,
         params_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
@@ -63,7 +63,7 @@ class DbrxExperts(FusedMoE):
 
     def __init__(
         self,
-        config: DbrxConfig,
+        config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: Optional[torch.dtype] = None,
         prefix: str = "",
@@ -138,7 +138,7 @@ class DbrxMoE(nn.Module):
 
     def __init__(
         self,
-        config: DbrxConfig,
+        config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: Optional[torch.dtype] = None,
         prefix: str = "",
@@ -169,7 +169,7 @@ class DbrxAttention(nn.Module):
 
     def __init__(
         self,
-        config: DbrxConfig,
+        config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -249,7 +249,7 @@ class DbrxFusedNormAttention(nn.Module):
 
     def __init__(
         self,
-        config: DbrxConfig,
+        config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -284,7 +284,7 @@ class DbrxBlock(nn.Module):
 
     def __init__(
         self,
-        config: DbrxConfig,
+        config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
