@@ -311,6 +311,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         experts = select_cutlass_fp8_gemm_impl(
             moe,
@@ -1032,6 +1033,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         experts = select_nvfp4_gemm_impl(
             moe,
