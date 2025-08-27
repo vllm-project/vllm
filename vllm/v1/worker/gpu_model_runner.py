@@ -1521,6 +1521,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.supports_mm_inputs and get_pp_group().is_first_rank:
             is_embed = ...  # TODO
 
+            # NOTE(woosuk): To unify token ids and soft tokens (vision
+            # embeddings), we always use embeddings (rather than token ids)
+            # as input to the multimodal model, even when the input is text.
             inputs_embeds_scheduled = self.model.get_input_embeddings(
                 input_ids=self.input_ids.gpu[:num_scheduled_tokens],
                 multimodal_embeddings=mm_embeds or None,
