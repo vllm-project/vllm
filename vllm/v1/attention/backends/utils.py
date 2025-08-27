@@ -5,8 +5,7 @@ import enum
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, make_dataclass
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Generic, Optional,
-                    TypeVar)
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
 
 import numpy as np
 import torch
@@ -468,8 +467,9 @@ def make_local_attention_virtual_batches(
         attn_chunk_size)[arange > 0]
 
     # convert from q_seqlens to cu_seqlens_q
-    cu_seqlens_q_local = np.pad(np.cumsum(seqlens_q_local), (1, 0))\
-        .astype(np.int32)
+    cu_seqlens_q_local = np.empty(virtual_batches + 1, dtype=np.int32)
+    np.cumsum(seqlens_q_local, out=cu_seqlens_q_local[1:])
+    cu_seqlens_q_local[0] = 0
 
     # compute the seqlens_k_local,
     #  basically a full local attention block for all but the last block in each
@@ -512,11 +512,10 @@ def make_local_attention_virtual_batches(
     #     [ 22, 23 ], < local-batch 6, (batch 2, starting from k[4])
     #     [ 24, 25 ], < local-batch 7, (batch 2, starting from k[8])
     #   ]
-    block_indices= np.broadcast_to(
-        np.arange(pages_per_local_batch, dtype=np.int32),
-        (virtual_batches, pages_per_local_batch)) \
-            + np.expand_dims(block_starts, axis=1)
-    block_indices = block_indices.flatten().clip(max=block_table.shape[1] - 1)
+    block_indices = (block_starts[:, None] +
+                     np.arange(pages_per_local_batch, dtype=np.int32))
+    block_indices = block_indices.reshape(-1).clip(max=block_table.shape[1] -
+                                                   1)
     batch_indices = np.repeat(np.arange(actual_batch_size, dtype=np.int32),
                               local_blocks * pages_per_local_batch)
     block_table_local = block_table[batch_indices, block_indices]\
@@ -541,35 +540,6 @@ def make_local_attention_virtual_batches(
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
     )
-
-
-def subclass_attention_metadata_builder(
-    name_prefix: str,
-    builder_cls: type[AttentionMetadataBuilder[M]],
-    build_preprocess_fn: Callable[[CommonAttentionMetadata],
-                                  CommonAttentionMetadata],
-) -> type[AttentionMetadataBuilder[M]]:
-    """
-    Return a new subclass of `builder_cls` whose .build(...) method
-    first calls build_preprocess_fn(common_attn_metadata) on the metadata.
-    """
-    name: str = name_prefix + builder_cls.__name__  # type: ignore
-
-    def build(self,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False):
-        return builder_cls.build(self, common_prefix_len,
-                                 build_preprocess_fn(common_attn_metadata),
-                                 fast_build)
-
-    Wrapped = type(
-        name,
-        (builder_cls, ),  # inherit from the original
-        {
-            "build": build,
-        })
-    return Wrapped  # type: ignore
 
 
 def subclass_attention_backend(
