@@ -1053,6 +1053,7 @@ if envs.VLLM_SERVER_DEV_MODE:
             str(vllm_config)
             if config_format == "text" else PydanticVllmConfig.dump_python(
                 vllm_config, mode="json", fallback=str)
+            # fallback=str is needed to handle e.g. torch.dtype
         }
         return JSONResponse(content=server_info)
 
