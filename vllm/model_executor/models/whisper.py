@@ -9,10 +9,10 @@ from typing import Literal, Optional, TypedDict, Union, cast
 import numpy as np
 import torch
 from torch import nn
-
 from transformers import (BatchFeature, WhisperConfig, WhisperFeatureExtractor,
                           WhisperProcessor)
 from transformers.models.whisper.modeling_whisper import sinusoids
+
 from vllm.attention import Attention, AttentionType
 from vllm.attention.layer import MultiHeadAttention
 from vllm.config import (CacheConfig, ModelConfig, SpeechToTextConfig,
@@ -784,7 +784,8 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             stt_config: SpeechToTextConfig,
             language: Optional[str],
             task_type: Literal["transcribe", "translate"],
-            request_prompt: str) -> PromptType:
+            request_prompt: str,
+            to_language: Optional[str]) -> PromptType:
         if language is None:
             raise ValueError(
                 "Language must be specified when creating the Whisper prompt")

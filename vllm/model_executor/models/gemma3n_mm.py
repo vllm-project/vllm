@@ -6,7 +6,6 @@ from typing import Any, Literal, Optional, TypedDict, Union, cast
 import numpy as np
 import torch
 from torch import nn
-
 from transformers import AutoModel, BatchFeature
 from transformers.models.gemma3n import (Gemma3nAudioConfig,
                                          Gemma3nAudioFeatureExtractor,
@@ -14,6 +13,7 @@ from transformers.models.gemma3n import (Gemma3nAudioConfig,
                                          Gemma3nTextConfig,
                                          Gemma3nVisionConfig)
 from transformers.models.siglip import SiglipImageProcessorFast
+
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -708,20 +708,33 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
                               model_config: ModelConfig,
                               language: Optional[str],
                               task_type: Literal["transcribe", "translate"],
-                              request_prompt: str) -> PromptType:
+                              request_prompt: str,
+                              to_language: Optional[str]) -> PromptType:
         """
         Gemma3n supports "free-form" transcription.
         We fix its prompt here to standardize transcriptions/translations 
         requests.
         """
+        # Transcribe this audio [into <>] | for transcription
+        # Translate this audio [from <> into <>] | for translation
         prompt = "<start_of_turn>user\n"
         prompt += "Transcribe" if task_type == "transcribe" else "Translate"
         prompt += " this audio"
-        if language is not None:
-            # We assume the language is a valid ISO 639-1 code.
-            full_lang_name = cls.supported_languages[language]
+
+        # We assume the language is a valid ISO 639-1 code.
+        full_lang_name = cls.supported_languages.get(language, "")
+        # Translation only for now
+        full_lang_name_to = cls.supported_languages.get(to_language, "")
+
+        if task_type == "transcribe" and full_lang_name:
             prompt += f" into {full_lang_name}"
-        prompt += ":<audio_soft_token><end_of_turn>\n<start_of_turn>model\n"
+        elif task_type == "translate":
+            if full_lang_name:
+                prompt += f" from {full_lang_name}"
+            if full_lang_name_to:
+                prompt += f" into {full_lang_name_to}"
+
+        prompt += ": <audio_soft_token><end_of_turn>\n<start_of_turn>model\n"
 
         audio = (audio, stt_config.sample_rate)
         prompts_dict = {"multi_modal_data": {"audio": audio}, "prompt": prompt}
@@ -735,4 +748,6 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
             # the model is only limited by its context length.
             max_audio_clip_s=30,
             sample_rate=16000,
+            # TODO enable chunking after more thorough testing.
+            min_energy_split_window_size=None,
         )

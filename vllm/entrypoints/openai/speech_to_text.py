@@ -110,7 +110,9 @@ class OpenAISpeechToText(OpenAIServing):
                 model_config=self.model_config,
                 language=language,
                 task_type=self.task_type,
-                request_prompt=request.prompt)
+                request_prompt=request.prompt,
+                to_language=request.to_language,
+            )
             prompts.append(prompt)
         return prompts, duration
 
