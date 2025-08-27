@@ -2439,8 +2439,8 @@ class LoRAConfig:
     lora_dtype: Union[torch.dtype, LoRADType] = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
     lora_extra_vocab_size: int = 0
-    """(Deprecating) Maximum size of extra vocabulary that can be present in a 
-    LoRA adapter. Set to 0 to disable. Will be removed in a future release."""
+    """(Deprecated) Maximum size of extra vocabulary that can be present in a 
+    LoRA adapter. Set to 0 to disable. Will be removed in v0.12.0."""
     lora_vocab_padding_size: ClassVar[int] = current_platform\
         .get_lora_vocab_padding_size()
 
@@ -2486,7 +2486,7 @@ class LoRAConfig:
         if self.lora_extra_vocab_size != 0:
             logger.warning(
                 "`lora_extra_vocab_size` is deprecated and will be removed "
-                "in a future release. Additional vocabulary support for "
+                "in v0.12.0. Additional vocabulary support for "
                 "LoRA adapters is being phased out."
             )
         
