@@ -1081,6 +1081,10 @@ class AllReduceFusionPass(VllmInductorPass):
         element_size = 4 if use_fp32_lamport else 2
         max_token_num = (max_size //
                          (self.hidden_dim * element_size * self.tp_size))
+        # take the min to save workspace size and we'll never use more
+        # than max_num_batched_tokens anyways
+        max_token_num = min(max_token_num,
+                            config.scheduler_config.max_num_batched_tokens)
 
         self.ipc_handles, workspace_tensor = (
             flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
