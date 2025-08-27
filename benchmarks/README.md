@@ -23,19 +23,50 @@ become available.
       <td><code>wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json</code></td>
     </tr>
     <tr>
+      <td><strong>ShareGPT4V (Image)</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td>
+        <code>wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/blob/main/sharegpt4v_instruct_gpt4-vision_cap100k.json</code>
+        <br>
+        <div>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:</div>
+        <code>wget http://images.cocodataset.org/zips/train2017.zip</code>
+      </td>
+    </tr>
+        <tr>
+      <td><strong>ShareGPT4Video (Video)</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td>
+        <code>git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video</code>
+      </td>
+    </tr>
+    <tr>
       <td><strong>BurstGPT</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
       <td><code>wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv</code></td>
     </tr>
     <tr>
-      <td><strong>Sonnet</strong></td>
+      <td><strong>Sonnet (deprecated)</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
       <td>Local file: <code>benchmarks/sonnet.txt</code></td>
     </tr>
     <tr>
       <td><strong>Random</strong></td>
+      <td style="text-align: center;">✅</td>
+      <td style="text-align: center;">✅</td>
+      <td><code>synthetic</code></td>
+    </tr>
+    <tr>
+      <td><strong>RandomMultiModal (Image/Video)</strong></td>
+      <td style="text-align: center;">🟡</td>
+      <td style="text-align: center;">🚧</td>
+      <td><code>synthetic</code> </td>
+    </tr>
+    <tr>
+      <td><strong>Prefix Repetition</strong></td>
       <td style="text-align: center;">✅</td>
       <td style="text-align: center;">✅</td>
       <td><code>synthetic</code></td>
@@ -177,6 +208,7 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 ```bash
 vllm bench serve \
   --backend openai-chat \
+  --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
@@ -213,6 +245,7 @@ vllm serve Qwen/Qwen2-VL-7B-Instruct
 ```bash
 vllm bench serve \
   --backend openai-chat \
+  --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
@@ -227,6 +260,7 @@ vllm bench serve \
 ```bash
 vllm bench serve \
   --backend openai-chat \
+  --endpoint-type openai-chat \
   --model Qwen/Qwen2-VL-7B-Instruct \
   --endpoint /v1/chat/completions \
   --dataset-name hf \
@@ -581,6 +615,20 @@ python3 benchmarks/benchmark_prefix_caching.py \
   --input-length-range 128:256
 ```
 
+### Prefix Repetition Dataset
+
+```bash
+vllm bench serve \
+  --backend openai \
+  --model meta-llama/Llama-2-7b-chat-hf \
+  --dataset-name prefix_repetition \
+  --num-prompts 100 \
+  --prefix-repetition-prefix-len 512 \
+  --prefix-repetition-suffix-len 128 \
+  --prefix-repetition-num-prefixes 5 \
+  --prefix-repetition-output-len 128
+```
+
 </details>
 
 ## ⚡ Example - Request Prioritization Benchmark
@@ -614,5 +662,141 @@ python3 benchmarks/benchmark_prioritization.py \
   --scheduling-policy priority \
   --n 2
 ```
+
+</details>
+
+## 👁️ Example - Multi-Modal Benchmark
+
+<details>
+<summary>Show more</summary>
+
+<br/>
+
+Benchmark the performance of multi-modal requests in vLLM.
+
+### Images (ShareGPT4V)
+
+Start vLLM:
+
+```bash
+python -m vllm.entrypoints.openai.api_server \
+  --model Qwen/Qwen2.5-VL-7B-Instruct \
+  --dtype bfloat16 \
+  --limit-mm-per-prompt '{"image": 1}' \
+  --allowed-local-media-path /path/to/sharegpt4v/images
+```
+
+Send requests with images:
+
+```bash
+python benchmarks/benchmark_serving.py \
+  --backend openai-chat \
+  --model Qwen/Qwen2.5-VL-7B-Instruct \
+  --dataset-name sharegpt \
+  --dataset-path /path/to/ShareGPT4V/sharegpt4v_instruct_gpt4-vision_cap100k.json \
+  --num-prompts 100 \
+  --save-result \
+  --result-dir ~/vllm_benchmark_results \
+  --save-detailed \
+  --endpoint /v1/chat/completion
+```
+
+### Videos (ShareGPT4Video)
+
+Start vLLM:
+
+```bash
+python -m vllm.entrypoints.openai.api_server \
+  --model Qwen/Qwen2.5-VL-7B-Instruct \
+  --dtype bfloat16 \
+  --limit-mm-per-prompt '{"video": 1}' \
+  --allowed-local-media-path /path/to/sharegpt4video/videos
+```
+
+Send requests with videos:
+
+```bash
+python benchmarks/benchmark_serving.py \
+  --backend openai-chat \
+  --model Qwen/Qwen2.5-VL-7B-Instruct \
+  --dataset-name sharegpt \
+  --dataset-path /path/to/ShareGPT4Video/llava_v1_5_mix665k_with_video_chatgpt72k_share4video28k.json \
+  --num-prompts 100 \
+  --save-result \
+  --result-dir ~/vllm_benchmark_results \
+  --save-detailed \
+  --endpoint /v1/chat/completion
+```
+
+### Synthetic Random Images (random-mm)
+
+Generate synthetic image inputs alongside random text prompts to stress-test vision models without external datasets.
+
+Notes:
+
+- Works only with online benchmark via the OpenAI  backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
+- Video sampling is not yet implemented.
+
+Start the server (example):
+
+```bash
+vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
+  --dtype bfloat16 \
+  --max-model-len 16384 \
+  --limit-mm-per-prompt '{"image": 3, "video": 0}' \
+  --mm-processor-kwargs max_pixels=1003520
+```
+
+Benchmark. It is recommended to use the flag `--ignore-eos` to simulate real responses. You can set the size of the output via the arg `random-output-len`.
+
+Ex.1: Fixed number of items and a single image resolution, enforcing generation of approx 40 tokens:
+
+```bash
+vllm bench serve \
+  --backend openai-chat \
+  --model Qwen/Qwen2.5-VL-3B-Instruct \
+  --endpoint /v1/chat/completions \
+  --dataset-name random-mm \
+  --num-prompts 100 \
+  --max-concurrency 10 \
+  --random-prefix-len 25 \
+  --random-input-len 300 \
+  --random-output-len 40 \
+  --random-range-ratio 0.2 \
+  --random-mm-base-items-per-request 2 \
+  --random-mm-limit-mm-per-prompt '{"image": 3, "video": 0}' \
+  --random-mm-bucket-config '{(224, 224, 1): 1.0}' \
+  --request-rate inf \
+  --ignore-eos \
+  --seed 42
+```
+
+The number of items per request can be controlled by passing multiple image buckets:
+
+```bash
+  --random-mm-base-items-per-request 2 \
+  --random-mm-num-mm-items-range-ratio 0.5 \
+  --random-mm-limit-mm-per-prompt '{"image": 4, "video": 0}' \
+  --random-mm-bucket-config '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}' \
+```
+
+Flags specific to `random-mm`:
+
+- `--random-mm-base-items-per-request`: base number of multimodal items per request.
+- `--random-mm-num-mm-items-range-ratio`: vary item count uniformly in the closed integer range [floor(n·(1−r)), ceil(n·(1+r))]. Set r=0 to keep it fixed; r=1 allows 0 items.
+- `--random-mm-limit-mm-per-prompt`: per-modality hard caps, e.g. '{"image": 3, "video": 0}'.
+- `--random-mm-bucket-config`: dict mapping (H, W, T) → probability. Entries with probability 0 are removed; remaining probabilities are renormalized to sum to 1. Use T=1 for images. Set any T>1 for videos (video sampling not yet supported).
+
+Behavioral notes:
+
+- If the requested base item count cannot be satisfied under the provided per-prompt limits, the tool raises an error rather than silently clamping.
+
+How sampling works:
+
+- Determine per-request item count k by sampling uniformly from the integer range defined by `--random-mm-base-items-per-request` and `--random-mm-num-mm-items-range-ratio`, then clamp k to at most the sum of per-modality limits.
+- For each of the k items, sample a bucket (H, W, T) according to the normalized probabilities in `--random-mm-bucket-config`, while tracking how many items of each modality have been added.
+- If a modality (e.g., image) reaches its limit from `--random-mm-limit-mm-per-prompt`, all buckets of that modality are excluded and the remaining bucket probabilities are renormalized before continuing.
+This should be seen as an edge case, and if this behavior can be avoided by setting `--random-mm-limit-mm-per-prompt` to a large number. Note that this might result in errors due to engine config `--limit-mm-per-prompt`.
+- The resulting request contains synthetic image data in `multi_modal_data` (OpenAI Chat format). When `random-mm` is used with the OpenAI Chat backend, prompts remain text and MM content is attached via `multi_modal_data`.
 
 </details>

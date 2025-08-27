@@ -35,7 +35,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   m.def(
       "moe_wna16_marlin_gemm(Tensor! a, Tensor? c_or_none,"
-      "Tensor! b_q_weight, Tensor! b_scales, Tensor? global_scale, Tensor? "
+      "Tensor! b_q_weight, Tensor? b_bias_or_none,"
+      "Tensor! b_scales, Tensor? global_scale, Tensor? "
       "b_zeros_or_none,"
       "Tensor? g_idx_or_none, Tensor? perm_or_none, Tensor! workspace,"
       "Tensor sorted_token_ids,"
@@ -77,6 +78,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "output_tensor) -> ()");
   m.impl("shuffle_rows", torch::kCUDA, &shuffle_rows);
 
+  // Apply grouped topk routing to select experts.
+  m.def(
+      "grouped_topk(Tensor scores, Tensor scores_with_bias, int n_group, int "
+      "topk_group, int topk, bool renormalize, float "
+      "routed_scaling_factor) -> (Tensor, Tensor)");
+  m.impl("grouped_topk", torch::kCUDA, &grouped_topk);
 #endif
 }
 

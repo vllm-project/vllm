@@ -801,7 +801,6 @@ def get_default_config(
     K: int,
     topk: int,
     dtype: Optional[str],
-    is_marlin: bool,
     block_shape: Optional[list[int]] = None,
 ) -> dict[str, int]:
     if dtype == "fp8_w8a8" and block_shape is not None:
@@ -832,11 +831,6 @@ def get_default_config(
             config = {"BLOCK_SIZE_M": 32, "GROUP_SIZE_M": 1}
         else:
             config = {"BLOCK_SIZE_M": 64, "GROUP_SIZE_M": 1}
-    elif is_marlin:
-        for block_size_m in [8, 16, 32, 48, 64]:
-            if M * topk / E / block_size_m < 0.9:
-                break
-        return {"BLOCK_SIZE_M": block_size_m}
     elif M <= E:
         config = {
             "BLOCK_SIZE_M": 16,
@@ -860,7 +854,6 @@ def try_get_optimal_moe_config(
     top_k: int,
     dtype: Optional[str],
     M: int,
-    is_marlin: bool = False,
     block_shape: Optional[list[int]] = None,
 ) -> dict[str, int]:
     from vllm.model_executor.layers.fused_moe import get_config
@@ -883,7 +876,7 @@ def try_get_optimal_moe_config(
         else:
             # Else use the default config
             config = get_default_config(M, E, N, w1_shape[2], top_k, dtype,
-                                        is_marlin, block_shape)
+                                        block_shape)
     return config
 
 
@@ -956,8 +949,23 @@ def grouped_topk(
     num_expert_group: int = 0,
     topk_group: int = 0,
     scoring_func: str = "softmax",
-    e_score_correction_bias: Optional[torch.Tensor] = None
+    routed_scaling_factor: float = 1.0,
+    e_score_correction_bias: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if envs.VLLM_USE_FUSED_MOE_GROUPED_TOPK and \
+            current_platform.is_cuda() and \
+            num_expert_group <= 32 and topk <= 32 and \
+            e_score_correction_bias is not None:
+        return fused_grouped_topk(
+            hidden_states=hidden_states,
+            gating_output=gating_output,
+            topk=topk,
+            renormalize=renormalize,
+            e_score_correction_bias=e_score_correction_bias,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor)
 
     assert hidden_states.size(0) == gating_output.size(0), (
         "Number of tokens mismatch")
@@ -1003,7 +1011,36 @@ def grouped_topk(
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
+    topk_weights = topk_weights * routed_scaling_factor
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
+
+def fused_grouped_topk(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    e_score_correction_bias: torch.Tensor,
+    num_expert_group: int = 0,
+    topk_group: int = 0,
+    scoring_func: str = "softmax",
+    routed_scaling_factor: float = 1.0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert hidden_states.size(0) == gating_output.size(0), (
+        "Number of tokens mismatch")
+
+    if scoring_func == "softmax":
+        scores = torch.softmax(gating_output, dim=-1)
+    elif scoring_func == "sigmoid":
+        scores = gating_output.sigmoid()
+    else:
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
+    scores_with_bias = scores + e_score_correction_bias.unsqueeze(0)
+    topk_values, topk_indices = ops.grouped_topk(
+        scores, scores_with_bias.to(scores.dtype), num_expert_group,
+        topk_group, topk, renormalize, routed_scaling_factor)
+    return topk_values.to(torch.float32), topk_indices.to(torch.int32)
 
 
 def get_config_dtype_str(
@@ -1189,10 +1226,10 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
         hidden_states: torch.Tensor,
         input_scale: torch.Tensor,
         gemm1_weights: torch.Tensor,
-        gemm1_weights_scale: torch.Tensor,
-        activation_scale: torch.Tensor,
         gemm2_weights: torch.Tensor,
-        gemm2_weights_scale: torch.Tensor,
+        output1_scales_scalar: torch.Tensor,
+        output1_scales_gate_scalar: torch.Tensor,
+        output2_scales_scalar: torch.Tensor,
         num_experts: int,
         top_k: int,
         num_expert_group: Optional[int],
@@ -1206,16 +1243,11 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
     num_expert_group = num_expert_group if num_expert_group is not None else 0
     topk_group = topk_group if topk_group is not None else 0
 
-    quant_hidden_states, input_scale = moe_kernel_quantize_input(
+    quant_hidden_states, _ = moe_kernel_quantize_input(
         hidden_states,
         input_scale,
         quant_dtype=torch.float8_e4m3fn,
         per_act_token_quant=False)
-
-    output1_scales_scalar = gemm1_weights_scale * input_scale * (
-        1.0 / activation_scale)
-    output1_scales_gate_scalar = gemm1_weights_scale * input_scale
-    output2_scales_scalar = activation_scale * gemm2_weights_scale
 
     from vllm.utils.flashinfer import (
         flashinfer_trtllm_fp8_per_tensor_scale_moe)
@@ -1244,24 +1276,24 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
 
 def flashinfer_fused_moe_per_tensor_scale_fp8_fake(
         routing_logits: torch.Tensor,
-        routing_bias: torch.Tensor,
+        routing_bias: Optional[torch.Tensor],
         hidden_states: torch.Tensor,
+        input_scale: torch.Tensor,
         gemm1_weights: torch.Tensor,
+        gemm2_weights: torch.Tensor,
         output1_scales_scalar: torch.Tensor,
         output1_scales_gate_scalar: torch.Tensor,
-        gemm2_weights: torch.Tensor,
         output2_scales_scalar: torch.Tensor,
         num_experts: int,
         top_k: int,
-        num_expert_group: int,
-        topk_group: int,
+        num_expert_group: Optional[int],
+        topk_group: Optional[int],
         intermediate_size: int,
         local_expert_offset: int,
         local_num_experts: int,
-        routed_scaling_factor: float = 1.0,
-        use_routing_scales_on_input: bool = False,
-        tile_tokens_dim: int = 8,
-        routing_method_type: int = 0) -> torch.Tensor:
+        use_routing_scales_on_input: bool,
+        routing_method_type: int,
+        routed_scaling_factor: float = 1.0) -> torch.Tensor:
     pass
 
 
@@ -1399,9 +1431,9 @@ def fused_experts(hidden_states: torch.Tensor,
     # E8M0 scale, which means we requantize the weight and input to the specific
     # scale. Fallen back to cutlass or triton for some cases would cause
     # accuracy issue.
-    should_use_deep_gemm = is_blackwell_deep_gemm_e8m0_used(
-    ) or _valid_deep_gemm(hidden_states, w1, w2)
-    if (allow_deep_gemm and use_fp8_w8a8 and should_use_deep_gemm):
+    if (allow_deep_gemm and use_fp8_w8a8
+            and (is_blackwell_deep_gemm_e8m0_used()
+                 or _valid_deep_gemm(hidden_states, w1, w2))):
         assert apply_router_weight_on_input is False
         assert is_act_and_mul, (
             "DeepGemm only supports is_act_and_mul=True for now.")
@@ -1633,17 +1665,6 @@ def fused_experts_impl(
                                 block_shape=block_shape,
                                 B_bias=w1_bias)
 
-        # TODO fused kernel
-        def swiglu_oai(gate_up):
-            alpha = 1.702
-            limit = 7.0
-            gate, up = gate_up[..., ::2], gate_up[..., 1::2]
-            gate = gate.clamp(min=None, max=limit)
-            up = up.clamp(min=-limit, max=limit)
-            glu = gate * torch.sigmoid(gate * alpha)
-            gated_output = (up + 1) * glu
-            return gated_output
-
         # Activation function with multiplication
         if activation == "silu" and is_act_and_mul:
             torch.ops._C.silu_and_mul(intermediate_cache2,
@@ -1651,13 +1672,16 @@ def fused_experts_impl(
         elif activation == "gelu" and is_act_and_mul:
             torch.ops._C.gelu_and_mul(intermediate_cache2,
                                       intermediate_cache1.view(-1, N))
+        elif activation == "swigluoai" and is_act_and_mul:
+            # alpha = 1.702, limit = 7.0
+            torch.ops._C.swigluoai_and_mul(intermediate_cache2,
+                                           intermediate_cache1.view(-1, N))
         # Activation function without multiplication
         elif activation == "silu":
             intermediate_cache2 = F.silu(intermediate_cache1.view(-1, N))
         elif activation == "gelu":
             intermediate_cache2 = F.gelu(intermediate_cache1.view(-1, N))
-        elif activation == "swiglu_oai":
-            intermediate_cache2 = swiglu_oai(intermediate_cache1.view(-1, N))
+
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}, "
                              f"with is_act_and_mul={is_act_and_mul}.")
@@ -1910,7 +1934,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         workspace2: torch.Tensor,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
-        extra_expert_args: Optional[dict[str, Any]],
     ):
         # Check constraints.
         if self.use_int4_w4a16:

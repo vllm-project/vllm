@@ -13,7 +13,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
-                     MultiModalInputs, MultiModalKwargs,
+                     MultiModalInputs, MultiModalKwargsOptionalItems,
                      MultiModalPlaceholderDict)
 from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
                          EncDecMultiModalProcessor)
@@ -43,7 +43,7 @@ class DummyDecoderData(NamedTuple):
     """Dummy data used for profiling."""
 
     prompt_token_ids: list[int]
-    multi_modal_data: MultiModalKwargs
+    multi_modal_data: MultiModalKwargsOptionalItems
     multi_modal_placeholders: MultiModalPlaceholderDict
 
 
@@ -209,7 +209,7 @@ class MultiModalProfiler(Generic[_I]):
         if processor.pad_dummy_encoder_prompt:
             num_tokens_to_pad = max(total_len, seq_len) - total_len
             encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
-        # NOTE: Whisper allows total_len > seq_len.
+        # NOTE: Whisper and Donut allows total_len > seq_len.
         elif total_len > seq_len and not envs.VLLM_USE_V1:
             # `max_num_batched_tokens` is defined by `SchedulerConfig`
             logger.warning_once(

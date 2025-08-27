@@ -48,7 +48,7 @@ from vllm.model_executor.models.minicpm import MiniCPMForCausalLM
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors)
 from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
@@ -58,7 +58,8 @@ from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
                                    VideoItem, VideoProcessorItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate, PromptUpdateDetails)
+                                        PromptUpdate, PromptUpdateDetails,
+                                        ResolvedPromptUpdate, _seq2text)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -694,7 +695,7 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         placeholders = [("image", self.info.image_pattern),
                         ("video", self.info.video_pattern)]
@@ -744,6 +745,43 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
             for modality, pattern in placeholders
         ]
 
+    def _recompute_cached_prompt_update(
+        self,
+        cached_update: ResolvedPromptUpdate,
+        new_item_idx: int,
+    ) -> ResolvedPromptUpdate:
+        new_update = super()._recompute_cached_prompt_update(
+            cached_update,
+            new_item_idx,
+        )
+
+        if cached_update.modality == "image":
+            tokenizer = self.info.get_tokenizer()
+            image_processor = self.info.get_image_processor()
+            version = self.info.get_model_version()
+
+            text = _seq2text(tokenizer, cached_update.content.full)
+            prev_item_idx = cached_update.item_idx
+
+            if version == (2, 0) or version == (2, 5):
+                im_start = image_processor.im_start_token
+                im_end = image_processor.im_end_token
+            else:
+                im_start = image_processor.im_id_start
+                im_end = image_processor.im_id_end
+
+            new_update = new_update.with_content(
+                PromptUpdateDetails.select_text(
+                    text.replace(
+                        f"{im_start}{prev_item_idx}{im_end}",
+                        f"{im_start}{new_item_idx}{im_end}",
+                        1,
+                    ),
+                    "<unk>",
+                ))
+
+        return new_update
+
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -778,6 +816,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         # and config class
         self.config = config
         self.multimodal_config = multimodal_config
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
         self.version = get_version_by_config(self.config)
         self.llm = self.init_llm(vllm_config=vllm_config,
@@ -1325,9 +1364,11 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         prefix: str = "",
     ) -> nn.Module:
         quant_config = self._maybe_ignore_quant_config(quant_config)
-        model = Idefics2VisionTransformer(config.vision_config,
-                                          quant_config=quant_config,
-                                          prefix=prefix)
+        model = Idefics2VisionTransformer(
+            config.vision_config,
+            quant_config=quant_config,
+            prefix=prefix,
+            use_data_parallel=self.use_data_parallel)
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
         return model
