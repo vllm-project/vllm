@@ -634,15 +634,21 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
             self, layer: torch.nn.Module) -> Optional[FusedMoEQuantConfig]:
 
-        if (envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+        if self.use_marlin:
             return None
+
+        if should_use_flashinfer_mxfp4():
+            w1_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
+        else:
+            w1_scale = layer.w13_precision_config
+            w2_scale = layer.w2_precision_config
 
         return mxfp4_w4a4_moe_quant_config(
             w1_bias=layer.w13_bias,
             w2_bias=layer.w2_bias,
-            w1_scale=self.w13_precision_config,
-            w2_scale=self.w2_precision_config,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
         )
 
     def select_gemm_impl(
