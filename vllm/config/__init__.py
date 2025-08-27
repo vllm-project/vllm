@@ -1699,6 +1699,10 @@ class ModelConfig:
         return self.multimodal_config is not None
 
     @property
+    def is_multimodal_raw_input_only_model(self) -> bool:
+        return self._model_info.supports_multimodal_raw_input_only
+
+    @property
     def is_cross_encoder(self) -> bool:
         return (self._model_info.supports_cross_encoding
                 or self.convert_type == "classify")
@@ -1706,10 +1710,6 @@ class ModelConfig:
     @property
     def is_pp_supported(self) -> bool:
         return self._model_info.supports_pp
-
-    @property
-    def is_multimodal_raw_input_supported(self) -> bool:
-        return self._model_info.supports_multimodal_raw_input
 
     @property
     def is_attention_free(self) -> bool:

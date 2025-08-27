@@ -139,8 +139,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cache_config.cache_dtype]
 
         self.is_pooling_model = model_config.pooler_config is not None
-        self.is_multimodal_raw_input_supported = (
-            model_config.is_multimodal_raw_input_supported)
+        self.is_multimodal_raw_input_only_model = (
+            model_config.is_multimodal_raw_input_only_model)
+
         self.max_model_len = model_config.max_model_len
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
@@ -612,7 +613,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> BatchedTensorInputs:
-        if not self.is_multimodal_raw_input_supported or not scheduler_output:  # noqa: SIM102
+        if not scheduler_output or not self.is_multimodal_raw_input_only_model:
             return {}
 
         mm_kwargs = list[MultiModalKwargsItem]()
@@ -631,8 +632,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return mm_kwargs_combined
 
     def _dummy_mm_kwargs(self, num_seqs: int) -> BatchedTensorInputs:
-        if not self.is_multimodal_raw_input_supported:
+        if not self.is_multimodal_raw_input_only_model:
             return {}
+
         mm_budget = self.mm_budget
         assert mm_budget is not None
 
