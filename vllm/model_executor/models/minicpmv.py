@@ -296,6 +296,7 @@ class Resampler4_5(Resampler2_5):
     def forward(self,
                 x: torch.Tensor,
                 tgt_sizes: torch.Tensor,
+                # temporal_ids for high refresh rate videos
                 temporal_ids=None) -> torch.Tensor:
         assert x.shape[0] == tgt_sizes.shape[0]
         bs = x.shape[0]
