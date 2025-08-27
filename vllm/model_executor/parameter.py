@@ -7,6 +7,7 @@ from typing import Callable, Optional, Union
 from weakref import WeakValueDictionary
 
 import torch
+import torch.nn.parameter
 from torch.nn import Parameter
 
 from vllm.distributed import (get_tensor_model_parallel_rank,
@@ -511,6 +512,18 @@ class SharedWeightParameter(BasevLLMParameter):
         raise ValueError("When loading partition weights of "
                          f"{self.__class__.__name__}, use methods provided by "
                          f"{self.__class__.__name__}, not partition loader")
+
+
+class MissingParameter(BasevLLMParameter):
+
+    def __new__(cls):
+        return super().__new__(cls, data=None)
+
+    def __init__(self):
+        super().__init__(data=None, weight_loader=self.weight_loader)
+
+    def weight_loader(self, *args, **kwargs):
+        pass
 
 
 def permute_param_layout_(param: BasevLLMParameter, input_dim: int,
