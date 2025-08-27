@@ -289,9 +289,15 @@ class Processor:
             arrival_time = time.time()
 
         # Optionally generate multimodal hash overrides based on request id.
-        mm_hash_overrides = (self._maybe_build_mm_hash_overrides(
-            request_id, prompt) if self.model_config.generate_mm_hash_overrides
-                             else None)
+        # NOTE: when users explicitly turn off BOTH prefix caching and input
+        # processing caching, no multimodal features or embeddings will be
+        # reused across requests, therefore hashing is no longer necessary.
+        if self.model_config.multimodal_config.mm_processor_cache_gb == 0 and (
+                not self.cache_config.enable_prefix_caching):
+            mm_hash_overrides = self._maybe_build_mm_hash_overrides(
+                request_id, prompt)
+        else:
+            mm_hash_overrides = None
 
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.

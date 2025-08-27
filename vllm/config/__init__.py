@@ -1706,23 +1706,6 @@ class ModelConfig:
 
         return mm_config.mm_processor_cache_gb > 0
 
-    @property
-    def generate_mm_hash_overrides(self) -> bool:
-        """Whether to generate multi-modal hash overrides for all items in
-        multimodal data based on request metadata.
-
-        NOTE: This returns True only if users explicitly turn off BOTH prefix
-        caching and input processing caching. In this case, no multimodal
-        features or embeddings will be reused across requests, therefore
-        hashing is no longer necessary.
-        """
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return False
-
-        return mm_config.mm_processor_cache_gb == 0 and (
-            not self.cache_config.enable_prefix_caching)
-
     def get_mm_input_cache_gb(self) -> int:
         mm_config = self.multimodal_config
         if mm_config is None:
