@@ -412,10 +412,7 @@ def test_full_cuda_graph(
         else:
             vllm_v0_outputs = None
 
-    with vllm_runner(model,
-                     max_num_seqs=MAX_NUM_SEQS,
-                     compilation_config={'full_cuda_graph':
-                                         True}) as vllm_model:
+    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
         vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
