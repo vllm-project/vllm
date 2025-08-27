@@ -140,6 +140,7 @@ def server_manager(request, default_server_args):
         yield server_manager
 
 
+@pytest.fixture
 def servers(server_manager):
     return server_manager.servers
 
