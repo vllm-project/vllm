@@ -1260,15 +1260,18 @@ class EngineArgs:
         if effective_max_model_len is None:
             effective_max_model_len = model_config.max_model_len
         if use_v1 and speculative_config is not None and \
+            effective_max_model_len is not None and \
             speculative_config.draft_model_config is not None and \
-                speculative_config.draft_model_config.max_model_len \
-                    < effective_max_model_len:
-            raise ValueError(
-                "The draft model config's max_model_len "
-                f"({speculative_config.draft_model_config.max_model_len}) "
-                "is less than the deployment's max_model_len "
-                f"({effective_max_model_len})."
-                "--max-model-len should be decreased to match.")
+            speculative_config.draft_model_config.max_model_len is not None:
+            draft_max_model_len = \
+                speculative_config.draft_model_config.max_model_len
+            if draft_max_model_len < effective_max_model_len:
+                raise ValueError(
+                    "The draft model config's max_model_len "
+                    f"({draft_max_model_len}) "
+                    "is less than the deployment's max_model_len "
+                    f"({effective_max_model_len})."
+                    "--max-model-len should be decreased to match.")
 
         # make sure num_lookahead_slots is set appropriately depending on
         # whether speculative decoding is enabled
