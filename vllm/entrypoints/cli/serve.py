@@ -216,12 +216,11 @@ def run_api_server_worker_proc(listen_address,
     """Entrypoint for individual API server worker processes."""
     client_config = client_config or {}
 
-    args._api_process_rank = server_index = client_config.get(
-        "client_index", 0)
     args._api_process_count = client_config.get("client_count", 1)
+    args._api_process_rank = client_config.get("client_index", 0)
 
     # Set process title and add process-specific prefix to stdout and stderr.
-    set_process_title("APIServer", str(server_index))
+    set_process_title("APIServer", str(args._api_process_rank))
     decorate_logs()
 
     uvloop.run(
