@@ -9,7 +9,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Optional, Union, cast
+from typing import Any, cast, Optional, TYPE_CHECKING, Union, Tuple
 
 import numpy as np
 import torch
@@ -1467,6 +1467,39 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_connector_output=kv_connector_output,
         )
 
+    def _forward(
+        self,
+        attn_metadata: dict[str, Any],
+        num_input_tokens: int,
+        num_tokens_across_dp: int,
+        cudagraph_runtime_mode: CUDAGraphMode,
+        batch_descriptor: BatchDescriptor,
+        scheduler_output: "SchedulerOutput",
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors,
+        inputs_embeds: list[torch.Tensor],
+        model_kwargs: dict[str, Any],
+    ) -> Tuple[torch.Tensor, Optional[KVConnectorOutput]]:
+        # Run the model.
+        # Use persistent buffers for CUDA graphs.
+        with set_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                batch_descriptor=batch_descriptor,
+        ), self.maybe_get_kv_connector_output(
+                scheduler_output) as kv_connector_output:
+                return self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                ), kv_connector_output
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1565,24 +1598,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=num_input_tokens,
-                num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
-                batch_descriptor=batch_descriptor,
-        ), self.maybe_get_kv_connector_output(
-                scheduler_output) as kv_connector_output:
-
-            model_output = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                **model_kwargs,
-            )
-
+        model_output, kv_connector_output = self._forward(
+            attn_metadata, 
+            num_input_tokens=num_input_tokens, 
+            num_tokens_across_dp=num_tokens_across_dp, 
+            cudagraph_runtime_mode=cudagraph_runtime_mode, 
+            batch_descriptor=batch_descriptor,
+            scheduler_output=scheduler_output,
+            input_ids=input_ids, 
+            positions=positions, 
+            intermediate_tensors=intermediate_tensors, 
+            inputs_embeds=inputs_embeds,
+            model_kwargs=model_kwargs,
+        )
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = model_output
         else:
