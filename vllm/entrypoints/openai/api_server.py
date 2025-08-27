@@ -1950,11 +1950,13 @@ async def run_server_worker(listen_address,
                             client_config=None,
                             **uvicorn_kwargs) -> None:
     """Run a single API server worker."""
+    client_config = client_config or {}
+
+    args._api_process_count = client_config.get("client_count", 1)
+    args._api_process_rank = client_config.get("client_index", 0)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
-
-    server_index = client_config.get("client_index", 0) if client_config else 0
 
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
@@ -1971,7 +1973,9 @@ async def run_server_worker(listen_address,
         vllm_config = await engine_client.get_vllm_config()
         await init_app_state(engine_client, vllm_config, app.state, args)
 
-        logger.info("Starting vLLM API server %d on %s", server_index,
+        print(vllm_config)
+        logger.info("Starting vLLM API server %d/%d on %s",
+                    args._api_process_rank, args._api_server_count,
                     listen_address)
         shutdown_task = await serve_http(
             app,
