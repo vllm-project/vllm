@@ -187,6 +187,7 @@ class KVCacheManager:
         new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
+        num_encoder_tokens: int = 0,
     ) -> Optional[KVCacheBlocks]:
         """Add slots for a request with new tokens to append.
 
@@ -253,6 +254,7 @@ class KVCacheManager:
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
+            num_encoder_tokens=num_encoder_tokens,
         )
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
@@ -273,7 +275,7 @@ class KVCacheManager:
                                                   new_computed_block_list)
 
         new_blocks = self.coordinator.allocate_new_blocks(
-            request.request_id, num_tokens_need_slot)
+            request.request_id, num_tokens_need_slot, num_encoder_tokens)
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
@@ -292,7 +294,7 @@ class KVCacheManager:
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
-        We free the blocks in reverse order so that he tail blocks are evicted 
+        We free the blocks in reverse order so that the tail blocks are evicted
         first when caching is enabled.
 
         Args:

@@ -309,6 +309,26 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
       "SymInt size_n, int num_bits) -> Tensor");
   // conditionally compiled so impl registrations are in source file
+
+  // CUTLASS w4a8 GEMM
+  ops.def(
+      "cutlass_w4a8_mm("
+      "   Tensor A,"
+      "   Tensor B,"
+      "   Tensor group_scales,"
+      "   int    group_size,"
+      "   Tensor channel_scales,"
+      "   Tensor token_scales,"
+      "   ScalarType? out_type,"
+      "   str?   maybe_schedule"
+      ") -> Tensor",
+      {stride_tag});
+  // pack scales
+  ops.def("cutlass_pack_scale_fp8(Tensor scales) -> Tensor");
+  // encode and reorder weight matrix
+  ops.def("cutlass_encode_and_reorder_int4b(Tensor B) -> Tensor");
+  // conditionally compiled so impl registration is in source file
+
 #endif
 
   // Dequantization for GGML.
@@ -672,11 +692,16 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "str kv_cache_dtype) -> ()");
   cache_ops.impl("convert_fp8", torch::kCUDA, &convert_fp8);
 
-  // Gather cache blocks from src_cache to dst.
+  // Gather cache blocks from src_cache to dst, dequantizing from
+  // src_cache's dtype to dst's dtype if necessary.
   cache_ops.def(
-      "gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
-      "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
-  cache_ops.impl("gather_cache", torch::kCUDA, &gather_cache);
+      "gather_and_maybe_dequant_cache(Tensor src_cache, Tensor! dst, "
+      "                               Tensor block_table, Tensor cu_seq_lens, "
+      "                               int batch_size, "
+      "                               str kv_cache_dtype, "
+      "                               Tensor scale, Tensor? seq_starts) -> ()");
+  cache_ops.impl("gather_and_maybe_dequant_cache", torch::kCUDA,
+                 &gather_and_maybe_dequant_cache);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
