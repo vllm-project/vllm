@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
-from transformers import AutoModel, BatchEncoding, PretrainedConfig, TensorType
+from transformers import BatchEncoding, PretrainedConfig, TensorType
 
 from vllm.config import VllmConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -26,6 +26,7 @@ from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
                                                    SupportsV0Only)
 from vllm.model_executor.models.internvl import get_internvl_target_ratios
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.radio import RadioModel
 from vllm.model_executor.models.utils import (flatten_bn,
                                               init_vllm_registered_model,
                                               maybe_prefix,
@@ -644,17 +645,10 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
             hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
-        self.vision_model = AutoModel.from_config(config.vision_config,
-                                                  trust_remote_code=True)
-        self.vision_model.model._initialize_weights = (
-            self.vision_model.model._init_weights)
-        self.vision_model2 = self.get_vision_model(self.vision_model)
-        # Move input normalization to processor to mirror original HF
-        # implementation where normalization is done in fp32
-        self.vision_model.radio_model.make_preprocessor_external(
-        )  # todo check this as well
-        self.vision_model = self.vision_model.to(
-            self.language_model.config.torch_dtype)
+
+        self.vision_model = self.get_vit_model_from_radio_config(
+            config.vision_config).to(self.language_model.config.torch_dtype)
+        self.vision_model.make_preprocessor_external()
 
         self.drop_vision_class_token = True
 
@@ -681,6 +675,46 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
         # TODO(amalasanjayd): Fix this
         self.img_context_token_id = None
         self.config = config
+
+    def get_vit_model_from_radio_config(self, hf_config):
+        """Build a vLLM RadioModel from an HF radio vision model.
+        """
+
+        vit_dims: dict[str, tuple[int, int, int, int]] = {
+            "vit_small_patch16_224": (384, 12, 6, 1536),
+            "vit_base_patch16_224": (768, 12, 12, 3072),
+            "vit_large_patch16_224": (1024, 24, 16, 4096),
+            "vit_huge_patch16_224": (1280, 32, 16, 5120),
+        }
+
+        model_name = hf_config.args.get("model")
+        hidden_size, num_layers, num_heads, intermediate_size = vit_dims.get(
+            model_name)
+
+        preferred_resolution = getattr(hf_config, "preferred_resolution", None)
+        image_size = preferred_resolution[0] if preferred_resolution else 224
+        patch_size = getattr(hf_config, "patch_size", 16)
+
+        vit_config = PretrainedConfig(
+            hidden_size=hidden_size,
+            num_hidden_layers=num_layers,
+            num_attention_heads=num_heads,
+            intermediate_size=intermediate_size,
+            image_size=image_size,
+            patch_size=patch_size,
+            qkv_bias=True,
+            qk_normalization=False,
+            norm_type="layer_norm",
+            layer_norm_eps=1e-6,
+            initializer_factor=1.0,
+            hidden_act="gelu",
+            max_img_size=2048,
+            reg_tokens=(hf_config.args.get("register_multiple")
+                        if hasattr(hf_config, "args")
+                        and isinstance(hf_config.args, dict) else None),
+        )
+
+        return RadioModel(vit_config)
 
     def pixel_shuffle(self, x, scale_factor=0.5):
         n, w, h, c = x.size()
@@ -711,11 +745,8 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
             x = x.permute(0, 2, 1, 3).contiguous()
         return x
 
-    def get_vision_model(self, vision_model):
-        pass
-
     def extract_feature(self, pixel_values):
-        vit_embeds = self.vision_model(pixel_values).features
+        vit_embeds = self.vision_model(pixel_values)
         vit_embeds = vit_embeds.to(dtype=torch.bfloat16)
         h = w = int(vit_embeds.shape[1]**0.5)
         vit_embeds = vit_embeds.reshape(vit_embeds.shape[0], h, w, -1)
@@ -771,7 +802,6 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
 
     def _process_image_input(self,
                              image_input: CustomImageInputs) -> torch.Tensor:
-        # TODO(amalasanjayd)
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
@@ -883,32 +913,55 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
                                                   sampling_metadata)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        adapter_dict = dict(self.mlp1.named_parameters())
 
-        def is_vision_model_weights(weight: tuple[str, torch.Tensor]):
-            return weight[0].startswith("vision_model")
+        def is_llm(name: str) -> bool:
+            return name.startswith("language_model")
 
         def is_adapter_weights(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith("mlp1")
 
-        # Get references to parameters for direct loading
-        vision_model_dict = dict(self.vision_model.named_parameters())
-        vision_model_buffers = dict(self.vision_model.named_buffers())
-        adapter_dict = dict(self.mlp1.named_parameters())
+        radio_kv: dict[str, torch.Tensor] = {}
+
+        def maybe_map_radio_weight(name: str, t: torch.Tensor):
+            if not name.startswith("vision_model.radio_model."):
+                return
+            sub = name[len("vision_model.radio_model."):]  # drop prefix
+
+            # Skip buffers not used
+            if sub in {"summary_idxs"}:
+                return
+
+            if sub.startswith("model.patch_generator."):
+                vllm_key = f"model.patch_generator.{sub.split('.', 2)[-1]}"
+                radio_kv[vllm_key] = t
+                return
+
+            if sub.startswith("input_conditioner."):
+                vllm_key = f"input_conditioner.{sub.split('.', 1)[-1]}"
+                radio_kv[vllm_key] = t
+                return
+
+            # Encoder blocks: HF 'model.blocks.{i}.' -> VLLM 'model.encoder.layers.{i}.'
+            if sub.startswith("model.blocks."):
+                parts = sub.split(".")
+                if len(parts) >= 4:
+                    layer_idx = parts[2]
+                    suffix = ".".join(parts[3:])
+                    # Skip layer-scale entries that VLLM doesn’t use
+                    # todo check if we want it
+                    if suffix in {"ls1", "ls2"} or suffix.startswith(
+                        ("ls1.", "ls2.")):
+                        return
+                    vllm_key = f"model.encoder.layers.{layer_idx}.{suffix}"
+                    radio_kv[vllm_key] = t
+                return
 
         def llm_weights_generator():
-            # Single pass over weights
             for name, w in weights:
-                if is_vision_model_weights((name, w)):
-                    # Load vision encoder weights directly
-                    trimmed_name = ".".join(name.split(".")[1:])
-                    if "input_conditioner" in trimmed_name:
-                        continue
-                    if trimmed_name in vision_model_buffers:
-                        param = vision_model_buffers[trimmed_name]
-                    else:
-                        param = vision_model_dict[trimmed_name]
-                    with torch.no_grad():
-                        default_weight_loader(param, w)
+                if is_llm(name):
+                    yield (".".join(name.split(".")[1:]), w
+                           )  # strip 'language_model.'
                 elif is_adapter_weights((name, w)):
                     # Load vision-language adapter weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
@@ -916,14 +969,10 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
                     with torch.no_grad():
                         default_weight_loader(param, w)
                 else:
-                    # LLM weights: yield them to be loaded
-                    # by language_model.load_weights
-                    assert name.startswith("language_model")
-                    trimmed_name = ".".join(name.split(".")[1:])
-                    yield (trimmed_name, w)
+                    maybe_map_radio_weight(name, w)
 
-        # Now we call the language model load with the generator
         self.language_model.load_weights(llm_weights_generator())
+        self.vision_model.load_state_dict(radio_kv, strict=False)
 
     def print_architecture(self,
                            detailed: bool = True,
