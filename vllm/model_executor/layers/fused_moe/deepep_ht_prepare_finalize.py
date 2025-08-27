@@ -11,7 +11,8 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
-
+from vllm.v1.worker.ubatching import (dbo_yield_and_switch_from_comm_to_compute,
+                                      dbo_yield_and_switch_from_compute_to_comm)
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
@@ -63,6 +64,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         has_scales = token_scales is not None
 
+        dbo_yield_and_switch_from_compute_to_comm()
         (num_tokens_per_rank, num_tokens_per_rdma_rank,
          dispatch_expert_num_tokens, is_token_in_rank,
          event) = self.buffer.get_dispatch_layout(
@@ -95,6 +97,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             previous_event=None,
             async_finish=False,
             allocate_on_comm_stream=False)
+        dbo_yield_and_switch_from_comm_to_compute()
 
         if has_scales:
             expert_x, expert_x_scale = token_data
@@ -208,6 +211,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
 
+        dbo_yield_and_switch_from_compute_to_comm()
         combined_x, _, event = self.buffer.combine(
             x=fused_expert_output,
             handle=self.handle,
@@ -216,5 +220,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             previous_event=None,
             async_finish=False,
             allocate_on_comm_stream=False)
+        dbo_yield_and_switch_from_comm_to_compute()
         # Respect inplace outputs.
         output.copy_(combined_x, non_blocking=True)

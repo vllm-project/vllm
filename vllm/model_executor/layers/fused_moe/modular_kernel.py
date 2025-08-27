@@ -424,18 +424,16 @@ def _chunk_scales(scales: Optional[torch.Tensor], start: int,
     return None
 
 
-class SingleAllocBuffer:
+class SharedResizableBuffer:
     def __init__(self):
         self.buffer = None
   
     # NOTE: Assumes the first call to get() is the largest shape,
     #  this is usually true due to the profile run.
     def get(self, shape: tuple[int, ...], device: torch.device, dtype: torch.dtype):
-        if self.buffer is None:
-            self.buffer = torch.empty(shape, device=device, dtype=dtype)
         shape_numel = prod(shape)
-        assert self.buffer.numel() >= shape_numel, \
-            f"Buffer not large enough: {self.buffer.numel()} < {prod(shape)}"
+        if self.buffer is None or self.buffer.numel() < shape_numel:
+            self.buffer = torch.empty(shape_numel, device=device, dtype=dtype)
         assert self.buffer.device == device, \
             f"Buffer device mismatch: {self.buffer.device} != {device}"
         assert self.buffer.dtype == dtype, \
@@ -456,9 +454,9 @@ class FusedMoEModularKernel(torch.nn.Module):
     layer due to any layer specific state that may be used by the component
     objects.
     """
-    fused_out_buffer = SingleAllocBuffer()
-    workspace13_buffer = SingleAllocBuffer()
-    workspace2_buffer = SingleAllocBuffer()
+    fused_out_buffer = SharedResizableBuffer()
+    workspace13_buffer = SharedResizableBuffer()
+    workspace2_buffer = SharedResizableBuffer()
 
     def __init__(
         self,
