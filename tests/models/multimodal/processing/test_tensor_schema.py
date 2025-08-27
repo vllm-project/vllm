@@ -221,7 +221,7 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
     model_config.get_multimodal_config().limit_per_prompt = limit_mm_per_prompt
     processor = factories.build_processor(ctx, cache=None)
 
-    torch.set_default_dtype(torch.float16)
+    torch.set_default_dtype(torch.bfloat16)
     with initialize_dummy_model(model_cls, model_config) as model:
         for modality, _, mm_kwargs in create_batched_mm_kwargs(
                 model_config, processor):
