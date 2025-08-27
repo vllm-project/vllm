@@ -787,11 +787,12 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
-        # TODO(bnell): implement chunking for shared_experts.
         shared_output: torch.Tensor
 
         if (not self.prepare_finalize.has_prepare_no_receive()
                 or self.shared_experts is None):
+
+            # Run shared experts serially with dispatch.
             if self.shared_experts is not None:
                 shared_output = self.shared_experts(a1)
 
@@ -808,6 +809,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                  self.fused_experts.quant_config,
              )
         else:
+            # Overlap shared expert compute with all2all dispatch.
             receiver = self.prepare_finalize.prepare_no_receive(
                 a1,
                 a1_scale,
