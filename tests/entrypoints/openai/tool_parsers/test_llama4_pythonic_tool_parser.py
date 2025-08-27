@@ -8,7 +8,9 @@ import pytest
 from tests.entrypoints.openai.tool_parsers.utils import (
     run_tool_extraction, run_tool_extraction_streaming)
 from vllm.entrypoints.openai.protocol import FunctionCall
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from vllm.entrypoints.openai.tool_parsers import ToolParser
+from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
+    tool_parser_manager)
 
 # Test cases similar to pythonic parser but with Llama4 specific format
 SIMPLE_FUNCTION_OUTPUT = "[get_weather(city='LA', metric='C')]"
@@ -59,7 +61,7 @@ PYTHON_TAG_FUNCTION_OUTPUT = (
 @pytest.mark.parametrize("streaming", [True, False])
 def test_no_tool_call(streaming: bool):
     mock_tokenizer = MagicMock()
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser(
+    tool_parser: ToolParser = tool_parser_manager.get_extension_class(
         "llama4_pythonic")(mock_tokenizer)
     model_output = "How can I help you today?"
 
@@ -161,7 +163,7 @@ TEST_CASES = [
 def test_tool_call(streaming: bool, model_output: str,
                    expected_tool_calls: list[FunctionCall]):
     mock_tokenizer = MagicMock()
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser(
+    tool_parser: ToolParser = tool_parser_manager.get_extension_class(
         "llama4_pythonic")(mock_tokenizer)
 
     content, tool_calls = run_tool_extraction(tool_parser,
@@ -176,7 +178,7 @@ def test_tool_call(streaming: bool, model_output: str,
 
 def test_streaming_tool_call_with_large_steps():
     mock_tokenizer = MagicMock()
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser(
+    tool_parser: ToolParser = tool_parser_manager.get_extension_class(
         "llama4_pythonic")(mock_tokenizer)
     model_output_deltas = [
         "<|python_start|>[get_weather(city='LA', metric='C'), "
@@ -198,7 +200,7 @@ def test_streaming_tool_call_with_large_steps():
 def test_regex_timeout_handling(streaming: bool):
     """test regex timeout is handled gracefully"""
     mock_tokenizer = MagicMock()
-    tool_parser: ToolParser = ToolParserManager.get_tool_parser(
+    tool_parser: ToolParser = tool_parser_manager.get_extension_class(
         "llama4_pythonic")(mock_tokenizer)
 
     fake_problematic_input = "hello world[A(A=" + "\t)A(A=,\t" * 2

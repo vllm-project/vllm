@@ -34,7 +34,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
-from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.base_loader import model_loader_manager
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
@@ -151,7 +151,7 @@ class RemoteOpenAIServer:
             model_config = engine_args.create_model_config()
             load_config = engine_args.create_load_config()
 
-            model_loader = get_model_loader(load_config)
+            model_loader = model_loader_manager.create(load_config.load_format)
             model_loader.download_model(model_config)
 
         self._start_server(model, vllm_serve_args, env_dict)

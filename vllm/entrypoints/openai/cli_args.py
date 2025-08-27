@@ -23,7 +23,8 @@ from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
 from vllm.entrypoints.constants import (H11_MAX_HEADER_COUNT_DEFAULT,
                                         H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT)
 from vllm.entrypoints.openai.serving_models import LoRAModulePath
-from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
+    tool_parser_manager)
 from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
 
@@ -210,7 +211,7 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
         frontend_kwargs["middleware"]["default"] = []
 
         # Special case: Tool call parser shows built-in options.
-        valid_tool_parsers = list(ToolParserManager.tool_parsers.keys())
+        valid_tool_parsers = tool_parser_manager.get_valid_extension_names()
         parsers_str = ",".join(valid_tool_parsers)
         frontend_kwargs["tool_call_parser"]["metavar"] = (
             f"{{{parsers_str}}} or name registered in --tool-parser-plugin")

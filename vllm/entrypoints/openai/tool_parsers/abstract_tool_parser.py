@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from collections.abc import Sequence
 from functools import cached_property
 from typing import Callable, Optional, Union
@@ -10,8 +9,10 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaMessage,
                                               ExtractedToolCallInformation)
 from vllm.logger import init_logger
+from vllm.plugins.extension_manager import (ExtensionManager,
+                                            ExtensionManagerRegistry)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import import_from_path, is_list_of
+from vllm.utils import is_list_of
 
 logger = init_logger(__name__)
 
@@ -80,20 +81,12 @@ class ToolParser:
             "implemented!")
 
 
+tool_parser_manager = ExtensionManager(base_cls=ToolParser)
+
+
+# Legacy ToolParserManager class, kept for compatibility.
+# Use `@tool_parser_manager.register(names=["foo"])` to register new tool parsers.
 class ToolParserManager:
-    tool_parsers: dict[str, type] = {}
-
-    @classmethod
-    def get_tool_parser(cls, name) -> type:
-        """
-        Get tool parser by name which is registered by `register_module`.
-
-        Raise a KeyError exception if the name is not registered.
-        """
-        if name in cls.tool_parsers:
-            return cls.tool_parsers[name]
-
-        raise KeyError(f"tool helper: '{name}' not found in tool_parsers")
 
     @classmethod
     def _register_module(cls,
@@ -108,12 +101,14 @@ class ToolParserManager:
             module_name = module.__name__
         if isinstance(module_name, str):
             module_name = [module_name]
+        if ToolParser.__name__ not in ExtensionManagerRegistry._registry:
+            ExtensionManagerRegistry._registry[ToolParser.__name__] = {}
         for name in module_name:
-            if not force and name in cls.tool_parsers:
-                existed_module = cls.tool_parsers[name]
-                raise KeyError(f'{name} is already registered '
-                               f'at {existed_module.__module__}')
-            cls.tool_parsers[name] = module
+            if not force and name in ExtensionManagerRegistry._registry[
+                    ToolParser.__name__]:
+                raise KeyError(f'Tool parser {name} is already registered')
+            ExtensionManagerRegistry._registry[
+                ToolParser.__name__][name] = module
 
     @classmethod
     def register_module(
@@ -147,18 +142,3 @@ class ToolParserManager:
             return module
 
         return _register
-
-    @classmethod
-    def import_tool_parser(cls, plugin_path: str) -> None:
-        """
-        Import a user-defined tool parser by the path of the tool parser define
-        file.
-        """
-        module_name = os.path.splitext(os.path.basename(plugin_path))[0]
-
-        try:
-            import_from_path(module_name, plugin_path)
-        except Exception:
-            logger.exception("Failed to load module '%s' from %s.",
-                             module_name, plugin_path)
-            return

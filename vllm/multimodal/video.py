@@ -13,6 +13,7 @@ import numpy.typing as npt
 from PIL import Image
 
 from vllm import envs
+from vllm.plugins.extension_manager import ExtensionManager
 
 from .base import MediaIO
 from .image import ImageMediaIO
@@ -62,30 +63,12 @@ class VideoLoader:
         raise NotImplementedError
 
 
-class VideoLoaderRegistry:
-
-    def __init__(self) -> None:
-        self.name2class: dict[str, type] = {}
-
-    def register(self, name: str):
-
-        def wrap(cls_to_register):
-            self.name2class[name] = cls_to_register
-            return cls_to_register
-
-        return wrap
-
-    @staticmethod
-    def load(cls_name: str) -> VideoLoader:
-        cls = VIDEO_LOADER_REGISTRY.name2class.get(cls_name)
-        assert cls is not None, f"VideoLoader class {cls_name} not found"
-        return cls()
+video_loader_manager = ExtensionManager(base_cls=VideoLoader)
+# Kept for legacy import compatibility
+VIDEO_LOADER_REGISTRY = video_loader_manager
 
 
-VIDEO_LOADER_REGISTRY = VideoLoaderRegistry()
-
-
-@VIDEO_LOADER_REGISTRY.register("opencv")
+@video_loader_manager.register(names=["opencv"])
 class OpenCVVideoBackend(VideoLoader):
 
     def get_cv2_video_api(self):
@@ -178,7 +161,7 @@ class VideoMediaIO(MediaIO[npt.NDArray]):
         # for flexible control.
         self.kwargs = kwargs
         video_loader_backend = envs.VLLM_VIDEO_LOADER_BACKEND
-        self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
+        self.video_loader = video_loader_manager.create(video_loader_backend)
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
         return self.video_loader.load_bytes(data,

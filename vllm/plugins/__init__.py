@@ -70,3 +70,9 @@ def load_general_plugins():
     # general plugins, we only need to execute the loaded functions
     for func in plugins.values():
         func()
+
+
+__all__ = [
+    "load_plugins_by_group",
+    "load_general_plugins",
+]

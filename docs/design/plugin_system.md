@@ -56,3 +56,41 @@ Every plugin has three parts:
 ## Compatibility Guarantee
 
 vLLM guarantees the interface of documented plugins, such as `ModelRegistry.register_model`, will always be available for plugins to register models. However, it is the responsibility of plugin developers to ensure their plugins are compatible with the version of vLLM they are targeting. For example, `"vllm_add_dummy_model.my_llava:MyLlava"` should be compatible with the version of vLLM that the plugin targets. The interface for the model may change during vLLM's development.
+
+## Class Extensions
+
+For specific classes that you want to plug in a custom implementation, you can use the `ExtensionManager` interface. The `ExtensionManager` interface allows you to register a custom implementation on top of an existing base class (i.e. extension group), and at runtime, you can instantiate your own implementations.
+
+If you are extending a class that already has an `ExtensionManager`, you can simply reuse it. Otherwise, send an PR to add a new `ExtensionManager` for your target base class.
+
+Below is a minimum example of how it works:
+
+### 1. Create an ExtensionManager on the base class
+
+```python
+from vllm.plugins.extension_manager import ExtensionManager
+
+class FooBase:
+    ...
+
+foo_manager = ExtensionManager(base_cls=FooBase)
+
+```
+
+### 2. Register your custom extension
+
+```python
+from ... import foo_manager
+
+@foo_manager.register(names=["foo_impl"])
+class FooImpl(FooBase):
+    ...
+```
+
+### 3. Instantiate at runtime
+
+```python
+from ... import foo_manager
+
+foo_impl_object = foo_manager.create(name="foo_impl")
+```

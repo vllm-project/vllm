@@ -17,7 +17,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ExtractedToolCallInformation,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
-    ToolParser, ToolParserManager)
+    ToolParser, tool_parser_manager)
 from vllm.entrypoints.openai.tool_parsers.utils import (find_common_prefix,
                                                         is_complete_json,
                                                         partial_json_loads)
@@ -26,8 +26,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("llama3_json")
-@ToolParserManager.register_module("llama4_json")
+@tool_parser_manager.register(names=["llama3_json", "llama4_json"])
 class Llama3JsonToolParser(ToolParser):
     """
     Tool call parser for Llama 3.x and 4 models intended for use with the

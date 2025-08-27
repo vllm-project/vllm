@@ -27,7 +27,8 @@ from vllm.model_executor.layers.linear import (LinearBase,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.base_loader import (BaseModelLoader,
+                                                          model_loader_manager)
 from vllm.model_executor.model_loader.utils import (ParamMapping,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -51,6 +52,7 @@ def is_moe_model(model: torch.nn.Module) -> bool:
         isinstance(module, FusedMoE) for module in model.modules()))
 
 
+@model_loader_manager.register(names=["bitsandbytes"])
 class BitsAndBytesModelLoader(BaseModelLoader):
     """Model loader to load model weights with BitAndBytes quantization."""
 

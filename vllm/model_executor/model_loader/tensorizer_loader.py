@@ -10,7 +10,8 @@ from torch import nn
 
 from vllm.config import LoadConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.base_loader import (BaseModelLoader,
+                                                          model_loader_manager)
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, deserialize_tensorizer_model, init_tensorizer_model,
     is_vllm_tensorized, serialize_vllm_model, tensorizer_weights_iterator)
@@ -33,6 +34,7 @@ def validate_config(config: dict):
             raise ValueError(f"{k} is not an allowed Tensorizer argument.")
 
 
+@model_loader_manager.register(names=["tensorizer"])
 class TensorizerLoader(BaseModelLoader):
     """Model loader using CoreWeave's tensorizer library."""
 

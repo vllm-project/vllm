@@ -37,7 +37,9 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
+from vllm.entrypoints.openai.tool_parsers import ToolParser
+from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
+    tool_parser_manager)
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
     MistralToolCall)
 from vllm.entrypoints.utils import get_max_tokens
@@ -116,8 +118,9 @@ class OpenAIServingChat(OpenAIServing):
                     logger.warning(
                         "Llama3.2 models may struggle to emit valid pythonic"
                         " tool calls")
-                self.tool_parser = ToolParserManager.get_tool_parser(
-                    tool_parser)
+                assert tool_parser is not None
+                self.tool_parser = tool_parser_manager.get_extension_class(
+                    name=tool_parser)
             except Exception as e:
                 raise TypeError("Error: --enable-auto-tool-choice requires "
                                 f"tool_parser:'{tool_parser}' which has not "
