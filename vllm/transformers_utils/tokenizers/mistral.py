@@ -428,7 +428,8 @@ class MistralTokenizer(TokenizerBase):
                         return self.tokenizer.unk_id
 
                 ids = [_token_to_id(t) for t in tokens]
-                decoded = self.tokenizer.decode(ids, self.special_token_policy)
+                decoded = self.tokenizer.decode(ids,
+                                                self._special_token_policy)
             else:
                 decoded = "".join(tokens)
         else:
@@ -443,7 +444,7 @@ class MistralTokenizer(TokenizerBase):
                     if regular_tokens:
                         decoded_list.append(
                             self.tokenizer.decode(regular_tokens,
-                                                  self.special_token_policy))
+                                                  self._special_token_policy))
                         regular_tokens = []
                     decoded_list.append(token)
                 else:
@@ -452,7 +453,7 @@ class MistralTokenizer(TokenizerBase):
             if regular_tokens:
                 decoded_list.append(
                     self.tokenizer.decode(regular_tokens,
-                                          self.special_token_policy))
+                                          self._special_token_policy))
 
             decoded = ''.join(decoded_list)
 
@@ -470,7 +471,7 @@ class MistralTokenizer(TokenizerBase):
 
         if isinstance(ids, int):
             ids = [ids]
-        return self.tokenizer.decode(ids, self.special_token_policy)
+        return self.tokenizer.decode(ids, self._special_token_policy)
 
     def convert_ids_to_tokens(
         self,
@@ -512,7 +513,7 @@ class MistralTokenizer(TokenizerBase):
             #      https://github.com/vllm-project/vllm/pull/9625
             # if underlying tokenizeir is sentencepiece, we just add "�"
             tokens = [
-                self.tokenizer.id_to_byte_piece(id, self.special_token_policy)
+                self.tokenizer.id_to_byte_piece(id, self._special_token_policy)
                 for id in ids
             ]
 
