@@ -417,4 +417,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "MambaForCausalLM": MambaModelConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
+    "FalconMambaForCausalLM": MambaModelConfig,
 }
