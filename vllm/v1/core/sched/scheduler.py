@@ -100,6 +100,13 @@ class Scheduler(SchedulerInterface):
 
         self.block_size = self.cache_config.block_size
 
+        self.cp_world_size = vllm_config.parallel_config.context_parallel_size
+        # Note(hc): The scheduler’s block_size must be multiplied by cp_world_size,
+        # since block hashes are computed on the original/full token sequence at a
+        # granularity of original_block_size × cp_world_size.
+        if self.cp_world_size > 1:
+            self.block_size *= self.cp_world_size
+
         # req_id -> Request
         self.requests: dict[str, Request] = {}
         # Scheduling policy
@@ -161,6 +168,7 @@ class Scheduler(SchedulerInterface):
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
+            cp_world_size=self.cp_world_size,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 

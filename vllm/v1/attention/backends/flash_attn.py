@@ -222,10 +222,13 @@ class FlashAttentionMetadataBuilder(
         # populated on first build() call.
         self.aot_sliding_window: Optional[tuple[int, int]] = None
 
-    def build(self,
-              common_prefix_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False) -> FlashAttentionMetadata:
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+        cp_local_token_cnt: Optional[int] = None,
+    ) -> FlashAttentionMetadata:
         """
         fast_build disables AOT scheduling, used when there will be few 
         iterations i.e. spec-decode

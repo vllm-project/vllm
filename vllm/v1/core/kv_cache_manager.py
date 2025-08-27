@@ -91,6 +91,7 @@ class KVCacheManager:
         use_eagle: bool = False,
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
+        cp_world_size: int = 1,
     ) -> None:
         self.max_model_len = max_model_len
 
@@ -109,12 +110,17 @@ class KVCacheManager:
             self.block_size = kv_cache_config.kv_cache_groups[
                 0].kv_cache_spec.block_size
 
+            if cp_world_size > 1:
+                assert len(kv_cache_config.kv_cache_groups) == 1
+                self.block_size *= cp_world_size
+
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
             use_eagle=self.use_eagle,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
+            cp_world_size=cp_world_size,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
