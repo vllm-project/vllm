@@ -356,7 +356,12 @@ def test_multinode_dp_server_info(server_manager):
     api_server_count = server_manager.api_server_count
 
     # Each request will hit one of the API servers
-    parallel_configs = [_get_parallel_config(head_server) for _ in range(50)]
+    # `n_reqs` is set so that there is a good chance each server
+    # receives at least one request
+    n_reqs = 2 * api_server_count * api_server_count
+    parallel_configs = [
+        _get_parallel_config(head_server) for _ in range(n_reqs)
+    ]
     api_process_counts = [c["api_process_count"] for c in parallel_configs]
     api_process_ranks = [c["api_process_rank"] for c in parallel_configs]
 
