@@ -27,7 +27,10 @@ MISTRAL_FORMAT_ARGS = [
 
 
 @pytest.fixture(scope="module")
-def server():
+def server(request):
+    if marker := request.node.get_closest_marker("extra_server_args"):
+        SERVER_ARGS.append(marker.args[0])
+
     with RemoteOpenAIServer(MODEL_NAME, SERVER_ARGS) as remote_server:
         yield remote_server
 
@@ -200,26 +203,26 @@ async def test_stream_options(winning_call, client):
 
 
 @pytest.mark.asyncio
-async def test_transcription_with_enable_force_include_usage(winning_call):
-    model_name = "openai/whisper-small"
-    server_args = ["--enforce-eager", "--enable-force-include-usage"]
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
-        client = remote_server.get_async_client()
-        res = await client.audio.transcriptions.create(model=model_name,
-                                                       file=winning_call,
-                                                       language="en",
-                                                       temperature=0.0,
-                                                       stream=True,
-                                                       timeout=30)
-        final = False
-        continuous = True
-        async for chunk in res:
-            if not len(chunk.choices):
-                # final usage sent
-                final = True
-            else:
-                continuous = continuous and hasattr(chunk, 'usage')
-        assert final and continuous
+@pytest.mark.extra_server_args(['--enable-force-include-usage'])
+async def test_transcription_with_enable_force_include_usage(
+        client, winning_call):
+    res = await client.audio.transcriptions.create(model=MODEL_NAME,
+                                                   file=winning_call,
+                                                   language="en",
+                                                   temperature=0.0,
+                                                   stream=True,
+                                                   timeout=30)
+
+    async for chunk in res:
+        if not len(chunk.choices):
+            # final usage sent
+            usage = chunk.usage
+            assert isinstance(usage, dict)
+            assert usage['prompt_tokens'] > 0
+            assert usage['completion_tokens'] > 0
+            assert usage['total_tokens'] > 0
+        else:
+            assert not hasattr(chunk, 'usage')
 
 
 @pytest.mark.asyncio

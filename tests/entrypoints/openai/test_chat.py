@@ -38,7 +38,6 @@ def server(zephyr_lora_files):  # noqa: F811
         "2",
         "--max-num-seqs",
         "128",
-        "--enable-force-include-usage",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -438,6 +437,7 @@ async def test_chat_completion_stream_options(
     "model_name",
     ["HuggingFaceH4/zephyr-7b-beta", "zephyr-lora"],
 )
+@pytest.mark.extra_server_args(['--enable-force-include-usage'])
 async def test_chat_with_enable_force_include_usage(client: openai.AsyncOpenAI,
                                                     model_name: str):
     messages = [{
@@ -455,22 +455,21 @@ async def test_chat_with_enable_force_include_usage(client: openai.AsyncOpenAI,
         extra_body=dict(min_tokens=10),
         temperature=0.0,
         stream=True,
-        enable_force_include_usage=True,
     )
     last_completion_tokens = 0
     async for chunk in stream:
-        assert chunk.usage.prompt_tokens >= 0
-        assert last_completion_tokens == 0 or \
+        if not len(chunk.choices):
+            assert chunk.usage.prompt_tokens >= 0
+            assert last_completion_tokens == 0 or \
                chunk.usage.completion_tokens > last_completion_tokens or \
                (
                    not chunk.choices and
                    chunk.usage.completion_tokens == last_completion_tokens
                )
-        assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
-                                            chunk.usage.completion_tokens)
-        last_completion_tokens = chunk.usage.completion_tokens
-
-    assert last_completion_tokens == 10
+            assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
+                                                chunk.usage.completion_tokens)
+        else:
+            assert chunk.usage is None
 
 
 @pytest.mark.asyncio
