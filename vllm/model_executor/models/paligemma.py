@@ -211,6 +211,7 @@ class PaliGemmaMultiModalProcessor(
                                   tokenization_kwargs,
                                   mm_hash_overrides=mm_hash_overrides)
         prompt_token_ids = mm_inputs["prompt_token_ids"]
+
         tokenizer = self.info.get_tokenizer()
         newline_prompt = "\n"
         newline_token_id = tokenizer.encode(newline_prompt)[-1]  # 108
