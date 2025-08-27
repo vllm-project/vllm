@@ -398,7 +398,6 @@ class InputPreprocessor:
                 prompt_token_ids,
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs"),
-                mm_uuids=parsed_content.get("multi_modal_uuids"),
                 tokenization_kwargs=tokenization_kwargs,
                 lora_request=lora_request,
                 mm_hash_overrides=mm_hash_overrides,
