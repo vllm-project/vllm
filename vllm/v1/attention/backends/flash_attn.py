@@ -517,7 +517,6 @@ class FlashAttentionImpl(AttentionImpl):
                     (num_tokens, num_heads * head_size)).contiguous(),
                 layer._q_scale)
             query = query.reshape((num_tokens, num_heads, head_size))
-
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc
             seqused_k = attn_metadata.seq_lens
@@ -551,10 +550,11 @@ class FlashAttentionImpl(AttentionImpl):
                 num_splits=attn_metadata.max_num_splits,
                 s_aux=self.sinks,
             )
+            # print("=== done flash attention, output")
             return output
 
-        # Cascade attention (rare case).
-        cascade_attention(
+        # use hydragen attention 
+        hydragen_attention(
             output[:num_actual_tokens],
             query[:num_actual_tokens],
             key_cache,
@@ -578,6 +578,31 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale,
             v_descale=layer._v_scale,
         )
+
+        # cascade_attention(
+        #     output[:num_actual_tokens],
+        #     query[:num_actual_tokens],
+        #     key_cache,
+        #     value_cache,
+        #     cu_query_lens=attn_metadata.query_start_loc,
+        #     max_query_len=attn_metadata.max_query_len,
+        #     cu_prefix_query_lens=attn_metadata.cu_prefix_query_lens,
+        #     prefix_kv_lens=attn_metadata.prefix_kv_lens,
+        #     suffix_kv_lens=attn_metadata.suffix_kv_lens,
+        #     max_kv_len=attn_metadata.max_seq_len,
+        #     softmax_scale=self.scale,
+        #     alibi_slopes=self.alibi_slopes,
+        #     sliding_window=self.sliding_window,
+        #     logits_soft_cap=self.logits_soft_cap,
+        #     block_table=attn_metadata.block_table,
+        #     common_prefix_len=attn_metadata.common_prefix_len,
+        #     fa_version=self.vllm_flash_attn_version,
+        #     prefix_scheduler_metadata=attn_metadata.prefix_scheduler_metadata,
+        #     suffix_scheduler_metadata=attn_metadata.scheduler_metadata,
+        #     q_descale=layer._q_scale,
+        #     k_descale=layer._k_scale,
+        #     v_descale=layer._v_scale,
+        # )
         return output
 
     def _forward_encoder_attention(
@@ -658,6 +683,8 @@ def use_cascade_attention(
     # We use an arbitrary threshold of 256 tokens. TODO: Tune this threshold.
     # NOTE(woosuk): This is the common case. We should return False as soon as
     # possible to avoid any unnecessary computation.
+
+    return True
     if common_prefix_len < 256:
         return False
     # Cascade attention is currently not supported with these variants.
@@ -704,6 +731,7 @@ def use_cascade_attention(
     flash_decoding_time = cdiv(flash_decoding_ctas, num_sms)
 
     # Use cascade attention if it is faster than FlashDecoding.
+    print("=== decide time",cascade_time, "vs", flash_decoding_time)
     return cascade_time < flash_decoding_time
 
 
@@ -798,3 +826,112 @@ def cascade_attention(
     # Merge prefix and suffix outputs, and store the result in output.
     merge_attn_states(output, prefix_output, prefix_lse, suffix_output,
                       suffix_lse)
+
+def hydragen_attention(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    cu_query_lens: torch.Tensor,
+    max_query_len: int,
+    cu_prefix_query_lens: torch.Tensor,
+    prefix_kv_lens: torch.Tensor,
+    suffix_kv_lens: torch.Tensor,
+    max_kv_len: int,
+    softmax_scale: float,
+    alibi_slopes: Optional[torch.Tensor],
+    sliding_window: tuple[int, int],
+    logits_soft_cap: float,
+    block_table: torch.Tensor,
+    common_prefix_len: int,
+    fa_version: int,
+    prefix_scheduler_metadata: Optional[torch.Tensor] = None,
+    suffix_scheduler_metadata: Optional[torch.Tensor] = None,
+    q_descale: Optional[torch.Tensor] = None,
+    k_descale: Optional[torch.Tensor] = None,
+    v_descale: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Minimal HydraGen-style shared-prefix attention merge.
+
+    Computes prefix attention (causal=False) over the shared prefix and
+    suffix attention (causal=True) over the remaining KV, both with
+    return_softmax_lse=True. Then merges:
+
+        O = exp(lse_prefix - lse)*O_prefix + exp(lse_suffix - lse)*O_suffix
+        where lse = logaddexp(lse_prefix, lse_suffix)
+
+    Shapes:
+      - query: [num_tokens, num_heads, head_size]
+      - outputs: same as query
+      - lse_*: [num_heads, num_tokens]
+    """
+    print("=== my hydragen")
+    assert alibi_slopes is None, (
+        "HydraGen attention (quick path) does not support ALiBi.")
+    assert sliding_window == (-1, -1), (
+        "HydraGen attention (quick path) does not support sliding window.")
+
+    num_tokens = query.shape[0]
+    block_size = key_cache.shape[-3]
+    assert common_prefix_len % block_size == 0
+    num_common_kv_blocks = common_prefix_len // block_size
+    assert num_common_kv_blocks > 0
+
+    # Prefix pass (shared KV), single pseudo-batch; queries are the same packed batch.
+    descale_shape = (cu_prefix_query_lens.shape[0] - 1, key_cache.shape[-2])
+    prefix_output, prefix_lse = flash_attn_varlen_func(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        cu_seqlens_q=cu_prefix_query_lens,
+        seqused_k=prefix_kv_lens,
+        max_seqlen_q=num_tokens,
+        max_seqlen_k=common_prefix_len,
+        softmax_scale=softmax_scale,
+        causal=False,
+        window_size=sliding_window,
+        block_table=block_table[:1],
+        softcap=logits_soft_cap,
+        return_softmax_lse=True,
+        scheduler_metadata=prefix_scheduler_metadata,
+        fa_version=fa_version,
+        q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
+        k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
+        v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
+    )
+
+    # Suffix pass (per-request remaining KV), causal=True.
+    descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
+    suffix_output, suffix_lse = flash_attn_varlen_func(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        cu_seqlens_q=cu_query_lens,
+        seqused_k=suffix_kv_lens,
+        max_seqlen_q=max_query_len,
+        max_seqlen_k=max_kv_len - common_prefix_len,
+        softmax_scale=softmax_scale,
+        causal=True,
+        window_size=sliding_window,
+        block_table=block_table[:, num_common_kv_blocks:],
+        softcap=logits_soft_cap,
+        return_softmax_lse=True,
+        scheduler_metadata=suffix_scheduler_metadata,
+        fa_version=fa_version,
+        q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
+        k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
+        v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
+    )
+
+    # Stable merge using per-head per-token log-sum-exp weights.
+    # lse_*: [H, T]; outputs: [T, H, D] → transpose to [H, T, D] for weighting.
+    lse_total = torch.logaddexp(prefix_lse, suffix_lse)
+    w_prefix = torch.exp(prefix_lse - lse_total).unsqueeze(-1)
+    w_suffix = torch.exp(suffix_lse - lse_total).unsqueeze(-1)
+
+    prefix_out_htd = prefix_output.transpose(0, 1)
+    suffix_out_htd = suffix_output.transpose(0, 1)
+    merged_htd = w_prefix * prefix_out_htd + w_suffix * suffix_out_htd
+    merged_thd = merged_htd.transpose(0, 1)
+    output.copy_(merged_thd)
+    return output
