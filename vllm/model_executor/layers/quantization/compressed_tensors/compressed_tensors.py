@@ -425,6 +425,10 @@ class CompressedTensorsConfig(QuantizationConfig):
             weight_quant: BaseModel,
             input_quant: BaseModel,
             format: Optional[str] = None) -> "CompressedTensorsScheme":
+
+        # use the per-layer format if defined, otherwise, use global format
+        format = format if format is not None else self.quant_format
+
         # Detect If Mixed Precision
         if self._is_fp4a16_nvfp4(weight_quant, input_quant):
             return CompressedTensorsW4A16Fp4()
@@ -437,14 +441,14 @@ class CompressedTensorsConfig(QuantizationConfig):
                                             actorder=weight_quant.actorder)
 
         if self._is_wNa16_group_channel(weight_quant, input_quant):
-            if (self.quant_format == CompressionFormat.marlin_24.value
+            if (format == CompressionFormat.marlin_24.value
                     and weight_quant.num_bits in W4A16SPARSE24_SUPPORTED_BITS):
                 assert weight_quant.symmetric
                 return CompressedTensorsW4A16Sparse24(
                     strategy=weight_quant.strategy,
                     num_bits=weight_quant.num_bits,
                     group_size=weight_quant.group_size)
-            if (self.quant_format == CompressionFormat.pack_quantized.value
+            if (format == CompressionFormat.pack_quantized.value
                     and weight_quant.num_bits in WNA16_SUPPORTED_BITS):
                 return CompressedTensorsWNA16(
                     num_bits=weight_quant.num_bits,
@@ -453,10 +457,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     group_size=weight_quant.group_size,
                     actorder=weight_quant.actorder)
 
-        act_quant_format = is_activation_quantization_format(
-            format
-        ) if format is not None else is_activation_quantization_format(
-            self.quant_format)
+        act_quant_format = is_activation_quantization_format(format)
         if act_quant_format:
             if self._is_fp4a4_nvfp4(weight_quant, input_quant):
                 if cutlass_fp4_supported(
