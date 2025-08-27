@@ -3,7 +3,7 @@
 
 import contextlib
 import copy
-from typing import Callable
+from typing import Callable, Optional
 
 import torch
 import torch.fx.graph_module
@@ -43,11 +43,11 @@ class NanoSplitManager:
         self.graph_modules = {1: self.original_graph_module}
 
         # Runtime preparation
-        self.cached_config: NanoSplitConfig | None = None
-        self.comm_stream = torch.cuda.Stream()
-        self.comp_stream = torch.cuda.Stream()
-        self.hook: Callable[[NanoOpInfo], contextlib.
-                            AbstractContextManager[None]] | None = None
+        self.cached_config: Optional[NanoSplitConfig] = None
+        self.comm_stream: torch.cuda.Stream = torch.cuda.Stream()
+        self.comp_stream: torch.cuda.Stream = torch.cuda.Stream()
+        self.hook: Optional[Callable[
+            [NanoOpInfo], contextlib.AbstractContextManager[None]]] = None
         self.get_bs_fn = "get_batch_size"
         self.split_fn = "split_input"
         self.wrapper_fn = "op_wrapper"
@@ -112,8 +112,12 @@ class NanoSplitManager:
                 return self.original_graph_module(*args, **kwargs)
 
             num_nano_batches = self.cached_config.num_nano_batches
-            comm_finished = [None for _ in range(num_nano_batches)]
-            comp_finished = [None for _ in range(num_nano_batches)]
+            comm_finished: list[Optional[torch.cuda.Event]] = [
+                None for _ in range(num_nano_batches)
+            ]
+            comp_finished: list[Optional[torch.cuda.Event]] = [
+                None for _ in range(num_nano_batches)
+            ]
 
             @contextlib.contextmanager
             def set_stream(op_info: NanoOpInfo):
@@ -121,29 +125,30 @@ class NanoSplitManager:
                     torch.cuda.set_stream(self.comm_stream)
                     comm_finished[op_info.idx] = torch.cuda.Event()
                     if comp_finished[op_info.idx] is not None:
-                        assert isinstance(comp_finished[op_info.idx],
-                                          torch.cuda.Event)
-                        comp_finished[op_info.idx].wait()
+                        # NOTE(yi): this is to make mypy happy
+                        comp_finished_event = comp_finished[op_info.idx]
+                        assert comp_finished_event is not None
+                        comp_finished_event.wait()
                         comp_finished[op_info.idx] = None
                 else:
                     torch.cuda.set_stream(self.comp_stream)
                     comp_finished[op_info.idx] = torch.cuda.Event()
                     if comm_finished[op_info.idx] is not None:
-                        assert isinstance(comm_finished[op_info.idx],
-                                          torch.cuda.Event)
-                        comm_finished[op_info.idx].wait()
+                        comm_finished_event = comm_finished[op_info.idx]
+                        assert comm_finished_event is not None
+                        comm_finished_event.wait()
                         comm_finished[op_info.idx] = None
                 try:
                     yield
                 finally:
                     if op_info.tag == "all_reduce":
-                        assert isinstance(comm_finished[op_info.idx],
-                                          torch.cuda.Event)
-                        comm_finished[op_info.idx].record()
+                        comm_finished_event = comm_finished[op_info.idx]
+                        assert comm_finished_event is not None
+                        comm_finished_event.record()
                     else:
-                        assert isinstance(comp_finished[op_info.idx],
-                                          torch.cuda.Event)
-                        comp_finished[op_info.idx].record()
+                        comp_finished_event = comp_finished[op_info.idx]
+                        assert comp_finished_event is not None
+                        comp_finished_event.record()
 
             @contextlib.contextmanager
             def nvtx_mark(op_info: NanoOpInfo):

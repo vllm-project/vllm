@@ -3,7 +3,7 @@
 
 import dataclasses
 import itertools
-from typing import Callable
+from typing import Callable, Union
 
 import torch
 from torch.fx.node import Argument as NodeArgument
@@ -101,7 +101,7 @@ def tag_graph(gm: torch.fx.GraphModule, op_tags: dict[str, str]):
 
 def analyze_graph(
     graph: torch.fx.Graph,
-    batch_size: int | torch.SymInt | None = None
+    batch_size: Union[int, torch.SymInt, None] = None
 ) -> tuple[list[torch.fx.Node], torch.fx.Graph]:
     weight_nodes = set()
     splittable_inputs = []
