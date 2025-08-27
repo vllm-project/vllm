@@ -13,9 +13,9 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import (
     _validate_scale_shape, moe_kernel_quantize_input)
 from vllm.utils import cdiv, round_up
-from vllm.v1.worker.ubatching import (get_current_ubatch_context,
-                                      yield_and_switch_from_comm_to_compute,
-                                      yield_and_switch_from_compute_to_comm)
+from vllm.v1.worker.ubatching import (
+    dbo_current_ubatch_id, dbo_yield_and_switch_from_comm_to_compute,
+    dbo_yield_and_switch_from_compute_to_comm)
 
 logger = init_logger(__name__)
 
@@ -108,8 +108,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                Optional[torch.Tensor]]:
         num_tokens = a1.size(0)  # M
         hidden_dim = a1.size(-1)  # K
-        ubatch_ctx = get_current_ubatch_context()
-        a2a_idx = ubatch_ctx.id if ubatch_ctx is not None else 0
+        a2a_idx = dbo_current_ubatch_id()
 
         assert topk_ids.size(0) == num_tokens
         # expert_map should be None because with expert map, -1 id is used for
@@ -204,7 +203,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # There's not much point setting this unless it is != indices.size(0)
         bound_m: Optional[torch.Tensor] = None
 
-        yield_and_switch_from_compute_to_comm(schedule="default")
+        dbo_yield_and_switch_from_compute_to_comm()
         self.a2as[a2a_idx].dispatch(
             out_expert_num_tokens=expert_num_tokens,
             out_expert_x=expert_x,
@@ -214,7 +213,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             indices=topk_ids.view(dtype=torch.uint32),
             bound_m=bound_m,
         )
-        yield_and_switch_from_comm_to_compute(schedule="default")
+        dbo_yield_and_switch_from_comm_to_compute()
 
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
@@ -241,9 +240,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # This argument is optional
         # There's not much point setting this unless it is != topk_ids.size(0)
         bound_m: Optional[torch.Tensor] = None
-        ubatch_ctx = get_current_ubatch_context()
-        ubatch_id = ubatch_ctx.id if ubatch_ctx is not None else -1
-        a2a_idx = 0 if ubatch_id == -1 else ubatch_id
+        a2a_idx = dbo_current_ubatch_id()
 
         # TODO (bnell): fails in test_pplx_moe.py, figure out what's going on
         #num_tokens = output.size(0)  # M
@@ -259,7 +256,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        yield_and_switch_from_compute_to_comm(schedule="default")
+        dbo_yield_and_switch_from_compute_to_comm()
         self.a2as[a2a_idx].combine(
             out_tokens=output,
             indices=topk_ids.view(dtype=torch.uint32),
@@ -267,4 +264,4 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_y=fused_expert_output,
             bound_m=bound_m,
         )
-        yield_and_switch_from_comm_to_compute(schedule="default")
+        dbo_yield_and_switch_from_comm_to_compute()

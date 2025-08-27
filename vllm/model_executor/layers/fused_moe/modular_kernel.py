@@ -435,6 +435,25 @@ def _chunk_scales(scales: Optional[torch.Tensor], start: int,
     return None
 
 
+class SharedResizableBuffer:
+
+    def __init__(self):
+        self.buffer = None
+
+    # NOTE: Assumes the first call to get() is the largest shape,
+    #  this is usually true due to the profile run.
+    def get(self, shape: tuple[int, ...], device: torch.device,
+            dtype: torch.dtype):
+        shape_numel = prod(shape)
+        if self.buffer is None or self.buffer.numel() < shape_numel:
+            self.buffer = torch.empty(shape_numel, device=device, dtype=dtype)
+        assert self.buffer.device == device, \
+            f"Buffer device mismatch: {self.buffer.device} != {device}"
+        assert self.buffer.dtype == dtype, \
+            f"Buffer dtype mismatch: {self.buffer.dtype} != {dtype}"
+        return self.buffer[:shape_numel].view(*shape)
+
+
 @final
 class FusedMoEModularKernel(torch.nn.Module):
     """
@@ -448,6 +467,9 @@ class FusedMoEModularKernel(torch.nn.Module):
     layer due to any layer specific state that may be used by the component
     objects.
     """
+    fused_out_buffer = SharedResizableBuffer()
+    workspace13_buffer = SharedResizableBuffer()
+    workspace2_buffer = SharedResizableBuffer()
 
     def __init__(
         self,
@@ -496,12 +518,12 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
-        workspace13 = torch.empty(prod(workspace13_shape),
-                                  device=a1.device,
-                                  dtype=workspace_dtype)
-        workspace2 = torch.empty(prod(workspace2_shape),
-                                 device=a1.device,
-                                 dtype=workspace_dtype)
+        workspace13 = self.workspace13_buffer.get(workspace13_shape,
+                                                  device=a1.device,
+                                                  dtype=workspace_dtype)
+        workspace2 = self.workspace2_buffer.get(workspace2_shape,
+                                                device=a1.device,
+                                                dtype=workspace_dtype)
 
         assert fused_out is None or fused_out.shape == fused_out_shape, (
             f"fused_out {fused_out.shape} but expected {fused_out_shape}")
@@ -593,9 +615,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         (_, _, fused_out_shape, _) = self.fused_experts.workspace_shapes(
             a1, a1q, M, N, K, top_k, global_num_experts, local_num_experts,
             expert_tokens_meta)
-        fused_out = torch.empty(fused_out_shape,
-                                device=a1q.device,
-                                dtype=a1.dtype)
+        fused_out = self.fused_out_buffer.get(fused_out_shape,
+                                              device=a1q.device,
+                                              dtype=a1.dtype)
 
         def slice_input_tensors(
             chunk_idx: int
