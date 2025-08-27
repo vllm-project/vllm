@@ -36,10 +36,10 @@ def api_server_args():
         "localhost:8000",
         "sock":
         sock,
+        "args":
+        "test_args",  # Simple string to avoid pickling issues
         "num_servers":
         3,
-        "args_per_server":
-        ["test_args"] * 3,  # Simple string to avoid pickling issues
         "input_addresses": [
             "tcp://127.0.0.1:5001", "tcp://127.0.0.1:5002",
             "tcp://127.0.0.1:5003"
