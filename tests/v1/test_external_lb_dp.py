@@ -154,23 +154,30 @@ async def clients(servers: list[tuple[RemoteOpenAIServer, list[str]]]):
         ]
 
 
+def _get_parallel_config(server: RemoteOpenAIServer):
+    response = requests.get(server.url_for("server_info?config_format=json"))
+    response.raise_for_status()
+
+    vllm_config = response.json()["vllm_config"]
+    return vllm_config["parallel_config"]
+
+
 def test_external_lb_server_info(server_manager):
     servers = server_manager.servers
     api_server_count = server_manager.api_server_count
 
     for i, (server, _) in enumerate(servers):
-        response = requests.get(server.url_for("server_info"))
-        response.raise_for_status()
+        print(f"Testing {i=}")
 
-        vllm_config = response.json()
-        parallel_config = vllm_config["parallel_config"]
+        # Each request will hit one of the API servers
+        parallel_configs = [_get_parallel_config(server) for _ in range(50)]
+        api_process_counts = [c["api_process_count"] for c in parallel_configs]
+        api_process_ranks = [c["api_process_rank"] for c in parallel_configs]
 
-        assert parallel_config[
-            "api_process_count"] == api_server_count, f"Failed ({i=})"
-        assert parallel_config["api_process_rank"] == 0, f"Failed ({i=})"
-
-        # Logging in case a non-assert exception occurs
-        print(f"Passed ({i=})")
+        assert all(c == api_server_count
+                   for c in api_process_counts), api_process_counts
+        assert all(0 <= r < api_server_count
+                   for r in api_process_ranks), api_process_ranks
 
 
 @pytest.mark.asyncio

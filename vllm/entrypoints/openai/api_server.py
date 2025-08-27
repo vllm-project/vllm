@@ -19,13 +19,14 @@ from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import Annotated, Any, Callable, Optional
+from typing import Annotated, Any, Callable, Literal, Optional
 
 import prometheus_client
 import pydantic
 import regex as re
 import uvloop
-from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Request
+from fastapi import (APIRouter, Depends, FastAPI, Form, HTTPException, Query,
+                     Request)
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -1038,9 +1039,21 @@ if envs.VLLM_SERVER_DEV_MODE:
     logger.warning("SECURITY WARNING: Development endpoints are enabled! "
                    "This should NOT be used in production!")
 
+    PydanticVllmConfig = pydantic.TypeAdapter(VllmConfig)
+
     @router.get("/server_info")
-    async def show_server_info(raw_request: Request):
-        server_info = {"vllm_config": str(raw_request.app.state.vllm_config)}
+    async def show_server_info(
+        raw_request: Request,
+        config_format: Annotated[Literal["text", "json"],
+                                 Query()] = "text",
+    ):
+        vllm_config: VllmConfig = raw_request.app.state.vllm_config
+        server_info = {
+            "vllm_config":
+            str(vllm_config)
+            if config_format == "text" else PydanticVllmConfig.dump_python(
+                vllm_config, mode="json", fallback=str)
+        }
         return JSONResponse(content=server_info)
 
     @router.post("/reset_prefix_cache")
