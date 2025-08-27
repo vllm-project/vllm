@@ -118,6 +118,8 @@ class PPTestSettings:
         multi_node_only: bool = False,
         load_format: Optional[str] = None,
     ):
+        vllm_major_versions = ["1"] if runner == "pooling" else ["0"]
+
         return PPTestSettings(
             parallel_setups=[
                 ParallelSetup(tp_size=tp_base,
@@ -126,7 +128,7 @@ class PPTestSettings:
                               chunked_prefill=False),
             ],
             distributed_backends=["mp"],
-            vllm_major_versions=["0"],
+            vllm_major_versions=vllm_major_versions,
             runner=runner,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        load_format=load_format),
