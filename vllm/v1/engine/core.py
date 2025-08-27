@@ -1178,11 +1178,10 @@ class DPEngineCoreActor(DPEngineCoreProc):
     def _set_visible_devices(self, vllm_config: VllmConfig,
                              local_dp_rank: int):
         from vllm.platforms import current_platform
-        if current_platform.is_cuda_alike():
-            self._set_cuda_visible_devices(vllm_config, local_dp_rank)
-        elif current_platform.is_xpu():
-            # Do not set device env vars for XPU
+        if current_platform.is_xpu():
             pass
+        else:
+            self._set_cuda_visible_devices(vllm_config, local_dp_rank)
 
     def _set_cuda_visible_devices(self, vllm_config: VllmConfig,
                                   local_dp_rank: int):
