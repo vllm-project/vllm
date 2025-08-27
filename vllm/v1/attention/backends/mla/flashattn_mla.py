@@ -57,8 +57,7 @@ class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
 
 class FlashAttnMLAMetadataBuilder(
         MLACommonMetadataBuilder[FlashAttnMLAMetadata]):
-    # TODO(lucas): tune this value
-    reorder_batch_threshold: ClassVar[int] = 64
+    reorder_batch_threshold: ClassVar[int] = 512
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
