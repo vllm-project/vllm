@@ -152,7 +152,11 @@ def is_online_quantization(quantization: Any) -> bool:
     return quantization in ["inc"]
 
 
-NEEDS_HELP = "--help" in sys.argv or sys.argv[0].endswith("mkdocs")
+NEEDS_HELP = (
+    "--help" in sys.argv  # vllm SUBCOMMAND --help
+    or "mkdocs" in sys.orig_argv[:3]  # python -m mkdocs SUBCOMMAND
+    or sys.argv[0].endswith("mkdocs")  # mkdocs SUBCOMMAND
+)
 
 
 @functools.lru_cache(maxsize=30)
