@@ -119,7 +119,6 @@ def paged_attention_rocm(
     fp8_out_scale: Optional[torch.Tensor] = None,
     mfma_type: str = "fp8" if envs.is_set("VLLM_USE_FP8_MFMA") else "f16",
 ) -> None:
-    print(f"\nmfma_type: {mfma_type}")
     torch.ops._rocm_C.paged_attention(out, exp_sum, max_logits, tmp_out, query,
                                       key_cache, value_cache, num_kv_heads,
                                       scale, block_tables, seq_lens,
