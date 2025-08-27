@@ -455,12 +455,9 @@ VLM_TEST_SETTINGS = {
         ),
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
         img_idx_to_prompt=lambda idx: "<IMG_CONTEXT>",
-        max_model_len=4096,
+        video_idx_to_prompt=lambda idx: "<video>",
+        max_model_len=8192,
         use_tokenizer_eos=True,
-        image_size_factors=[(0.25, 0.5, 1.0)],
-        vllm_runner_kwargs={
-            "model_impl": "auto",
-        },
         auto_cls=AutoModelForImageTextToText,
     ),
     "kimi_vl": VLMTestInfo(
