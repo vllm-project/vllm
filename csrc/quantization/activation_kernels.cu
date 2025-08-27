@@ -209,12 +209,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   // base offsets (element-based)
   const Idx_t base_i = e * stride_i_e + g * GROUP_SIZE * stride_i_h;
 
-  // TODO: Check if warp_id x is correct here?
-  const Idx_t base_yq =
-      e * stride_yq_e + warp_id * g * GROUP_SIZE * stride_yq_h;
-  const Idx_t base_ys = e * stride_ys_e + warp_id * g * stride_ys_g;
-
-  __syncthreads();
+  const Idx_t base_yq = e * stride_yq_e + g * GROUP_SIZE * stride_yq_h;
+  const Idx_t base_ys = e * stride_ys_e + g * stride_ys_g;
 
   Idx_t gate_off_128 = (base_i / 8u);
   Idx_t up_off_128 = ((base_i + H * stride_i_h) / 8u);
@@ -227,13 +223,14 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   auto y_q_ptr = _y_q + yq_off;
   auto y_s_ptr = _y_s + base_ys;
 
+  __syncthreads();
   const Idx_t n_tokens = s_counts[warp_id];
 
   Idx_t t_load = 0, stage = 0;
   auto load_and_advance_y_pred = [&] {
     if (t_load < n_tokens) {
       // We do 2 * ... here to account for up + gate.
-      auto stage_offset = (NUM_WARPS * WARP_SIZE * 2u) * (stage % NUM_STAGES);
+      auto stage_offset = (stage % NUM_STAGES) * (NUM_WARPS * WARP_SIZE);
       auto s_gate_stage_128_staged_ptr = s_buff_gate_load_128 + stage_offset;
       auto s_up_stage_128_staged_ptr = s_buff_up_load_128 + stage_offset;
       cp_async4(s_gate_stage_128_staged_ptr, gate_128_ptr);
@@ -274,7 +271,9 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       gate = silu2(__bfloat1622float2(*s_gate_compute));
       upv = __bfloat1622float2(*s_up_compute);
       results[i] = make_float2(gate.x * upv.x, gate.y * upv.y);
-      y_max = fmaxf(results[i].x, results[i].y);
+      y_max = fmaxf(y_max, fmaxf(results[i].x, results[i].y));
+      s_gate_compute += WARP_SIZE;
+      s_up_compute += WARP_SIZE;
     }
 
     // TODO: Get rid of this...
