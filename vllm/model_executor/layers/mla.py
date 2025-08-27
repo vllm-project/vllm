@@ -28,7 +28,10 @@ class MLAModules:
 
 @CustomOp.register("multi_head_latent_attention")
 class MultiHeadLatentAttention(CustomOp):
-    """MLA layer.
+    """MLA layer registered as CustomOp.
+    Note that currently MLA ignores the enable/disable mechanism of CustomOp
+    because there is only one in-tree implementation in forward_native.
+    TODO: implement this with a new PluggableLayer mechanism.
 
     This class takes positions and hidden_states as input. 
     The input tensors can either contain prefill tokens or decode tokens.
