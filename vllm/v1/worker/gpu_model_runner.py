@@ -52,6 +52,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         GiB_bytes, LazyLoader, cdiv, check_use_alibi,
                         get_dtype_size, is_pin_memory_available, round_up,
@@ -120,6 +121,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+
+        reasoning_config = self.vllm_config.reasoning_config
+        if reasoning_config is not None:
+            tokenizer = init_tokenizer_from_configs(
+                model_config=self.vllm_config.model_config,
+                scheduler_config=self.vllm_config.scheduler_config,
+                lora_config=self.vllm_config.lora_config,
+            ).get_lora_tokenizer(None)
+            if reasoning_config.think_start_str is not None:
+                reasoning_config.think_start_token_ids = \
+                    tokenizer.convert_tokens_to_ids(
+                        tokenizer.tokenize(reasoning_config.think_start_str))
+            if reasoning_config.think_end_str is not None:
+                reasoning_config.think_end_token_ids = \
+                    tokenizer.convert_tokens_to_ids(
+                        tokenizer.tokenize(reasoning_config.think_end_str))
 
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
         set_cpu_offload_max_bytes(
