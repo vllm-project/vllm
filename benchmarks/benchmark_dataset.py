@@ -1204,6 +1204,7 @@ class MuirBenchDataset(HuggingFaceDataset):
         output_len: Optional[int] = None,
         enable_multimodal_chat: bool = False,
         input_len: Optional[int] = None,
+        filtered_res: Optional[tuple[int, int]] = None,
         **kwargs,
    ) -> List[SampleRequest]:
         output_len = output_len or self.DEFAULT_OUTPUT_LEN
@@ -1212,6 +1213,17 @@ class MuirBenchDataset(HuggingFaceDataset):
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
+
+            if filtered_res:
+                images = item.get("image_list", [])
+                if not images:
+                    continue
+                if not all(
+                    isinstance(img, Image.Image) and img.size == filtered_res
+                    for img in images
+                ):
+                    continue
+
             prompt = self.SUPPORTED_DATASET_PATHS[self.dataset_path](item)
             original_prompt = prompt
 

@@ -600,6 +600,13 @@ def save_to_pytorch_benchmark_format(
         pt_file = f"{os.path.splitext(file_name)[0]}.pytorch.json"
         write_to_json(pt_file, pt_records)
 
+def parse_resolution(arg_filtered_res):
+    if arg_filtered_res:
+        try:
+            width, height = map(int, arg_filtered_res.strip().split(","))
+            return (width, height)
+        except ValueError:
+            raise ValueError(f"Invalid format, expected: WIDTH,HEIGHT")
 
 def main(args: argparse.Namespace):
     print(args)
@@ -730,6 +737,8 @@ def main(args: argparse.Namespace):
                 "'openai-audio' backend."
             )
         if dataset_class == MuirBenchDataset:
+            filtered_res = parse_resolution(args.filtered_res)
+
             input_requests = dataset_class(
             dataset_path=args.dataset_path,
             dataset_subset=args.hf_subset,
@@ -740,6 +749,7 @@ def main(args: argparse.Namespace):
             tokenizer=tokenizer,
             output_len=args.hf_output_len,
             input_len=args.input_len,
+            filtered_res=filtered_res,
         )
         else:
             
@@ -1279,6 +1289,13 @@ if __name__ == "__main__":
         "--full",
         action="store_true",
         help="Set full token response mode, only for /chat/completions",
+    )
+
+    parser.add_argument(
+        "--filtered-res",
+        type=str,
+        default=None,
+        help="Optional image resolution filter as WIDTH,HEIGHT",
     )
 
     args = parser.parse_args()
