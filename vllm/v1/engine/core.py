@@ -1181,12 +1181,13 @@ class DPEngineCoreActor(DPEngineCoreProc):
         if current_platform.is_xpu():
             pass
         else:
-            self._set_cuda_visible_devices(vllm_config, local_dp_rank)
+            device_control_env_var = current_platform.device_control_env_var
+            self._set_cuda_visible_devices(vllm_config, local_dp_rank,
+                                           device_control_env_var)
 
     def _set_cuda_visible_devices(self, vllm_config: VllmConfig,
-                                  local_dp_rank: int):
-        from vllm.platforms import current_platform
-        device_control_env_var = current_platform.device_control_env_var
+                                  local_dp_rank: int,
+                                  device_control_env_var: str):
         world_size = vllm_config.parallel_config.world_size
         # Set CUDA_VISIBLE_DEVICES or equivalent.
         try:
