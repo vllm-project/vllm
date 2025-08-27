@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from unittest.mock import MagicMock
 
@@ -643,11 +644,9 @@ def test_chunked_prefill_preempt():
     assert out.num_batched_tokens == max_num_batched_tokens
 
 
-@pytest.mark.parametrize("num_scheduler_steps", [1, 5])
-def test_chunked_prefill_spec_prefill(num_scheduler_steps):
+def test_chunked_prefill_spec_prefill():
     """Verify that the num_lookahead_slots is set appropriately for an all"""
-    """prefill batch depending on whether multi-step scheduling is enabled"""
-    """or not"""
+    """prefill batch."""
     block_size = 4
     max_seqs = 30
     max_model_len = 200
@@ -660,7 +659,6 @@ def test_chunked_prefill_spec_prefill(num_scheduler_steps):
         max_model_len,
         enable_chunked_prefill=True,
         num_lookahead_slots=num_lookahead_slots,
-        num_scheduler_steps=num_scheduler_steps,
     )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 16
@@ -678,8 +676,7 @@ def test_chunked_prefill_spec_prefill(num_scheduler_steps):
     assert out.num_prefill_groups == 1
     assert out.num_batched_tokens == max_num_batched_tokens
     print(out.num_lookahead_slots)
-    assert out.num_lookahead_slots == (0 if (num_scheduler_steps == 1) else
-                                       num_lookahead_slots)
+    assert out.num_lookahead_slots == 0
 
 
 def test_chunked_prefill_max_seqs():

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
 from abc import ABC, abstractmethod
@@ -131,4 +132,8 @@ class BlockSpaceManager(ABC):
 
     @abstractmethod
     def get_num_cached_tokens(self, seq: Sequence) -> int:
+        pass
+
+    @abstractmethod
+    def remove_seq_from_computed_blocks_tracker(self, seq: Sequence) -> None:
         pass

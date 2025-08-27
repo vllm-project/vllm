@@ -24,6 +24,7 @@
 
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
+#include "../cuda_compat.h"
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -31,12 +32,6 @@
 typedef __hip_bfloat16 __nv_bfloat16;
 #else
   #include "../quantization/fp8/nvidia/quant_utils.cuh"
-#endif
-
-#ifndef USE_ROCM
-  #define WARP_SIZE 32
-#else
-  #define WARP_SIZE warpSize
 #endif
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
@@ -172,7 +167,7 @@ __device__ void paged_attention_kernel(
 
   // Load the query to registers.
   // Each thread in a thread group has a different part of the query.
-  // For example, if the the thread group size is 4, then the first thread in
+  // For example, if the thread group size is 4, then the first thread in
   // the group has 0, 4, 8, ... th vectors of the query, and the second thread
   // has 1, 5, 9, ... th vectors of the query, and so on. NOTE(woosuk): Because
   // q is split from a qkv tensor, it may not be contiguous.
@@ -259,7 +254,7 @@ __device__ void paged_attention_kernel(
 
     // Load a key to registers.
     // Each thread in a thread group has a different part of the key.
-    // For example, if the the thread group size is 4, then the first thread in
+    // For example, if the thread group size is 4, then the first thread in
     // the group has 0, 4, 8, ... th vectors of the key, and the second thread
     // has 1, 5, 9, ... th vectors of the key, and so on.
     for (int i = 0; i < NUM_TOKENS_PER_THREAD_GROUP; i++) {
@@ -670,7 +665,6 @@ __global__ void paged_attention_v2_reduce_kernel(
 
 }  // namespace vllm
 
-#undef WARP_SIZE
 #undef MAX
 #undef MIN
 #undef DIVIDE_ROUND_UP

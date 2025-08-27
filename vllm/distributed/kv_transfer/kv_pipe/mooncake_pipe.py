@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
 import os
+import struct
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional, Union
@@ -14,6 +16,7 @@ from safetensors.torch import save as safetensors_save
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
 from vllm.logger import init_logger
+from vllm.utils import join_host_port, make_zmq_path, split_host_port
 
 logger = init_logger(__name__)
 NONE_INT = -150886311
@@ -57,14 +60,14 @@ class MooncakeTransferEngine:
 
     def __init__(self, kv_rank: int, local_rank: int):
         try:
-            import mooncake_vllm_adaptor as mva
+            from mooncake.engine import TransferEngine
         except ImportError as e:
             raise ImportError(
                 "Please install mooncake by following the instructions at "
                 "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
                 "to run vLLM with MooncakeConnector.") from e
 
-        self.engine = mva.mooncake_vllm_adaptor()
+        self.engine = TransferEngine()
         self.local_rank = local_rank
 
         try:
@@ -77,18 +80,19 @@ class MooncakeTransferEngine:
             logger.error(
                 "An error occurred while loading the configuration: %s", exc)
             raise
-        prefill_host, base_prefill_port = self.config.prefill_url.split(':')
-        decode_host, base_decode_port = self.config.decode_url.split(':')
+        prefill_host, base_prefill_port = split_host_port(
+            self.config.prefill_url)
+        decode_host, base_decode_port = split_host_port(self.config.decode_url)
 
         # Avoid ports conflict when running prefill and decode on the same node
         if prefill_host == decode_host and \
                 base_prefill_port == base_decode_port:
-            base_decode_port = str(int(base_decode_port) + 100)
+            base_decode_port = base_decode_port + 100
 
-        prefill_port = int(base_prefill_port) + self.local_rank
-        decode_port = int(base_decode_port) + self.local_rank
-        self.prefill_url = ':'.join([prefill_host, str(prefill_port)])
-        self.decode_url = ':'.join([decode_host, str(decode_port)])
+        prefill_port = base_prefill_port + self.local_rank
+        decode_port = base_decode_port + self.local_rank
+        self.prefill_url = join_host_port(prefill_host, prefill_port)
+        self.decode_url = join_host_port(decode_host, decode_port)
 
         self.initialize(self.prefill_url if kv_rank == 0 else self.decode_url,
                         self.config.metadata_server, self.config.protocol,
@@ -108,22 +112,30 @@ class MooncakeTransferEngine:
         self._setup_metadata_sockets(kv_rank, prefill_host, base_prefill_port,
                                      decode_host, base_decode_port)
 
-    def _setup_metadata_sockets(self, kv_rank: int, p_host: str, p_port: str,
-                                d_host: str, d_port: str) -> None:
+    def _setup_metadata_sockets(self, kv_rank: int, p_host: str, p_port: int,
+                                d_host: str, d_port: int) -> None:
         """Set up ZeroMQ sockets for sending and receiving data."""
         # Offsets < 8 are left for initialization in case tp and pp are enabled
-        p_rank_offset = int(p_port) + 8 + self.local_rank * 2
-        d_rank_offset = int(d_port) + 8 + self.local_rank * 2
+        p_rank_offset = p_port + 8 + self.local_rank * 2
+        d_rank_offset = d_port + 8 + self.local_rank * 2
         if kv_rank == 0:
-            self.sender_socket.bind(f"tcp://*:{p_rank_offset + 1}")
-            self.receiver_socket.connect(f"tcp://{d_host}:{d_rank_offset + 1}")
-            self.sender_ack.connect(f"tcp://{d_host}:{d_rank_offset + 2}")
-            self.receiver_ack.bind(f"tcp://*:{p_rank_offset + 2}")
+            self.sender_socket.bind(
+                make_zmq_path("tcp", p_host, p_rank_offset + 1))
+            self.receiver_socket.connect(
+                make_zmq_path("tcp", d_host, d_rank_offset + 1))
+            self.sender_ack.connect(
+                make_zmq_path("tcp", d_host, d_rank_offset + 2))
+            self.receiver_ack.bind(
+                make_zmq_path("tcp", p_host, p_rank_offset + 2))
         else:
-            self.receiver_socket.connect(f"tcp://{p_host}:{p_rank_offset + 1}")
-            self.sender_socket.bind(f"tcp://*:{d_rank_offset + 1}")
-            self.receiver_ack.bind(f"tcp://*:{d_rank_offset + 2}")
-            self.sender_ack.connect(f"tcp://{p_host}:{p_rank_offset + 2}")
+            self.receiver_socket.connect(
+                make_zmq_path("tcp", p_host, p_rank_offset + 1))
+            self.sender_socket.bind(
+                make_zmq_path("tcp", d_host, d_rank_offset + 1))
+            self.receiver_ack.bind(
+                make_zmq_path("tcp", d_host, d_rank_offset + 2))
+            self.sender_ack.connect(
+                make_zmq_path("tcp", p_host, p_rank_offset + 2))
 
     def initialize(self, local_hostname: str, metadata_server: str,
                    protocol: str, device_name: str,
@@ -140,12 +152,12 @@ class MooncakeTransferEngine:
                     "Mooncake Configuration error. `metadata_backend`"
                     f" should be one of {supported_backend}.")
 
-            self.engine.initializeExt(local_hostname, metadata_server,
-                                      protocol, device_name, metadata_backend)
+            self.engine.initialize_ext(local_hostname, metadata_server,
+                                       protocol, device_name, metadata_backend)
 
     def allocate_managed_buffer(self, length: int) -> int:
         """Allocate a managed buffer of the specified length."""
-        ret = self.engine.allocateManagedBuffer(length)
+        ret = self.engine.allocate_managed_buffer(length)
         if ret <= 0:
             logger.error("Allocation Return Error")
             raise Exception("Allocation Return Error")
@@ -153,13 +165,13 @@ class MooncakeTransferEngine:
 
     def free_managed_buffer(self, buffer: int, length: int) -> int:
         """Free a previously allocated managed buffer."""
-        return self.engine.freeManagedBuffer(buffer, length)
+        return self.engine.free_managed_buffer(buffer, length)
 
     def transfer_sync(self, buffer: int, peer_buffer_address: int,
                       length: int) -> int:
         """Synchronously transfer data to the specified address."""
-        ret = self.engine.transferSync(self.remote_url, buffer,
-                                       peer_buffer_address, length)
+        ret = self.engine.transfer_sync_read(self.remote_url, buffer,
+                                             peer_buffer_address, length)
         if ret < 0:
             logger.error("Transfer Return Error")
             raise Exception("Transfer Return Error")
@@ -168,15 +180,15 @@ class MooncakeTransferEngine:
     def write_bytes_to_buffer(self, buffer: int, user_data: bytes,
                               length: int) -> int:
         """Write bytes to the allocated buffer."""
-        return self.engine.writeBytesToBuffer(buffer, user_data, length)
+        return self.engine.write_bytes_to_buffer(buffer, user_data, length)
 
     def read_bytes_from_buffer(self, buffer: int, length: int) -> bytes:
         """Read bytes from the allocated buffer."""
-        return self.engine.readBytesFromBuffer(buffer, length)
+        return self.engine.read_bytes_from_buffer(buffer, length)
 
     def wait_for_ack(self, src_ptr: int, length: int) -> None:
         """Asynchronously wait for ACK from the receiver."""
-        ack = self.sender_ack.recv_pyobj()
+        ack = self.sender_ack.recv()
         if ack != b'ACK':
             logger.error("Failed to receive ACK from the receiver")
 
@@ -187,18 +199,22 @@ class MooncakeTransferEngine:
         length = len(user_data)
         src_ptr = self.allocate_managed_buffer(length)
         self.write_bytes_to_buffer(src_ptr, user_data, length)
-        self.sender_socket.send_pyobj((src_ptr, length))
+        self.sender_socket.send_multipart(
+            [struct.pack("!Q", src_ptr),
+             struct.pack("!Q", length)])
         self.buffer_cleaner.submit(self.wait_for_ack, src_ptr, length)
 
     def recv_bytes(self) -> bytes:
         """Receive bytes from the remote process."""
-        src_ptr, length = self.receiver_socket.recv_pyobj()
+        data = self.receiver_socket.recv_multipart()
+        src_ptr = struct.unpack("!Q", data[0])[0]
+        length = struct.unpack("!Q", data[1])[0]
         dst_ptr = self.allocate_managed_buffer(length)
         self.transfer_sync(dst_ptr, src_ptr, length)
         ret = self.read_bytes_from_buffer(dst_ptr, length)
 
         # Buffer cleanup
-        self.receiver_ack.send_pyobj(b'ACK')
+        self.receiver_ack.send(b'ACK')
         self.free_managed_buffer(dst_ptr, length)
 
         return ret

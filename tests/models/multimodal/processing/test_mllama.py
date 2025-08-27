@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for mllama's multimodal preprocessing and profiling."""
 import pytest
 from transformers import MllamaConfig
@@ -48,18 +49,18 @@ def test_profiling(
     encoder_seq_lens = [len(dummy_encoder_data.prompt_token_ids)
                         ] * max_num_seqs
 
-    mm_kwargs = processor.apply(
-        prompt=dummy_mm_data.prompt_text,
+    mm_data = processor.apply(
+        prompt=dummy_mm_data.prompt,
         mm_data=dummy_mm_data.mm_data,
         hf_processor_mm_kwargs=dict(),
-    )["mm_kwargs"]
+    )["mm_kwargs"].get_data()
 
     # Get the actual number of encoder tokens for each sample.
     # Because attn_metadata.encoder_seq_lens only counts the last
     # group of images for each sample, which is used to cheat the
     # block manager to allocate blocks for those images only.
     # See MllamaMultiModalProcessor for more details.
-    num_tiles = [[t] for t in mm_kwargs.pop("num_tiles")]
+    num_tiles = [[t] for t in mm_data.pop("num_tiles")]
     num_tokens_per_tile = calc_token_per_chunk(image_size)
     actual_encoder_seq_lens = [
         sum(num_tile) * num_tokens_per_tile for num_tile in num_tiles

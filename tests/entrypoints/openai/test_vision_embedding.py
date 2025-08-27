@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import json
 
 import pytest
 import requests
-from PIL import Image
 from transformers import AutoProcessor
 
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
@@ -28,8 +30,8 @@ TEST_IMAGE_URLS = [
 @pytest.fixture(scope="module")
 def server():
     args = [
-        "--task",
-        "embed",
+        "--runner",
+        "pooling",
         "--max-model-len",
         "2048",
         "--max-num-seqs",
@@ -37,7 +39,7 @@ def server():
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
-        f"image={MAXIMUM_IMAGES}",
+        json.dumps({"image": MAXIMUM_IMAGES}),
         "--chat-template",
         str(vlm2vec_jinja_path),
     ]
@@ -61,7 +63,7 @@ def get_hf_prompt_tokens(model_name, content, image_url):
 
     placeholder = "<|image_1|> "
     prompt = f"{placeholder}{content}"
-    images = [Image.open(requests.get(image_url, stream=True).raw)]
+    images = [fetch_image(image_url)]
     inputs = processor(prompt, images, return_tensors="pt")
     return inputs.input_ids.shape[1]
 

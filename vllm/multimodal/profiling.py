@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Generic, NamedTuple, Optional, TypeVar, cast
+from typing import Generic, NamedTuple, Optional, TypeVar, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -13,7 +13,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
-                     MultiModalInputs, MultiModalKwargs,
+                     MultiModalInputs, MultiModalKwargsOptionalItems,
                      MultiModalPlaceholderDict)
 from .processing import (BaseMultiModalProcessor, BaseProcessingInfo,
                          EncDecMultiModalProcessor)
@@ -25,11 +25,12 @@ logger = init_logger(__name__)
 class ProcessorInputs:
     """
     Represents the keyword arguments to
-    :meth:`vllm.multimodal.processing.BaseMultiModalProcessor.apply`.
+    [`vllm.multimodal.processing.BaseMultiModalProcessor.apply`][].
     """
-    prompt_text: str
+    prompt: Union[str, list[int]]
     mm_data: MultiModalDataDict
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
+    tokenization_kwargs: Mapping[str, object] = field(default_factory=dict)
 
 
 class DummyEncoderData(NamedTuple):
@@ -42,7 +43,7 @@ class DummyDecoderData(NamedTuple):
     """Dummy data used for profiling."""
 
     prompt_token_ids: list[int]
-    multi_modal_data: MultiModalKwargs
+    multi_modal_data: MultiModalKwargsOptionalItems
     multi_modal_placeholders: MultiModalPlaceholderDict
 
 
@@ -61,6 +62,24 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self.info = info
 
     @abstractmethod
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        """
+        Build the text input corresponding to `mm_counts`.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> MultiModalDataDict:
+        """
+        Build the multimodal input which, after processing, results in
+        the maximum possible number of placeholder tokens.
+        """
+        raise NotImplementedError
+
     def get_dummy_processor_inputs(
         self,
         seq_len: int,
@@ -68,9 +87,15 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
     ) -> ProcessorInputs:
         """
         Build the input which, after processing, results in
-        :code:`self.info.get_mm_max_tokens_per_item()` placeholder tokens.
+        the maximum possible number of placeholder tokens.
         """
-        raise NotImplementedError
+        dummy_text = self.get_dummy_text(mm_counts)
+        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts)
+        tokenization_kwargs = {"truncation": False}
+
+        return ProcessorInputs(prompt=dummy_text,
+                               mm_data=dummy_mm_data,
+                               tokenization_kwargs=tokenization_kwargs)
 
     def _get_dummy_audios(
         self,
@@ -78,6 +103,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         length: int,
         num_audios: int,
     ) -> list[npt.NDArray]:
+        if num_audios == 0:
+            return []
         audio = np.zeros((length, ))
         return [audio] * num_audios
 
@@ -88,6 +115,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         height: int,
         num_images: int,
     ) -> list[Image.Image]:
+        if num_images == 0:
+            return []
         image = Image.new("RGB", (width, height), color=255)
         return [image] * num_images
 
@@ -99,6 +128,8 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         num_frames: int,
         num_videos: int,
     ) -> list[npt.NDArray]:
+        if num_videos == 0:
+            return []
         video = np.full((num_frames, width, height, 3), 255)
         return [video] * num_videos
 
@@ -125,86 +156,47 @@ class MultiModalProfiler(Generic[_I]):
         return self.processor.dummy_inputs
 
     def get_mm_limits(self) -> Mapping[str, int]:
-        mm_config = self.processing_info.ctx.get_mm_config()
-        supported_mm_limits = self.processing_info.get_supported_mm_limits()
-
-        mm_limits = {
-            modality: mm_config.get_limit_per_prompt(modality)
-            for modality in supported_mm_limits
-        }
-
-        for modality, supported_limit in supported_mm_limits.items():
-            limit = mm_limits[modality]
-            if supported_limit is not None and supported_limit < limit:
-                raise ValueError(
-                    f"You set {modality}={limit} (or defaulted to 1) in "
-                    f"`--limit-mm-per-prompt`, but this model only supports "
-                    f"at most {supported_limit} {modality} items.")
-
-        return mm_limits
+        return self.processor.allowed_mm_limits
 
     def _get_dummy_mm_inputs(
         self,
         seq_len: int,
-        mm_counts: Mapping[str, int],
+        mm_counts: Optional[Mapping[str, int]] = None,
     ) -> MultiModalInputs:
+        if mm_counts is None:
+            mm_counts = self.get_mm_limits()
+
         factory = self.dummy_inputs
         processor_inputs = factory.get_dummy_processor_inputs(
             seq_len, mm_counts)
 
         return self.processor.apply(
-            prompt=processor_inputs.prompt_text,
+            prompt=processor_inputs.prompt,
             mm_data=processor_inputs.mm_data,
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
+            tokenization_kwargs=processor_inputs.tokenization_kwargs,
         )
 
-    def get_and_validate_mm_inputs(
+    def _get_mm_num_tokens(
         self,
-        seq_len: int,
-        mm_counts: Optional[Mapping[str, int]] = None,
-    ) -> tuple[MultiModalInputs, Mapping[str, int]]:
-        if mm_counts is None:
-            mm_counts = self.get_mm_limits()
-
-        info = self.processing_info
-        mm_max_tokens_per_item = info.get_mm_max_tokens_per_item(
-            seq_len, mm_counts)
-
-        if mm_counts.keys() - mm_max_tokens_per_item.keys():
-            raise AssertionError(
-                "The keys returned by `get_supported_mm_limits` "
-                f"({set(mm_counts.keys())}) should be a subset of those "
-                "returned by `get_mm_max_tokens_per_item` "
-                f"({set(mm_max_tokens_per_item.keys())})")
-
-        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
+        mm_inputs: MultiModalInputs,
+        mm_embeddings_only: bool = True,
+    ) -> Mapping[str, int]:
         placeholders_by_modality = mm_inputs["mm_placeholders"]
 
-        total_placeholders_by_modality = {
-            modality: sum(item.get_num_embeds() for item in placeholders)
+        return {
+            modality:
+            sum(item.get_num_embeds() if mm_embeddings_only else item.length
+                for item in placeholders)
             for modality, placeholders in placeholders_by_modality.items()
         }
-        expected_placeholders_by_modality = {
-            modality: mm_max_tokens_per_item[modality] * mm_counts[modality]
-            for modality in placeholders_by_modality
-        }
-        if total_placeholders_by_modality != expected_placeholders_by_modality:
-            raise AssertionError(
-                f"The processed dummy data has a total of "
-                f"{total_placeholders_by_modality} placeholder tokens, which "
-                f"is not the expected {expected_placeholders_by_modality} "
-                "tokens.")
-        return mm_inputs, total_placeholders_by_modality
 
     def get_encoder_dummy_data(
         self,
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
     ) -> DummyEncoderData:
-        (
-            mm_inputs,
-            total_placeholders_by_modality,
-        ) = self.get_and_validate_mm_inputs(seq_len, mm_counts)
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
         mm_inputs = cast(MultiModalEncDecInputs, mm_inputs)
 
         # For encoder-decoder models, use encoder prompt token ids instead of
@@ -217,21 +209,18 @@ class MultiModalProfiler(Generic[_I]):
         if processor.pad_dummy_encoder_prompt:
             num_tokens_to_pad = max(total_len, seq_len) - total_len
             encoder_prompt_token_ids.extend([0] * num_tokens_to_pad)
-        # NOTE: Whisper allows total_len > seq_len.
+        # NOTE: Whisper and Donut allows total_len > seq_len.
         elif total_len > seq_len and not envs.VLLM_USE_V1:
             # `max_num_batched_tokens` is defined by `SchedulerConfig`
             logger.warning_once(
-                "The encoder sequence length used for profiling ("
-                f"max_num_batched_tokens / max_num_seqs = {seq_len}) "
-                " is too short "
-                "to hold the multi-modal embeddings in the worst case "
-                f"({total_len} tokens in total, out of which "
-                f"{total_placeholders_by_modality} are reserved for "
-                "multi-modal embeddings). This may cause certain "
-                "multi-modal inputs to fail during inference, even when "
-                "the input text is short. To avoid this, you should "
-                "increase `max_model_len`, reduce `max_num_seqs`, "
-                "and/or reduce `mm_counts`.")
+                "The encoder sequence length used for profiling (max_num_batched_tokens / max_num_seqs = %d) "  # noqa: E501
+                "is too short to hold the multi-modal embeddings in the worst case (%d tokens in total, out of which %s are reserved for multi-modal embeddings). "  # noqa: E501
+                "This may cause certain multi-modal inputs to fail during inference, even when the input text is short. "  # noqa: E501
+                "To avoid this, you should increase `max_model_len`, reduce `max_num_seqs`, and/or reduce `mm_counts`.",  # noqa: E501
+                seq_len,
+                total_len,
+                str(self._get_mm_num_tokens(mm_inputs)),
+            )
 
         return DummyEncoderData(encoder_prompt_token_ids)
 
@@ -240,10 +229,7 @@ class MultiModalProfiler(Generic[_I]):
         seq_len: int,
         mm_counts: Optional[Mapping[str, int]] = None,
     ) -> DummyDecoderData:
-        (
-            mm_inputs,
-            total_placeholders_by_modality,
-        ) = self.get_and_validate_mm_inputs(seq_len, mm_counts)
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
 
         prompt_token_ids = mm_inputs["prompt_token_ids"]
         total_len = len(prompt_token_ids)
@@ -252,17 +238,14 @@ class MultiModalProfiler(Generic[_I]):
         if total_len > seq_len and not envs.VLLM_USE_V1:
             # `max_num_batched_tokens` is defined by `SchedulerConfig`
             logger.warning_once(
-                "The sequence length used for profiling ("
-                f"max_num_batched_tokens / max_num_seqs = {seq_len}) "
-                "is too short "
-                "to hold the multi-modal embeddings in the worst case "
-                f"({total_len} tokens in total, out of which "
-                f"{total_placeholders_by_modality} are reserved for "
-                "multi-modal embeddings). This may cause certain "
-                "multi-modal inputs to fail during inference, even when "
-                "the input text is short. To avoid this, you should "
-                "increase `max_model_len`, reduce `max_num_seqs`, "
-                "and/or reduce `mm_counts`.")
+                "The sequence length used for profiling (max_num_batched_tokens / max_num_seqs = %d) "  # noqa: E501
+                "is too short to hold the multi-modal embeddings in the worst case (%d tokens in total, out of which %s are reserved for multi-modal embeddings). "  # noqa: E501
+                "This may cause certain multi-modal inputs to fail during inference, even when the input text is short. "  # noqa: E501
+                "To avoid this, you should increase `max_model_len`, reduce `max_num_seqs`, and/or reduce `mm_counts`.",  # noqa: E501
+                seq_len,
+                total_len,
+                str(self._get_mm_num_tokens(mm_inputs)),
+            )
 
         if total_len < seq_len:
             prompt_token_ids.extend([0] * (seq_len - total_len))
@@ -272,3 +255,59 @@ class MultiModalProfiler(Generic[_I]):
             multi_modal_data=mm_inputs["mm_kwargs"],
             multi_modal_placeholders=mm_inputs["mm_placeholders"],
         )
+
+    def _get_mm_max_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Optional[Mapping[str, int]] = None,
+        mm_embeddings_only: bool = True,
+    ) -> Mapping[str, int]:
+        if mm_counts is None:
+            mm_counts = self.get_mm_limits()
+
+        max_tokens_per_item = self.processing_info.get_mm_max_tokens_per_item(
+            seq_len=seq_len,
+            mm_counts=mm_counts,
+        )
+        if max_tokens_per_item is not None:
+            if mm_counts is None:
+                total_mm_tokens = sum(max_tokens_per_item.values())
+            else:
+                total_mm_tokens = sum(max_tokens_per_item[k] * mm_counts[k]
+                                      for k in max_tokens_per_item.keys()
+                                      & mm_counts.keys())
+            if total_mm_tokens > seq_len:
+                logger.warning_once(
+                    "The sequence length (%d) is smaller than the pre-defined"
+                    " worst-case total number of multimodal tokens (%d). "
+                    "This may cause certain multi-modal inputs to fail during "
+                    "inference. To avoid this, you should increase "
+                    "`max_model_len` or reduce `mm_counts`.",
+                    seq_len,
+                    total_mm_tokens,
+                )
+            return max_tokens_per_item
+
+        mm_inputs = self._get_dummy_mm_inputs(seq_len, mm_counts)
+        return self._get_mm_num_tokens(mm_inputs,
+                                       mm_embeddings_only=mm_embeddings_only)
+
+    def get_mm_max_contiguous_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Optional[Mapping[str, int]] = None,
+    ):
+        """
+        Returns the maximum length of the multimodal (image placeholders+text)
+        tokens, including any break/text tokens in-between image embeddings.
+
+        <im_start> [IMG] [IMG] [IMG] <row_break> [IMG] [IMG] [IMG] <im_end>
+        Returns 9, even when the number of image embeddings is 6.
+        
+        This is important to take into account when profiling and
+        initializing the encoder cache size.
+        """
+
+        return self._get_mm_max_tokens(seq_len,
+                                       mm_counts,
+                                       mm_embeddings_only=False)

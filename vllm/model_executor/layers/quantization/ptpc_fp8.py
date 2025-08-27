@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import torch
 from torch.nn.parameter import Parameter
@@ -9,13 +10,14 @@ from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.fp8 import (Fp8Config,
                                                          Fp8KVCacheMethod,
                                                          Fp8LinearMethod)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    is_layer_skipped)
+    GroupShape, is_layer_skipped)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp)
 from vllm.platforms import current_platform
@@ -31,7 +33,7 @@ class PTPCFp8Config(Fp8Config):
     def __init__(
         self,
         activation_scheme: str = "dynamic",
-        ignored_layers: Optional[List[str]] = None,
+        ignored_layers: Optional[list[str]] = None,
     ) -> None:
         if not current_platform.is_rocm():
             raise ValueError(
@@ -50,11 +52,11 @@ class PTPCFp8Config(Fp8Config):
                          ignored_layers=ignored_layers)
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "ptpc_fp8"
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "PTPCFp8Config":
+    def from_config(cls, config: dict[str, Any]) -> "PTPCFp8Config":
         activation_scheme = cls.get_from_keys(config, ["activation_scheme"])
         ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
         return cls(activation_scheme=activation_scheme,
@@ -93,8 +95,10 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         super().__init__(quant_config=quant_config)
         # Force weight quantization
         self.quant_config.is_checkpoint_fp8_serialized = False
-        self.fp8_linear = Fp8LinearOp(cutlass_fp8_supported=False,
-                                      use_per_token_if_dynamic=True)
+        self.fp8_linear = Fp8LinearOp(
+            act_quant_static=False,
+            act_quant_group_shape=GroupShape.PER_TOKEN,
+            force_fp8_e4m3fnuz=True)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data,

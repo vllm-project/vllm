@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Dict, Optional
+from typing import Optional
 
 from transformers import SmolVLMProcessor
 
@@ -18,15 +19,7 @@ from .idefics3 import Idefics3ProcessingInfo
 
 class SmolVLMProcessingInfo(Idefics3ProcessingInfo):
 
-    def get_hf_processor(
-        self,
-        *,
-        max_image_size: Optional[Dict[str, int]] = None,
-        **kwargs: object,
-    ) -> SmolVLMProcessor:
-        if max_image_size is not None:
-            kwargs["max_image_size"] = max_image_size
-
+    def get_hf_processor(self, **kwargs: object) -> SmolVLMProcessor:
         return self.ctx.get_hf_processor(SmolVLMProcessor, **kwargs)
 
     def _get_image_token(

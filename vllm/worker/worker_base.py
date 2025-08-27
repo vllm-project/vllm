@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
 import os
@@ -48,7 +49,6 @@ class WorkerBase:
         self.scheduler_config = vllm_config.scheduler_config
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
         self.kv_transfer_config = vllm_config.kv_transfer_config
         self.compilation_config = vllm_config.compilation_config
@@ -201,8 +201,7 @@ class LoRANotSupportedWorkerBase(WorkerBase):
         raise ValueError(f"{type(self)} does not support LoRA")
 
     def pin_lora(self, lora_id: int) -> bool:
-        return ValueError(
-            f"{type(self)} does not support LoRA")  # type: ignore
+        raise ValueError(f"{type(self)} does not support LoRA")
 
     def list_loras(self) -> Set[int]:
         raise ValueError(f"{type(self)} does not support LoRA")
@@ -397,8 +396,6 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
-        if (execute_model_req is not None and execute_model_req.spec_step_idx):
-            kwargs["spec_step_idx"] = execute_model_req.spec_step_idx
 
         self.execute_worker(worker_input)
 
@@ -509,6 +506,7 @@ class WorkerWrapperBase:
         """
         self.rpc_rank = rpc_rank
         self.worker: Optional[WorkerBase] = None
+        self.vllm_config: Optional[VllmConfig] = None
         # do not store this `vllm_config`, `init_worker` will set the final
         # one. TODO: investigate if we can remove this field in
         # `WorkerWrapperBase`, `init_cached_hf_modules` should be
@@ -546,7 +544,7 @@ class WorkerWrapperBase:
         Arguments are passed to the worker class constructor.
         """
         kwargs = all_kwargs[self.rpc_rank]
-        self.vllm_config = kwargs.get("vllm_config", None)
+        self.vllm_config = kwargs.get("vllm_config")
         assert self.vllm_config is not None, (
             "vllm_config is required to initialize the worker")
         enable_trace_function_call_for_thread(self.vllm_config)
@@ -596,7 +594,8 @@ class WorkerWrapperBase:
 
     def initialize_from_config(self, kv_cache_configs: List[Any]) -> None:
         kv_cache_config = kv_cache_configs[self.rpc_rank]
-        self.worker.initialize_from_config(kv_cache_config)  # type: ignore
+        with set_current_vllm_config(self.vllm_config):
+            self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 
     def init_device(self):
         with set_current_vllm_config(self.vllm_config):

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Authors:
 #  - Burkhard Ringlein <ngl@zurich.ibm.com>
@@ -7,11 +8,10 @@
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
 import torch
-import triton
-import triton.language as tl
 
 from vllm import _custom_ops as ops
-from vllm.platforms.rocm import use_rocm_custom_paged_attention
+from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 
 from .prefix_prefill import context_attention_fwd
 
@@ -27,6 +27,7 @@ def kernel_paged_attention_2d(
         query_ptr,  # [num_tokens, num_query_heads, head_size]
         key_cache_ptr,  # [num_blks, num_kv_heads, head_size // x, blk_size, x]
         value_cache_ptr,  # [num_blks, num_kv_heads, head_size, blk_size]
+        sink_ptr,  # [num_query_heads]
         block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
         seq_lens_ptr,  # [num_seqs]
         alibi_slopes_ptr,  # [num_query_heads]
@@ -58,6 +59,7 @@ def kernel_paged_attention_2d(
         stride_v_cache_3: tl.int64,  # int
         filter_by_query_len: tl.constexpr,  # bool
         query_start_len_ptr,  # [num_seqs+1]
+        USE_SINKS: tl.constexpr,  # bool
 ):
     seq_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -94,7 +96,17 @@ def kernel_paged_attention_2d(
 
     block_table_offset = seq_idx * block_table_stride
 
-    M = tl.full([num_queries_per_kv_padded], float("-inf"), dtype=tl.float32)
+    if not USE_SINKS:
+        M = tl.full([num_queries_per_kv_padded],
+                    float("-inf"),
+                    dtype=tl.float32)
+    else:
+        M = tl.load(
+            sink_ptr + query_head_idx,
+            mask=head_mask,
+            other=float("-inf"),
+        ).to(dtype=tl.float32)
+
     L = tl.full([num_queries_per_kv_padded], 1.0, dtype=tl.float32)
     acc = tl.zeros([num_queries_per_kv_padded, HEAD_SIZE_PADDED],
                    dtype=tl.float32)
@@ -222,6 +234,8 @@ def chunked_prefill_paged_decode(
     alibi_slopes=None,
     sliding_window=None,
     sm_scale=None,
+    # Optional tensor for sinks
+    sinks=None,
 ):
 
     if sm_scale is None:
@@ -252,6 +266,7 @@ def chunked_prefill_paged_decode(
             sliding_window=sliding_window,
             sm_scale=sm_scale,
             skip_decode=True,
+            sinks=sinks,
         )
 
     block_size = value_cache.shape[3]
@@ -264,11 +279,11 @@ def chunked_prefill_paged_decode(
     # Conversion of FP8 Tensor from uint8 storage to
     # appropriate torch.dtype for interpretation by Triton
     if "fp8" in kv_cache_dtype:
-        assert key_cache.dtype == torch.uint8
-        assert value_cache.dtype == torch.uint8
+        assert key_cache.dtype in [torch.uint8, current_platform.fp8_dtype()]
+        assert value_cache.dtype in [torch.uint8, current_platform.fp8_dtype()]
 
         if kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            target_dtype = torch.float8_e4m3fn
+            target_dtype = current_platform.fp8_dtype()
         elif kv_cache_dtype == "fp8_e5m2":
             target_dtype = torch.float8_e5m2
         else:
@@ -280,16 +295,24 @@ def chunked_prefill_paged_decode(
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv),
                                     16)
 
-    use_custom = use_rocm_custom_paged_attention(query.dtype, head_size,
-                                                 block_size,
-                                                 num_queries_per_kv,
-                                                 max_seq_len, sliding_window)
+    from vllm.platforms.rocm import use_rocm_custom_paged_attention
+    use_custom = use_rocm_custom_paged_attention(
+        query.dtype,
+        head_size,
+        block_size,
+        num_queries_per_kv,
+        max_seq_len,
+        sliding_window,
+        kv_cache_dtype,
+        alibi_slopes,
+        sinks,
+    )
     if use_custom:
         _PARTITION_SIZE_ROCM = 256
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE_ROCM - 1) //
                               _PARTITION_SIZE_ROCM)
         assert _PARTITION_SIZE_ROCM % block_size == 0
-        total_num_seq = query.shape[0]
+        total_num_seq = block_table.shape[0]
         tmp_output = torch.empty(
             size=(total_num_seq, num_query_heads, max_num_partitions,
                   head_size),
@@ -332,6 +355,7 @@ def chunked_prefill_paged_decode(
             query_ptr=query,
             key_cache_ptr=key_cache,
             value_cache_ptr=value_cache,
+            sink_ptr=sinks,
             block_tables_ptr=block_table,
             seq_lens_ptr=seq_lens,
             alibi_slopes_ptr=alibi_slopes,
@@ -363,4 +387,5 @@ def chunked_prefill_paged_decode(
             stride_v_cache_3=value_cache.stride(3),
             filter_by_query_len=True,
             query_start_len_ptr=query_start_loc,
+            USE_SINKS=sinks is not None,
         )

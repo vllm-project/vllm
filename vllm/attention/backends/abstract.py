@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
@@ -8,6 +9,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional,
 
 import torch
 
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.multimodal import MultiModalPlaceholderMap
 
 if TYPE_CHECKING:
@@ -78,6 +80,10 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @staticmethod
+    def get_kv_cache_stride_order() -> Tuple[int, ...]:
+        raise NotImplementedError
+
+    @staticmethod
     @abstractmethod
     def swap_blocks(
         src_kv_cache: torch.Tensor,
@@ -94,10 +100,9 @@ class AttentionBackend(ABC):
     ) -> None:
         raise NotImplementedError
 
-    def advance_step(self, model_input: "ModelRunnerInputBase",
-                     sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int, num_seqs: int, num_queries: int) -> None:
-        raise NotImplementedError
+    @classmethod
+    def full_cls_name(cls) -> tuple[str, str]:
+        return (cls.__module__, cls.__qualname__)
 
 
 @dataclass
@@ -237,6 +242,7 @@ class AttentionLayer(Protocol):
     _v_scale: torch.Tensor
     _k_scale_float: float
     _v_scale_float: float
+    _prob_scale: torch.Tensor
 
     def forward(
         self,
@@ -261,9 +267,9 @@ class AttentionImpl(ABC, Generic[T]):
         alibi_slopes: Optional[List[float]] = None,
         sliding_window: Optional[int] = None,
         kv_cache_dtype: str = "auto",
-        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
     ) -> None:
         raise NotImplementedError
 
@@ -277,8 +283,21 @@ class AttentionImpl(ABC, Generic[T]):
         kv_cache: torch.Tensor,
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
+
+    def fused_output_quant_supported(self, quant_key: QuantKey):
+        """
+        Does this attention implementation support fused output quantization.
+        This is used by the AttnFusionPass to only fuse output quantization
+        onto implementations that support it.
+
+        :param quant_key: QuantKey object that describes the quantization op
+        :return: is fusion supported for this type of quantization
+        """
+        return False
 
 
 class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
@@ -293,6 +312,8 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         kv_cache: torch.Tensor,
         attn_metadata: T,
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 

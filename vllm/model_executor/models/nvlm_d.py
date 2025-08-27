@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # adapted from https://huggingface.co/nvidia/NVLM-D-72B/blob/main/modeling_nvlm_d.py
 # --------------------------------------------------------
@@ -15,17 +16,17 @@ from transformers import PretrainedConfig
 
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargs
+from vllm.multimodal.inputs import MultiModalDataDict, MultiModalKwargsItems
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
-from vllm.multimodal.profiling import ProcessorInputs
 
 from .intern_vit import InternVisionModel
-from .internvl import (BaseInternVLProcessingInfo, BaseInternVLProcessor,
-                       InternVLChatModel, InternVLDummyInputsBuilder,
-                       InternVLMultiModalProcessor)
+from .internvl import (BaseInternVLDummyInputsBuilder,
+                       BaseInternVLMultiModalProcessor,
+                       BaseInternVLProcessingInfo, BaseInternVLProcessor,
+                       InternVLChatModel)
 
 IMG_PAD = "<|vision_pad|>"
 
@@ -62,21 +63,7 @@ class NVLMProcessor(BaseInternVLProcessor):
 
 class NVLMProcessingInfo(BaseInternVLProcessingInfo):
 
-    def get_hf_processor(
-        self,
-        *,
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-        **kwargs: object,
-    ) -> NVLMProcessor:
-        if min_dynamic_patch is not None:
-            kwargs["min_dynamic_patch"] = min_dynamic_patch
-        if max_dynamic_patch is not None:
-            kwargs["max_dynamic_patch"] = max_dynamic_patch
-        if dynamic_image_size is not None:
-            kwargs["dynamic_image_size"] = dynamic_image_size
-
+    def get_hf_processor(self, **kwargs: object) -> NVLMProcessor:
         return self.ctx.init_processor(
             NVLMProcessor,
             config=self.get_hf_config(),
@@ -85,50 +72,53 @@ class NVLMProcessingInfo(BaseInternVLProcessingInfo):
         )
 
 
-class NVLMDummyInputsBuilder(InternVLDummyInputsBuilder[NVLMProcessingInfo]):
+class NVLMDummyInputsBuilder(BaseInternVLDummyInputsBuilder[NVLMProcessingInfo]
+                             ):
 
-    def get_dummy_processor_inputs(
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+
+        # The newline is necessary to separate ">" of the current item
+        # and "<" of the next item
+        return "<image>\n" * num_images
+
+    def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> ProcessorInputs:
+    ) -> MultiModalDataDict:
         target_width, target_height = \
             self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
-        mm_data = {
+        return {
             "image":
             self._get_dummy_images(width=target_width,
                                    height=target_height,
                                    num_images=num_images)
         }
 
-        return ProcessorInputs(
-            # The newline is necessary to separate ">" of the current item
-            # and "<" of the next item
-            prompt_text="<image>\n" * num_images,
-            mm_data=mm_data,
-        )
 
-
-class NVLMMultiModalProcessor(InternVLMultiModalProcessor[NVLMProcessingInfo]):
+class NVLMMultiModalProcessor(
+        BaseInternVLMultiModalProcessor[NVLMProcessingInfo]):
 
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        if "image_num_patches" in out_mm_kwargs:
-            image_num_patches = out_mm_kwargs["image_num_patches"]
+        out_mm_data = out_mm_kwargs.get_data()
+        if "image_num_patches" in out_mm_data:
+            image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
             image_num_patches = image_num_patches.tolist()
-        elif "image_embeds" in out_mm_kwargs:
+        elif "image_embeds" in out_mm_data:
             # TODO: Use image size information in dictionary embedding inputs
             # to compute num_patches (similar to Qwen2-VL)
-            image_num_patches = [None] * len(out_mm_kwargs["image_embeds"])
+            image_num_patches = [None] * len(out_mm_data["image_embeds"])
         else:
             image_num_patches = []
 

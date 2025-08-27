@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests whether FP8 computation is enabled correctly.
 
 Run `pytest tests/quantization/test_fp8.py --forked`.
@@ -37,8 +38,7 @@ def test_model_load_and_run(vllm_runner, model_id: str, force_marlin: bool,
     with vllm_runner(model_id) as llm:
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
-        outputs = llm.generate_greedy(prompts=["Hello my name is"],
-                                      max_tokens=10)
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=10)
         print(outputs[0][1])
 
 
@@ -89,8 +89,7 @@ def test_kv_cache_model_load_and_run(vllm_runner, model_id: str,
 
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
-        outputs = llm.generate_greedy(prompts=["Hello my name is"],
-                                      max_tokens=10)
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=10)
         print(outputs[0][1])
 
 
@@ -193,3 +192,36 @@ def test_scaled_fp8_quant(dtype) -> None:
         ref_y,
         per_tensor_dequantize(torch.narrow(y, 0, 0, x.shape[0]), inv_scale,
                               dtype))
+
+    # non-contiguous input with padding
+    m, n, padded_stride = 975, 512, 576
+    padded_tensor = (torch.randn(size=(m, padded_stride), device="cuda") *
+                     13).to(dtype)
+    x_nc = padded_tensor[:, :n]  # shape (m, n) with stride (padded_stride, 1)
+
+    assert not x_nc.is_contiguous()
+    assert x_nc.stride(0) == padded_stride
+
+    # dynamic quantization
+    ref_y_nc, inv_scale_nc = ops.scaled_fp8_quant(x_nc, None)
+    ref_y_nc = per_tensor_dequantize(ref_y_nc, inv_scale_nc, dtype)
+
+    # reference dynamic quantization
+    y_nc = quantize_ref(x_nc, inv_scale_nc)
+    torch.testing.assert_close(
+        ref_y_nc, per_tensor_dequantize(y_nc, inv_scale_nc, dtype))
+
+    # static quantization
+    y_nc, _ = ops.scaled_fp8_quant(x_nc, inv_scale_nc)
+    torch.testing.assert_close(
+        ref_y_nc, per_tensor_dequantize(y_nc, inv_scale_nc, dtype))
+
+    # padding after non-contiguous input quantization
+    y_nc_pad, _ = ops.scaled_fp8_quant(x_nc,
+                                       inv_scale_nc,
+                                       num_token_padding=m + 10)
+    assert y_nc_pad.shape[0] == m + 10
+    torch.testing.assert_close(
+        ref_y_nc,
+        per_tensor_dequantize(torch.narrow(y_nc_pad, 0, 0, x_nc.shape[0]),
+                              inv_scale_nc, dtype))

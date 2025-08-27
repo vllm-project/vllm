@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import re
 from collections.abc import Sequence
 from random import choices
 from string import ascii_letters, digits
 from typing import Union
 
 import partial_json_parser
+import regex as re
 from partial_json_parser.core.options import Allow
 from pydantic import Field
 
@@ -38,12 +39,22 @@ class MistralToolCall(ToolCall):
         # https://github.com/mistralai/mistral-common/blob/21ee9f6cee3441e9bb1e6ed2d10173f90bd9b94b/src/mistral_common/protocol/instruct/validator.py#L299
         return "".join(choices(ALPHANUMERIC, k=9))
 
+    @staticmethod
+    def is_valid_id(id: str) -> bool:
+        return id.isalnum() and len(id) == 9
+
+
+def _is_fn_name_regex_support(model_tokenizer: AnyTokenizer) -> bool:
+    return isinstance(model_tokenizer, MistralTokenizer) \
+        and model_tokenizer.version >= 11
+
 
 @ToolParserManager.register_module("mistral")
 class MistralToolParser(ToolParser):
     """
-    Tool call parser for Mistral 7B Instruct v0.3, intended for use with the
-    examples/tool_chat_template_mistral.jinja template.
+    Tool call parser for Mistral 7B Instruct v0.3, intended for use with
+    - [`mistral_common`](https://github.com/mistralai/mistral-common/)
+    - the examples/tool_chat_template_mistral.jinja template.
 
     Used when --enable-auto-tool-choice --tool-call-parser mistral are all set
     """
@@ -65,10 +76,29 @@ class MistralToolParser(ToolParser):
         self.bot_token = "[TOOL_CALLS]"
         self.bot_token_id = self.vocab.get(self.bot_token)
         self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
+        if _is_fn_name_regex_support(self.model_tokenizer):
+            self.fn_name_regex = re.compile(
+                r'([a-zA-Z0-9_-]+)(\{[\s\S]*?\})(?=\s*$|,|\s)', re.DOTALL)
+        else:
+            self.fn_name_regex = None
+
         if self.bot_token_id is None:
             raise RuntimeError(
                 "Mistral Tool Parser could not locate the tool call token in "
                 "the tokenizer!")
+
+    def adjust_request(
+            self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        if not isinstance(
+                self.model_tokenizer, MistralTokenizer
+        ) and request.tools and request.tool_choice != 'none':
+            # Do not skip special tokens when using chat template
+            # with Mistral parser as TOOL_CALL token is needed
+            # for tool detection.
+            # Note: we don't want skip_special_tokens=False
+            # with MistralTokenizer as it is incompatible
+            request.skip_special_tokens = False
+        return request
 
     def extract_tool_calls(
         self,
@@ -91,11 +121,25 @@ class MistralToolParser(ToolParser):
         tool_content = model_output.replace(self.bot_token, "").strip()
 
         try:
-
             # we first try to directly load the json as parsing very nested
             # jsons is difficult
             try:
-                function_call_arr = json.loads(tool_content)
+                if self.fn_name_regex:
+                    matches = self.fn_name_regex.findall(tool_content)
+
+                    function_call_arr = []
+                    for match in matches:
+                        fn_name = match[0]
+                        args = match[1]
+
+                        # fn_name is encoded outside serialized json dump
+                        # only arguments are serialized
+                        function_call_arr.append({
+                            "name": fn_name,
+                            "arguments": json.loads(args)
+                        })
+                else:
+                    function_call_arr = json.loads(tool_content)
             except json.JSONDecodeError:
                 # use a regex to find the part corresponding to the tool call.
                 # NOTE: This use case should not happen if the model is trained

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
 from copy import deepcopy
@@ -242,7 +243,7 @@ def check_punica_wrapper(punica_wrapper) -> bool:
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
+@pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 128000])
 @pytest.mark.parametrize("stage", STAGES)
@@ -346,7 +347,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
 @torch.inference_mode()
 # @pytest.mark.skip(
 #     reason="Fails when loras are in any slot other than the first.")
-@pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
+@pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 128000])
 @pytest.mark.parametrize("stage", STAGES)
@@ -485,7 +486,7 @@ def test_embeddings_with_new_embeddings(dist_init, num_loras, device,
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
+@pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 256512])
 @pytest.mark.parametrize("stage", STAGES)
@@ -619,12 +620,15 @@ def test_lm_head_logits_processor(dist_init, num_loras, device, vocab_size,
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
+@pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
-@pytest.mark.parametrize("bias_enabled", [True, False])
-def test_linear_replicated(dist_init, num_loras, device, stage,
-                           bias_enabled) -> None:
+def test_linear_replicated(
+    dist_init,
+    num_loras,
+    device,
+    stage,
+) -> None:
 
     if current_platform.is_cuda_alike():
         torch.cuda.set_device(device)
@@ -633,10 +637,11 @@ def test_linear_replicated(dist_init, num_loras, device, stage,
     torch.set_default_device(device)
     punica_wrapper = get_punica_wrapper(8192, 256, device, max_loras=max_loras)
     assert check_punica_wrapper(punica_wrapper)
-    lora_config = LoRAConfig(max_loras=max_loras,
-                             max_lora_rank=8,
-                             lora_dtype=torch.float16,
-                             bias_enabled=bias_enabled)
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=8,
+        lora_dtype=torch.float16,
+    )
 
     def create_random_linear_replicated_layer():
 
@@ -650,10 +655,6 @@ def test_linear_replicated(dist_init, num_loras, device, stage,
         lora_linear.create_lora_weights(max_loras, lora_config)
         assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
             lora_linear.lora_b_stacked) == 1)
-        if bias_enabled:
-            assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
-        else:
-            assert lora_linear.lora_bias_stacked is None
         return linear, lora_linear
 
     for i in range(NUM_RANDOM_SEEDS):
@@ -733,14 +734,13 @@ def test_linear_replicated(dist_init, num_loras, device, stage,
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
+@pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("orientation", ["row", "column"])
 @pytest.mark.parametrize("fully_shard", [True, False])
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
-@pytest.mark.parametrize("bias_enabled", [True, False])
 def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
-                         device, stage, bias_enabled) -> None:
+                         device, stage) -> None:
 
     if current_platform.is_cuda_alike():
         torch.cuda.set_device(device)
@@ -749,11 +749,12 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
     torch.set_default_device(device)
     punica_wrapper = get_punica_wrapper(8192, 256, device, max_loras=max_loras)
     assert check_punica_wrapper(punica_wrapper)
-    lora_config = LoRAConfig(max_loras=max_loras,
-                             max_lora_rank=8,
-                             fully_sharded_loras=fully_shard,
-                             lora_dtype=torch.float16,
-                             bias_enabled=bias_enabled)
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=8,
+        fully_sharded_loras=fully_shard,
+        lora_dtype=torch.float16,
+    )
 
     def create_random_linear_parallel_layer():
         if orientation == "row":
@@ -776,10 +777,7 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
         lora_linear.create_lora_weights(max_loras, lora_config)
         assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
             lora_linear.lora_b_stacked) == 1)
-        if bias_enabled:
-            assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
-        else:
-            assert lora_linear.lora_bias_stacked is None
+
         return linear, lora_linear
 
     for i in range(NUM_RANDOM_SEEDS):
@@ -859,14 +857,13 @@ def test_linear_parallel(dist_init, num_loras, orientation, fully_shard,
 
 
 @torch.inference_mode()
-@pytest.mark.parametrize("num_loras", [1, 2, 4, 8])
+@pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("repeats", [1, 2, 3])
 @pytest.mark.parametrize("fully_shard", [True, False])
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
-@pytest.mark.parametrize("bias_enabled", [True, False])
 def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
-                                device, stage, bias_enabled) -> None:
+                                device, stage) -> None:
 
     if current_platform.is_cuda_alike():
         torch.cuda.set_device(device)
@@ -875,11 +872,12 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
     torch.set_default_device(device)
     punica_wrapper = get_punica_wrapper(8192, 256, device, max_loras=max_loras)
     assert check_punica_wrapper(punica_wrapper)
-    lora_config = LoRAConfig(max_loras=max_loras,
-                             max_lora_rank=8,
-                             fully_sharded_loras=fully_shard,
-                             lora_dtype=torch.float16,
-                             bias_enabled=bias_enabled)
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=8,
+        fully_sharded_loras=fully_shard,
+        lora_dtype=torch.float16,
+    )
 
     def create_column_parallel_packed_layer():
         if repeats == 2:
@@ -923,10 +921,7 @@ def test_column_parallel_packed(dist_init, num_loras, repeats, fully_shard,
                                         model_config=FakeConfig())
         assert (lora_linear.n_slices == len(lora_linear.lora_a_stacked) == len(
             lora_linear.lora_b_stacked) == n_slices)
-        if bias_enabled:
-            assert len(lora_linear.lora_bias_stacked) == lora_linear.n_slices
-        else:
-            assert lora_linear.lora_bias_stacked is None
+
         return linear, lora_linear
 
     for i in range(NUM_RANDOM_SEEDS):

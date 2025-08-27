@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-
-from typing import Callable, Dict, List, NamedTuple, Optional, Tuple
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Callable, NamedTuple, Optional
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -9,8 +9,11 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
-from vllm.config import CompilationConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape, QuantKey, ScaleDesc, kFp8DynamicTensorSym, kFp8DynamicTokenSym,
+    kFp8StaticTensorSym, kNvfp4Quant, kStaticTensorScale)
 from vllm.platforms import current_platform
 
 from .fx_utils import find_getitem_maybe
@@ -19,6 +22,7 @@ from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
+FP4_DTYPE = torch.uint8
 
 
 def empty_bf16(*args, **kwargs):
@@ -29,41 +33,24 @@ def empty_fp32(*args, **kwargs):
     return torch.empty(*args, **kwargs, dtype=torch.float32, device="cuda")
 
 
+def empty_i32(*args, **kwargs):
+    return torch.empty(*args, **kwargs, dtype=torch.int32, device="cuda")
+
+
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 
-
-class QuantKey(NamedTuple):
-    """
-    Named tuple for identifying the type of quantization.
-    dtype: quantized data type
-    static: static quantization if True, dynamic if False
-    per_tensor: per-tensor quantization if True, per-token if False
-    symmetric: symmetric if True, asymmetric if False
-    """
-    dtype: torch.dtype
-    static: bool
-    per_tensor: bool = True
-    symmetric: bool = True
-
-    def __str__(self):
-        return (f"QuantKey({'static' if self.static else 'dynamic'},"
-                f"{fx.graph.dtype_abbrs[self.dtype]},"
-                f"{'per_tensor' if self.per_tensor else 'per_token'},"
-                f"{'a' if not self.symmetric else ''}symmetric)")
-
-
-kFp8StaticTensorSym = QuantKey(FP8_DTYPE, True, True, True)
-kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, False, True, True)
-kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, False, False, True)
-
-QUANT_OPS: Dict[QuantKey, OpOverload] = {
-    kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa
+QUANT_OPS: dict[QuantKey, OpOverload] = {
+    kFp8StaticTensorSym:
+    torch.ops._C.static_scaled_fp8_quant.default,  # noqa: E501
     kFp8DynamicTensorSym:
-    torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa
+    torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
     kFp8DynamicTokenSym:
-    torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa
+    torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
 }
+if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
+    QUANT_OPS[
+        kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
 
 
 class FusedRMSQuantKey(NamedTuple):
@@ -80,15 +67,15 @@ class FusedRMSQuantKey(NamedTuple):
                 f"{'' if self.fused_add else 'out'} residual)")
 
 
-FUSED_OPS: Dict[FusedRMSQuantKey, OpOverload] = {
+FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     FusedRMSQuantKey(kFp8StaticTensorSym, False):
-    torch.ops._C.rms_norm_static_fp8_quant.default,  # noqa
+    torch.ops._C.rms_norm_static_fp8_quant.default,  # noqa: E501
     FusedRMSQuantKey(kFp8StaticTensorSym, True):
-    torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,  # noqa
+    torch.ops._C.fused_add_rms_norm_static_fp8_quant.default,  # noqa: E501
     FusedRMSQuantKey(kFp8DynamicTokenSym, False):
-    torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa
+    torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
     FusedRMSQuantKey(kFp8DynamicTokenSym, True):
-    torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa
+    torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
 }
 
 
@@ -101,7 +88,7 @@ class QuantMultiOutputMatch(MultiOutputMatch):
         self.QUANT_OP = quant_op  # in-place quant op
         self.FUSED_OP = fused_op  # in-place fused quant op
 
-    def insert_fused_node(self, fused_return_mapping: Dict[int, Tuple[fx.Node,
+    def insert_fused_node(self, fused_return_mapping: dict[int, tuple[fx.Node,
                                                                       int]],
                           **kwargs):
         """
@@ -177,8 +164,7 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
                  symmetric=True):
         fused_key = FusedRMSQuantKey(fused_add=False,
                                      quant=QuantKey(dtype=quant_dtype,
-                                                    static=True,
-                                                    per_tensor=True,
+                                                    scale=kStaticTensorScale,
                                                     symmetric=symmetric))
         super().__init__(epsilon, fused_key)
 
@@ -233,8 +219,7 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
                  symmetric=True):
         key = FusedRMSQuantKey(fused_add=True,
                                quant=QuantKey(dtype=quant_dtype,
-                                              static=True,
-                                              per_tensor=True,
+                                              scale=kStaticTensorScale,
                                               symmetric=symmetric))
         super().__init__(epsilon, key)
 
@@ -313,8 +298,8 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
                 # 0 is always None
                 fused_return_mapping = {1: (quant_node, 1), 2: (rms_node, 2)}
                 self.insert_fused_node(fused_return_mapping,
-                                       epsilon=rms_node.kwargs["epsilon"],
-                                       **kwargs)
+                                       **kwargs,
+                                       epsilon=rms_node.kwargs["epsilon"])
 
 
 class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
@@ -322,12 +307,12 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
     def __init__(self,
                  epsilon: float,
                  quant_dtype: torch.dtype,
-                 per_tensor: bool,
+                 group_shape: GroupShape = GroupShape.PER_TOKEN,
                  symmetric=True):
+        scale = ScaleDesc(torch.float32, False, group_shape)
         key = FusedRMSQuantKey(fused_add=False,
                                quant=QuantKey(dtype=quant_dtype,
-                                              static=False,
-                                              per_tensor=per_tensor,
+                                              scale=scale,
                                               symmetric=symmetric))
         super().__init__(epsilon, key)
 
@@ -420,12 +405,12 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
     def __init__(self,
                  epsilon: float,
                  quant_dtype: torch.dtype,
-                 per_tensor: bool = True,
+                 group_shape: GroupShape = GroupShape.PER_TOKEN,
                  symmetric=True):
+        scale = ScaleDesc(torch.float32, False, group_shape)
         key = FusedRMSQuantKey(fused_add=True,
                                quant=QuantKey(dtype=quant_dtype,
-                                              static=False,
-                                              per_tensor=per_tensor,
+                                              scale=scale,
                                               symmetric=symmetric))
         super().__init__(epsilon, key)
 
@@ -531,7 +516,7 @@ class FusionPass(VllmInductorPass):
     _instance: 'Optional[FusionPass]' = None
 
     @classmethod
-    def instance(cls, config: CompilationConfig.PassConfig):
+    def instance(cls, config: VllmConfig):
         """
         Get the singleton instance of the FusionPass.
         If the instance exists, the config is updated but
@@ -540,15 +525,15 @@ class FusionPass(VllmInductorPass):
         if cls._instance is None:
             cls._instance = FusionPass(config)
         else:
-            cls._instance.config = config
+            cls._instance.pass_config = config.compilation_config.pass_config
         return cls._instance
 
-    def __init__(self, config: CompilationConfig.PassConfig):
+    def __init__(self, config: VllmConfig):
         assert self.__class__._instance is None, \
             "FusionPass singleton instance already exists"
         super().__init__(config)
 
-        self.matches: List[MultiOutputMatch] = []
+        self.matches: list[MultiOutputMatch] = []
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="fusion_pass")
 
@@ -565,16 +550,12 @@ class FusionPass(VllmInductorPass):
                 self.patterns, self.record_match)
 
             # Fuse rms_norm + dynamic per-token fp8 quant
-            RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE,
-                                       per_tensor=False).register(
-                                           self.patterns, self.record_match)
+            RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(
+                self.patterns, self.record_match)
 
             # Fuse fused_add_rms_norm + dynamic per-token fp8 quant
-            FusedAddRMSNormDynamicQuantPattern(epsilon,
-                                               FP8_DTYPE,
-                                               per_tensor=False).register(
-                                                   self.patterns,
-                                                   self.record_match)
+            FusedAddRMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(
+                self.patterns, self.record_match)
 
             # WARNING: This is a hack to clear the pattern matcher cache
             # and allow multiple values of epsilon.

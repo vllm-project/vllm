@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # cumem-based pytorch pluggable allocator to implement sleep mode.
 # other approaches tried but failed:
@@ -11,7 +12,7 @@ import dataclasses
 import gc
 import os
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Union
 
 import torch
 
@@ -63,7 +64,7 @@ except ModuleNotFoundError:
     libcudart = None
 
 # py_device, py_alignedSize, py_d_mem, py_p_memHandle
-HandleType = Tuple[int, int, int, int]
+HandleType = tuple[int, int, int, int]
 
 
 @dataclasses.dataclass
@@ -148,11 +149,16 @@ class CuMemAllocator:
             "Please track https://github.com/pytorch/pytorch/issues/147851 "
             "for the latest updates.")
 
-        self.pointer_to_data: Dict[int, AllocationData] = {}
+        self.pointer_to_data: dict[int, AllocationData] = {}
         self.current_tag: str = CuMemAllocator.default_tag
-        self.allocator_and_pools: Dict[str, Any] = {}
+        self.allocator_and_pools: dict[str, Any] = {}
+        # Creating strong references to the two callbacks here to prevent
+        # these ephemeral bound-method objects being garbage collected.
+        # See discussions in https://github.com/vllm-project/vllm/pull/22724
+        self.python_malloc_callback = self._python_malloc_callback
+        self.python_free_callback = self._python_free_callback
 
-    def python_malloc_callback(self, allocation_handle: HandleType) -> None:
+    def _python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """
         Internal method to store the allocation data
         when memory is allocated in the memory pool."""
@@ -161,7 +167,7 @@ class CuMemAllocator:
             allocation_handle, self.current_tag)
         return
 
-    def python_free_callback(self, ptr: int) -> HandleType:
+    def _python_free_callback(self, ptr: int) -> HandleType:
         """
         Internal method to look up the allocation data
         when memory is freed in the memory pool."""
@@ -172,7 +178,7 @@ class CuMemAllocator:
 
     def sleep(
             self,
-            offload_tags: Optional[Union[Tuple[str, ...],
+            offload_tags: Optional[Union[tuple[str, ...],
                                          str]] = None) -> None:
         """
         Put the allocator in sleep mode.
@@ -211,9 +217,9 @@ class CuMemAllocator:
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
         """
         Wake up the allocator from sleep mode.
-        All data that is previously offloaded will be loaded back to GPU 
+        All data that is previously offloaded will be loaded back to GPU
         memory, and the rest of the data will have empty memory.
-        
+
         :param tags: The tags of the memory allocation that will be loaded
             back to GPU memory. If None, all memory allocation will be loaded
             back to GPU memory.

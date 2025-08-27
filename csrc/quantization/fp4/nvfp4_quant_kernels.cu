@@ -332,7 +332,7 @@ template void invokeFP4Quantization(int m, int n, __nv_bfloat16 const* input,
                                     int multiProcessorCount,
                                     cudaStream_t stream);
 
-void scaled_fp4_quant_sm100a(torch::Tensor const& output,
+void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
                              torch::Tensor const& input,
                              torch::Tensor const& output_sf,
                              torch::Tensor const& input_sf) {
@@ -347,7 +347,7 @@ void scaled_fp4_quant_sm100a(torch::Tensor const& output,
   auto input_sf_ptr = static_cast<float const*>(input_sf.data_ptr());
   auto sf_out = static_cast<int32_t*>(output_sf.data_ptr());
   auto output_ptr = static_cast<int64_t*>(output.data_ptr());
-  at::cuda::CUDAGuard device_guard{(char)input.get_device()};
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   auto stream = at::cuda::getCurrentCUDAStream(input.get_device());
 
   // We don't support e8m0 scales at this moment.

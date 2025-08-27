@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, List, Mapping, Optional
+from typing import AsyncGenerator, Iterable, Mapping, Optional, Union
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
-from vllm.config import DecodingConfig, ModelConfig
+from vllm.config import DecodingConfig, ModelConfig, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
@@ -15,7 +16,6 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Device, collect_from_async_generator, random_uuid
@@ -54,7 +54,6 @@ class EngineClient(ABC):
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
@@ -65,6 +64,7 @@ class EngineClient(ABC):
         prompt: PromptType,
         request_id: str,
         params: BeamSearchParams,
+        lora_request: Optional[LoRARequest] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
 
         beam_width = params.beam_width
@@ -83,9 +83,21 @@ class EngineClient(ABC):
         else:
             processed_inputs = preprocessor._prompt_to_llm_inputs(prompt)
 
-        prompt_token_ids = processed_inputs["prompt_token_ids"]
+        if processed_inputs["type"] == "embeds":
+            raise NotImplementedError
+
+        # This is a workaround to fix multimodal beam search; this is a
+        # bandaid fix for 2 small problems:
+        # 1. Multi_modal_data on the processed_inputs currently resolves to
+        #    `None`.
+        # 2. preprocessing above expands the multimodal placeholders. However,
+        #    this happens again in generation, so the double expansion causes
+        #    a mismatch.
+        # TODO - would be ideal to handle this more gracefully.
+        prompt_token_ids = prompt.get("prompt_token_ids")
+        multi_modal_data = prompt.get("multi_modal_data")
+
         prompt_text = processed_inputs.get("prompt")
-        multi_modal_data = processed_inputs.get("multi_modal_data")
         mm_processor_kwargs = processed_inputs.get("mm_processor_kwargs")
 
         tokenized_length = len(prompt_token_ids)
@@ -103,27 +115,31 @@ class EngineClient(ABC):
                                cum_logprob=0,
                                logprobs=[],
                                multi_modal_data=multi_modal_data,
-                               mm_processor_kwargs=mm_processor_kwargs)
+                               mm_processor_kwargs=mm_processor_kwargs,
+                               lora_request=lora_request)
         ]
         completed = []
 
         for _ in range(max_tokens):
-            prompts_batch = [
+            prompts_batch, lora_req_batch = zip(*[(
                 TokensPrompt(prompt_token_ids=beam.tokens,
                              multi_modal_data=beam.multi_modal_data,
-                             mm_processor_kwargs=beam.mm_processor_kwargs)
-                for beam in all_beams
-            ]
+                             mm_processor_kwargs=beam.mm_processor_kwargs),
+                beam.lora_request,
+            ) for beam in all_beams])
 
             tasks = []
 
             request_id = f"beam_search-{random_uuid()}"
-            for i, individual_prompt in enumerate(prompts_batch):
+            for i, (individual_prompt,
+                    lora_req) in enumerate(zip(prompts_batch, lora_req_batch)):
                 request_id_item = f"{request_id}-{i}"
                 task = asyncio.create_task(
                     collect_from_async_generator(
-                        self.generate(individual_prompt, beam_search_params,
-                                      request_id_item)))
+                        self.generate(individual_prompt,
+                                      beam_search_params,
+                                      request_id_item,
+                                      lora_request=lora_req)))
                 tasks.append(task)
 
             output = await asyncio.gather(*tasks)
@@ -156,6 +172,7 @@ class EngineClient(ABC):
                                     tokens=current_beam.tokens + [token_id],
                                     logprobs=current_beam.logprobs +
                                     [logprobs],
+                                    lora_request=current_beam.lora_request,
                                     cum_logprob=current_beam.cum_logprob +
                                     logprob_obj.logprob,
                                     multi_modal_data=current_beam.
@@ -212,12 +229,18 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def abort(self, request_id: str) -> None:
+    async def abort(self, request_id: Union[str, Iterable[str]]) -> None:
         """Abort a request.
 
         Args:
-            request_id: The unique id of the request.
+            request_id: The unique id of the request,
+                        or an iterable of such ids.
         """
+        ...
+
+    @abstractmethod
+    async def get_vllm_config(self) -> VllmConfig:
+        """Get the vllm configuration of the vLLM engine."""
         ...
 
     @abstractmethod
@@ -251,7 +274,7 @@ class EngineClient(ABC):
     async def do_log_stats(
         self,
         scheduler_outputs: Optional[SchedulerOutputs] = None,
-        model_output: Optional[List[SamplerOutput]] = None,
+        model_output: Optional[list[SamplerOutput]] = None,
     ) -> None:
         ...
 
@@ -268,6 +291,11 @@ class EngineClient(ABC):
     @abstractmethod
     async def stop_profile(self) -> None:
         """Start profiling the engine"""
+        ...
+
+    @abstractmethod
+    async def reset_mm_cache(self) -> None:
+        """Reset the multi-modal cache"""
         ...
 
     @abstractmethod
@@ -295,3 +323,17 @@ class EngineClient(ABC):
     async def add_lora(self, lora_request: LoRARequest) -> None:
         """Load a new LoRA adapter into the engine for future requests."""
         ...
+
+    async def scale_elastic_ep(self,
+                               new_data_parallel_size: int,
+                               drain_timeout: int = 300) -> None:
+        """Scale the engine"""
+        raise NotImplementedError
+
+    async def collective_rpc(self,
+                             method: str,
+                             timeout: Optional[float] = None,
+                             args: tuple = (),
+                             kwargs: Optional[dict] = None):
+        """Perform a collective RPC call to the given path."""
+        raise NotImplementedError

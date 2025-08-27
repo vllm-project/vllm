@@ -1,27 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import time
 
 import pytest
 
-import vllm.envs as env
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.openai.api_server import (
+    build_async_engine_client_from_engine_args)
 from vllm.inputs import TextPrompt
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.utils import merge_async_iterators
 
-MODEL_PATH = "THUDM/chatglm3-6b"
+MODEL_PATH = "zai-org/chatglm3-6b"
 LORA_RANK = 64
 DEFAULT_MAX_LORAS = 4 * 3
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 def get_lora_requests(lora_path) -> list[LoRARequest]:
@@ -88,17 +82,6 @@ async def test_add_lora(chatglm3_lora_files):
         trust_remote_code=True,
         enforce_eager=True)
 
-    # The run_with_both_engines_lora fixture sets up the `VLLM_USE_V1`
-    # environment variable. reload vllm.enging.async_llm_engine as
-    # vllm.engine.async_llm_engine.AsyncLLMEgnine changes depending on the
-    # env var.
-    import importlib
-
-    import vllm.engine.async_llm_engine
-    importlib.reload(vllm.engine.async_llm_engine)
-    from vllm.entrypoints.openai.api_server import (
-        build_async_engine_client_from_engine_args)
-
     # split lora_requests into 3 parts
     part_size = len(lora_requests) // 3
     dummy_run_requests = lora_requests[:part_size]
@@ -114,12 +97,10 @@ async def test_add_lora(chatglm3_lora_files):
         # Run with warmup
         add_lora_tasks = [llm.add_lora(lr) for lr in warmup_run_requests]
         add_lora_results = await asyncio.gather(*add_lora_tasks)
-        if env.VLLM_USE_V1:
-            # Test that all all_lora calls are successful.
-            assert all(add_lora_results)
-        else:
-            # No way to check V0 engine results as the calls just return None.
-            pass
+
+        # Test that all all_lora calls are successful.
+        assert all(add_lora_results)
+
         time_with_add_lora = await requests_processing_time(
             llm, warmup_run_requests)
 

@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
 import copy
 import functools
+import importlib
+import json
 import os
 import signal
 import subprocess
@@ -11,10 +14,12 @@ import tempfile
 import time
 import warnings
 from contextlib import contextmanager, suppress
+from multiprocessing import Process
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Union
 
 import cloudpickle
+import httpx
 import openai
 import pytest
 import requests
@@ -28,8 +33,8 @@ from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.model_executor.model_loader.loader import get_model_loader
+from vllm.entrypoints.cli.serve import ServeSubcommand
+from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
@@ -73,6 +78,23 @@ VLLM_PATH = Path(__file__).parent.parent
 class RemoteOpenAIServer:
     DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
 
+    def _start_server(self, model: str, vllm_serve_args: list[str],
+                      env_dict: Optional[dict[str, str]]) -> None:
+        """Subclasses override this method to customize server process launch
+        """
+        env = os.environ.copy()
+        # the current process might initialize cuda,
+        # to be safe, we should use spawn method
+        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
+        if env_dict is not None:
+            env.update(env_dict)
+        self.proc: subprocess.Popen = subprocess.Popen(
+            ["vllm", "serve", model, *vllm_serve_args],
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+        )
+
     def __init__(self,
                  model: str,
                  vllm_serve_args: list[str],
@@ -80,16 +102,19 @@ class RemoteOpenAIServer:
                  env_dict: Optional[dict[str, str]] = None,
                  seed: Optional[int] = 0,
                  auto_port: bool = True,
-                 max_wait_seconds: Optional[float] = None) -> None:
+                 max_wait_seconds: Optional[float] = None,
+                 override_hf_configs: Optional[dict[str, Any]] = None) -> None:
         if auto_port:
             if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
                 raise ValueError("You have manually specified the port "
                                  "when `auto_port=True`.")
 
-            # Don't mutate the input args
-            vllm_serve_args = vllm_serve_args + [
-                "--port", str(get_open_port())
-            ]
+            # No need for a port if using unix sockets
+            if "--uds" not in vllm_serve_args:
+                # Don't mutate the input args
+                vllm_serve_args = vllm_serve_args + [
+                    "--port", str(get_open_port())
+                ]
         if seed is not None:
             if "--seed" in vllm_serve_args:
                 raise ValueError("You have manually specified the seed "
@@ -97,12 +122,24 @@ class RemoteOpenAIServer:
 
             vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
 
+        if override_hf_configs is not None:
+            vllm_serve_args = vllm_serve_args + [
+                "--hf-overrides",
+                json.dumps(override_hf_configs)
+            ]
+
         parser = FlexibleArgumentParser(
             description="vLLM's remote OpenAI server.")
-        parser = make_arg_parser(parser)
+        subparsers = parser.add_subparsers(required=False, dest="subparser")
+        parser = ServeSubcommand().subparser_init(subparsers)
         args = parser.parse_args(["--model", model, *vllm_serve_args])
-        self.host = str(args.host or 'localhost')
-        self.port = int(args.port)
+        self.uds = args.uds
+        if args.uds:
+            self.host = None
+            self.port = None
+        else:
+            self.host = str(args.host or 'localhost')
+            self.port = int(args.port)
 
         self.show_hidden_metrics = \
             args.show_hidden_metrics_for_version is not None
@@ -117,18 +154,7 @@ class RemoteOpenAIServer:
             model_loader = get_model_loader(load_config)
             model_loader.download_model(model_config)
 
-        env = os.environ.copy()
-        # the current process might initialize cuda,
-        # to be safe, we should use spawn method
-        env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
-        if env_dict is not None:
-            env.update(env_dict)
-        self.proc = subprocess.Popen(
-            ["vllm", "serve", model, *vllm_serve_args],
-            env=env,
-            stdout=sys.stdout,
-            stderr=sys.stderr,
-        )
+        self._start_server(model, vllm_serve_args, env_dict)
         max_wait_seconds = max_wait_seconds or 240
         self._wait_for_server(url=self.url_for("health"),
                               timeout=max_wait_seconds)
@@ -144,19 +170,25 @@ class RemoteOpenAIServer:
             # force kill if needed
             self.proc.kill()
 
+    def _poll(self) -> Optional[int]:
+        """Subclasses override this method to customize process polling"""
+        return self.proc.poll()
+
     def _wait_for_server(self, *, url: str, timeout: float):
         # run health check
         start = time.time()
+        client = (httpx.Client(transport=httpx.HTTPTransport(
+            uds=self.uds)) if self.uds else requests)
         while True:
             try:
-                if requests.get(url).status_code == 200:
+                if client.get(url).status_code == 200:
                     break
             except Exception:
                 # this exception can only be raised by requests.get,
                 # which means the server is not ready yet.
                 # the stack trace is not useful, so we suppress it
                 # by using `raise from None`.
-                result = self.proc.poll()
+                result = self._poll()
                 if result is not None and result != 0:
                     raise RuntimeError("Server exited unexpectedly.") from None
 
@@ -167,7 +199,8 @@ class RemoteOpenAIServer:
 
     @property
     def url_root(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        return (f"http://{self.uds.split('/')[-1]}"
+                if self.uds else f"http://{self.host}:{self.port}")
 
     def url_for(self, *parts: str) -> str:
         return self.url_root + "/" + "/".join(parts)
@@ -189,6 +222,48 @@ class RemoteOpenAIServer:
                                   api_key=self.DUMMY_API_KEY,
                                   max_retries=0,
                                   **kwargs)
+
+
+class RemoteOpenAIServerCustom(RemoteOpenAIServer):
+    """Launch test server with custom child process"""
+
+    def _start_server(self, model: str, vllm_serve_args: list[str],
+                      env_dict: Optional[dict[str, str]]) -> None:
+        self.proc: Process = Process(
+            target=self.child_process_fxn,
+            args=(env_dict, model,
+                  vllm_serve_args))  # type: ignore[assignment]
+        self.proc.start()
+
+    def __init__(self,
+                 model: str,
+                 vllm_serve_args: list[str],
+                 child_process_fxn: Callable[
+                     [Optional[dict[str, str]], str, list[str]], None],
+                 *,
+                 env_dict: Optional[dict[str, str]] = None,
+                 seed: Optional[int] = 0,
+                 auto_port: bool = True,
+                 max_wait_seconds: Optional[float] = None) -> None:
+        """Store custom child process function then invoke superclass
+        constructor which will indirectly launch it."""
+        self.child_process_fxn = child_process_fxn
+        super().__init__(model=model,
+                         vllm_serve_args=vllm_serve_args,
+                         env_dict=env_dict,
+                         seed=seed,
+                         auto_port=auto_port,
+                         max_wait_seconds=max_wait_seconds)
+
+    def _poll(self) -> Optional[int]:
+        return self.proc.exitcode
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.proc.terminate()
+        self.proc.join(8)
+        if self.proc.is_alive():
+            # force kill if needed
+            self.proc.kill()
 
 
 def _test_completion(
@@ -621,9 +696,12 @@ def multi_process_parallel(
     os.environ["RAY_RUNTIME_ENV_IGNORE_GITIGNORE"] = "1"
     ray.init(
         runtime_env={
-            "working_dir": VLLM_PATH,
-            "excludes":
-            ["build", ".git", "cmake-build-*", "shellcheck", "dist"]
+            "working_dir":
+            VLLM_PATH,
+            "excludes": [
+                "build", ".git", "cmake-build-*", "shellcheck", "dist",
+                "ep_kernels_workspace"
+            ]
         })
 
     distributed_init_port = get_open_port()
@@ -665,42 +743,54 @@ def get_physical_device_indices(devices):
 
 
 @_nvml()
-def wait_for_gpu_memory_to_clear(devices: list[int],
-                                 threshold_bytes: int,
+def wait_for_gpu_memory_to_clear(*,
+                                 devices: list[int],
+                                 threshold_bytes: Optional[int] = None,
+                                 threshold_ratio: Optional[float] = None,
                                  timeout_s: float = 120) -> None:
+    assert threshold_bytes is not None or threshold_ratio is not None
     # Use nvml instead of pytorch to reduce measurement error from torch cuda
     # context.
     devices = get_physical_device_indices(devices)
     start_time = time.time()
     while True:
         output: dict[int, str] = {}
-        output_raw: dict[int, float] = {}
+        output_raw: dict[int, tuple[float, float]] = {}
         for device in devices:
             if current_platform.is_rocm():
                 dev_handle = amdsmi_get_processor_handles()[device]
                 mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
                 gb_used = mem_info["vram_used"] / 2**10
+                gb_total = mem_info["vram_total"] / 2**10
             else:
                 dev_handle = nvmlDeviceGetHandleByIndex(device)
                 mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
                 gb_used = mem_info.used / 2**30
-            output_raw[device] = gb_used
-            output[device] = f'{gb_used:.02f}'
+                gb_total = mem_info.total / 2**30
+            output_raw[device] = (gb_used, gb_total)
+            output[device] = f'{gb_used:.02f}/{gb_total:.02f}'
 
-        print('gpu memory used (GB): ', end='')
+        print('gpu memory used/total (GiB): ', end='')
         for k, v in output.items():
             print(f'{k}={v}; ', end='')
         print('')
 
+        if threshold_bytes is not None:
+            is_free = lambda used, total: used <= threshold_bytes / 2**30
+            threshold = f"{threshold_bytes/2**30} GiB"
+        else:
+            is_free = lambda used, total: used / total <= threshold_ratio
+            threshold = f"{threshold_ratio:.2f}"
+
         dur_s = time.time() - start_time
-        if all(v <= (threshold_bytes / 2**30) for v in output_raw.values()):
+        if all(is_free(used, total) for used, total in output_raw.values()):
             print(f'Done waiting for free GPU memory on devices {devices=} '
-                  f'({threshold_bytes/2**30=}) {dur_s=:.02f}')
+                  f'({threshold=}) {dur_s=:.02f}')
             break
 
         if dur_s >= timeout_s:
             raise ValueError(f'Memory of devices {devices=} not free after '
-                             f'{dur_s=:.02f} ({threshold_bytes/2**30=})')
+                             f'{dur_s=:.02f} ({threshold=})')
 
         time.sleep(5)
 
@@ -804,14 +894,15 @@ def create_new_process_for_each_test(
 
     Args:
         method: The process creation method. Can be either "spawn" or "fork". 
-               If not specified,
-               it defaults to "spawn" on ROCm platforms and "fork" otherwise.
+               If not specified, it defaults to "spawn" on ROCm and XPU
+               platforms and "fork" otherwise.
 
     Returns:
         A decorator to run test functions in separate processes.
     """
     if method is None:
-        method = "spawn" if current_platform.is_rocm() else "fork"
+        use_spawn = current_platform.is_rocm() or current_platform.is_xpu()
+        method = "spawn" if use_spawn else "fork"
 
     assert method in ["spawn",
                       "fork"], "Method must be either 'spawn' or 'fork'"
@@ -952,10 +1043,37 @@ def get_client_text_logprob_generations(
         completions: list[Completion]) -> list[TextTextLogprobs]:
     '''Operates on the output of a request made to an Open-AI-protocol
     completions endpoint; obtains top-rank logprobs for each token in
-    each :class:`SequenceGroup`
+    each {class}`SequenceGroup`
     '''
     text_generations = get_client_text_generations(completions)
     text = ''.join(text_generations)
     return [(text_generations, text,
              (None if x.logprobs is None else x.logprobs.top_logprobs))
             for completion in completions for x in completion.choices]
+
+
+def has_module_attribute(module_name, attribute_name):
+    """
+    Helper function to check if a module has a specific attribute.
+    """
+    try:
+        module = importlib.import_module(module_name)
+        return hasattr(module, attribute_name)
+    except ImportError:
+        return False
+
+
+def get_attn_backend_list_based_on_platform() -> list[str]:
+    if current_platform.is_cuda():
+        return ["FLASH_ATTN_VLLM_V1", "TRITON_ATTN_VLLM_V1", "TREE_ATTN"]
+    elif current_platform.is_rocm():
+        attn_backend_list = ["TRITON_ATTN_VLLM_V1"]
+        try:
+            import aiter  # noqa: F401
+            attn_backend_list.append("FLASH_ATTN_VLLM_V1")
+        except Exception:
+            print("Skip FLASH_ATTN_VLLM_V1 on ROCm as aiter is not installed")
+
+        return attn_backend_list
+    else:
+        raise ValueError("Unsupported platform")

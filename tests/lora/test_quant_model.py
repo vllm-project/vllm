@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/fmmoret/vllm/blob/fm-support-lora-on-quantized-models/tests/lora/test_llama.py
@@ -24,25 +25,17 @@ if current_platform.is_rocm():
     MODELS = [
         ModelWithQuantization(
             model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-            quantization="GPTQ"),
+            quantization="gptq"),
     ]
 else:
     MODELS = [
         ModelWithQuantization(
             model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
-            quantization="AWQ"),
+            quantization="awq"),
         ModelWithQuantization(
             model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-            quantization="GPTQ"),
+            quantization="gptq"),
     ]
-
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines_lora):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
 
 
 def do_sample(llm: vllm.LLM,
@@ -100,7 +93,7 @@ def test_quant_model_lora(tinyllama_lora_files, model):
             "#ff8050",
             "#ff8080",
         ]
-    elif model.quantization == "AWQ":
+    elif model.quantization == "awq":
         expected_no_lora_output = [
             "I'm sorry, I don't understand",
             "I'm sorry, I don't understand",
@@ -109,7 +102,7 @@ def test_quant_model_lora(tinyllama_lora_files, model):
             "#f07700: A v",
             "#f00000: A v",
         ]
-    elif model.quantization == "GPTQ":
+    elif model.quantization == "gptq":
         expected_no_lora_output = [
             "I'm sorry, I don't have",
             "I'm sorry, I don't have",
@@ -122,7 +115,7 @@ def test_quant_model_lora(tinyllama_lora_files, model):
     def expect_match(output, expected_output):
         # HACK: GPTQ lora outputs are just incredibly unstable.
         # Assert that the outputs changed.
-        if (model.quantization == "GPTQ"
+        if (model.quantization == "gptq"
                 and expected_output is expected_lora_output):
             assert output != expected_no_lora_output
             for i, o in enumerate(output):
@@ -172,7 +165,7 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
                                  model):
     if num_gpus_available < 2:
         pytest.skip(f"Not enough GPUs for tensor parallelism {2}")
-    if model.quantization == "GPTQ":
+    if model.quantization == "gptq":
         pytest.skip("GPTQ lora outputs are just incredibly unstable")
     llm_tp1 = vllm.LLM(
         model=model.model_path,

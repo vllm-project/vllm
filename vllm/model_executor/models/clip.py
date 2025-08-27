@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Minimal implementation of CLIPVisionModel intended to be only used
 within a vision language model."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -28,9 +30,6 @@ class CLIPEncoderInfo(VisionEncoderInfo[CLIPVisionConfig]):
         image_width: int,
         image_height: int,
     ) -> int:
-        return self.get_patch_grid_length()**2 + 1
-
-    def get_max_image_tokens(self) -> int:
         return self.get_patch_grid_length()**2 + 1
 
     def get_image_size(self) -> int:
@@ -108,7 +107,6 @@ class CLIPAttention(nn.Module):
                 f"(got `embed_dim`: {self.embed_dim} and `num_heads`:"
                 f" {self.num_heads}).")
         self.scale = self.head_dim**-0.5
-        self.dropout = config.attention_dropout
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.embed_dim,
@@ -130,10 +128,6 @@ class CLIPAttention(nn.Module):
 
         self.attn = MultiHeadAttention(self.num_heads_per_partition,
                                        self.head_dim, self.scale)
-
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads,
-                           self.head_dim).transpose(1, 2).contiguous()
 
     def forward(
         self,
@@ -371,8 +365,8 @@ class CLIPVisionModel(nn.Module, SupportsQuant):
 
     # (TODO) Add prefix argument for filtering out weights to be loaded
     #        ref: https://github.com/vllm-project/vllm/pull/7186#discussion_r1734163986
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -380,7 +374,7 @@ class CLIPVisionModel(nn.Module, SupportsQuant):
             ("qkv_proj", "v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
+        loaded_params: set[str] = set()
         layer_count = len(self.vision_model.encoder.layers)
 
         for name, loaded_weight in weights:

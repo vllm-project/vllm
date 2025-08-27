@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+import os
 from dataclasses import dataclass
 from typing import Optional, Union
 
 import torch
+from safetensors.torch import save_file
 
 from vllm.lora.lora import LoRALayerWeights, PackedLoRALayerWeights
 
@@ -339,3 +343,76 @@ def generate_data_for_nslices(
         seq_len_tensor,
         indices,
     )
+
+
+def create_peft_lora(
+    model: torch.nn.Module,
+    save_dir: str,
+    target_modules: list[str],
+    rank: int = 8,
+    alpha: int = 16,
+    dropout: float = 0.1,
+    lora_dtype: torch.dtype = torch.float16,
+) -> dict[str, torch.Tensor]:
+    lora_weights = {}
+    adapter_config = {
+        "peft_type": "LORA",
+        "auto_mapping": None,
+        "base_model_name_or_path": "dummy_model",
+        "revision": None,
+        "task_type": "CAUSAL_LM",
+        "inference_mode": False,
+        "r": rank,
+        "lora_alpha": alpha,
+        "lora_dropout": dropout,
+        "fan_in_fan_out": False,
+        "bias": "none",
+        "modules_to_save": None,
+        "init_lora_weights": True,
+        "layers_to_transform": None,
+        "layers_pattern": None,
+        "target_modules": target_modules,
+        "exclude_modules": None,
+        "use_rslora": False,
+        "use_dora": False,
+        "loftq_config": None,
+    }
+
+    for module_name in target_modules:
+
+        module = model
+        for attr in module_name.split("."):
+            module = getattr(module, attr)
+
+        if hasattr(module, "input_size") and hasattr(module, "output_size"):
+
+            in_features = module.input_size
+            out_features = module.output_size
+
+        elif hasattr(module, "embedding_dim") and hasattr(
+                module, "num_embeddings"):
+            # ParallelLMHead
+            in_features = module.embedding_dim
+            out_features = module.num_embeddings
+        else:
+            raise ValueError(
+                f"Unable to determine dimensions for module {module_name}")
+
+        lora_A = torch.randn(rank, in_features, dtype=lora_dtype)
+
+        torch.nn.init.kaiming_uniform_(lora_A, a=5**0.5)
+
+        lora_B = torch.zeros(out_features, rank, dtype=lora_dtype)
+
+        # PEFT style
+        lora_weights[f"base_model.model.{module_name}.lora_A.weight"] = lora_A
+        lora_weights[f"base_model.model.{module_name}.lora_B.weight"] = lora_B
+
+    config_path = os.path.join(save_dir, "adapter_config.json")
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(adapter_config, f, indent=2, ensure_ascii=False)
+
+    weights_path = os.path.join(save_dir, "adapter_model.safetensors")
+    save_file(lora_weights, weights_path)
+
+    return lora_weights

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Test:
 
@@ -11,16 +12,9 @@ import torch_xla
 import torch_xla.core
 import torch_xla.core.xla_model
 
-from vllm import envs
 from vllm.attention.layer import MultiHeadAttention
 from vllm.attention.selector import _cached_get_attn_backend
 from vllm.platforms import current_platform
-
-if not envs.VLLM_USE_V1:
-    pytest.skip(
-        "Skipping V1 tests. Rerun with `VLLM_USE_V1=1` to test.",
-        allow_module_level=True,
-    )
 
 
 @pytest.fixture(autouse=True)

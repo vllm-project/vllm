@@ -1,22 +1,104 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """This file is used for /tests and /benchmarks"""
+from collections.abc import Mapping
+from dataclasses import dataclass
 from types import MappingProxyType
-from typing import List, Mapping, Optional, Tuple
+from typing import ClassVar, NamedTuple, Optional
 
 import numpy
 import torch
+from torch import fx
 
-from vllm.model_executor.layers.quantization.qqq import (
-    MARLIN_QQQ_SUPPORTED_NUM_BITS)
+from vllm._custom_ops import cutlass_scaled_mm_supports_fp4
+from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
-SUPPORTED_GPTQ_QUANT_TYPES = [scalar_types.uint4b8, scalar_types.uint8b128]
-SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
+FP8_DTYPE = current_platform.fp8_dtype()
+FP4_DTYPE = torch.uint8
+
+
+# Use proxy as NamedTuple direct subclasses cannot have static members
+class _GroupShape(NamedTuple):
+    row: int
+    col: int
+
+
+class GroupShape(_GroupShape):
+    """
+    This class describes the quantization group shape.
+    It includes static members for common shapes (per-tensor, per-token).
+    """
+
+    # Aliases for common quantization group shapes
+    PER_TENSOR: ClassVar['GroupShape']
+    PER_TOKEN: ClassVar['GroupShape']
+
+
+GroupShape.PER_TENSOR = GroupShape(-1, -1)
+GroupShape.PER_TOKEN = GroupShape(1, -1)
+
+
+@dataclass(frozen=True)
+class ScaleDesc:
+    """
+    Class for describing a single quantization scaling factor.
+    dtype: data type of the scale
+    static: static scale if True, dynamic if False
+    group_shape: group shape of the scale
+    """
+    dtype: torch.dtype
+    static: bool
+    group_shape: GroupShape
+
+    def __str__(self):
+        group_shape = ('per_tensor'
+                       if self.group_shape == GroupShape.PER_TENSOR else
+                       ('per_token' if self.group_shape == GroupShape.PER_TOKEN
+                        else str(self.group_shape)))
+
+        return (f"{fx.graph.dtype_abbrs[self.dtype]},"
+                f"{'static' if self.static else 'dynamic'},{group_shape}")
+
+
+@dataclass(frozen=True)
+class QuantKey:
+    """
+    Class for identifying the type of quantization.
+    dtype: quantized data type
+    scale: scale descriptor
+    scale2: second-level scale descriptor
+    symmetric: symmetric if True, asymmetric if False
+    """
+    dtype: torch.dtype
+    scale: ScaleDesc
+    scale2: Optional[ScaleDesc] = None
+    symmetric: bool = True
+
+    def __str__(self):
+        scale2_str = f"scale2({self.scale2})," if self.scale2 else ""
+        return (f"QuantKey({fx.graph.dtype_abbrs[self.dtype]},"
+                f"scale({self.scale}),{scale2_str}"
+                f"{'a' if not self.symmetric else ''}symmetric)")
+
+
+kStaticTensorScale = ScaleDesc(torch.float32, True, GroupShape.PER_TENSOR)
+kFp8StaticTensorSym = QuantKey(FP8_DTYPE, kStaticTensorScale, symmetric=True)
+
+kDynamicTensorScale = ScaleDesc(torch.float32, False, GroupShape.PER_TENSOR)
+kFp8DynamicTensorSym = QuantKey(FP8_DTYPE, kDynamicTensorScale, symmetric=True)
+
+kDynamicTokenScale = ScaleDesc(torch.float32, False, GroupShape.PER_TOKEN)
+kFp8DynamicTokenSym = QuantKey(FP8_DTYPE, kDynamicTokenScale, symmetric=True)
+
+kNvfp4GroupScale = ScaleDesc(FP8_DTYPE, False, GroupShape(1, 16))
+kNvfp4Quant = QuantKey(FP4_DTYPE,
+                       scale=kNvfp4GroupScale,
+                       scale2=kStaticTensorScale)
 
 
 # Normalize the group_shape to the full extent for any dims that are -1
-def _normalize_quant_group_shape(x: torch.Tensor, group_shape: Tuple[int,
-                                                                     int]):
+def _normalize_quant_group_shape(x: torch.Tensor, group_shape: GroupShape):
     # -1 means full extent
     return (group_shape[0] if group_shape[0] > 0 else x.shape[-2],
             group_shape[1] if group_shape[1] > 0 else x.shape[-1])
@@ -56,9 +138,9 @@ def group_broadcast(t, shape):
 #               (i.e. per-token-per-group)
 def scaled_quantize(
     x: torch.Tensor,
-    group_shape: Tuple[int, int],
+    group_shape: GroupShape,
     quant_dtype: torch.dtype,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     group_shape = _normalize_quant_group_shape(x, group_shape)
     assert quant_dtype.is_floating_point, \
         "currently `scaled_quantize` only supports floating point dtypes " \
@@ -97,9 +179,9 @@ def scaled_quantize(
 def scaled_dequantize(
     x_q: torch.Tensor,
     x_s: torch.Tensor,
-    group_shape: Optional[Tuple[int, int]] = None,
+    group_shape: Optional[GroupShape] = None,
     out_dtype: torch.dtype = torch.float32,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     if group_shape is not None:
         group_shape = _normalize_quant_group_shape(x_q, group_shape)
 
@@ -173,8 +255,8 @@ def unpack_quantized_values_into_int32(w_q: torch.Tensor,
 
 def is_layer_skipped(
     prefix: str,
-    ignored_layers: List[str],
-    fused_mapping: Mapping[str, List[str]] = MappingProxyType({})
+    ignored_layers: list[str],
+    fused_mapping: Mapping[str, list[str]] = MappingProxyType({})
 ) -> bool:
     # prefix: model.layers.0.self_attn.q_proj
     # proj_name: q_proj
@@ -330,6 +412,10 @@ def quantize_weights(w: torch.Tensor,
     )
 
 
+SUPPORTED_GPTQ_QUANT_TYPES = [scalar_types.uint4b8, scalar_types.uint8b128]
+SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
+
+
 def gptq_quantize_weights(w: torch.Tensor,
                           quant_type: ScalarType,
                           group_size: int,
@@ -359,89 +445,6 @@ def gptq_quantize_weights(w: torch.Tensor,
                                                     test_perm)
 
     return w_ref, w_q, w_s, g_idx, rand_perm
-
-
-# QQQ employs different quant schemes for per-group and
-# per-channel quantization.
-def qqq_quantize_weights(w: torch.Tensor, num_bits: int, group_size: int):
-    orig_device = w.device
-    size_k, size_n = w.shape
-
-    assert w.is_floating_point(), "w must be float"
-    assert num_bits in MARLIN_QQQ_SUPPORTED_NUM_BITS, \
-           f"Unsupported num_bits = {num_bits}"
-    assert group_size in SUPPORTED_GROUP_SIZES + [
-        size_k
-    ], f"Unsupported groupsize = {group_size}"
-
-    if group_size == -1:
-        group_size = size_k
-    assert group_size <= size_k
-
-    if group_size < size_k:
-        # Reshape to [groupsize, -1]
-        w = w.reshape((-1, group_size, size_n))
-        w = w.permute(1, 0, 2)
-        w = w.reshape((group_size, -1))
-
-        max_q_val = 2**num_bits - 1
-        half_q_val = (max_q_val + 1) // 2
-
-        # Compute scale for each group
-        s_group = torch.max(torch.abs(w), 0, keepdim=True)[0]
-        s_group *= 2 / max_q_val  # 2 => symmetric
-
-        # Quantize
-        q_w = torch.round(w / s_group).int()
-        q_w += half_q_val
-        q_w = torch.clamp(q_w, 0, max_q_val)
-        # Compute ref (dequantized)
-        w_ref = (q_w - half_q_val).half() * s_group
-
-        # Restore original shapes
-        def reshape_w(w):
-            w = w.reshape((group_size, -1, size_n))
-            w = w.permute(1, 0, 2)
-            w = w.reshape((size_k, size_n)).contiguous()
-            return w
-
-        q_w = reshape_w(q_w)
-        w_ref = reshape_w(w_ref)
-
-        # Compute int8 quantization scale for each channel
-        s_channel = torch.max(torch.abs(w_ref), 0, keepdim=True)[0]
-        s_channel /= 127.0
-        t_int8 = (w_ref / s_channel).round().clamp(-128, 127).to(torch.int8)
-        w_ref = t_int8.half() * s_channel
-        s_channel = s_channel.reshape(1, -1).to(dtype=torch.float)
-
-        # Fuse scales
-        s_group = (s_group.reshape(-1, size_n).contiguous() /
-                   s_channel).to(dtype=torch.half)
-    else:
-        max_q_val = 2**(num_bits - 1) - 1
-
-        # Compute scale for each channel
-        s_channel = torch.max(torch.abs(w), 0, keepdim=True)[0]
-        s_channel /= max_q_val
-
-        # Quantize
-        q_w = torch.round(w / s_channel).int()
-        q_w = torch.clamp(q_w, -max_q_val, max_q_val)
-        # Compute ref (dequantized)
-        w_ref = q_w.half() * s_channel
-
-        s_group = torch.tensor([], dtype=torch.half)
-        # div 2 ** (8 - self.bits)) to offset right shift in unpacking
-        s_channel /= (2**(8 - num_bits))
-        s_channel = s_channel.reshape(-1, size_n).contiguous().to(torch.float)
-
-    return (
-        w_ref.to(device=orig_device),
-        q_w.to(device=orig_device),
-        s_group.to(device=orig_device),
-        s_channel.to(device=orig_device),
-    )
 
 
 def sort_weights(q_w: torch.Tensor, g_idx: torch.Tensor):
@@ -569,3 +572,56 @@ def awq_pack(
     q_w = q_w.reshape((-1, size_n)).contiguous()
 
     return pack_cols(q_w, num_bits, size_k, size_n)
+
+
+def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:
+    """
+    Pad and block-interleave the FP4 block-scales so that they match the data
+    layout expected by the CUTLASS / FlashInfer kernels.
+
+    Parameters
+    ----------
+    scale: torch.Tensor
+
+    Returns
+    -------
+    torch.Tensor
+        The swizzled tensor with the same logical shape as *scale*.
+    """
+    assert scale.dtype == torch.float8_e4m3fn, (
+        "swizzle_blockscale expects the input tensor to be in "
+        "torch.float8_e4m3fn format.")
+
+    scale_ndim = scale.ndim
+    if scale_ndim == 2:
+        scale = scale.unsqueeze(0)  # (1, M, K)
+    assert scale.ndim == 3, "Expected a 2-D or 3-D tensor for block scales."
+
+    B, M, K = scale.shape
+
+    def _round_up(x: int, m: int) -> int:
+        return (x + m - 1) // m * m
+
+    M_padded = _round_up(M, 128)
+    K_padded = _round_up(K, 4)
+
+    padded = torch.zeros((B, M_padded, K_padded),
+                         dtype=scale.dtype,
+                         device=scale.device)
+    padded[:B, :M, :K] = scale
+
+    # Reshape / permute to the layout required by the kernel.
+    padded = padded.reshape(B, M_padded // 128, 4, 32, K_padded // 4, 4)
+    swizzled = padded.permute(0, 1, 4, 3, 2, 5).contiguous().cuda()
+
+    if scale_ndim == 2:
+        return swizzled.reshape(M_padded, K_padded)
+    return swizzled.reshape(B, M_padded, K_padded)
+
+
+def cutlass_fp4_supported() -> bool:
+    if not current_platform.is_cuda():
+        return False
+    capability_tuple = current_platform.get_device_capability()
+    capability = -1 if capability_tuple is None else capability_tuple.to_int()
+    return cutlass_scaled_mm_supports_fp4(capability)

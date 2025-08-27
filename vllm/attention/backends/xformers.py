@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with xFormers and PagedAttention."""
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 from xformers import ops as xops
@@ -386,14 +387,14 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
-        if blocksparse_params is not None:
-            raise ValueError(
-                "XFormers does not support block-sparse attention.")
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported in V0 "
+                                      "XFORMERS backend.")
         if logits_soft_cap is not None:
             logger.warning_once("XFormers does not support logits soft cap. "
                                 "Outputs may be slightly off.")
@@ -411,7 +412,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         self.sliding_window = sliding_window
         self.kv_cache_dtype = kv_cache_dtype
 
-        assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         supported_head_sizes = PagedAttention.get_supported_head_sizes()
@@ -431,6 +431,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         kv_cache: torch.Tensor,
         attn_metadata: "XFormersMetadata",
         output: Optional[torch.Tensor] = None,
+        output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
@@ -469,20 +471,26 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 max_encoder_seq_len)
     
         Args:
+            layer: Attention layer instance.
             query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+            kv_cache: KV cache tensor with shape 
+                [2, num_blocks, block_size * num_kv_heads * head_size].
                 NOTE: kv_cache will be an empty tensor with shape [0]
                 for profiling run.
             attn_metadata: Metadata for attention.
-            attn_type: Select attention type, between encoder attention,
-                       decoder self-attention, or encoder/decoder cross-
-                       attention. Defaults to decoder self-attention,
-                       which is the vLLM default generally
+            output: Optional output tensor.
+            output_scale: Optional output scale tensor.
+            output_block_scale: Optional output block scale tensor.
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported"
+                " for XFormersImpl")
+
         attn_type = self.attn_type
         # Check that appropriate attention metadata attributes are
         # selected for the desired attention type
@@ -637,7 +645,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         for API spec.
 
         Args:
-            output: shape = [num_prefill_tokens, num_heads, head_size]
             query: shape = [num_prefill_tokens, num_heads, head_size]
             key: shape = [num_prefill_tokens, num_kv_heads, head_size]
             value: shape = [num_prefill_tokens, num_kv_heads, head_size]

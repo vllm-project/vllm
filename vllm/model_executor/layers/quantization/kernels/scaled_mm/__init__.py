@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Dict, List, Optional, Type
+from typing import Optional
 
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
     AiterScaledMMLinearKernel)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.cpu import (
+    CPUScaledMMLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
     CutlassScaledMMLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
@@ -16,8 +19,8 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.xla import (
 from vllm.platforms import PlatformEnum, current_platform
 
 # in priority/performance order (when available)
-_POSSIBLE_KERNELS: Dict[PlatformEnum, List[Type[ScaledMMLinearKernel]]] = {
-    PlatformEnum.CPU: [CutlassScaledMMLinearKernel],
+_POSSIBLE_KERNELS: dict[PlatformEnum, list[type[ScaledMMLinearKernel]]] = {
+    PlatformEnum.CPU: [CPUScaledMMLinearKernel],
     PlatformEnum.CUDA: [CutlassScaledMMLinearKernel],
     PlatformEnum.ROCM: [AiterScaledMMLinearKernel, TritonScaledMMLinearKernel],
     PlatformEnum.TPU: [XLAScaledMMLinearKernel],
@@ -27,7 +30,7 @@ _POSSIBLE_KERNELS: Dict[PlatformEnum, List[Type[ScaledMMLinearKernel]]] = {
 def choose_scaled_mm_linear_kernel(
         config: ScaledMMLinearLayerConfig,
         compute_capability: Optional[int] = None
-) -> Type[ScaledMMLinearKernel]:
+) -> type[ScaledMMLinearKernel]:
     """
     Choose an ScaledMMLinearKernel that can implement the given config for the 
     given compute capability. Attempts to choose the best kernel in terms of 
@@ -44,7 +47,7 @@ def choose_scaled_mm_linear_kernel(
         ValueError: If no kernel can implement the given config.
 
     Returns:
-        Type[ScaledMMLinearKernel]: Chosen kernel.
+        type[ScaledMMLinearKernel]: Chosen kernel.
     """
 
     if compute_capability is None:

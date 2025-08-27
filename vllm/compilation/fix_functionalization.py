@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import operator
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 from .fx_utils import is_func
 from .vllm_inductor_pass import VllmInductorPass
@@ -24,10 +27,17 @@ class FixFunctionalizationPass(VllmInductorPass):
     """
 
     def __call__(self, graph: torch.fx.Graph):
+        # XPU does not support auto-functionalization yet.
+        # Will enable this when switch to vllm-xpu-kernels.
+        if current_platform.is_xpu():
+            logger.debug("XPU platform does not support fix functionalization"
+                         "pass currently.")
+            return
+
         self.begin()
         self.dump_graph(graph, "before_fix_functionalization")
 
-        self.nodes_to_remove: List[torch.fx.Node] = []
+        self.nodes_to_remove: list[torch.fx.Node] = []
         count = 0
         for node in graph.nodes:
             if not is_func(node, auto_functionalized):
@@ -68,18 +78,25 @@ class FixFunctionalizationPass(VllmInductorPass):
                 self.defunctionalize(graph, node, mutated_args)
             elif at_target in [
                     torch.ops._C.rms_norm.default,
-                    torch.ops._C.rms_norm_static_fp8_quant.default
+                    torch.ops._C.rms_norm_static_fp8_quant.default,
             ]:
                 mutated_args = {1: 'result'}
                 self.defunctionalize(graph, node, mutated_args)
-
+            # For some reason we need to specify the args for both
+            # silu_and_mul and silu_and_mul_quant. The kwargs
+            # pathway gets the wrong answer.
             elif at_target == torch.ops._C.silu_and_mul.default:
-                mutated_args = {1: 'out'}
-                # Because we have an 'out', need to specify args directly
+                mutated_args = {1: 'result'}
                 self.defunctionalize(graph,
                                      node,
                                      mutated_args,
-                                     args=('out', 'input'))
+                                     args=('result', 'input'))
+            elif at_target == torch.ops._C.silu_and_mul_quant.default:
+                mutated_args = {1: 'result'}
+                self.defunctionalize(graph,
+                                     node,
+                                     mutated_args,
+                                     args=('result', 'input', 'scale'))
             else:
                 continue  # skip the count
 
@@ -110,8 +127,8 @@ class FixFunctionalizationPass(VllmInductorPass):
     def defunctionalize(self,
                         graph: torch.fx.Graph,
                         node: torch.fx.Node,
-                        mutated_args: Dict[int, Union[torch.fx.Node, str]],
-                        args: Optional[Tuple[Union[torch.fx.Node, str],
+                        mutated_args: dict[int, Union[torch.fx.Node, str]],
+                        args: Optional[tuple[Union[torch.fx.Node, str],
                                              ...]] = None):
         """
         De-functionalize a node by replacing it with a call to the original.
@@ -123,7 +140,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         self._remove(node)
 
     def replace_users_with_mutated_args(self, node: torch.fx.Node,
-                                        mutated_args: Dict[int,
+                                        mutated_args: dict[int,
                                                            Union[torch.fx.Node,
                                                                  str]]):
         """
@@ -139,7 +156,7 @@ class FixFunctionalizationPass(VllmInductorPass):
             user.replace_all_uses_with(arg)
             self._remove(user)
 
-    def getitem_users(self, node: torch.fx.Node) -> Dict[int, torch.fx.Node]:
+    def getitem_users(self, node: torch.fx.Node) -> dict[int, torch.fx.Node]:
         """
         Returns the operator.getitem users of the auto-functionalized node,
         indexed by the index they are getting.
@@ -154,7 +171,7 @@ class FixFunctionalizationPass(VllmInductorPass):
     def insert_defunctionalized(self,
                                 graph: torch.fx.Graph,
                                 node: torch.fx.Node,
-                                args: Optional[Tuple[Union[torch.fx.Node, str],
+                                args: Optional[tuple[Union[torch.fx.Node, str],
                                                      ...]] = None):
         """
         Insert a new defunctionalized node into the graph before node.

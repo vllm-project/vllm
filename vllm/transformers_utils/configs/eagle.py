@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
 from typing import Optional, Union
@@ -14,6 +15,7 @@ class EAGLEConfig(PretrainedConfig):
     def __init__(self,
                  model: Union[PretrainedConfig, dict, None] = None,
                  truncated_vocab_size: Optional[int] = None,
+                 method: Optional[str] = 'eagle',
                  **kwargs):
 
         model_config: Union[PretrainedConfig, DeepseekV2Config, None]
@@ -41,14 +43,32 @@ class EAGLEConfig(PretrainedConfig):
             self.truncated_vocab_size = self.model.vocab_size if \
                 truncated_vocab_size is None else truncated_vocab_size
 
-        if "architectures" not in kwargs:
-            kwargs["architectures"] = ["EAGLEModel"]
+        # Eagle model name should follow naming convention of
+        # LlamaForCausalLM -> EagleLlamaForCausalLM
+        # LlamaForCausalLM -> Eagle3LlamaForCausalLM
+        if method == "eagle":
+            assert self.model is not None, \
+                "model should not be None when method is eagle"
+            kwargs["architectures"] = [
+                f"Eagle{arch}" if not arch.startswith("Eagle") \
+                    else arch for arch in self.model.architectures
+            ]
+        elif method == "eagle3":
+            assert self.model is not None, \
+                "model should not be None when method is eagle3"
+            kwargs["architectures"] = [
+                arch if arch.startswith("Eagle3") or arch.endswith("Eagle3")
+                else f"Eagle3{arch}" for arch in self.model.architectures
+            ]
+        else:
+            raise ValueError(f"Invalid method {method}. "
+                             "Supported methods are eagle and eagle3.")
 
         super().__init__(**kwargs)
 
         if self.model is not None:
             for k, v in self.model.to_dict().items():
-                if not hasattr(self, k):
+                if k not in kwargs:
                     setattr(self, k, v)
 
     @classmethod

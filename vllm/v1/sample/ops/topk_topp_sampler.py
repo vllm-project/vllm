@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from typing import Optional
 
 import torch
 import torch.nn as nn
+from packaging import version
 
 from vllm import envs
+from vllm.config import LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -26,26 +29,22 @@ class TopKTopPSampler(nn.Module):
     Implementations may update the logits tensor in-place.
     """
 
-    def __init__(self):
+    def __init__(
+            self,
+            logprobs_mode: LogprobsMode = LogprobsMode.RAW_LOGPROBS) -> None:
         super().__init__()
-        if current_platform.is_cuda():
+        self.logprobs_mode = logprobs_mode
+        # flashinfer optimization does not apply if intermediate
+        # logprobs/logits after top_k/top_p need to be returned
+        if logprobs_mode not in (LogprobsMode.PROCESSED_LOGITS,
+                                 LogprobsMode.PROCESSED_LOGPROBS
+                                 ) and current_platform.is_cuda():
             if is_flashinfer_available:
                 flashinfer_version = flashinfer.__version__
-                if flashinfer_version >= "0.2.3":
-                    # FIXME(DefTruth): Currently, we have errors when using
-                    # FlashInfer>=v0.2.3 for top-p & top-k sampling. As a
-                    # workaround, we disable FlashInfer for top-p & top-k
-                    # sampling by default while FlashInfer>=v0.2.3.
-                    # The sampling API removes the success return value
-                    # of all sampling API, which is not compatible with
-                    # earlier design.
-                    # https://github.com/flashinfer-ai/flashinfer/releases/
-                    # tag/v0.2.3
-                    logger.info(
-                        "Currently, FlashInfer top-p & top-k sampling sampler "
-                        "is disabled because FlashInfer>=v0.2.3 is not "
-                        "backward compatible. Falling back to the PyTorch-"
-                        "native implementation of top-p & top-k sampling.")
+                if version.parse(flashinfer_version) < version.parse("0.2.3"):
+                    logger.warning_once(
+                        "FlashInfer version >= 0.2.3 required. "
+                        "Falling back to default sampling implementation.")
                     self.forward = self.forward_native
                 elif envs.VLLM_USE_FLASHINFER_SAMPLER is not False:
                     # NOTE(woosuk): The V0 sampler doesn't use FlashInfer for
@@ -56,32 +55,28 @@ class TopKTopPSampler(nn.Module):
                     # None means False, while in V1, None means True. This is
                     # why we use the condition
                     # `envs.VLLM_USE_FLASHINFER_SAMPLER is not False` here.
-                    logger.info("Using FlashInfer for top-p & top-k sampling.")
+                    logger.info_once(
+                        "Using FlashInfer for top-p & top-k sampling.")
                     self.forward = self.forward_cuda
                 else:
-                    logger.warning(
+                    logger.warning_once(
                         "FlashInfer is available, but it is not enabled. "
                         "Falling back to the PyTorch-native implementation of "
                         "top-p & top-k sampling. For the best performance, "
                         "please set VLLM_USE_FLASHINFER_SAMPLER=1.")
                     self.forward = self.forward_native
             else:
-                logger.warning(
+                logger.warning_once(
                     "FlashInfer is not available. Falling back to the PyTorch-"
                     "native implementation of top-p & top-k sampling. For the "
                     "best performance, please install FlashInfer.")
                 self.forward = self.forward_native
-        elif current_platform.is_tpu():
-            if envs.VLLM_TPU_DISABLE_TOPK_TOPP_OPTIMIZATION:
-                logger.warning(
-                    "TPU-specific optimization for top-k & top-p sampling are "
-                    "disabled, falling back to PyTorch-native implementation "
-                    "which could be very slow.")
-                self.forward = self.forward_native
-            else:
-                self.forward = self.forward_tpu
         else:
             self.forward = self.forward_native
+        if current_platform.is_tpu():
+            self.apply_top_k_top_p = apply_top_k_top_p_tpu
+        else:
+            self.apply_top_k_top_p = apply_top_k_top_p
 
     def forward_native(
         self,
@@ -89,15 +84,20 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         PyTorch-native implementation of top-k and top-p sampling.
 
         The logits tensor may be updated in-place.
         """
-        logits = apply_top_k_top_p(logits, k, p)
+        logits = self.apply_top_k_top_p(logits, k, p)
+        logits_to_return = None
+        if self.logprobs_mode == LogprobsMode.PROCESSED_LOGITS:
+            logits_to_return = logits
+        elif self.logprobs_mode == LogprobsMode.PROCESSED_LOGPROBS:
+            logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        return random_sample(probs, generators)
+        return random_sample(probs, generators), logits_to_return
 
     def forward_cuda(
         self,
@@ -105,26 +105,24 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """More optimized implementation for top-k and top-p sampling."""
-        probs = logits.softmax(dim=-1, dtype=torch.float32)
-        if k is None and p is None:
-            # We prefer `random_sample` over `flashinfer_sample` when sorting is
-            # not needed. This is because `random_sample` does not require
-            # CPU-GPU synchronization while `flashinfer_sample` does.
-            return random_sample(probs, generators)
-        return flashinfer_sample(probs, k, p, generators)
-
-    def forward_tpu(
-        self,
-        logits: torch.Tensor,
-        generators: dict[int, torch.Generator],
-        k: Optional[torch.Tensor],
-        p: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        logits = apply_top_k_top_p_tpu(logits, k, p)
-        probs = logits.softmax(dim=-1, dtype=torch.float32)
-        return random_sample(probs, generators)
+        # We prefer `random_sample` over `flashinfer_sample` when sorting is
+        # not needed. This is because `random_sample` does not require
+        # CPU-GPU synchronization while `flashinfer_sample` does.
+        if (k is None and p is None) or generators:
+            if generators:
+                logger.warning_once("FlashInfer 0.2.3+ does not support "
+                                    "per-request generators. Falling back to "
+                                    "PyTorch-native implementation.")
+            return self.forward_native(logits, generators, k, p)
+        assert self.logprobs_mode not in (
+            LogprobsMode.PROCESSED_LOGITS, LogprobsMode.PROCESSED_LOGPROBS
+        ), "FlashInfer does not support returning logits/logprobs"
+        # flashinfer sampling functions expect contiguous logits.
+        # In flex_attn/triton_attn fp32 inference, logits can be non-contiguous
+        # because of slicing operation in logits_processor.
+        return flashinfer_sample(logits.contiguous(), k, p, generators), None
 
 
 def apply_top_k_top_p_tpu(
@@ -146,12 +144,22 @@ def apply_top_k_top_p_tpu(
     chance of being chosen during final sampling, so we can consider the tie
     being broken then.
     """
+    probs = logits.softmax(dim=-1)
+    probs_sort, _ = probs.sort(dim=-1, descending=False)
+
     if k is not None:
-        logits = apply_top_k_only(logits, k)
+        top_k_count = probs_sort.size(1) - k.to(torch.long)  # shape: (batch, )
+        top_k_count = top_k_count.unsqueeze(dim=1)
+        top_k_cutoff = probs_sort.gather(-1, top_k_count)
+
+        # Make sure the no top-k rows are no-op.
+        no_top_k_mask = (k == logits.shape[1]).unsqueeze(dim=1)
+        top_k_cutoff.masked_fill_(no_top_k_mask, -float("inf"))
+
+        elements_to_discard = probs < top_k_cutoff
+        logits.masked_fill_(elements_to_discard, -float("inf"))
 
     if p is not None:
-        probs = logits.softmax(dim=-1)
-        probs_sort, _ = probs.sort(dim=-1, descending=False)
         cumprob = torch.cumsum(probs_sort, dim=-1)
         top_p_mask = cumprob <= 1 - p.unsqueeze(dim=1)
         top_p_mask[:, -1] = False  # at least one
@@ -224,7 +232,7 @@ def apply_top_k_only(
     max_top_k = k.max()
     # topk.values tensor has shape [batch_size, max_top_k].
     # Convert top k to 0-based index in range [0, max_top_k).
-    k_index = k.sub_(1).unsqueeze(1).expand(logits.shape[0], 1)
+    k_index = k.sub_(1).unsqueeze(1)
     top_k_mask = logits.topk(max_top_k, dim=1).values.gather(1, k_index.long())
     # Handle non-topk rows.
     top_k_mask.masked_fill_(no_top_k_mask.unsqueeze(1), -float("inf"))
@@ -257,17 +265,17 @@ def random_sample(
 
 
 def flashinfer_sample(
-    probs: torch.Tensor,
+    logits: torch.Tensor,
     k: Optional[torch.Tensor],
     p: Optional[torch.Tensor],
     generators: dict[int, torch.Generator],
 ) -> torch.Tensor:
-    """Sample from the probabilities using FlashInfer.
+    """Sample from the logits using FlashInfer.
 
     Statistically, this function is equivalent to the `random_sample` function.
     However, this function is faster because it avoids sorting the logits tensor
     via rejection sampling.
-    
+
     NOTE: The outputs of this function do not necessarily match the outputs of
     the `random_sample` function. It only guarantees that the outputs are
     statistically equivalent.
@@ -277,36 +285,19 @@ def flashinfer_sample(
     the synchronization overhead.
     """
     assert not (k is None and p is None)
-    max_top_k_round = 32
-    batch_size = probs.shape[0]
-    uniform_samples = torch.empty((max_top_k_round, batch_size),
-                                  device=probs.device)
-    if len(generators) != batch_size:
-        uniform_samples.uniform_()
-    if generators:
-        for i, generator in generators.items():
-            uniform_samples[:, i].uniform_(generator=generator)
-
     if k is None:
         # Top-p only.
-        next_token_ids, success = flashinfer.sampling.top_p_sampling_from_probs(
-            probs, uniform_samples, p, deterministic=True)
+        probs = logits.softmax(dim=-1, dtype=torch.float32)
+        next_token_ids = flashinfer.sampling.top_p_sampling_from_probs(
+            probs, p, deterministic=True)
     elif p is None:
         # Top-k only.
-        next_token_ids, success = flashinfer.sampling.top_k_sampling_from_probs(
-            probs, uniform_samples, k, deterministic=True)
+        probs = logits.softmax(dim=-1, dtype=torch.float32)
+        next_token_ids = flashinfer.sampling.top_k_sampling_from_probs(
+            probs, k, deterministic=True)
     else:
         # Both top-k and top-p.
-        next_token_ids, success = (
-            flashinfer.sampling.top_k_top_p_sampling_from_probs(
-                probs, uniform_samples, k, p, deterministic=True))
+        next_token_ids = flashinfer.sampling.top_k_top_p_sampling_from_logits(
+            logits, k, p, deterministic=True)
 
-    # NOTE: CPU-GPU synchronization happens here.
-    if not success.all():
-        if k is not None:
-            probs = flashinfer.sampling.top_k_renorm_prob(probs, k)
-        if p is not None:
-            probs = flashinfer.sampling.top_p_renorm_prob(probs, p)
-        next_token_ids = flashinfer.sampling.sampling_from_probs(
-            probs, uniform_samples[0], deterministic=True)
     return next_token_ids.view(-1)

@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt2/modeling_gpt2.py
@@ -19,7 +20,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GPTBigCode model compatible with HuggingFace weights."""
-from typing import Iterable, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -35,7 +37,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -43,8 +44,9 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class GPTBigCodeAttention(nn.Module):
@@ -82,6 +84,7 @@ class GPTBigCodeAttention(nn.Module):
             total_num_kv_heads,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_attn",
         )
 
         self.c_proj = RowParallelLinear(
@@ -89,6 +92,7 @@ class GPTBigCodeAttention(nn.Module):
             self.hidden_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_proj",
         )
         self.attn = Attention(self.num_heads,
                               self.head_dim,
@@ -122,6 +126,7 @@ class GPTBigMLP(nn.Module):
         intermediate_size: int,
         config: GPTBigCodeConfig,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -130,12 +135,14 @@ class GPTBigMLP(nn.Module):
             intermediate_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_fc",
         )
         self.c_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_proj",
         )
         self.act = get_act_fn(config.activation_function)
 
@@ -166,7 +173,10 @@ class GPTBigCodeBlock(nn.Module):
                                         quant_config,
                                         prefix=f"{prefix}.attn")
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.mlp = GPTBigMLP(inner_dim, config, quant_config)
+        self.mlp = GPTBigMLP(inner_dim,
+                             config,
+                             quant_config,
+                             prefix=f"{prefix}.mlp")
 
     def forward(
         self,
@@ -244,15 +254,33 @@ class GPTBigCodeModel(nn.Module):
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            if ".attn.bias" in name:
+                # Skip attention mask.
+                # NOTE: "c_attn.bias" should not be skipped.
+                continue
+            if is_pp_missing_parameter(name, self):
+                continue
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            # TODO (@robertgshaw2-neuralmagic): move to fp8 linear method
+            if "c_attn.input_scale" in name:
+                weight_loader(param, loaded_weight, 'q')
+                weight_loader(param, loaded_weight, 'k')
+                weight_loader(param, loaded_weight, 'v')
+            else:
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
 
 class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {"c_attn": ["c_attn"]}
-
-    # LoRA specific attributes
-    embedding_modules = {
-        "wte": "input_embeddings",
-        "lm_head": "output_embeddings",
-    }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -265,7 +293,8 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.quant_config = quant_config
         self.transformer = GPTBigCodeModel(vllm_config=vllm_config,
-                                           prefix=prefix)
+                                           prefix=maybe_prefix(
+                                               prefix, "transformer"))
         if self.config.tie_word_embeddings:
             self.lm_head = self.transformer.wte
         else:
@@ -278,7 +307,6 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 
@@ -305,36 +333,13 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                        sampling_metadata)
         return logits
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[SamplerOutput]:
-        next_tokens = self.sampler(logits, sampling_metadata)
-        return next_tokens
-
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: Set[str] = set()
-        for name, loaded_weight in weights:
-            if "lm_head.weight" in name:
-                continue
-            if ".attn.bias" in name:
-                # Skip attention mask.
-                # NOTE: "c_attn.bias" should not be skipped.
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            # TODO (@robertgshaw2-neuralmagic): move to fp8 linear method
-            if "c_attn.input_scale" in name or "c_attn.weight_scale" in name:
-                weight_loader(param, loaded_weight, 'q')
-                weight_loader(param, loaded_weight, 'k')
-                weight_loader(param, loaded_weight, 'v')
-            else:
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        skip_prefixes = None
+        if self.config.tie_word_embeddings:
+            skip_prefixes = ["lm_head."]
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=skip_prefixes,
+        )
+        return loader.load_weights(weights)
