@@ -658,8 +658,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
 
 def determine_expert_map(
-        ep_size: int, ep_rank: int,
-        global_num_experts: int) -> tuple[int, Optional[torch.Tensor]]:
+    ep_size: int,
+    ep_rank: int,
+    global_num_experts: int,
+    enable_zigzag_expert_placement: bool = False,
+) -> tuple[int, Optional[torch.Tensor]]:
     """
         Calculates how many experts should be assigned to each rank for EP and
         creates a mapping from global to local expert index. Experts are
@@ -669,6 +672,8 @@ def determine_expert_map(
         Args:
             ep_size (int): The size of the expert parallel group
             global_num_experts (int): The total number of experts in the model.
+            enable_zigzag_expert_placement (bool): Whether to enable zigzag
+                expert placement.
 
         Returns:
             tuple[int, Optional[torch.Tensor]]: A tuple containing:
@@ -693,10 +698,22 @@ def determine_expert_map(
 
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts, ), -1, dtype=torch.int32)
-    # Create a expert map for the local experts
-    start_idx = ep_rank * base_experts + min(ep_rank, remainder)
-    expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
-        0, local_num_experts, dtype=torch.int32)
+
+    if enable_zigzag_expert_placement:
+        # Generate expert IDs for this rank using zigzag pattern
+        local_log_experts = torch.arange(ep_rank,
+                                         global_num_experts,
+                                         ep_size,
+                                         dtype=torch.int32)
+
+        expert_map[local_log_experts] = torch.arange(0,
+                                                     local_num_experts,
+                                                     dtype=torch.int32)
+    else:
+        # Create a expert map for the local experts
+        start_idx = ep_rank * base_experts + min(ep_rank, remainder)
+        expert_map[start_idx:start_idx + local_num_experts] = torch.arange(
+            0, local_num_experts, dtype=torch.int32)
     return (local_num_experts, expert_map)
 
 
@@ -741,6 +758,8 @@ class FusedMoE(CustomOp):
         renomalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
+        enable_zigzag_expert_placement: Whether to enable zigzag expert
+            placement for MoE layers.
     """
 
     def __init__(
@@ -816,10 +835,27 @@ class FusedMoE(CustomOp):
             else:
                 assert num_redundant_experts == 0, \
                     "Redundant experts are only supported with EPLB."
-            self.local_num_experts, self.expert_map = determine_expert_map(
-                ep_size=self.ep_size,
-                ep_rank=self.ep_rank,
-                global_num_experts=self.global_num_experts)
+
+            # Check if zigzag expert placement can be enabled
+            zigzag_requested = vllm_config.parallel_config.\
+                enable_zigzag_expert_placement
+            if zigzag_requested:
+                assert (num_redundant_experts == 0 and
+                        num_expert_group is not None and
+                        num_expert_group > 1), \
+                    "Zigzag expert placement is not supported with redundant " \
+                    "experts or num_expert_group == 1"
+                self.local_num_experts, self.expert_map = determine_expert_map(
+                    ep_size=self.ep_size,
+                    ep_rank=self.ep_rank,
+                    global_num_experts=self.global_num_experts,
+                    enable_zigzag_expert_placement=zigzag_requested,
+                )
+            else:
+                self.local_num_experts, self.expert_map = determine_expert_map(
+                    ep_size=self.ep_size,
+                    ep_rank=self.ep_rank,
+                    global_num_experts=self.global_num_experts)
             logger.info_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
                 " number of experts: %s/%s. Experts local to global index map:"
