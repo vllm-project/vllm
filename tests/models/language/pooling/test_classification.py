@@ -29,12 +29,7 @@ def test_models(
         # switch to use ROCm CK FA backend
         monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
 
-    # Seem to use slightly more memory after torch.compile in 2.8
-    # only for this model jason9693/Qwen2.5-1.5B-apeach
-    with vllm_runner(model,
-                     max_model_len=512,
-                     dtype=dtype,
-                     gpu_memory_utilization=0.85) as vllm_model:
+    with vllm_runner(model, max_model_len=512, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.classify(example_prompts)
 
     with hf_runner(model,
