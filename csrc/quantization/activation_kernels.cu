@@ -181,7 +181,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       s_buff_128[2                           // gate + up
                  * GROUP_SIZE                // group size
                  * NUM_WARPS * NUM_STAGES];  // num warps
-  __shared__ Idx_t s_counts[NUM_WARPS];
+  __shared__ Idx_t s_counts[1];
 
   const Idx_t tid = threadIdx.x;
   const Idx_t warp_id = tid / WARP_SIZE;
@@ -200,8 +200,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   // how many tokens for this expert
 
-  if (!lane_id) {
-    s_counts[warp_id] = counts[e * stride_counts_e];
+  if (!tid) {
+    s_counts[0] = counts[e * stride_counts_e];
   }
 
   const Idx_t stride_i_t_128 = stride_i_t / 8u;
@@ -224,7 +224,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   auto y_s_ptr = _y_s + base_ys;
 
   __syncthreads();
-  const Idx_t n_tokens = s_counts[warp_id];
+  const Idx_t n_tokens = s_counts[0];
 
   Idx_t t_load = 0, stage = 0;
   auto load_and_advance_y_pred = [&] {
