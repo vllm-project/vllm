@@ -7,11 +7,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 from itertools import accumulate
-from typing import (TYPE_CHECKING, Any, Literal, Optional, TypedDict, TypeVar,
-                    Union, cast, final)
+from typing import (TYPE_CHECKING, Any, Literal, Optional, TypedDict, Union,
+                    cast, final)
 
 import numpy as np
-from typing_extensions import NotRequired, TypeAlias, deprecated
+from typing_extensions import NotRequired, TypeAlias, TypeVar, deprecated
 
 from vllm.utils import LazyLoader, full_groupby, is_list_of
 from vllm.utils.jsontree import JSONTree, json_map_leaves
@@ -668,7 +668,15 @@ class MultiModalKwargsItem(UserDict[str, MultiModalFieldElem]):
         return {key: elem.data for key, elem in self.items()}
 
 
-class MultiModalKwargsItems(UserDict[str, Sequence[MultiModalKwargsItem]]):
+_I = TypeVar(
+    "_I",
+    MultiModalKwargsItem,
+    Optional[MultiModalKwargsItem],
+    default=MultiModalKwargsItem,
+)
+
+
+class MultiModalKwargsItems(UserDict[str, Sequence[_I]]):
     """
     A dictionary of
     [`MultiModalKwargsItem`][vllm.multimodal.inputs.MultiModalKwargsItem]s
@@ -714,25 +722,35 @@ class MultiModalKwargsItems(UserDict[str, Sequence[MultiModalKwargsItem]]):
         items_by_modality = full_groupby(items, key=lambda x: x.modality)
         return MultiModalKwargsItems(items_by_modality)
 
-    def __getitem__(self, modality: str):
+    def __getitem__(self, modality: str) -> Sequence[_I]:
         if modality not in self:
             raise KeyError(f"Modality {modality!r} not found. "
                            f"Available modalities: {set(self.keys())}")
 
-        return super().__getitem__(modality)
+        return super().__getitem__(modality)  # type: ignore[return-value]
 
     def get_data(self, *, pin_memory: bool = False) -> "MultiModalKwargs":
         elems_by_key = defaultdict[str, list[MultiModalFieldElem]](list)
-        for items in self.values():
-            for item in items:
+        for modality, items in self.items():
+            for i, item in enumerate(items):
+                if item is None:
+                    raise RuntimeError("Cannot build data from empty "
+                                       f"mm_items[{modality}][{i}]")
+
                 for key, elem in item.items():
                     elems_by_key[key].append(elem)
 
         return MultiModalKwargs({
             key:
             elems[0].field.reduce_data(elems, pin_memory=pin_memory)
-            for key, elems in elems_by_key.items() if len(elems) > 0
+            for key, elems in elems_by_key.items()
         })
+
+
+MultiModalKwargsOptionalItems: TypeAlias = Union[
+    MultiModalKwargsItems[MultiModalKwargsItem],
+    MultiModalKwargsItems[Optional[MultiModalKwargsItem]],
+]
 
 
 class MultiModalKwargs(UserDict[str, NestedTensors]):
@@ -898,7 +916,7 @@ class MultiModalInputs(TypedDict):
     token_type_ids: NotRequired[list[int]]
     """The token type IDs of the prompt."""
 
-    mm_kwargs: MultiModalKwargsItems
+    mm_kwargs: MultiModalKwargsOptionalItems
     """Keyword arguments to be directly passed to the model after batching."""
 
     mm_hashes: "MultiModalHashDict"
