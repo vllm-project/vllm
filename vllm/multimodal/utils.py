@@ -553,7 +553,7 @@ def run_dp_sharded_mrope_vision_model_tensor(
                                          device=pixel_values.device,
                                          dtype=pixel_values.dtype)
         grid_thw_local = torch.empty(
-            (0, 2), device=grid_thw.device, dtype=grid_thw.dtype)
+            (0, grid_thw.shape[1]), device=grid_thw.device, dtype=grid_thw.dtype)
 
     # Calculate output dimensions
     embed_dim_reduction_factor = (vision_model.spatial_merge_size *
