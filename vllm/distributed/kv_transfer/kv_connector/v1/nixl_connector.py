@@ -182,9 +182,10 @@ class NixlConnector(KVConnectorBase_V1):
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        blocks: "KVCacheBlocks",
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         assert self.connector_scheduler is not None
+        block_ids = blocks.get_block_ids()[0]
         return self.connector_scheduler.request_finished(request, block_ids)
 
     ############################################################
@@ -369,7 +370,7 @@ class NixlConnectorScheduler:
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        blocks: "KVCacheBlocks",
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Once a request is finished, determine whether request blocks
@@ -400,6 +401,7 @@ class NixlConnectorScheduler:
 
         # TODO: check whether block_ids actually ever be 0. If not we could
         # remove the conditional below
+        block_ids = blocks.get_block_ids()[0]
         delay_free_blocks = len(block_ids) > 0
 
         if delay_free_blocks:
