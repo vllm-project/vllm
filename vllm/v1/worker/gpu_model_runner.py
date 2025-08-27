@@ -650,29 +650,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.parallel_config.microbatching_token_threshold \
             and max_num_scheduled_tokens == 1
 
-        # Don't microbatch unless every other DP worker is also microbatching
-        should_ubatch = self.should_ubatch(should_attempt_ubatching)
-        if not should_ubatch:
-            return (None, 0, None)
-
         # For pure decode we can just create ubatches by cutting the request
         # in half
-        b0_reqs_end = num_reqs // 2
-        b0_tokens_end = total_num_scheduled_tokens // 2
-        assert b0_reqs_end < num_reqs and \
-            b0_tokens_end < total_num_scheduled_tokens
-        ubatch_slices = [
-            UbatchSlice(slice(0, b0_reqs_end), slice(0, b0_tokens_end)),
-            UbatchSlice(slice(b0_reqs_end, num_reqs),
-                        slice(b0_tokens_end, total_num_scheduled_tokens)),
-        ]
+        ubatch_slices = None
+        if should_attempt_ubatching:
+            b0_reqs_end = num_reqs // 2
+            b0_tokens_end = total_num_scheduled_tokens // 2
+            assert b0_reqs_end < num_reqs and \
+                b0_tokens_end < total_num_scheduled_tokens
+            ubatch_slices = [
+                UbatchSlice(slice(0, b0_reqs_end), slice(0, b0_tokens_end)),
+                UbatchSlice(slice(b0_reqs_end, num_reqs),
+                            slice(b0_tokens_end, total_num_scheduled_tokens)),
+            ]
 
-        # Compute ubatch padding. This currently only accounts for DP padding
+        # Don't microbatch unless every other DP worker is also microbatching
         num_pad_tokens = 0
         num_tokens_after_padding = None
-        ubatch_abort = False
-        num_pad_tokens, num_tokens_after_padding = self.get_dp_padding_ubatch(
+        should_ubatch, num_pad_tokens, num_tokens_after_padding = self.get_dp_padding_ubatch(
             ubatch_slices)
+        if not should_ubatch:
+            return (None, 0, None)
+        assert ubatch_slices
+
+
+        # Compute ubatch padding. This currently only accounts for DP padding
+        ubatch_abort = False
         if num_pad_tokens > 0:
             # Check if the padding would result in an empty second ubatch.
             # If so abort ubatching
@@ -1574,12 +1577,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def get_dp_padding_ubatch(
             self,
-            ubatch_slices: UBatchSlices) -> tuple[int, Optional[torch.Tensor]]:
+            ubatch_slices: Optional[UBatchSlices]) -> tuple[bool, int, Optional[torch.Tensor]]:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
 
         if dp_size == 1:
             # Early exit.
-            return 0, None
+            return False, 0, None
+
+        if ubatch_slices is None:
+            (should_ubatch, num_tokens_across_dp) = self.should_ubatch_with_num_tokens(False, 0)
+            assert should_ubatch is False
+            assert num_tokens_across_dp is None
+            return should_ubatch, 0, num_tokens_across_dp
 
         first_ubatch_slice = ubatch_slices[0]
         second_ubatch_slice = ubatch_slices[1]
@@ -1611,12 +1620,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_tokens_per_ubatch = num_tokens_padded // 2
 
         # Note that we compute the number of padded tokens per ubatch
-        num_pad_tokens, num_tokens_after_padding = self.get_dp_padding(
+        should_ubatch, num_tokens_across_dp= self.should_ubatch_with_num_tokens(True,
             num_tokens_per_ubatch)
+        if not should_ubatch:
+            assert num_tokens_across_dp is None
+            return should_ubatch, 0, num_tokens_across_dp
 
+        assert num_tokens_across_dp is not None
+
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
+        num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
+                                                dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+        num_pad_tokens = max_tokens_across_dp_cpu - num_tokens_per_ubatch
         num_pad_tokens = ((num_pad_tokens + num_tokens_per_ubatch) * 2) - \
             num_tokens_unpadded
-        return num_pad_tokens, num_tokens_after_padding
+        return should_ubatch, num_pad_tokens, num_tokens_after_padding
 
     # This doesn't actually pad the ubatch slices. It just shifts the
     # split point to the correct value so that padding can be applied
@@ -1654,6 +1674,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dp_rank = self.vllm_config.parallel_config.data_parallel_rank
         return DPMetadata.should_ubatch_across_dp(should_ubatch, dp_size,
                                                   dp_rank)
+    def should_ubatch_with_num_tokens(self, should_ubatch: bool, num_tokens_per_ubatch: int,
+                      ) -> tuple[bool, Optional[torch.Tensor]]:
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+        return DPMetadata.should_ubatch_across_dp2(should_ubatch, num_tokens_per_ubatch, dp_size,dp_rank)
 
     def _pool(
         self,
@@ -2453,7 +2478,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             should_ubatch = num_tokens >= \
                 self.parallel_config.microbatching_token_threshold and \
                 allow_microbatching
-            should_ubatch = self.should_ubatch(should_ubatch)
+            should_ubatch, _ = self.should_ubatch_with_num_tokens(should_ubatch, num_tokens // 2)
         assert cudagraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
         }
