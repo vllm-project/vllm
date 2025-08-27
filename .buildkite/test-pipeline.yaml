@@ -234,7 +234,7 @@ steps:
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
 
-- label: V1 Test v1/e2e
+- label: V1 Test e2e
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
@@ -244,7 +244,7 @@ steps:
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
     - pytest -v -s v1/e2e
 
-- label: V1 Test v1/entrypoints
+- label: V1 Test entrypoints
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
@@ -252,7 +252,7 @@ steps:
   commands:
     - pytest -v -s v1/entrypoints
 
-- label: V1 Test (others)
+- label: V1 Test others
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
