@@ -1841,9 +1841,10 @@ class ParallelConfig:
     @staticmethod
     def has_unfinished_dp(dp_group: "ProcessGroup",
                           has_unfinished: bool) -> bool:
+        device = torch.device("hpu" if current_platform.is_hpu() else "cpu")
         tensor = torch.tensor([has_unfinished],
                               dtype=torch.int32,
-                              device="cpu")
+                              device=device)
         # dp rank 0: has_unfinished_seqs=True
         # dp rank 1: has_unfinished_seqs=False
         # aggregated: has_unfinished_seqs=True

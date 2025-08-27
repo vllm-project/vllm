@@ -70,7 +70,7 @@ if TYPE_CHECKING:
     CMAKE_BUILD_TYPE: Optional[str] = None
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
-    VLLM_RPC_TIMEOUT: int = 10000  # ms
+    VLLM_RPC_TIMEOUT: int = 3000000  # ms
     VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
@@ -557,7 +557,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Time in ms for the zmq client to wait for a response from the backend
     # server for simple data operations
     "VLLM_RPC_TIMEOUT":
-    lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
+    lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "3000000")),
 
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded

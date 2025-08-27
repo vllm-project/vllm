@@ -15,7 +15,7 @@ import tempfile
 import uuid
 from argparse import Namespace
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from functools import partial
 from http import HTTPStatus
 from typing import Annotated, Any, Optional
@@ -164,6 +164,25 @@ async def build_async_engine_client(
         yield engine
 
 
+def run_mp_engine_with_device(vllm_config, usage_context, ipc_path,
+                              disable_log_stats, disable_log_requests,
+                              engine_alive, rank):
+    os.environ["HABANA_VISIBLE_DEVICES"] = str(rank)
+    os.environ.pop("MASTER_ADDR", None)
+    os.environ.pop("MASTER_PORT", None)
+    os.environ.pop("RANK", None)
+    os.environ.pop("WORLD_SIZE", None)
+    os.environ.pop("LOCAL_RANK", None)
+
+    try:
+        run_mp_engine(vllm_config, usage_context, ipc_path, disable_log_stats,
+                      disable_log_requests, engine_alive)
+        print(f"[PID {os.getpid()}] ENGINE COMPLETED SUCCESSFULLY", flush=True)
+    except Exception as e:
+        print(f"[PID {os.getpid()}] ENGINE FAILED: {e}", flush=True)
+        raise
+
+
 @asynccontextmanager
 async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
@@ -177,6 +196,90 @@ async def build_async_engine_client_from_engine_args(
 
     Returns the Client or None if the creation failed.
     """
+    dp_size = getattr(engine_args, 'data_parallel_size', 1)
+    if dp_size > 1:
+        # 1. Set up multiprocessing context and prometheus directory
+        logger.info("Initializing Data Parallelism with %s engines.", dp_size)
+        if "PROMETHEUS_MULTIPROC_DIR" not in os.environ:
+            global prometheus_multiproc_dir
+            prometheus_multiproc_dir = tempfile.TemporaryDirectory()
+            os.environ[
+                "PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name
+
+        with suppress(RuntimeError):
+            multiprocessing.set_start_method("spawn", force=True)
+        context = multiprocessing.get_context("spawn")
+
+        # 2. Launch all engine subprocesses
+        engine_processes: list[multiprocessing.Process] = []
+        engine_clients: list[MQLLMEngineClient] = []
+
+        for rank in range(dp_size):
+            # Create a dedicated, isolated config for each worker.
+            # Each worker will think it's a single, standalone engine.
+            worker_config = engine_args.create_engine_config()
+            worker_config.parallel_config.data_parallel_size = 1
+            worker_config.parallel_config.world_size = 1
+            ipc_path = get_open_zmq_ipc_path()
+            engine_alive = context.Value('b', True, lock=False)
+
+            process = context.Process(
+                target=run_mp_engine_with_device,
+                args=(worker_config, UsageContext.OPENAI_API_SERVER, ipc_path,
+                      engine_args.disable_log_stats,
+                      engine_args.disable_log_requests, engine_alive, rank),
+                daemon=True,
+                name=f"vllm-independent-engine-{rank}")
+            process.start()
+            engine_processes.append(process)
+            logger.info("Launched engine with PID %s for rank %s", \
+                        process.pid, rank)
+
+            client = MQLLMEngineClient(ipc_path=ipc_path,
+                                       engine_config=worker_config,
+                                       engine_pid=process.pid)
+            engine_clients.append(client)
+
+        # 3. Concurrently wait for all clients to be ready (solves deadlock)
+        try:
+            setup_tasks = [client.setup() for client in engine_clients]
+            await asyncio.gather(*setup_tasks)
+            logger.info("All data parallel engine clients are ready.")
+
+            # This wrapper will distribute requests in a round-robin fashion.
+            from collections.abc import AsyncGenerator
+
+            class DPEngineClient:
+
+                def __init__(self, clients):
+                    self.clients = clients
+                    self.current = 0
+
+                async def generate(self, *args, **kwargs) -> AsyncGenerator:
+                    # Pick the next engine in the cycle for the next request.
+                    client = self.clients[self.current]
+                    self.current = (self.current + 1) % len(self.clients)
+
+                    # Forward the request to the chosen engine
+                    async for result in client.generate(*args, **kwargs):
+                        yield result
+
+                def __getattr__(self, name):
+                    return getattr(self.clients[0], name)
+
+            yield DPEngineClient(engine_clients)
+
+        finally:
+            # 4. Cleanup logic
+            logger.info("Shutting down all data parallel engines.")
+            for client in engine_clients:
+                client.close()
+            for process in engine_processes:
+                process.terminate()
+                process.join(timeout=5)
+                if process.is_alive():
+                    process.kill()
+        return
 
     # Create the EngineConfig (determines if we can use V1).
     usage_context = UsageContext.OPENAI_API_SERVER
@@ -232,7 +335,7 @@ async def build_async_engine_client_from_engine_args(
             # Make TemporaryDirectory for prometheus multiprocessing
             # Note: global TemporaryDirectory will be automatically
             #   cleaned up upon exit.
-            global prometheus_multiproc_dir
+            # global prometheus_multiproc_dir
             prometheus_multiproc_dir = tempfile.TemporaryDirectory()
             os.environ[
                 "PROMETHEUS_MULTIPROC_DIR"] = prometheus_multiproc_dir.name

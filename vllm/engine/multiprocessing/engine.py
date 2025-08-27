@@ -78,6 +78,8 @@ class MQLLMEngine:
                  ipc_path: str,
                  use_async_sockets: bool,
                  *args,
+                 dp_rank: int = 0,
+                 dp_size: int = 1,
                  log_requests: bool = True,
                  **kwargs) -> None:
         # For MQLLMEngine, we can use cached outputs, since each new request
@@ -110,6 +112,15 @@ class MQLLMEngine:
         # IPC path for the data socket.
         self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
 
+        # DP configuration
+        self.dp_rank = dp_rank
+        self.dp_size = dp_size
+
+        # Set GPU for this rank
+        if dp_size > 1:
+            import os
+            os.environ['HABANA_VISIBLE_DEVICES'] = str(dp_rank)
+
         # Error state.
         self._errored_with: Optional[BaseException] = None
 
@@ -124,22 +135,21 @@ class MQLLMEngine:
     def from_vllm_config(cls, vllm_config: VllmConfig,
                          usage_context: UsageContext,
                          disable_log_requests: bool, disable_log_stats: bool,
-                         ipc_path: str) -> "MQLLMEngine":
+                         ipc_path: str, **engine_kwargs) -> "MQLLMEngine":
         # Setup plugins for each process
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
         use_async_sockets = vllm_config.model_config.use_async_output_proc
 
-        return cls(
-            vllm_config=vllm_config,
-            executor_class=LLMEngine._get_executor_cls(vllm_config),
-            ipc_path=ipc_path,
-            usage_context=usage_context,
-            use_async_sockets=use_async_sockets,
-            log_requests=(not disable_log_requests),
-            log_stats=(not disable_log_stats),
-        )
+        return cls(vllm_config=vllm_config,
+                   executor_class=LLMEngine._get_executor_cls(vllm_config),
+                   ipc_path=ipc_path,
+                   usage_context=usage_context,
+                   use_async_sockets=use_async_sockets,
+                   log_requests=(not disable_log_requests),
+                   log_stats=(not disable_log_stats),
+                   **engine_kwargs)
 
     @staticmethod
     def from_engine_args(engine_args: AsyncEngineArgs,
@@ -452,7 +462,7 @@ def signal_handler(*_) -> None:
 
 def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
                   ipc_path: str, disable_log_stats: bool,
-                  disable_log_requests: bool, engine_alive):
+                  disable_log_requests: bool, engine_alive, **kwargs):
     try:
         # Ensure we can serialize transformer config before spawning
         maybe_register_config_serialize_by_value()
@@ -462,6 +472,8 @@ def run_mp_engine(vllm_config: VllmConfig, usage_context: UsageContext,
             usage_context=usage_context,
             disable_log_stats=disable_log_stats,
             disable_log_requests=disable_log_requests,
+            dp_rank=kwargs.get("dp_rank", 0),
+            dp_size=kwargs.get("dp_size", 1),
             ipc_path=ipc_path)
 
         signal.signal(signal.SIGTERM, signal_handler)
