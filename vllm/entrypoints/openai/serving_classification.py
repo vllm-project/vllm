@@ -61,7 +61,6 @@ class ClassificationMixin(OpenAIServing):
                 ctx.request,
                 ctx.tokenizer,
                 ctx.request.input,
-                truncate_prompt_tokens=ctx.request.truncate_prompt_tokens,
             )
 
             return None

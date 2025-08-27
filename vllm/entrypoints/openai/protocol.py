@@ -1325,8 +1325,10 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions,
-                             normalize=self.normalize)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
+            normalize=self.normalize)
 
 
 class EmbeddingChatRequest(OpenAIBaseModel):
@@ -1393,8 +1395,10 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         return data
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions,
-                             normalize=self.normalize)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
+            normalize=self.normalize)
 
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
@@ -1430,7 +1434,9 @@ class ScoreRequest(OpenAIBaseModel):
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            activation=self.activation)
 
 
 class RerankRequest(OpenAIBaseModel):
@@ -1460,7 +1466,9 @@ class RerankRequest(OpenAIBaseModel):
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            activation=self.activation)
 
 
 class RerankDocument(BaseModel):
@@ -1618,7 +1626,9 @@ class ClassificationRequest(OpenAIBaseModel):
     # --8<-- [end:classification-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            activation=self.activation)
 
 
 class ClassificationData(OpenAIBaseModel):
