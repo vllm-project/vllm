@@ -169,7 +169,8 @@ llm = LLM(
     (which is instead controlled by `data_parallel_size`).
 
 Batch-level DP needs to be implemented on a per-model basis,
-and indicated by setting `supports_encoder_tp_data = True` in the model class.
+and enabled by setting `supports_encoder_tp_data = True` in the model class.
+Regardless, you need to set `mm_encoder_tp_mode="data"` in engine arguments to use this feature.
 
 Known supported models:
 
