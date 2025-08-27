@@ -335,3 +335,7 @@ class CpuPlatform(Platform):
         return (cls.supports_v1(model_config)
                 and arch in (CpuArchEnum.X86, CpuArchEnum.POWERPC,
                              CpuArchEnum.ARM, CpuArchEnum.S390X))
+
+    @classmethod
+    def opaque_attention_op(cls) -> bool:
+        return True

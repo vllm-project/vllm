@@ -412,6 +412,10 @@ class RocmPlatform(Platform):
         return any(gfx in gcn_arch for gfx in supported_archs)
 
     @classmethod
+    def opaque_attention_op(cls) -> bool:
+        return True
+
+    @classmethod
     def get_cu_count(cls, device_id: int = 0) -> int:
         return torch.cuda.get_device_properties(
             device_id).multi_processor_count
