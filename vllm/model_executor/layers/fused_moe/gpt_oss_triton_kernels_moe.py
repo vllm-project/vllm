@@ -3,8 +3,11 @@
 from typing import TYPE_CHECKING, Optional
 
 import torch
+import triton
+import triton.language as tl
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
@@ -17,7 +20,12 @@ if has_triton_kernels():
         import triton_kernels.swiglu
         from triton_kernels.matmul_ogs import (FnSpecs, FusedActivation,
                                                matmul_ogs)
-        from triton_kernels.routing import routing
+        from triton_kernels.routing import (RoutingData,
+                GatherIndx,
+                ScatterIndx,routing,prune_routing, routing_from_bitmatrix, compute_expt_data)
+        from triton_kernels.topk import topk
+        from triton_kernels.tensor import Bitmatrix
+
     except ModuleNotFoundError:
         logger.error(
             "Failed to import Triton kernels. Please make sure your triton "
@@ -26,6 +34,109 @@ if has_triton_kernels():
 if TYPE_CHECKING:
     from triton_kernels.matmul_ogs import PrecisionConfig
 
+"""
+code reference:
+https://github.com/triton-lang/triton/blob/dd1bbc52b34d202dfe5ffea1e04fb16166c5c04e/python/triton_kernels/bench/distributed.py#L264
+"""
+@triton.jit
+def pack_bitmatrix(
+    bitmatrix,
+    expt_indx,
+    n_rows,
+    n_cols,
+    n_expts_act,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    sentinel: tl.constexpr,
+):
+    """
+    Packs expt_indx into a bitmatrix.
+    """
+    pid_m = tl.program_id(0)
+    offsets_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offsets_k = tl.arange(0, BLOCK_SIZE_K)
+    offsets = offsets_m[:, None] * n_expts_act + offsets_k[None, :]
+    mask = (offsets_m < n_rows)[:, None] & (offsets_k < n_expts_act)[None, :]
+    indices = tl.load(expt_indx + offsets, mask=mask, other=sentinel)
+    div = indices // 32
+    rem = indices % 32
+    iters = tl.cdiv(sentinel, BLOCK_SIZE_K)
+    for i in range(iters):
+        offs = tl.arange(0, BLOCK_SIZE_K // 32) + i * (BLOCK_SIZE_K // 32)
+        x = tl.where(div[:, :, None] == offs[None, None, :], (1 << rem)[:, :, None], 0)
+        y = tl.reduce_or(x, axis=1)
+        bitmatrix_ptrs = bitmatrix + offsets_m[:, None] * n_cols + offs[None, :]
+        tl.store(bitmatrix_ptrs, y, mask=offsets_m[:, None] < n_rows)
+
+def ep_routing_triton(
+    logits: torch.Tensor,
+    top_k: int,
+    sm_first: bool = False,
+    n_rows: Optional[int] = None,
+    ep_size: Optional[int] = None,
+    ep_rank: Optional[int] = None,
+):
+    # pruning the experts data not on this rank
+    # and reconstruct routing_data
+    E = logits.shape[1]
+    if ep_size is None:
+        ep_size = get_ep_group().world_size
+    if ep_rank is None:
+        ep_rank = get_ep_group().rank_in_group
+
+    if sm_first:
+        logits = torch.softmax(logits, dim=-1)
+    expt_scal, expt_indx, _ = topk(logits,
+                                   top_k,
+                                   apply_softmax=not sm_first,
+                                   n_rows=n_rows)
+    expt_indx = expt_indx.int()
+
+    # expt_indx, sort_indices = torch.sort(expt_indx, dim=1, stable=True)
+    # expt_scal = torch.gather(expt_scal, 1, sort_indices)
+
+    assert E % ep_size == 0, "gpt-oss Triton kernel only \
+                              support even sharded experts"
+
+    num_local_expert = E // ep_size
+
+    # we assume experts are assigned contiguously
+    mask = (expt_indx // num_local_expert) == ep_rank
+    expt_indx -= ep_rank * num_local_expert
+    expt_scal = expt_scal.masked_fill(~mask, 0)
+    expt_indx = expt_indx.masked_fill(~mask, num_local_expert)
+
+    # Recover bitmatrix for local experts
+    BLOCK_SIZE_M = 512
+    BLOCK_SIZE_K = 32
+    # The sentinel value is chunk_size + 1 instead of chunk_size to ensure the bitmatrix buffer
+    # doesn't overflow. For example, cdiv(32, 32) is 1, while the 32th bit is on the second column.
+    sentinel = num_local_expert + 1
+    n_cols = triton.cdiv(sentinel, BLOCK_SIZE_K)
+    n_rows = expt_indx.size(0)
+    
+    bitmatrix = torch.zeros((n_rows, n_cols), dtype=torch.uint32, device=expt_indx.device)
+    grid = (triton.cdiv(n_rows, BLOCK_SIZE_M), )
+
+    pack_bitmatrix[grid](
+        bitmatrix,
+        expt_indx,
+        n_rows,
+        n_cols,
+        top_k,
+        BLOCK_SIZE_M=BLOCK_SIZE_M,
+        BLOCK_SIZE_K=BLOCK_SIZE_K,
+        sentinel=sentinel,
+    )
+    
+    bitmatrix_shape = [n_rows, triton.cdiv(num_local_expert, BLOCK_SIZE_K) * 32]
+    bitmatrix_shape_max = [n_rows, None]
+    bitmatrix = Bitmatrix(bitmatrix, shape=bitmatrix_shape, shape_max=bitmatrix_shape_max, scratchpad=None)
+    expt_scal, expt_indx, bitmatrix = prune_routing(expt_scal, expt_indx, bitmatrix, E, ep_size)
+    routing_data, gather_indx, scatter_indx = routing_from_bitmatrix(bitmatrix, expt_scal, expt_indx, E // ep_size,
+                                                                     top_k)
+
+    return routing_data, gather_indx, scatter_indx
 
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
@@ -35,6 +146,7 @@ def triton_kernel_moe_forward(
     topk: int,
     renormalize: bool,
     activation: str = "silu",
+    use_ep: bool = False,
     apply_router_weight_on_input: bool = False,
     use_fp8_w8a8: bool = False,
     per_channel_quant: bool = False,
@@ -51,9 +163,16 @@ def triton_kernel_moe_forward(
     block_shape: Optional[list[int]] = None,
 ) -> torch.Tensor:
 
-    routing_data, gather_idx, scatter_idx = routing(gating_output,
-                                                    topk,
-                                                    sm_first=not renormalize)
+    # we only use expert_map tp test if ep is enabled
+    if use_ep:
+        routing_data, gather_idx, scatter_idx = ep_routing_triton(
+            gating_output, topk, sm_first=not renormalize)
+        # no token routed only apply to ep
+        if torch.count_nonzero(routing_data.gate_scal) == 0:
+            return torch.zeros_like(hidden_states)
+    else:
+        routing_data, gather_idx, scatter_idx = routing(
+            gating_output, topk, sm_first=not renormalize)
 
     return triton_kernel_fused_experts(
         None,
