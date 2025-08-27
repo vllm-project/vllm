@@ -10,6 +10,7 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import _custom_ops as ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -49,11 +50,6 @@ from vllm.scalar_type import scalar_types
 from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_moe
-
-if current_platform.is_xpu():
-    from vllm._ipex_ops import ipex_ops as ops
-else:
-    from vllm import _custom_ops as ops
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -141,10 +137,35 @@ class Fp8Config(QuantizationConfig):
                    ignored_layers=ignored_layers,
                    weight_block_size=weight_block_size)
 
+    def get_xpu_quant_method(self, layer: torch.nn.Module,
+                             prefix: str) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention
+        from vllm.model_executor.layers.quantization.ipex_quant import (
+            IPEXFp8LinearMethod, IPEXFp8MoEMethod)
+        fp8_config = Fp8Config(
+            is_checkpoint_fp8_serialized=self.is_checkpoint_fp8_serialized,
+            activation_scheme=self.activation_scheme,
+            ignored_layers=self.ignored_layers,
+            weight_block_size=self.weight_block_size)
+
+        if isinstance(layer, LinearBase):
+            if is_layer_skipped(prefix=prefix,
+                                ignored_layers=self.ignored_layers,
+                                fused_mapping=self.packed_modules_mapping):
+                return UnquantizedLinearMethod()
+            return IPEXFp8LinearMethod(fp8_config)
+        elif isinstance(layer, FusedMoE):
+            return IPEXFp8MoEMethod(fp8_config, layer)
+        elif isinstance(layer, Attention):
+            return Fp8KVCacheMethod(self)
+        return None
+
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
+        if current_platform.is_xpu():
+            return self.get_xpu_quant_method(layer, prefix)
         if isinstance(layer, LinearBase):
             if is_layer_skipped(prefix=prefix,
                                 ignored_layers=self.ignored_layers,
@@ -206,7 +227,7 @@ class Fp8LinearMethod(LinearMethodBase):
         self.use_marlin = (not current_platform.has_device_capability(89)
                            or envs.VLLM_TEST_FORCE_FP8_MARLIN)
         # Disable marlin for rocm
-        if current_platform.is_rocm() or current_platform.is_xpu():
+        if current_platform.is_rocm():
             self.use_marlin = False
 
         # AITER is only supported on ROCm and only for FP8_FNUZ
@@ -376,10 +397,7 @@ class Fp8LinearMethod(LinearMethodBase):
                                                          scale=None)
 
             # Update the layer with the new values.
-            if current_platform.is_xpu():
-                layer.weight = Parameter(qweight, requires_grad=False)
-            else:
-                layer.weight = Parameter(qweight.t(), requires_grad=False)
+            layer.weight = Parameter(qweight.t(), requires_grad=False)
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             # layer.input_scale is None indicates dynamic quant and scale is
             # computed from input.
@@ -447,12 +465,6 @@ class Fp8LinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if current_platform.is_xpu():
-            weight = layer.weight.data
-            scale = layer.weight_scale.data
-            output = torch.ops.torch_ipex.fp8_gemm_w8a16(
-                x, weight, True, scale, bias)
-            return output
 
         if self.use_marlin:
             return apply_fp8_marlin_linear(
@@ -789,24 +801,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                                                       requires_grad=False)
                 layer.w2_weight = torch.nn.Parameter(shuffled_w2,
                                                      requires_grad=False)
-
-            if current_platform.is_xpu():
-                import intel_extension_for_pytorch as ipex
-                layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
-                    layer.w13_weight,
-                    layer.w2_weight,
-                    w1_scale_inv=(layer.w13_weight_scale_inv
-                                  if self.block_quant else
-                                  layer.w13_weight_scale),
-                    w2_scale_inv=(layer.w2_weight_scale_inv if self.block_quant
-                                  else layer.w2_weight_scale),
-                    a1_scale_inv=layer.w13_input_scale,
-                    a2_scale_inv=layer.w2_input_scale,
-                    use_prepack=True,
-                )
-
-            return
-
         # If checkpoint is fp8, we need to handle that the
         # MoE kernels require single activation scale and single weight
         # scale for w13 per expert.
@@ -995,25 +989,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-
-        if current_platform.is_xpu():
-            return self.forward_xpu(
-                x=x,
-                layer=layer,
-                router_logits=router_logits,
-                top_k=top_k,
-                renormalize=renormalize,
-                use_grouped_topk=use_grouped_topk,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-                activation=activation,
-                apply_router_weight_on_input=apply_router_weight_on_input)
-
         if enable_eplb:
             assert expert_load_view is not None
             assert logical_to_physical_map is not None
@@ -1183,31 +1158,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     allow_cutlass_block_scaled_grouped_gemm=(
                         self.allow_cutlass_block_scaled_grouped_gemm),
                 )
-
-    def forward_xpu(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        use_grouped_topk: bool,
-        top_k: int,
-        router_logits: torch.Tensor,
-        renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        custom_routing_function: Optional[Callable] = None,
-        **kwargs,
-    ):
-
-        return layer.ipex_fusion(
-            x,
-            use_grouped_topk,
-            top_k,
-            router_logits,
-            renormalize,
-            topk_group,
-            num_expert_group,
-            custom_routing_function=custom_routing_function,
-        )
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
