@@ -44,10 +44,16 @@ class BatchUpdate:
     # Key assumption: the `output_tok_ids` list (which is an element of each
     # tuple in `added`) is a reference to the request's running output tokens
     # list; via this reference, the logits processors always see the latest
-    # list of generated output tokens
+    # list of generated output tokens.
+    #
+    # NOTE:
+    # * Added or moved requests may replace existing requests with the same
+    #   index.
+    # * Operations should be processed in the following order:
+    #   - removed, added, moved
     removed: Sequence[RemovedRequest]
-    moved: Sequence[MovedRequest]
     added: Sequence[AddedRequest]
+    moved: Sequence[MovedRequest]
 
 
 class LogitsProcessor(ABC):
@@ -59,6 +65,11 @@ class LogitsProcessor(ABC):
 
     @abstractmethod
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        """Apply LogitsProcessor to batch logits tensor.
+
+        The updated tensor must be returned but may be
+        modified in-place.
+        """
         raise NotImplementedError
 
     @abstractmethod
