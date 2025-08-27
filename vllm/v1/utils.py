@@ -142,11 +142,14 @@ class APIServerProcessManager:
             stats_update_address: Optional stats update address 
         """
         if len(args_per_server) != num_servers:
-            raise ValueError(f"Incorrect {len(args_per_server)=}")
+            raise ValueError(f"Incorrect {len(args_per_server)=}, "
+                             f"expected {num_servers}")
         if len(input_addresses) != num_servers:
-            raise ValueError(f"Incorrect {len(input_addresses)=}")
+            raise ValueError(f"Incorrect {len(input_addresses)=}, "
+                             f"expected {num_servers}")
         if len(output_addresses) != num_servers:
-            raise ValueError(f"Incorrect {len(output_addresses)=}")
+            raise ValueError(f"Incorrect {len(output_addresses)=}, "
+                             f"expected {num_servers}")
 
         self.listen_address = listen_address
         self.sock = sock
