@@ -183,7 +183,7 @@ def test_hybrid_dp_server_info(server_manager):
     api_server_count = server_manager.api_server_count
 
     for i, (server, _) in enumerate(servers):
-        response = requests.get(server.url_for("/server_info"))
+        response = requests.get(server.url_for("server_info"))
         response.raise_for_status()
 
         vllm_config = response.json()
@@ -192,6 +192,9 @@ def test_hybrid_dp_server_info(server_manager):
         assert parallel_config[
             "api_process_count"] == api_server_count, f"Failed ({i=})"
         assert parallel_config["api_process_rank"] == i, f"Failed ({i=})"
+
+        # Logging in case a non-assert exception occurs
+        print(f"Passed ({i=})")
 
 
 @pytest.mark.asyncio
