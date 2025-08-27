@@ -88,6 +88,7 @@ class OpenAIServingResponses(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
+        log_error_stack: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -96,6 +97,7 @@ class OpenAIServingResponses(OpenAIServing):
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             enable_force_include_usage=enable_force_include_usage,
+            log_error_stack=log_error_stack,
         )
 
         self.chat_template = chat_template
