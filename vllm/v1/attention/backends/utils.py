@@ -205,16 +205,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         """
         raise NotImplementedError
 
-    def build_for_cudagraph_capture(
-            self, common_attn_metadata: CommonAttentionMetadata) -> M:
-        """
-        Build attention metadata for CUDA graph capture. Uses build by default.
-        Subclasses that override this method should call self.build or
-        super().build_for_cudagraph_capture.
-        """
-        return self.build(common_prefix_len=0,
-                          common_attn_metadata=common_attn_metadata)
-
     def build_for_drafting(
         self,
         common_attn_metadata: CommonAttentionMetadata,

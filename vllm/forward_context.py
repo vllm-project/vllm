@@ -38,13 +38,20 @@ class BatchDescriptor(NamedTuple):
     False can also be used for an uniform decode batch to dispatch to the 
     cudagraph supporting non-uniform batches.
     """
+    uniform_query_len: int = 0
+    """
+    For non-uniform batches, should set to 0 for uniquely identifying the batch.
+    For uniform batches, it is the max_query_len of a uniform batch.
+    """
 
     @property
     def non_uniform(self) -> "BatchDescriptor":
         """
         Return a non-uniform version of current batch descriptor.
         """
-        return BatchDescriptor(self.num_tokens, uniform_decode=False)
+        return BatchDescriptor(self.num_tokens,
+                               uniform_decode=False,
+                               uniform_query_len=0)
 
 
 def _compute_chunked_local_num_tokens(num_tokens_across_dp_cpu: list[int],
