@@ -226,13 +226,18 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
         mm_features: list["MultiModalFeatureSpec"],
     ) -> list["MultiModalFeatureSpec"]:
         """
-        Update multimodal features with cached data from this cache.
+        Update multimodal features with cached encoder outputs.
         
+        For each feature, attempts to retrieve cached encoder outputs using the 
+        feature's identifier. If cached data exists, replaces the feature's data
+        with the cached version. Otherwise, stores the current data in the cache
+        for future use.
+
         Args:
-            mm_features: List of MultiModalFeatureSpec to update
+            mm_features: List of MultiModalFeatureSpec objects to process
             
         Returns:
-            The same list with updated data fields
+            The same list of features with data fields updated from cache
         """
         for feature in mm_features:
             feature.data = self.get_and_update_item(feature.data,
