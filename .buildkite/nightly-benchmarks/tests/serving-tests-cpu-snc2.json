@@ -64,7 +64,7 @@
         }
     },
     {
-        "test_name": "serving_llama8B_bf16_tp2pp2_sharegpt",
+        "test_name": "serving_llama8B_bf16_tp4_sharegpt",
         "qps_list": ["inf"],
         "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200],
         "server_environment_variables": {
@@ -76,8 +76,7 @@
         },
         "server_parameters": {
             "model": "meta-llama/Llama-3.1-8B-Instruct",
-            "tensor_parallel_size": 2,
-            "pipeline_parallel_size": 2,
+            "tensor_parallel_size": 4,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
 	    "block_size": 128,
@@ -167,7 +166,7 @@
         }
     },
     {
-        "test_name": "serving_llama8B_bf16_tp2pp2_random_128_128",
+        "test_name": "serving_llama8B_bf16_tp4_random_128_128",
         "qps_list": ["inf"],
         "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200, 1000],
         "server_environment_variables": {
@@ -179,8 +178,7 @@
         },
         "server_parameters": {
             "model": "meta-llama/Llama-3.1-8B-Instruct",
-            "tensor_parallel_size": 2,
-            "pipeline_parallel_size": 2,
+            "tensor_parallel_size": 4,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
 	    "block_size": 128,
@@ -268,7 +266,7 @@
         }
     },
     {
-        "test_name": "serving_llama8B_int4_tp2pp2_sharegpt",
+        "test_name": "serving_llama8B_int4_tp4_sharegpt",
         "qps_list": ["inf"],
         "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200],
         "server_environment_variables": {
@@ -281,8 +279,7 @@
         "server_parameters": {
             "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
 	    "quantization": "awq",
-            "tensor_parallel_size": 2,
-            "pipeline_parallel_size": 2,
+            "tensor_parallel_size": 4,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
 	    "block_size": 128,
@@ -374,7 +371,7 @@
         }
     },
     {
-        "test_name": "serving_llama8B_int4_tp2pp2_random_128_128",
+        "test_name": "serving_llama8B_int4_tp4_random_128_128",
         "qps_list": ["inf"],
         "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200, 1000],
         "server_environment_variables": {
@@ -387,8 +384,7 @@
         "server_parameters": {
             "model": "hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4",
 	    "quantization": "awq",
-            "tensor_parallel_size": 2,
-            "pipeline_parallel_size": 2,
+            "tensor_parallel_size": 4,
 	    "dtype": "bfloat16",
 	    "distributed_executor_backend": "mp",
 	    "block_size": 128,
