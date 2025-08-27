@@ -136,11 +136,9 @@ def _set_global_compilation_settings(config: VllmConfig):
     import torch._inductor.config
 
     inductor_config = config.compilation_config.inductor_compile_config
-    try:
-        # Note: The MKLDNN and CPPGEMM backend requires freezing parameters.
-        freezing_value = torch._inductor.config.freezing
-        if inductor_config.get("max_autotune", False):
-            torch._inductor.config.freezing = True
-        yield
-    finally:
-        torch._inductor.config.freezing = freezing_value
+    # Note: The MKLDNN and CPPGEMM backend requires freezing parameters.
+    freezing_value = torch._inductor.config.freezing
+    if inductor_config.get("max_autotune", False):
+        torch._inductor.config.freezing = True
+    yield
+    torch._inductor.config.freezing = freezing_value
