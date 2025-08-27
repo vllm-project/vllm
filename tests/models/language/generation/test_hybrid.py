@@ -136,7 +136,7 @@ def test_models(
         )
 
 
-@pytest.mark.parametrize("model", SSM_MODELS[0] + HYBRID_MODELS[0])
+@pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_batching(
