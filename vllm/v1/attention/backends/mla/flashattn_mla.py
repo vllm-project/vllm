@@ -72,10 +72,11 @@ class FlashAttnMLAMetadataBuilder(
                 batch_size=num_reqs,
                 max_seqlen_q=max_query_len,
                 max_seqlen_k=max_seq_len,
-                cache_seqlens=seqlens,
                 num_heads_q=self.num_heads,
                 num_heads_kv=1,
                 headdim=self.mla_dims.qk_rope_head_dim,
+                cache_seqlens=seqlens,
+                qkv_dtype=self.kv_cache_spec.dtype,
                 headdim_v=self.mla_dims.kv_lora_rank,
                 page_size=self.page_size,
                 cu_seqlens_q=cu_query_lens,
@@ -88,7 +89,6 @@ class FlashAttnMLAMetadataBuilder(
             seq_lens_device: torch.Tensor, query_start_loc_cpu: torch.Tensor,
             query_start_loc_device: torch.Tensor
     ) -> FlashAttnMLADecodeMetadata:
-
         query_lens_cpu = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1])
         max_query_len = query_lens_cpu.max().item()
         max_seq_len = seq_lens_cpu.max().item()
