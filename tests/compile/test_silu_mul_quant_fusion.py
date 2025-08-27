@@ -12,15 +12,16 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp)
+    Fp8LinearOp, cutlass_fp8_supported)
 from vllm.platforms import current_platform
+from vllm.tests.utils import override_cutlass_fp8_supported
 
 from .backend import TestBackend
 
 
 class TestModel(torch.nn.Module):
 
-    def __init__(self, hidden_size: int, force_fp8_e4m3fnuz: bool, *args,
+    def __init__(self, hidden_size: int, cuda_force_torch: bool, *args,
                  **kwargs):
         super().__init__(*args, **kwargs)
         self.silu_and_mul = SiluAndMul()
@@ -31,11 +32,11 @@ class TestModel(torch.nn.Module):
             hidden_size,
             hidden_size).to(dtype=current_platform.fp8_dtype()).t())
 
-        self.fp8_linear = Fp8LinearOp(
-            force_fp8_e4m3fnuz=force_fp8_e4m3fnuz,
-            act_quant_static=True,
-            act_quant_group_shape=GroupShape.PER_TENSOR,
-        )
+        with override_cutlass_fp8_supported(not cuda_force_torch):
+            self.fp8_linear = Fp8LinearOp(
+                act_quant_static=True,
+                act_quant_group_shape=GroupShape.PER_TENSOR,
+            )
 
     def forward(self, x):
         y = self.silu_and_mul(x)
@@ -48,11 +49,11 @@ class TestModel(torch.nn.Module):
 
 @pytest.mark.parametrize("num_tokens", [256])
 @pytest.mark.parametrize("hidden_size", [64])
-@pytest.mark.parametrize("force_fp8_e4m3fnuz", [True, False])
+@pytest.mark.parametrize("cuda_force_torch",
+                         [True, False] if cutlass_fp8_supported() else [False])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"],
                     reason="Only test on CUDA and ROCm")
-def test_fusion_silu_and_mul_quant(num_tokens, hidden_size,
-                                   force_fp8_e4m3fnuz):
+def test_fusion_silu_and_mul_quant(num_tokens, hidden_size, cuda_force_torch):
     torch.set_default_device("cuda")
     torch.set_default_dtype(torch.float16)
 
@@ -63,7 +64,7 @@ def test_fusion_silu_and_mul_quant(num_tokens, hidden_size,
     fusion_pass = ActivationQuantFusionPass(config)
 
     backend = TestBackend(NoOpEliminationPass(config), fusion_pass)
-    model = TestModel(hidden_size, force_fp8_e4m3fnuz)
+    model = TestModel(hidden_size, cuda_force_torch)
 
     # First dimension dynamic
     x = torch.rand(num_tokens, hidden_size * 2)
