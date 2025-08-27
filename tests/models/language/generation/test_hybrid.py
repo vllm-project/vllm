@@ -413,9 +413,9 @@ def test_full_cuda_graph(
             vllm_v0_outputs = None
 
     with vllm_runner(model,
-                        max_num_seqs=MAX_NUM_SEQS,
-                        compilation_config={'full_cuda_graph': True},
-                        enable_prefix_caching=False) as vllm_model:
+                     max_num_seqs=MAX_NUM_SEQS,
+                     compilation_config={'full_cuda_graph': True},
+                     enable_prefix_caching=False) as vllm_model:
         vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
@@ -467,16 +467,15 @@ def test_fp32_state(
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "0")
         with vllm_runner(model,
-                        max_num_seqs=MAX_NUM_SEQS,
-                        mamba_ssm_cache_dtype="float32") as vllm_model:
+                         max_num_seqs=MAX_NUM_SEQS,
+                         mamba_ssm_cache_dtype="float32") as vllm_model:
             vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, num_logprobs)
 
-    
     with vllm_runner(model,
-                        max_num_seqs=MAX_NUM_SEQS,
-                        mamba_ssm_cache_dtype="float32",
-                        enable_prefix_caching=False) as vllm_model:
+                     max_num_seqs=MAX_NUM_SEQS,
+                     mamba_ssm_cache_dtype="float32",
+                     enable_prefix_caching=False) as vllm_model:
         vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
