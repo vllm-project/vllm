@@ -234,7 +234,7 @@ steps:
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
 
-- label: V1 Test e2e
+- label: Test e2e + v1/engine
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
@@ -243,8 +243,9 @@ steps:
     # TODO: accuracy does not match, whether setting
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
     - pytest -v -s v1/e2e
+    - pytest -v -s v1/engine
 
-- label: V1 Test entrypoints
+- label: Test entrypoints
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
@@ -252,7 +253,7 @@ steps:
   commands:
     - pytest -v -s v1/entrypoints
 
-- label: V1 Test others
+- label: Test others
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
@@ -260,7 +261,6 @@ steps:
   commands:
     # split the test to avoid interference
     - pytest -v -s v1/core
-    - pytest -v -s v1/engine
     - pytest -v -s v1/executor
     - pytest -v -s v1/sample
     - pytest -v -s v1/logits_processors
