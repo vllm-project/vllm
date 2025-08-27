@@ -437,7 +437,7 @@ class ModelConfig:
     from `AutoProcessor.from_pretrained`. The available overrides depend on the
     model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
     """
-    mm_processor_cache_gb: int = 4
+    mm_processor_cache_gb: float = 4
     """The size (in GiB) of the multi-modal processor cache, which is used to
     avoid re-processing past multi-modal inputs.
 
@@ -884,12 +884,6 @@ class ModelConfig:
 
         return None
 
-    def set_mm_processor_cache_gb(self, value: int) -> None:
-        mm_config = self.get_multimodal_config()
-
-        self.mm_processor_cache_gb = value
-        mm_config.mm_processor_cache_gb = value
-
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
             self.model, self.revision)
@@ -1119,9 +1113,20 @@ class ModelConfig:
     def _verify_quantization(self) -> None:
         supported_quantization = me_quant.QUANTIZATION_METHODS
         optimized_quantization_methods = [
-            "fp8", "modelopt", "gptq_marlin_24", "gptq_marlin", "awq_marlin",
-            "fbgemm_fp8", "compressed-tensors", "experts_int8", "quark",
-            "modelopt_fp4", "bitblas", "gptq_bitblas", "inc"
+            "fp8",
+            "modelopt",
+            "gptq_marlin_24",
+            "gptq_marlin",
+            "awq_marlin",
+            "fbgemm_fp8",
+            "compressed-tensors",
+            "experts_int8",
+            "quark",
+            "modelopt_fp4",
+            "bitblas",
+            "gptq_bitblas",
+            "inc",
+            "petit_nvfp4",
         ]
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods,
@@ -1153,6 +1158,7 @@ class ModelConfig:
                 "moe_wna16",
                 "modelopt",
                 "modelopt_fp4",
+                "petit_nvfp4",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
@@ -1684,22 +1690,6 @@ class ModelConfig:
     @property
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
-
-    @property
-    def enable_mm_processor_cache(self) -> bool:
-        """Whether the multi-modal processor cache should be enabled."""
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return False
-
-        return mm_config.mm_processor_cache_gb > 0
-
-    def get_mm_input_cache_gb(self) -> int:
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return 0
-
-        return envs.VLLM_MM_INPUT_CACHE_GIB
 
     @property
     def is_cross_encoder(self) -> bool:
@@ -2549,7 +2539,7 @@ class MultiModalConfig:
     `{"num_crops": 4}`.
     """
 
-    mm_processor_cache_gb: int = 4
+    mm_processor_cache_gb: float = 4
     """
     The size (in GiB) of the multi-modal processor cache, which is used to
 
@@ -3045,7 +3035,8 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
-GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines"]
+GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines",
+                                "lm-format-enforcer"]
 
 
 @config

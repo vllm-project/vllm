@@ -135,7 +135,7 @@ class Qwen2_5_VLVideoPixelInputs(TypedDict):
 
     second_per_grid_ts: torch.Tensor
     """
-    The video time interval (in seconds) for each grid along the temporal 
+    The video time interval (in seconds) for each grid along the temporal
     dimension in the 3D position IDs. Returned when `videos` is not `None`.
     """
 
@@ -851,6 +851,11 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
 class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsLoRA, SupportsPP,
                                          SupportsQuant):
+
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
 
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(

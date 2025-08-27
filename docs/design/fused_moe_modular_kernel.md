@@ -133,7 +133,7 @@ class FusedMoEModularKernel:
 Typically a FusedMoEPrepareAndFinalize type is backed by an All2All Dispatch & Combine implementation / kernel. For example,
 
 * PplxPrepareAndFinalize type is backed by Pplx All2All kernels,
-* DeepEPHTPrepareAndFinalize type is backed by DeepEP High-Throughtput All2All kernels, and
+* DeepEPHTPrepareAndFinalize type is backed by DeepEP High-Throughput All2All kernels, and
 * DeepEPLLPrepareAndFinalize type is backed by DeepEP Low-Latency All2All kernels.
 
 #### Step 1: Add an All2All manager
@@ -183,7 +183,7 @@ implementations that input `FusedMoEActivationFormat.Standard` support chunking 
 
 #### maybe_make_prepare_finalize
 
-The `maybe_make_prepare_finalize` method is responsbile for constructing an instance of `FusedMoEPrepareAndFinalize` when appropriate based on the current all2all backend, e.g. when EP + DP is enabled.  The base class method currently constructs all the `FusedMoEPrepareAndFinalize` objects for the EP+DP case.  Derived classes can override this method to construct prepare/finalize objects for different scenarios, e.g. `ModelOptNvFp4FusedMoE` can construct a `FlashInferCutlassMoEPrepareAndFinalize` for the EP+TP case.
+The `maybe_make_prepare_finalize` method is responsible for constructing an instance of `FusedMoEPrepareAndFinalize` when appropriate based on the current all2all backend, e.g. when EP + DP is enabled.  The base class method currently constructs all the `FusedMoEPrepareAndFinalize` objects for the EP+DP case.  Derived classes can override this method to construct prepare/finalize objects for different scenarios, e.g. `ModelOptNvFp4FusedMoE` can construct a `FlashInferCutlassMoEPrepareAndFinalize` for the EP+TP case.
 Please refer to the implementations in,
 
 * `ModelOptNvFp4FusedMoE`
@@ -198,7 +198,7 @@ Please refer to the implementations in,
 * `CompressedTensorsW8A8Fp8MoECutlassMethod`
 * `Fp8MoEMethod`
 * `ModelOptNvFp4FusedMoE`
-dervied classes.
+derived classes.
 
 #### init_prepare_finalize
 
@@ -226,7 +226,7 @@ Doing this will add the new implementation to the test suite.
 
 The unit test file [test_modular_kernel_combinations.py](gh-file:tests/kernels/moe/test_modular_kernel_combinations.py) can also be executed as a standalone script.
 Example: `python3 -m tests.kernels.moe.test_modular_kernel_combinations --pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts`
-As a side-effect, this script can be used to test `FusedMoEPrepareAndFinalize` & `FusedMoEPermuteExpertsUnpermute` compatibility. When invoked
+As a side effect, this script can be used to test `FusedMoEPrepareAndFinalize` & `FusedMoEPermuteExpertsUnpermute` compatibility. When invoked
 with incompatible types, the script will error.
 
 ### How To Profile

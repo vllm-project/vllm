@@ -38,11 +38,6 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
                               model_arch=model_arch,
                               exist_overrides=model_info.hf_overrides)
 
-    if model_arch in ("Llama4ForCausalLM", "EagleLlama4ForCausalLM"):
-        from vllm.model_executor.models.llama4 import Llama4ForCausalLM
-        from vllm.model_executor.models.registry import ModelRegistry
-        ModelRegistry.register_model("Llama4ForCausalLM", Llama4ForCausalLM)
-
     # Avoid calling model.forward()
     def _initialize_kv_caches_v0(self) -> None:
         self.cache_config.num_gpu_blocks = 0

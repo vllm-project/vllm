@@ -52,6 +52,7 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "HQQMarlinMethod",
     "QuarkLinearMethod",
     "ModelOptNvFp4LinearMethod",
+    "PetitNvFp4LinearMethod",
 ]
 
 
@@ -232,10 +233,10 @@ class LinearBase(CustomOp):
     Args:
         input_size: input dimension of the linear layer.
         output_size: output dimension of the linear layer.
-        bias: If true, add bias.
         skip_bias_add: If true, skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
         quant_config: Quantization configure.
+        prefix: Prefix for parameter names.
         return_bias: If true, return bias together with outputs in forward pass.
     """
 
@@ -377,13 +378,14 @@ class MergedReplicatedLinear(ReplicatedLinear):
 
     Args:
         input_size: input dimension of the linear layer.
-        output_size: output dimension of the linear layer.
+        output_sizes: list of output dimensions of the linear layer.
         bias: If true, add bias.
         skip_bias_add: If true, skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
         quant_config: Quantization configure.
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
     """
 
     def __init__(
@@ -1377,7 +1379,7 @@ class RowParallelLinear(LinearBase):
         return output, output_bias
 
     def extra_repr(self) -> str:
-        s = f"input_features={self.input_size_per_partition}"
+        s = f"in_features={self.input_size_per_partition}"
         s += f", output_features={self.output_size}"
         s += f", bias={self.bias is not None}"
         s += f", tp_size={self.tp_size}"

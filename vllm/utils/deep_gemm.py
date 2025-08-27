@@ -27,7 +27,7 @@ def is_deep_gemm_supported() -> bool:
     is_supported_arch = current_platform.is_cuda() and (
         current_platform.is_device_capability(90)
         or current_platform.is_device_capability(100))
-    return has_deep_gemm() and is_supported_arch
+    return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
 
 
 @functools.cache
@@ -35,12 +35,9 @@ def is_blackwell_deep_gemm_e8m0_used() -> bool:
     """Return ``True`` if vLLM is configured to use DeepGEMM "
     "E8M0 scale on a Blackwell-class GPU.
     """
-    if not (envs.VLLM_USE_DEEP_GEMM):
-        logger.debug_once("DeepGEMM E8M0 disabled: VLLM_USE_DEEP_GEMM=0.")
-        return False
-
-    if not has_deep_gemm():
-        logger.debug_once("DeepGEMM E8M0 disabled: DeepGEMM backend missing.")
+    if not is_deep_gemm_supported():
+        logger.debug_once(
+            "DeepGEMM E8M0 disabled: DeepGEMM not supported on this system.")
         return False
 
     if not envs.VLLM_USE_DEEP_GEMM_E8M0:
@@ -202,6 +199,12 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
     return 1 - sim
 
 
+def should_use_deepgemm_for_fp8_linear(output_dtype: torch.dtype,
+                                       weight: torch.Tensor):
+    return (is_deep_gemm_supported() and output_dtype == torch.bfloat16
+            and weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
+
+
 __all__ = [
     "calc_diff",
     "fp8_gemm_nt",
@@ -210,4 +213,5 @@ __all__ = [
     "per_block_cast_to_fp8",
     "is_blackwell_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
+    "should_use_deepgemm_for_fp8_linear",
 ]
