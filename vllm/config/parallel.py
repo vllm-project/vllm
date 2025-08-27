@@ -98,9 +98,21 @@ class ParallelConfig:
     --data-parallel-start-rank."""
 
     api_process_count: int = 1
-    """[Internal CLI arg] The number of API processes initialized."""
+    """
+    The number of API processes initialized.
+
+    Note:
+        This is an internal config that should only be set by API server
+        scale-out.
+    """
     api_process_rank: int = 0
-    """[Internal CLI arg] The rank of this API process."""
+    """
+    The rank of this API process.
+
+    Note:
+        This is an internal config that should only be set by API server
+        scale-out.
+    """
 
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
