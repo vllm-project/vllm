@@ -3,7 +3,6 @@
 
 import argparse
 import signal
-from copy import deepcopy
 from typing import Any, Optional
 
 import uvloop
@@ -139,15 +138,15 @@ def run_multi_api_server(args: argparse.Namespace):
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
-    # No need to set api_process_rank for EngineCore processes
-    args.api_process_count = args.api_server_count
-
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
 
     listen_address, sock = setup_server(args)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
+    engine_args._api_process_count = num_api_servers
+    engine_args._api_process_rank = -1
+
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
@@ -168,10 +167,6 @@ def run_multi_api_server(args: argparse.Namespace):
     hybrid_dp_lb = parallel_config.data_parallel_hybrid_lb
     assert external_dp_lb or hybrid_dp_lb or dp_rank == 0
 
-    args_per_server = [deepcopy(args) for _ in range(num_api_servers)]
-    for server_idx in range(num_api_servers):
-        args_per_server[server_idx].api_process_rank = server_idx
-
     api_server_manager: Optional[APIServerProcessManager] = None
 
     with launch_core_engines(vllm_config, executor_class, log_stats,
@@ -183,8 +178,8 @@ def run_multi_api_server(args: argparse.Namespace):
             target_server_fn=run_api_server_worker_proc,
             listen_address=listen_address,
             sock=sock,
+            args=args,
             num_servers=num_api_servers,
-            args_per_server=args_per_server,
             input_addresses=addresses.inputs,
             output_addresses=addresses.outputs,
             stats_update_address=coordinator.get_stats_publish_address()
@@ -219,9 +214,10 @@ def run_api_server_worker_proc(listen_address,
                                client_config=None,
                                **uvicorn_kwargs) -> None:
     """Entrypoint for individual API server worker processes."""
+    client_config = client_config or {}
+    server_index = client_config.get("client_index", 0)
 
     # Set process title and add process-specific prefix to stdout and stderr.
-    server_index = client_config.get("client_index", 0) if client_config else 0
     set_process_title("APIServer", str(server_index))
     decorate_logs()
 
