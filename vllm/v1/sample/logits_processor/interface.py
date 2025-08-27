@@ -91,7 +91,7 @@ class LogitsProcessor(ABC):
         to each forward pass.
 
         Args:
-            batch_update is non-None iff there have been
-            changes to the batch makeup.
+            batch_update: Non-None iff there have been changes
+                to the batch makeup.
         """
         raise NotImplementedError
