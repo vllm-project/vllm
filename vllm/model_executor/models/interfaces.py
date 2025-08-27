@@ -143,6 +143,11 @@ def supports_multimodal(
     return getattr(model, "supports_multimodal", False)
 
 
+def supports_multimodal_encoder_tp_data(
+        model: Union[type[object], object]) -> bool:
+    return getattr(model, "supports_encoder_tp_data", False)
+
+
 @runtime_checkable
 class SupportsMultiModalWithRawInput(SupportsMultiModal, Protocol):
     """The interface required for all multi-modal models."""
