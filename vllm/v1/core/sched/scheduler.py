@@ -453,26 +453,26 @@ class Scheduler(SchedulerInterface):
                 else:
                     num_encoder_tokens = 0
 
+                # NOTE(Kuntai): Since the number of cache hit tokens from
+                # connector (`num_external_computed_tokens`) can be very
+                # large, we want to only allocate tokens inside the sliding
+                # window when  This is done by
+                # `allocate_slots_and_remove_unnecessary_blocks`.
                 if all([
                         self.connector is not None,
+                        # NOTE(Kuntai): the current implementation of
+                        # `allocate_slots_and_remove_unnecessary_blocks` is not
+                        # tested with encoder-decoder models.
+                        # So we fall back to default code path when
+                        # `num_encoder_tokens > 0`.
                         num_external_computed_tokens > 0,
                         num_encoder_tokens == 0,
                 ]):
-                    # NOTE(Kuntai): the current implementation of
-                    # `allocate_slots_and_remove_unnecessary_blocks` is not
-                    # tested with encoder-decoder models.
-                    # So we fall back to default code path when
-                    # `num_encoder_tokens > 0`.
-
-                    # Since external computed tokens can be very large,
-                    # We want to only allocate tokens inside the sliding
-                    # window. This is done by
-                    # `allocate_slots_and_remove_unnecessary_blocks`.
-
                     # FIXME(Kuntai): need to handle rollback when allocation
                     # fails.
+                    # Allocate for prefix-cached tokens
                     manager = self.kv_cache_manager
-                    new_blocks = (
+                    ret = (
                         manager.allocate_slots_and_remove_unnecessary_blocks(
                             request,
                             num_external_computed_tokens,
@@ -481,24 +481,22 @@ class Scheduler(SchedulerInterface):
                             delay_cache_blocks=load_kv_async,
                             chunk_size=self.max_num_scheduled_tokens,
                         ))
-
-                    if new_blocks is None:
+                    if ret is None:
                         # The request cannot be scheduled.
                         break
-
-                    new_blocks = self.kv_cache_manager.allocate_slots(
+                    # Then allocate for new tokens
+                    ret = self.kv_cache_manager.allocate_slots(
                         request,
                         num_new_tokens + num_external_computed_tokens,
                         num_lookahead_tokens=effective_lookahead_tokens,
                         delay_cache_blocks=load_kv_async,
                     )
-
-                    if new_blocks is None:
+                    if ret is None:
                         # The request cannot be scheduled.
                         break
 
                 else:
-                    new_blocks = self.kv_cache_manager.allocate_slots(
+                    ret = self.kv_cache_manager.allocate_slots(
                         request,
                         num_new_tokens + num_external_computed_tokens,
                         num_new_local_computed_tokens,
@@ -507,7 +505,7 @@ class Scheduler(SchedulerInterface):
                         delay_cache_blocks=load_kv_async,
                         num_encoder_tokens=num_encoder_tokens,
                     )
-                    if new_blocks is None:
+                    if ret is None:
                         # The request cannot be scheduled.
                         break
 

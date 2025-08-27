@@ -295,7 +295,7 @@ class Worker(WorkerBase):
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
-        # initialize kv transfer as it depends on kv cache config
+        # initialize kv transfer here as it depends on kv cache config
         self.vllm_config.kv_cache_config = kv_cache_config
         ensure_kv_transfer_initialized(self.vllm_config)
 
