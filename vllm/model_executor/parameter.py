@@ -383,7 +383,7 @@ class SharedWeightParameter(BasevLLMParameter):
     Parameter for weights with many shared tensors across a model
 
     For example, when applying transforms to the "gate" and "up" partitions of
-    `MergedColumnParallelLinear`, the tranform weights must stay separate
+    `MergedColumnParallelLinear`, the transform weights must stay separate
     tensors in order to allow for tensor memory sharing between layers.
     """
     # global registry for sharing tensors based on passed `data_key`

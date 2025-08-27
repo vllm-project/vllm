@@ -994,6 +994,12 @@ class VllmRunner:
                                         **kwargs)
 
     def generate_prompt_perplexity(self, prompts: list[str]) -> list[float]:
+        """
+        Return the perplexity score associated with generating the prompts
+
+        :param prompts: list of prompts to score
+        :return: perplexity score of each prompt
+        """
         outputs = self.generate_greedy_logprobs(prompts,
                                                 max_tokens=1,
                                                 num_logprobs=None,
