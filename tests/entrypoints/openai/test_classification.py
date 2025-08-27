@@ -10,8 +10,6 @@ from vllm.entrypoints.openai.protocol import ClassificationResponse
 
 from ...utils import RemoteOpenAIServer
 
-# Seem to use slightly more memory after torch.compile in 2.8
-# only for this model jason9693/Qwen2.5-1.5B-apeach
 MODEL_NAME = "jason9693/Qwen2.5-1.5B-apeach"
 DTYPE = "float32"  # Use float32 to avoid NaN issue
 
@@ -24,8 +22,6 @@ def server():
         "512",
         "--dtype",
         DTYPE,
-        "--gpu_memory_utilization",
-        "0.85",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
