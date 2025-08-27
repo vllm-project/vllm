@@ -887,7 +887,8 @@ class OpenAIServingChat(OpenAIServing):
                         delta_message = DeltaMessage(content=delta_text)
 
                     # update the previous values for the next iteration
-                    if tool_choice_auto or self.reasoning_parser:
+                    if ((tool_choice_auto or self.reasoning_parser)
+                            and not self.use_harmony):
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         previous_texts[i] = current_text
