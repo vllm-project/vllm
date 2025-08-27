@@ -203,7 +203,6 @@ async def build_async_engine_client_from_engine_args(
 
     Returns the Client or None if the creation failed.
     """
-    client_config = dict(client_config) if client_config else {}
 
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
@@ -217,10 +216,12 @@ async def build_async_engine_client_from_engine_args(
 
         from vllm.v1.engine.async_llm import AsyncLLM
         async_llm: Optional[AsyncLLM] = None
-        print("client_config before", client_config)
+
+        # Don't mutate the input client_config
+        client_config = dict(client_config) if client_config else {}
         client_count = client_config.pop("client_count", 1)
         client_index = client_config.pop("client_index", 0)
-        print("client_config after", client_config)
+
         try:
             async_llm = AsyncLLM.from_vllm_config(
                 vllm_config=vllm_config,
