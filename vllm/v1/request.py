@@ -85,7 +85,7 @@ class Request:
         self.num_computed_tokens = 0
         self.cache_salt: Optional[str] = cache_salt
 
-        # Multi-modal features
+        # Multi-modal related
         self.mm_features = mm_features or []
         self.num_encoder_inputs = len(self.mm_features)
         self.has_encoder_inputs = self.num_encoder_inputs > 0
