@@ -90,21 +90,14 @@ class XPUPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
 
-        # FIXME: Temporarily forcing eager mode
-        # remove after t.compile support stabilizes.
-        if (envs.VLLM_USE_V1 and model_config is not None
-                and not vllm_config.model_config.enforce_eager):
-            from vllm.config import CompilationLevel
-            vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION  # noqa: E501
-
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
         compilation_config = vllm_config.compilation_config
         if compilation_config.cudagraph_mode is None or \
                 compilation_config.cudagraph_mode.max_cudagraph_mode() \
                     != CUDAGraphMode.NONE:
-            logger.info("[XPU] CUDA graph is not supported on XPU, "
-                        "disabling cudagraphs.")
+            logger.info("[XPU] CUDA graph is not supported on XPU, disabling "
+                        "cudagraphs. Fallback to cudagraph_mode=NONE")
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         # check and update parallel config
@@ -182,3 +175,7 @@ class XPUPlatform(Platform):
                     "Intel Arc A770 have bfloat16 accuracy known issue. "
                     "You can use float16 instead by explicitly setting the "
                     "`dtype` flag in CLI, for example: --dtype=half.")
+
+    @classmethod
+    def opaque_attention_op(cls) -> bool:
+        return True
