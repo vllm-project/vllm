@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import os
+import socket
 import time
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, Optional, Union
 
 import numpy as np
+import torch
 
 import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
@@ -20,14 +23,15 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.tasks import SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device, cdiv
+from vllm.utils import (Device, as_list, cancel_task_threadsafe, cdiv,
+                        deprecate_kwargs)
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -57,6 +61,7 @@ class AsyncLLM(EngineClient):
         start_engine_loop: bool = True,
         stat_loggers: Optional[list[StatLoggerFactory]] = None,
         client_addresses: Optional[dict[str, str]] = None,
+        client_count: int = 1,
         client_index: int = 0,
     ) -> None:
         """
@@ -94,11 +99,14 @@ class AsyncLLM(EngineClient):
         self.log_requests = log_requests
         self.log_stats = log_stats
 
-        # Tokenizer (+ ensure liveness if running in another process).
-        self.tokenizer = init_tokenizer_from_configs(
-            model_config=vllm_config.model_config,
-            scheduler_config=vllm_config.scheduler_config,
-            lora_config=vllm_config.lora_config)
+        if self.model_config.skip_tokenizer_init:
+            self.tokenizer = None
+        else:
+            # Tokenizer (+ ensure liveness if running in another process).
+            self.tokenizer = init_tokenizer_from_configs(
+                model_config=vllm_config.model_config,
+                scheduler_config=vllm_config.scheduler_config,
+                lora_config=vllm_config.lora_config)
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(
@@ -117,6 +125,7 @@ class AsyncLLM(EngineClient):
             executor_class=executor_class,
             log_stats=self.log_stats,
             client_addresses=client_addresses,
+            client_count=client_count,
             client_index=client_index,
         )
 
@@ -125,7 +134,7 @@ class AsyncLLM(EngineClient):
         if self.log_stats:
             self.logger_manager = StatLoggerManager(
                 vllm_config=vllm_config,
-                engine_idxs=self.engine_core.engine_ranks,
+                engine_idxs=self.engine_core.engine_ranks_managed,
                 custom_stat_loggers=stat_loggers,
             )
             self.logger_manager.log_engine_initialized()
@@ -138,17 +147,44 @@ class AsyncLLM(EngineClient):
         except RuntimeError:
             pass
 
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            logger.info(
+                "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
+                envs.VLLM_TORCH_PROFILER_DIR)
+            worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
+            self.profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                ],
+                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    envs.VLLM_TORCH_PROFILER_DIR,
+                    worker_name=worker_name,
+                    use_gzip=True))
+        else:
+            logger.info(
+                "Torch profiler disabled. AsyncLLM CPU traces will not be collected."  # noqa: E501
+            )
+            self.profiler = None
+
     @classmethod
+    @deprecate_kwargs(
+        "disable_log_requests",
+        additional_message=("This argument will have no effect. "
+                            "Use `enable_log_requests` instead."),
+    )
     def from_vllm_config(
-        cls,
-        vllm_config: VllmConfig,
-        start_engine_loop: bool = True,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[list[StatLoggerFactory]] = None,
-        disable_log_requests: bool = False,
-        disable_log_stats: bool = False,
-        client_addresses: Optional[dict[str, str]] = None,
-        client_index: int = 0,
+            cls,
+            vllm_config: VllmConfig,
+            start_engine_loop: bool = True,
+            usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+            stat_loggers: Optional[list[StatLoggerFactory]] = None,
+            enable_log_requests: bool = False,
+            disable_log_stats: bool = False,
+            client_addresses: Optional[dict[str, str]] = None,
+            client_count: int = 1,
+            client_index: int = 0,
+            disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLM":
         if not envs.VLLM_USE_V1:
             raise ValueError(
@@ -163,10 +199,11 @@ class AsyncLLM(EngineClient):
             executor_class=Executor.get_class(vllm_config),
             start_engine_loop=start_engine_loop,
             stat_loggers=stat_loggers,
-            log_requests=not disable_log_requests,
+            log_requests=enable_log_requests,
             log_stats=not disable_log_stats,
             usage_context=usage_context,
             client_addresses=client_addresses,
+            client_count=client_count,
             client_index=client_index,
         )
 
@@ -188,7 +225,7 @@ class AsyncLLM(EngineClient):
         return cls(
             vllm_config=vllm_config,
             executor_class=executor_class,
-            log_requests=not engine_args.disable_log_requests,
+            log_requests=engine_args.enable_log_requests,
             log_stats=not engine_args.disable_log_stats,
             start_engine_loop=start_engine_loop,
             usage_context=usage_context,
@@ -206,8 +243,10 @@ class AsyncLLM(EngineClient):
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
 
-        if handler := getattr(self, "output_handler", None):
-            handler.cancel()
+        cancel_task_threadsafe(getattr(self, "output_handler", None))
+
+    async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        return await self.engine_core.get_supported_tasks_async()
 
     async def add_request(
         self,
@@ -218,7 +257,6 @@ class AsyncLLM(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
     ) -> RequestOutputCollector:
@@ -235,8 +273,7 @@ class AsyncLLM(EngineClient):
         # Convert Input --> Request.
         prompt_str, request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
-            tokenization_kwargs, trace_headers, prompt_adapter_request,
-            priority, data_parallel_rank)
+            tokenization_kwargs, trace_headers, priority, data_parallel_rank)
 
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_str, None, 0, queue)
@@ -280,7 +317,6 @@ class AsyncLLM(EngineClient):
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -311,7 +347,6 @@ class AsyncLLM(EngineClient):
                 sampling_params,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
             )
@@ -420,14 +455,16 @@ class AsyncLLM(EngineClient):
 
         self.output_handler = asyncio.create_task(output_handler())
 
-    async def abort(self, request_id: str) -> None:
+    async def abort(self, request_id: Union[str, Iterable[str]]) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
-        request_ids = self.output_processor.abort_requests((request_id, ))
-        await self.engine_core.abort_requests_async(request_ids)
+        request_ids = (request_id, ) if isinstance(
+            request_id, str) else as_list(request_id)
+        all_request_ids = self.output_processor.abort_requests(request_ids)
+        await self.engine_core.abort_requests_async(all_request_ids)
 
         if self.log_requests:
-            logger.info("Aborted request %s.", request_id)
+            logger.info("Aborted request(s) %s.", ",".join(request_ids))
 
     async def encode(
         self,
@@ -437,6 +474,7 @@ class AsyncLLM(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -465,6 +503,7 @@ class AsyncLLM(EngineClient):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
+                tokenization_kwargs=tokenization_kwargs,
             )
 
             # The output_handler task pushes items into the queue.
@@ -523,6 +562,10 @@ class AsyncLLM(EngineClient):
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
+        if self.tokenizer is None:
+            raise ValueError("Unable to get tokenizer because "
+                             "skip_tokenizer_init is True")
+
         return self.tokenizer.get_lora_tokenizer(lora_request)
 
     async def is_tracing_enabled(self) -> bool:
@@ -542,14 +585,19 @@ class AsyncLLM(EngineClient):
             raise self.dead_error
 
     async def start_profile(self) -> None:
-        await self.engine_core.profile_async(True)
+        coros = [self.engine_core.profile_async(True)]
+        if self.profiler is not None:
+            coros.append(asyncio.to_thread(self.profiler.start))
+        await asyncio.gather(*coros)
 
     async def stop_profile(self) -> None:
-        await self.engine_core.profile_async(False)
+        coros = [self.engine_core.profile_async(False)]
+        if self.profiler is not None:
+            coros.append(asyncio.to_thread(self.profiler.stop))
+        await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
-        self.processor.mm_registry.reset_processor_cache()
-        self.processor.mm_input_cache_client.reset()
+        self.processor.clear_cache()
         await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(self,
@@ -559,6 +607,7 @@ class AsyncLLM(EngineClient):
         await self.engine_core.reset_prefix_cache_async()
 
     async def sleep(self, level: int = 1) -> None:
+        await self.reset_prefix_cache()
         await self.engine_core.sleep_async(level)
 
     async def wake_up(self, tags: Optional[list[str]] = None) -> None:

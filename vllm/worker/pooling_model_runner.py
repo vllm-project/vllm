@@ -64,13 +64,6 @@ class PoolingModelRunner(
             self.set_active_loras(model_input.lora_requests,
                                   model_input.lora_mapping)
 
-        if self.prompt_adapter_config:
-            assert model_input.prompt_adapter_requests is not None
-            assert model_input.prompt_adapter_mapping is not None
-            self.set_active_prompt_adapters(
-                model_input.prompt_adapter_requests,
-                model_input.prompt_adapter_mapping)
-
         # Currently cuda graph is only supported by the decode phase.
         assert model_input.attn_metadata is not None
         prefill_meta = model_input.attn_metadata.prefill_metadata
@@ -156,9 +149,16 @@ class PoolingModelRunner(
         if not self.is_driver_worker:
             return []
 
+        pooling_metadata = model_input.pooling_metadata
+        assert pooling_metadata is not None
+
+        pooling_metadata.build_pooling_cursor(
+            num_scheduled_tokens=pooling_metadata.prompt_lens,
+            device=hidden_or_intermediate_states.device)
+
         return [
             self.model.pooler(hidden_states=hidden_or_intermediate_states,
-                              pooling_metadata=model_input.pooling_metadata)
+                              pooling_metadata=pooling_metadata)
         ]
 
     def make_model_input_from_broadcasted_tensor_dict(

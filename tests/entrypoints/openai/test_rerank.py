@@ -3,6 +3,8 @@
 
 import pytest
 import requests
+import torch
+import torch.nn.functional as F
 
 from vllm.entrypoints.openai.protocol import RerankResponse
 
@@ -124,4 +126,42 @@ def test_invocations(server: RemoteOpenAIServer):
                                                  invocation_output["results"]):
         assert rerank_result.keys() == invocations_result.keys()
         assert rerank_result["relevance_score"] == pytest.approx(
-            invocations_result["relevance_score"], rel=0.01)
+            invocations_result["relevance_score"], rel=0.05)
+        # TODO: reset this tolerance to 0.01 once we find
+        # an alternative to flash_attn with bfloat16
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_activation(server: RemoteOpenAIServer, model_name: str):
+
+    async def get_outputs(activation):
+        query = "What is the capital of France?"
+        documents = [
+            "The capital of Brazil is Brasilia.",
+            "The capital of France is Paris."
+        ]
+
+        response = requests.post(server.url_for("rerank"),
+                                 json={
+                                     "model": model_name,
+                                     "query": query,
+                                     "documents": documents,
+                                     "activation": activation
+                                 })
+        outputs = response.json()
+
+        return torch.tensor([x['relevance_score'] for x in outputs["results"]])
+
+    default = await get_outputs(activation=None)
+    w_activation = await get_outputs(activation=True)
+    wo_activation = await get_outputs(activation=False)
+
+    assert torch.allclose(default, w_activation,
+                          atol=1e-2), "Default should use activation."
+    assert not torch.allclose(
+        w_activation, wo_activation,
+        atol=1e-2), "wo_activation should not use activation."
+    assert torch.allclose(
+        F.sigmoid(wo_activation), w_activation, atol=1e-2
+    ), "w_activation should be close to activation(wo_activation)."

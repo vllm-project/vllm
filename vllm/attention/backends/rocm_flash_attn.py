@@ -4,7 +4,7 @@
 import itertools
 from dataclasses import dataclass
 from functools import cache
-from typing import TYPE_CHECKING, List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import torch
 
@@ -20,12 +20,8 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape)
+    QuantKey, kFp8StaticTensorSym)
 from vllm.platforms import current_platform
-from vllm.platforms.rocm import use_rocm_custom_paged_attention
-
-if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 logger = init_logger(__name__)
 _PARTITION_SIZE_ROCM = 256
@@ -261,69 +257,6 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             qs = self._cached_decode_metadata.query_start_loc
             self._cached_decode_metadata.query_start_loc = qs - qs[0]
         return self._cached_decode_metadata
-
-    def advance_step(self,
-                     model_input: "ModelInputForGPUWithSamplingMetadata",
-                     sampled_token_ids: Optional[torch.Tensor],
-                     block_size: int,
-                     num_seqs: int,
-                     num_queries: int,
-                     turn_prefills_into_decodes: bool = False):
-        """
-        Update metadata in-place to advance one decode step.
-        """
-
-        assert not turn_prefills_into_decodes, \
-            ("Chunked prefill is not supported with rocm_flash_attn yet."
-             "turn_prefills_into_decodes is a Multi-Step + Chunked-Prefill "
-             "specific parameter.")
-
-        # When using cudagraph, the num_seqs is padded to the next captured
-        # batch sized, but num_queries tracks the actual number of requests in
-        # the batch. For --enforce-eager mode, num_seqs == num_queries
-        if num_seqs != num_queries:
-            assert num_seqs > num_queries
-            assert self.use_cuda_graph
-
-        assert self.num_prefills == 0
-        assert self.num_prefill_tokens == 0
-        assert self.num_decode_tokens == num_seqs
-        assert self.slot_mapping.shape == (num_seqs, )
-
-        assert self.seq_lens is not None
-        assert len(self.seq_lens) == num_seqs
-        assert self.seq_lens_tensor is not None
-        assert self.seq_lens_tensor.shape == (num_seqs, )
-        assert self.max_query_len == 1
-        assert self.max_prefill_seq_len == 0
-        assert self.max_decode_seq_len == max(self.seq_lens)
-
-        assert self.query_start_loc is not None
-        assert self.query_start_loc.shape == (num_queries + 1, )
-        assert self.seq_start_loc is not None
-        assert self.seq_start_loc.shape == (num_seqs + 1, )
-
-        assert self.context_lens_tensor is not None
-        assert self.context_lens_tensor.shape == (num_queries, )
-
-        assert self.block_tables is not None
-        assert self.block_tables.shape[0] == num_seqs
-
-        # Update query lengths. Note that we update only queries and not seqs,
-        # since tensors may be padded due to captured cuda graph batch size
-        for i in range(num_queries):
-            self.seq_lens[i] += 1
-        self.max_decode_seq_len = max(self.seq_lens)
-
-        ops.advance_step_flashattn(num_seqs=num_seqs,
-                                   num_queries=num_queries,
-                                   block_size=block_size,
-                                   input_tokens=model_input.input_tokens,
-                                   sampled_token_ids=sampled_token_ids,
-                                   input_positions=model_input.input_positions,
-                                   seq_lens=self.seq_lens_tensor,
-                                   slot_mapping=self.slot_mapping,
-                                   block_tables=self.block_tables)
 
 
 class ROCmFlashAttentionMetadataBuilder(
@@ -596,11 +529,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                                   head_dim).reshape(tokens, n_kv_heads * n_rep,
                                                     head_dim))
 
-    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
-                                     group_shape: GroupShape):
+    def fused_output_quant_supported(self, quant_key: QuantKey):
         if self.use_triton_flash_attn:
-            return dtype == current_platform.fp8_dtype(
-            ) and static and group_shape == GroupShape.PER_TENSOR
+            return quant_key == kFp8StaticTensorSym
 
         # Only supported in the Triton backend
         return False
@@ -615,6 +546,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         attn_metadata: ROCmFlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 
@@ -652,17 +584,18 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 use prefill sequence attributes
 
         Args:
+            layer: Attention layer instance.
             query: shape = [num_tokens, num_heads * head_size]
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+            kv_cache: KV cache tensor with shape 
+                [2, num_blocks, block_size * num_kv_heads * head_size].
                 NOTE: kv_cache will be an empty tensor with shape [0]
                 for profiling run.
             attn_metadata: Metadata for attention.
-            attn_type: Select attention type, between encoder attention,
-                       decoder self-attention, or encoder/decoder cross-
-                       attention. Defaults to decoder self-attention,
-                       which is the vLLM default generally
+            output: Optional output tensor.
+            output_scale: Optional output scale tensor.
+            output_block_scale: Optional output block scale tensor.
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
@@ -672,6 +605,11 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             raise NotImplementedError(
                 "fused output quantization only supported for Triton"
                 " implementation in ROCMFlashAttentionImpl for now")
+
+        if output_block_scale is not None:
+            raise NotImplementedError(
+                "fused nvfp4 output quantization is not supported"
+                " for ROCMFlashAttentionImpl")
 
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
@@ -886,6 +824,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             num_seqs, num_heads, head_size = decode_query.shape
             block_size = value_cache.shape[3]
             gqa_ratio = num_heads // self.num_kv_heads
+            from vllm.platforms.rocm import use_rocm_custom_paged_attention
             use_custom = use_rocm_custom_paged_attention(
                 decode_query.dtype, head_size, block_size, gqa_ratio,
                 decode_meta.max_decode_seq_len, self.sliding_window,

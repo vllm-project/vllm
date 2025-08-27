@@ -76,10 +76,6 @@ def get_vllm_config():
     )
     model_config = ModelConfig(
         model="facebook/opt-125m",
-        task="generate",
-        tokenizer="facebook/opt-125m",
-        tokenizer_mode="auto",
-        trust_remote_code=True,
         dtype="float16",
         seed=42,
     )
@@ -124,7 +120,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
-                mm_inputs=[],
+                mm_kwargs=[],
                 mm_hashes=[],
                 mm_positions=[],
                 sampling_params=SamplingParams(),
@@ -145,7 +141,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -211,7 +207,7 @@ def test_update_states_request_finished(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids={req_id},
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -243,7 +239,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -270,7 +266,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -351,7 +347,7 @@ def test_update_states_no_changes(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -388,7 +384,7 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -421,12 +417,12 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
         return rnd_stride
 
     # Patch the attention backend class and re-trigger the KV cache creation.
-    for attn_backend in model_runner.attn_backends:
+    for attn_group in model_runner._attn_group_iterator():
+        attn_backend = attn_group.backend
         monkeypatch.setattr(attn_backend, "get_kv_cache_stride_order",
                             rnd_stride_order)
 
-    model_runner.attn_backends = []
-    model_runner.attn_metadata_builders = []
+    model_runner.attn_groups = []
     model_runner.initialize_kv_cache(model_runner.kv_cache_config)
 
     # Shape is unchanged, but layout may differ
@@ -460,9 +456,14 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
         {"load_config": {
             "load_format": original_load_format
         }})
-    model_runner_2.load_model()  # Load real weights inplace
+    model_runner_2.reload_weights()  # Load real weights inplace
     assert str(model_runner.get_model().state_dict()) == str(
         model_runner_2.get_model().state_dict())
+
+
+def test_reload_weights_before_load_model(model_runner):
+    with pytest.raises(AssertionError):
+        model_runner.reload_weights()
 
 
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order():
@@ -679,6 +680,7 @@ def test_init_kv_cache_with_kv_sharing_valid():
         kv_cache_spec[layer_0].page_size_bytes
 
     runner.initialize_kv_cache(kv_cache_config)
+    kv_cache_config_after_init = runner.kv_cache_config
 
     layer_0_kv = vllm_ctx[layer_0].kv_cache[0]
     layer_1_kv = vllm_ctx[layer_1].kv_cache[0]
@@ -686,10 +688,12 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert id(layer_1_kv) == id(layer_0_kv)
 
     # check layer 1 added to kv cache group's layer names
-    assert len(kv_cache_config.kv_cache_groups) == 1
-    assert len(kv_cache_config.kv_cache_groups[0].layer_names) == 2
-    assert kv_cache_config.kv_cache_groups[0].layer_names[0] == layer_0
-    assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
+    assert len(kv_cache_config_after_init.kv_cache_groups) == 1
+    assert len(kv_cache_config_after_init.kv_cache_groups[0].layer_names) == 2
+    assert kv_cache_config_after_init.kv_cache_groups[0].layer_names[
+        0] == layer_0
+    assert kv_cache_config_after_init.kv_cache_groups[0].layer_names[
+        1] == layer_1
 
 
 def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
@@ -744,7 +748,8 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
     layer_4 = "model.layers.4.mixer"
     layer_5 = "model.layers.5.mixer"
 
-    with set_current_vllm_config(vllm_config):
+    with set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
         hf_config = vllm_config.model_config.hf_config
         fwd_context = {}
         for key in [layer_0, layer_1]:
@@ -770,6 +775,8 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
                 head_dim=hf_config.mamba_d_head,
                 rms_norm_eps=hf_config.rms_norm_eps,
                 activation=hf_config.hidden_act,
+                cache_config=cache_config,
+                model_config=model_config,
                 prefix=key,
             )
         # suppress var not used error

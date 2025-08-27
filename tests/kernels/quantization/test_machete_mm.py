@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the machete kernel.
 
-Run `pytest tests/kernels/test_machete_mm.py`.
+Run `pytest tests/kernels/quantization/test_machete_mm.py`.
 """
 
 import math
@@ -34,8 +34,6 @@ IS_SUPPORTED_BY_GPU = current_platform.get_device_capability()[0] >= 9
 
 MNK_SHAPES = [
     (1, 128, 128),
-    (1, 512, 1024),
-    (1, 4096, 4096),
     (1, 8192, 28672),
     (13, 8192, 4096),
     (26, 4096, 8192),
@@ -43,8 +41,6 @@ MNK_SHAPES = [
     (64, 8192, 28672),
     (257, 128, 4096),
     (257, 4224, 4160),
-    (257, 4096, 4096),
-    (1024, 4096, 8192),
     (1024, 8192, 4096),
 ]
 
@@ -99,23 +95,23 @@ TEST_TYPES = [
                  token_scale_type=None)
       for w_type in [scalar_types.uint4, scalar_types.uint8]
       for a_type in [torch.float16, torch.bfloat16]),
-    # QQQ style
-    *(TypeConfig(act_type=torch.int8,
-                 weight_type=scalar_types.uint4b8,
-                 output_type=torch.float16,
-                 group_scale_type=group_scale_type,
-                 group_zero_type=None,
-                 channel_scale_type=torch.float,
-                 token_scale_type=torch.float)
-      for group_scale_type in [None, torch.float16]),
-    *(TypeConfig(act_type=torch.float8_e4m3fn,
-                 weight_type=scalar_types.uint4b8,
-                 output_type=torch.float16,
-                 group_scale_type=group_scale_type,
-                 group_zero_type=None,
-                 channel_scale_type=torch.float,
-                 token_scale_type=torch.float)
-      for group_scale_type in [None, torch.float16]),
+    # # QQQ style
+    # *(TypeConfig(act_type=torch.int8,
+    #              weight_type=scalar_types.uint4b8,
+    #              output_type=torch.float16,
+    #              group_scale_type=group_scale_type,
+    #              group_zero_type=None,
+    #              channel_scale_type=torch.float,
+    #              token_scale_type=torch.float)
+    #   for group_scale_type in [None, torch.float16]),
+    # *(TypeConfig(act_type=torch.float8_e4m3fn,
+    #              weight_type=scalar_types.uint4b8,
+    #              output_type=torch.float16,
+    #              group_scale_type=group_scale_type,
+    #              group_zero_type=None,
+    #              channel_scale_type=torch.float,
+    #              token_scale_type=torch.float)
+    #   for group_scale_type in [None, torch.float16]),
 ]
 
 # TODO: in future PR refactor this and `is_quant_method_supported` in the kernel

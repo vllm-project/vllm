@@ -49,7 +49,7 @@ def vllm_reranker(
 
     with vllm_runner(
             model_name,
-            task="score",
+            runner="pooling",
             dtype=dtype,
             max_num_seqs=2,
             max_model_len=2048,

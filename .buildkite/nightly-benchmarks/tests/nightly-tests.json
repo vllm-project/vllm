@@ -35,9 +35,7 @@
         }, 
         "vllm_server_parameters": {
             "disable_log_stats": "",
-            "disable_log_requests": "",
             "gpu_memory_utilization": 0.9,
-            "num_scheduler_steps": 10,
             "max_num_seqs": 512,
             "dtype": "bfloat16"
         },
@@ -90,9 +88,7 @@
         }, 
         "vllm_server_parameters": {
             "disable_log_stats": "",
-            "disable_log_requests": "",
             "gpu_memory_utilization": 0.9,
-            "num_scheduler_steps": 10,
             "max_num_seqs": 512,
             "dtype": "bfloat16"
         },
@@ -145,9 +141,7 @@
         }, 
         "vllm_server_parameters": {
             "disable_log_stats": "",
-            "disable_log_requests": "",
             "gpu_memory_utilization": 0.9,
-            "num_scheduler_steps": 10,
             "max_num_seqs": 512,
             "dtype": "bfloat16"
         },
@@ -197,9 +191,7 @@
         }, 
         "vllm_server_parameters": {
             "disable_log_stats": "",
-            "disable_log_requests": "",
             "gpu_memory_utilization": 0.9,
-            "num_scheduler_steps": 10,
             "max_num_seqs": 512,
             "dtype": "bfloat16"
         },
@@ -251,9 +243,7 @@
         }, 
         "vllm_server_parameters": {
             "disable_log_stats": "",
-            "disable_log_requests": "",
             "gpu_memory_utilization": 0.9,
-            "num_scheduler_steps": 10,
             "max_num_seqs": 512,
             "dtype": "bfloat16"
         },
@@ -305,9 +295,7 @@
         }, 
         "vllm_server_parameters": {
             "disable_log_stats": "",
-            "disable_log_requests": "",
             "gpu_memory_utilization": 0.9,
-            "num_scheduler_steps": 10,
             "max_num_seqs": 512,
             "dtype": "bfloat16"
         },
