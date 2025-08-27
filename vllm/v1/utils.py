@@ -96,6 +96,35 @@ class ConstantList(Generic[T], Sequence):
         return f"ConstantList({self._x})"
 
 
+class CpuGpuBuffer:
+
+    def __init__(
+        self,
+        *args,
+        dtype: torch.dtype,
+        device: torch.device,
+        pin_memory: bool,
+    ):
+        self.cpu = torch.zeros(*args,
+                               dtype=dtype,
+                               device="cpu",
+                               pin_memory=pin_memory)
+        self.np = self.cpu.numpy()
+        self.gpu = self.cpu.to(device)
+
+    def copy_to_gpu(self, n: Optional[int] = None) -> torch.Tensor:
+        if n is None:
+            return self.gpu.copy_(self.cpu, non_blocking=True)
+        return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
+
+    def copy_to_cpu(self, n: Optional[int] = None) -> torch.Tensor:
+        """NOTE: Because this method is non-blocking, explicit synchronization
+        is needed to ensure the data is copied to CPU."""
+        if n is None:
+            return self.cpu.copy_(self.gpu, non_blocking=True)
+        return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
+
+
 def get_engine_client_zmq_addr(local_only: bool,
                                host: str,
                                port: int = 0) -> str:
