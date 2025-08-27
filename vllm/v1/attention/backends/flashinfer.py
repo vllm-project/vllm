@@ -321,7 +321,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         seq_lens_np = seq_lens_cpu.numpy()
         block_table_tensor = common_attn_metadata.block_table_tensor
 
-        num_blocks_np = (seq_lens_np + page_size - 1) // page_size
+        num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
 
         use_cascade = common_prefix_len > 0
         if use_cascade:
