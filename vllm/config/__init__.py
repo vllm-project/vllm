@@ -2510,7 +2510,7 @@ class LoRAConfig:
         the final hidden states.
 
         Opt-out: default-include declared fields; keep a tiny exclude set;
-        normalize types; keep MD5 for compatibility.
+        normalize types; use SHA-256.
         """
         from vllm.config.utils import build_opt_out_items as _build_items
 
@@ -2520,8 +2520,8 @@ class LoRAConfig:
 
         items = _build_items(self, EXCLUDE_FROM_HASH)
 
-        hash_str = hashlib.md5(repr(tuple(items)).encode(),
-                               usedforsecurity=False).hexdigest()
+        import hashlib
+        hash_str = hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
         return hash_str
 
     def __post_init__(self):

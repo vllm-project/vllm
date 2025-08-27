@@ -3,6 +3,8 @@
 
 from typing import TYPE_CHECKING, Callable, TypeVar
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
 
@@ -11,6 +13,8 @@ else:
     ConfigType = type
 
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
+
+logger = init_logger(__name__)
 
 
 def config(cls: ConfigT) -> ConfigT:
@@ -80,9 +84,7 @@ def canon_value(x):
 
     # Unsupported type
     try:
-        from vllm.logger import init_logger
-        init_logger(__name__).debug("canon_value: unsupported type '%s'",
-                                    type(x).__name__)
+        logger.debug("canon_value: unsupported type '%s'", type(x).__name__)
     except Exception:
         try:
             import logging

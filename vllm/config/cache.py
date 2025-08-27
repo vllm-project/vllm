@@ -156,8 +156,7 @@ class CacheConfig:
         from vllm.config.utils import build_opt_out_items as _build_items
         items = _build_items(self, EXCLUDE_FROM_HASH)
 
-        hash_str = hashlib.md5(repr(tuple(items)).encode(),
-                               usedforsecurity=False).hexdigest()
+        hash_str = hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
         return hash_str
 
     def __post_init__(self) -> None:
