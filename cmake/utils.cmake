@@ -3,7 +3,17 @@
 # `EXECUTABLE` and is one of the `SUPPORTED_VERSIONS`.
 #
 macro (find_python_from_executable EXECUTABLE SUPPORTED_VERSIONS)
-  file(REAL_PATH ${EXECUTABLE} EXECUTABLE)
+  if(NOT EXISTS "${EXECUTABLE}" OR IS_DIRECTORY "${EXECUTABLE}")
+    message(FATAL_ERROR "EXECUTABLE does not exist or is a directory: ${EXECUTABLE}")
+  endif()
+  execute_process(
+    COMMAND "${EXECUTABLE}" --version
+    RESULT_VARIABLE _PYTHON_EXEC_RESULT
+    OUTPUT_QUIET ERROR_QUIET
+  )
+  if(NOT _PYTHON_EXEC_RESULT EQUAL 0)
+    message(FATAL_ERROR "EXECUTABLE is not a valid python executable: ${EXECUTABLE}")
+  endif()
   set(Python_EXECUTABLE ${EXECUTABLE})
   find_package(Python COMPONENTS Interpreter Development.Module Development.SABIModule)
   if (NOT Python_FOUND)
