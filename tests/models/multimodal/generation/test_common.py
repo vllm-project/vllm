@@ -462,7 +462,6 @@ VLM_TEST_SETTINGS = {
             "model_impl": "auto",
         },
         auto_cls=AutoModelForImageTextToText,
-        marks=[pytest.mark.core_model],
     ),
     "kimi_vl": VLMTestInfo(
         models=["moonshotai/Kimi-VL-A3B-Instruct"],
