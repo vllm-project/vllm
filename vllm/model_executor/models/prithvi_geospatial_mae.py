@@ -27,9 +27,6 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import (
-    IsAttentionFree, MultiModalEmbeddings, SupportsMultiModalWithRawInput,
-    default_pooling_type)
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
@@ -42,6 +39,10 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+
+from .interfaces import (IsAttentionFree, MultiModalEmbeddings,
+                         SupportsMultiModalWithRawInput)
+from .interfaces_base import default_pooling_type
 
 
 def _prithvi_field_config(hf_inputs: Mapping[str, torch.Tensor]):

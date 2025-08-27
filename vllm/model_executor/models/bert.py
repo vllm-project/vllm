@@ -28,8 +28,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 from vllm.v1.pool.metadata import PoolingMetadata
 
-from .interfaces import (SupportsCrossEncoding, SupportsQuant,
-                         default_pooling_type)
+from .interfaces import SupportsCrossEncoding, SupportsQuant
+from .interfaces_base import default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
