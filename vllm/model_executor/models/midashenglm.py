@@ -282,8 +282,6 @@ class DashengBlock(nn.Module):
 
 
 class DashengAudioTransformer(nn.Module):
-    config_class = DashengConfig
-    supports_gradient_checkpointing = True
 
     def __init__(
         self,

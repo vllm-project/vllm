@@ -311,6 +311,7 @@ def _test_processing_correctness_one(
     "google/paligemma2-3b-ft-docci-448",
     "microsoft/Phi-3.5-vision-instruct",
     "microsoft/Phi-4-multimodal-instruct",
+    "mispeech/midashenglm-7b",
     "mistralai/Pixtral-12B-2409",
     "mistral-community/pixtral-12b",
     "Qwen/Qwen-VL-Chat",
