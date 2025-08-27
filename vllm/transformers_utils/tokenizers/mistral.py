@@ -211,10 +211,8 @@ class MistralTokenizer(TokenizerBase):
         from mistral_common.tokens.tokenizers.sentencepiece import (
             SentencePieceTokenizer)
         self.is_spm = isinstance(tokenizer_, SentencePieceTokenizer)
-        self.special_token_policy = SpecialTokenPolicy.IGNORE
-        if self.is_tekken or self.is_spm:
-            pass
-        else:
+        self._special_token_policy = SpecialTokenPolicy.IGNORE if self.is_tekken else None
+        if not (self.is_tekken or self.is_spm):
             raise TypeError(f"Unsupported tokenizer: {type(tokenizer_)}")
 
         self._vocab = tokenizer_.vocab()
