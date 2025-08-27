@@ -52,6 +52,12 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
+    supports_encoder_tp_data: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `multimodal_config.mm_encoder_tp_mode="data"`.
+    """
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         """
@@ -135,6 +141,11 @@ def supports_multimodal(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsMultiModal]], TypeIs[SupportsMultiModal]]:
     return getattr(model, "supports_multimodal", False)
+
+
+def supports_multimodal_encoder_tp_data(
+        model: Union[type[object], object]) -> bool:
+    return getattr(model, "supports_encoder_tp_data", False)
 
 
 @runtime_checkable

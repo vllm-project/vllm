@@ -872,6 +872,13 @@ class ModelConfig:
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self._model_info.supports_multimodal:
+            if (self.mm_encoder_tp_mode == "data" and
+                    not self._model_info.supports_multimodal_encoder_tp_data):
+                logger.warning_once(
+                    "This model does not support `--mm-encoder-tp-mode data`. "
+                    "Falling back to `--mm-encoder-tp-mode weights`.")
+                self.mm_encoder_tp_mode = "weights"
+
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
