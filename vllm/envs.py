@@ -168,6 +168,9 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
+    VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE: bool = True
+    VLLM_USE_STANDALONE_COMPILE: bool = True
+    VLLM_PATTERN_MATCH_DEBUG: Optional[str] = None
 
 
 def get_default_cache_root():
@@ -376,6 +379,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # enabled by default.
     "VLLM_USE_STANDALONE_COMPILE":
     lambda: os.environ.get("VLLM_USE_STANDALONE_COMPILE", "1") == "1",
+
+    # Debug pattern matching inside custom passes
+    "VLLM_PATTERN_MATCH_DEBUG":
+    lambda: os.environ.get("VLLM_PATTERN_MATCH_DEBUG", None),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
