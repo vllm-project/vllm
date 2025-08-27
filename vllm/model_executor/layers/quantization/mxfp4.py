@@ -11,8 +11,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    triton_kernel_moe_forward)
 from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
@@ -667,6 +665,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )[0]
             return trtllm_gen_output
         else:
+            from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
+                triton_kernel_moe_forward)
             return triton_kernel_moe_forward(
                 hidden_states=x,
                 w1=self.w13_weight_triton_tensor,
