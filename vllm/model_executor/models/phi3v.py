@@ -41,7 +41,8 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo,
                                         MultiModalPromptUpdates,
                                         PlaceholderFeaturesInfo,
-                                        PromptReplacement, PromptUpdate)
+                                        PromptReplacement, PromptUpdate,
+                                        ResolvedPromptUpdate)
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
@@ -439,6 +440,23 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
                 replacement=get_replacement_phi3v,
             )
         ]
+
+    def _recompute_cached_prompt_update(
+        self,
+        cached_update: ResolvedPromptUpdate,
+        new_item_idx: int,
+    ) -> ResolvedPromptUpdate:
+        new_update = super()._recompute_cached_prompt_update(
+            cached_update,
+            new_item_idx,
+        )
+
+        if cached_update.modality == "image":
+            hf_processor = self.info.get_hf_processor()
+            image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
+            new_update = new_update.with_target(image_tokens[new_item_idx])
+
+        return new_update
 
     def _apply_prompt_updates(
         self,

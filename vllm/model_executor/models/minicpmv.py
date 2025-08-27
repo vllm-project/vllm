@@ -58,7 +58,8 @@ from vllm.multimodal.parse import (DictEmbeddingItems, ImageItem,
                                    VideoItem, VideoProcessorItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate, PromptUpdateDetails)
+                                        PromptUpdate, PromptUpdateDetails,
+                                        ResolvedPromptUpdate, _seq2text)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -743,6 +744,43 @@ class MiniCPMVMultiModalProcessor(BaseMultiModalProcessor[_I]):
                               replacement=get_replacement[modality])
             for modality, pattern in placeholders
         ]
+
+    def _recompute_cached_prompt_update(
+        self,
+        cached_update: ResolvedPromptUpdate,
+        new_item_idx: int,
+    ) -> ResolvedPromptUpdate:
+        new_update = super()._recompute_cached_prompt_update(
+            cached_update,
+            new_item_idx,
+        )
+
+        if cached_update.modality == "image":
+            tokenizer = self.info.get_tokenizer()
+            image_processor = self.info.get_image_processor()
+            version = self.info.get_model_version()
+
+            text = _seq2text(tokenizer, cached_update.content.full)
+            prev_item_idx = cached_update.item_idx
+
+            if version == (2, 0) or version == (2, 5):
+                im_start = image_processor.im_start_token
+                im_end = image_processor.im_end_token
+            else:
+                im_start = image_processor.im_id_start
+                im_end = image_processor.im_id_end
+
+            new_update = new_update.with_content(
+                PromptUpdateDetails.select_text(
+                    text.replace(
+                        f"{im_start}{prev_item_idx}{im_end}",
+                        f"{im_start}{new_item_idx}{im_end}",
+                        1,
+                    ),
+                    "<unk>",
+                ))
+
+        return new_update
 
     def _get_mm_fields_config(
         self,
