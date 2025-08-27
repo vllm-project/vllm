@@ -344,7 +344,8 @@ class _ModelInfo:
             supports_multimodal=supports_multimodal(model),
             supports_multimodal_raw_input=supports_multimodal_raw_input(model),
             supports_multimodal_encoder_tp_data=(
-                supports_multimodal(model) and model.supports_encoder_tp_data),
+                supports_multimodal(model)
+                and getattr(model, "supports_encoder_tp_data", False)),
             supports_pp=supports_pp(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
