@@ -164,7 +164,7 @@ llm = LLM(
 )
 ```
 
-!! important
+!!! important
     Batch-level DP is not to be confused with API request-level DP
     (which is instead controlled by `data_parallel_size`).
 
