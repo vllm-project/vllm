@@ -39,7 +39,13 @@ def kernel_warmup(worker: "Worker"):
 
     # FlashInfer attention warmup
     # Only warmup if the model has FlashInfer attention groups
-    if any(group.backend.get_name() == "FLASHINFER_VLLM_V1"
+    def _is_flashinfer_backend(backend):
+        try:
+            return backend.get_name() == "FLASHINFER_VLLM_V1"
+        except NotImplementedError:
+            return False
+    
+    if any(_is_flashinfer_backend(group.backend)
            for groups in worker.model_runner.attn_groups for group in groups):
         logger.info("Warming up FlashInfer attention.")
         # Warmup with mixed batch containing both prefill and decode tokens
