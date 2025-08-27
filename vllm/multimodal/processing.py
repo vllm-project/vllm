@@ -1020,8 +1020,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt: str,
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        *,
+        mm_hash_overrides: Optional[MultiModalHashes] = None,
     ) -> MultiModalInputs:
-        return self.apply(prompt, mm_data, hf_processor_mm_kwargs)
+        return self.apply(prompt,
+                          mm_data,
+                          hf_processor_mm_kwargs,
+                          mm_hash_overrides=mm_hash_overrides)
 
     def _get_data_parser(self) -> MultiModalDataParser:
         """
@@ -1357,7 +1362,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
     ) -> MultiModalHashes:
-        """Create MM hashes to be returned (only used in V1)."""
+        """Create MM hashes to be returned (only used in V1).
+
+        Note: When overrides are provided via callers of `apply`,
+        `_hash_mm_items` will be bypassed and the overrides will be used.
+        """
         model_id = self.info.model_id
 
         return {
@@ -1464,6 +1473,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
+        *,
+        mm_hash_overrides: Optional[MultiModalHashes] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         (
             prompt_ids,
@@ -1483,8 +1494,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                                        hf_processor_mm_kwargs),
         )
 
-        mm_hashes = self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
-                                        tokenization_kwargs)
+        # Use overrides if provided; fallback to data-dependent hashing.
+        mm_hashes = (mm_hash_overrides if mm_hash_overrides is not None else
+                     self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
+                                         tokenization_kwargs))
 
         mm_prompt_updates = self._get_mm_prompt_updates(
             mm_data_items,
@@ -1506,6 +1519,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
+        *,
+        mm_hash_overrides: Optional[MultiModalHashes] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         """
         Apply the HF processor on the full prompt text,
@@ -1520,10 +1535,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
                 tokenization_kwargs=tokenization_kwargs,
+                mm_hash_overrides=mm_hash_overrides,
             )
 
-        mm_hashes = self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
-                                        tokenization_kwargs)
+        # Use overrides if provided; fallback to data-dependent hashing.
+        mm_hashes = (mm_hash_overrides if mm_hash_overrides is not None else
+                     self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
+                                         tokenization_kwargs))
 
         mm_missing_data_items = self._get_cache_missing_items(
             cache=cache,
@@ -1723,6 +1741,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
+        *,
+        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1751,6 +1771,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_items,
             hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
+            mm_hash_overrides=mm_hash_overrides,
         )
 
         # NOTE: tokenization_kwargs are not required to init processor
@@ -1835,6 +1856,8 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
+        *,
+        mm_hash_overrides: Optional[MultiModalHashes] = None,
     ) -> MultiModalEncDecInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1849,6 +1872,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             mm_data,
             hf_processor_mm_kwargs,
             tokenization_kwargs,
+            mm_hash_overrides=mm_hash_overrides,
         )
 
         return self._get_enc_dec_inputs(

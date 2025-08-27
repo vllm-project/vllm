@@ -138,6 +138,7 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
+        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
     ) -> MultiModalInputs:
         if "image" in mm_data:
             image_data = mm_data["image"]
@@ -146,8 +147,10 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
             mm_data = {"image": mm_data}
 
         mm_items = self._to_mm_items(mm_data)
-        mm_hashes = self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
-                                        tokenization_kwargs or {})
+        tokenization_kwargs = tokenization_kwargs or {}
+        mm_hashes = (mm_hash_overrides if mm_hash_overrides is not None else
+                     self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
+                                         tokenization_kwargs))
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         mm_processed_data = BatchFeature(image_data)
