@@ -935,3 +935,6 @@ def hydragen_attention(
     merged_thd = merged_htd.transpose(0, 1)
     output.copy_(merged_thd)
     return output
+
+def code_platoon_attention():
+    pass
