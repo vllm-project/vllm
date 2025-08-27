@@ -455,7 +455,8 @@ class CompilationConfig:
         if not self.use_cudagraph:
             logger.warning("use_cudagraph is deprecated, use "
                            "cudagraph_mode=NONE instead.")
-            if self.cudagraph_mode is not None:
+            if self.cudagraph_mode is not None and \
+                self.cudagraph_mode != CUDAGraphMode.NONE:
                 raise ValueError(
                     "use_cudagraph and cudagraph_mode are mutually"
                     " exclusive, prefer cudagraph_mode since "
@@ -464,7 +465,8 @@ class CompilationConfig:
         if self.full_cuda_graph:
             logger.warning("full_cuda_graph is deprecated, use "
                            "cudagraph_mode=FULL instead.")
-            if self.cudagraph_mode is not None:
+            if self.cudagraph_mode is not None and \
+                not self.cudagraph_mode.has_full_cudagraphs():
                 raise ValueError("full_cuda_graph and cudagraph_mode are "
                                  "mutually exclusive, prefer cudagraph_mode "
                                  "since full_cuda_graph is deprecated.")
