@@ -361,14 +361,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         paged_kv_indptr.copy_(self.paged_kv_indptr_cpu[:num_reqs + 1],
                               non_blocking=True)
 
-        # write self.paged_kv_last_page_len_cpu inplace
-        paged_kv_last_page_len_np = seq_lens_np % page_size
-        self.paged_kv_last_page_len_np[:num_reqs] = np.where(
-            paged_kv_last_page_len_np == 0,
-            page_size,
-            paged_kv_last_page_len_np,
-        )
-
         # write self.paged_kv_indices inplace
         num_actual_pages = num_blocks_np.sum().item()
         paged_kv_indices = self.paged_kv_indices[:num_actual_pages]
@@ -378,6 +370,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             block_table_tensor.stride(0),
             paged_kv_indptr,
             BLOCK_SIZE=1024,
+        )
+
+        # write self.paged_kv_last_page_len_cpu inplace
+        paged_kv_last_page_len_np = seq_lens_np % page_size
+        self.paged_kv_last_page_len_np[:num_reqs] = np.where(
+            paged_kv_last_page_len_np == 0,
+            page_size,
+            paged_kv_last_page_len_np,
         )
 
         # Check if any layer uses sinks (requires TRTLLM attention)
