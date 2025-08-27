@@ -72,7 +72,6 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):
         "64",
         "--max-cpu-loras",
         "2",
-        "--enable-force-include-usage",
     ]
 
 
@@ -81,6 +80,8 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):
 def server(default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
+    if marker := request.node.get_closest_marker("extra_server_args"):
+        default_server_args.append(marker.args[0])
 
     original_value = os.environ.get('VLLM_USE_V1')
     os.environ['VLLM_USE_V1'] = '0'
@@ -518,6 +519,7 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
     "model_name",
     [MODEL_NAME, "zephyr-lora"],
 )
+@pytest.mark.extra_server_args(['--enable-force-include-usage'])
 async def test_completion_with_enable_force_include_usage(
         client: openai.AsyncOpenAI, model_name: str):
     prompt = "What is the capital of France?"
@@ -526,23 +528,16 @@ async def test_completion_with_enable_force_include_usage(
                                              prompt=prompt,
                                              max_tokens=5,
                                              temperature=0.0,
-                                             stream=True,
-                                             enable_force_include_usage=True)
+                                             stream=True)
     async for chunk in stream:
-        assert chunk.usage is not None
-        assert chunk.usage.prompt_tokens > 0
-        assert chunk.usage.completion_tokens > 0
-        assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
-                                            chunk.usage.completion_tokens)
-        if chunk.choices[0].finish_reason is not None:
-            final_chunk = await stream.__anext__()
-            assert final_chunk.usage is not None
-            assert final_chunk.usage.prompt_tokens > 0
-            assert final_chunk.usage.completion_tokens > 0
-            assert final_chunk.usage.total_tokens == (
-                final_chunk.usage.prompt_tokens +
-                final_chunk.usage.completion_tokens)
-            assert final_chunk.choices == []
+        if not len(chunk.choices):
+            assert chunk.usage is not None
+            assert chunk.usage.prompt_tokens > 0
+            assert chunk.usage.completion_tokens > 0
+            assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
+                                                chunk.usage.completion_tokens)
+        else:
+            assert chunk.usage is None
 
 
 @pytest.mark.asyncio

@@ -30,17 +30,11 @@ def monkeypatch_module():
     mpatch.undo()
 
 
-@pytest.fixture(scope="module", params=[False, True])
-def server(
-        request,
-        monkeypatch_module,
-        zephyr_lora_files,  #noqa: F811
+@pytest.fixture(scope="module")
+def default_server_args(
+        zephyr_lora_files,  # noqa: F811
         zephyr_lora_added_tokens_files):  # noqa: F811
-
-    use_v1 = request.param
-    monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
-
-    args = [
+    return [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
         "bfloat16",
@@ -58,10 +52,18 @@ def server(
         "2",
         "--max-num-seqs",
         "128",
-        "--enable-force-include-usage",
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+
+@pytest.fixture(scope="module", params=[False, True])
+def server(default_server_args, request, monkeypatch_module):
+    if marker := request.node.get_closest_marker("extra_server_args"):
+        default_server_args.append(marker.args[0])
+
+    use_v1 = request.param
+    monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
+
+    with RemoteOpenAIServer(MODEL_NAME, default_server_args) as remote_server:
         yield remote_server
 
 
@@ -492,6 +494,7 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
     "model_name",
     ["HuggingFaceH4/zephyr-7b-beta", "zephyr-lora"],
 )
+@pytest.mark.extra_server_args(['--enable-force-include-usage'])
 async def test_chat_with_enable_force_include_usage(client: openai.AsyncOpenAI,
                                                     model_name: str):
     messages = [{
@@ -509,22 +512,21 @@ async def test_chat_with_enable_force_include_usage(client: openai.AsyncOpenAI,
         extra_body=dict(min_tokens=10),
         temperature=0.0,
         stream=True,
-        enable_force_include_usage=True,
     )
     last_completion_tokens = 0
     async for chunk in stream:
-        assert chunk.usage.prompt_tokens >= 0
-        assert last_completion_tokens == 0 or \
+        if not len(chunk.choices):
+            assert chunk.usage.prompt_tokens >= 0
+            assert last_completion_tokens == 0 or \
                chunk.usage.completion_tokens > last_completion_tokens or \
                (
                    not chunk.choices and
                    chunk.usage.completion_tokens == last_completion_tokens
                )
-        assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
-                                            chunk.usage.completion_tokens)
-        last_completion_tokens = chunk.usage.completion_tokens
-
-    assert last_completion_tokens == 10
+            assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
+                                                chunk.usage.completion_tokens)
+        else:
+            assert chunk.usage is None
 
 
 @pytest.mark.asyncio
