@@ -57,6 +57,11 @@ def get_mxfp4_backend():
         logger.info_once("Using FlashInfer MXFP4 BF16 backend for SM90")
         return Mxfp4Backend.SM90_FI_MXFP4_BF16
     elif (current_platform.is_device_capability(100) and has_flashinfer()
+          and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS):
+        logger.info_once(
+            "Using FlashInfer MXFP4 MXFP8 CUTLASS backend for SM100")
+        return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
+    elif (current_platform.is_device_capability(100) and has_flashinfer()
           and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8):
         logger.info_once(
             "Using FlashInfer MXFP4 MXFP8 TRTLLM backend for SM100, "
@@ -64,11 +69,6 @@ def get_mxfp4_backend():
             "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS=1 for better "
             "performance")
         return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-    elif (current_platform.is_device_capability(100) and has_flashinfer()
-          and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS):
-        logger.info_once(
-            "Using FlashInfer MXFP4 MXFP8 CUTLASS backend for SM100")
-        return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
     elif current_platform.is_device_capability(100) and has_flashinfer():
         logger.info_once(
             "Using FlashInfer MXFP4 BF16 backend for SM100, "
@@ -80,7 +80,7 @@ def get_mxfp4_backend():
            or current_platform.is_device_capability(90))
           and not has_flashinfer()):
         logger.warning_once(
-            "MXFP4 MoE is enabled on Blackwell or Hopper but FlashInfer "
+            "MXFP4 MoE is enabled on Blackwell and Hopper but FlashInfer "
             "is not available. This may result in degraded performance. "
             "Please `pip install vllm[flashinfer]` for best results.")
 
