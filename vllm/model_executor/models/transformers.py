@@ -327,6 +327,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
+        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -393,9 +394,11 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs,
                                        num_image_patches),
         )
+        # Use overrides if provided; fallback to data-dependent hashing.
+        mm_hashes = (mm_hash_overrides if mm_hash_overrides is not None else
+                     self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
+                                         tokenization_kwargs))
 
-        mm_hashes = self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
-                                        tokenization_kwargs)
         return MultiModalInputs(
             type="multimodal",
             prompt=prompt,

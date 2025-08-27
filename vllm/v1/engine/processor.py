@@ -225,6 +225,41 @@ class Processor:
             # Remember that this backend was set automatically
             params.guided_decoding.backend_was_auto = True
 
+    def _maybe_build_mm_hash_overrides(
+        self,
+        request_id: str,
+        prompt: PromptType,
+    ) -> Optional[dict[str, list[str]]]:
+        """Build per-item multimodal hash overrides when enabled. In this case,
+        multimodal data items are identified by their request id, modality and
+        index rather than their content.
+
+        Returns a dictionary of modality -> list[str] of overrides, or None if
+        disabled or no multimodal data is present.
+        """
+
+        def _extract_mm_data(p: PromptType):
+            if isinstance(p, dict) and "encoder_prompt" in p:
+                enc = p.get("encoder_prompt")
+                if isinstance(enc, dict):
+                    return enc.get("multi_modal_data")
+                return None
+            if isinstance(p, dict):
+                return p.get("multi_modal_data")
+            return None
+
+        mm_data = _extract_mm_data(prompt)
+        if not mm_data:
+            return None
+
+        overrides: dict[str, list[str]] = {}
+        for modality, data in mm_data.items():
+            n = len(data) if isinstance(data, list) else 1
+            overrides[modality] = [
+                f"{request_id}-{modality}-{i}" for i in range(n)
+            ]
+        return overrides
+
     def process_inputs(
         self,
         request_id: str,
@@ -254,6 +289,18 @@ class Processor:
         if arrival_time is None:
             arrival_time = time.time()
 
+        # Optionally generate multimodal hash overrides based on request id.
+        # NOTE: when users explicitly turn off BOTH prefix caching and input
+        # processing caching, no multimodal features or embeddings will be
+        # reused across requests, therefore hashing is no longer necessary.
+        if (self.model_config.multimodal_config and
+                self.model_config.multimodal_config.mm_processor_cache_gb == 0
+                and not self.cache_config.enable_prefix_caching):
+            mm_hash_overrides = self._maybe_build_mm_hash_overrides(
+                request_id, prompt)
+        else:
+            mm_hash_overrides = None
+
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
@@ -262,6 +309,7 @@ class Processor:
             prompt,
             tokenization_kwargs=tokenization_kwargs,
             lora_request=lora_request,
+            mm_hash_overrides=mm_hash_overrides,
         )
         from vllm.platforms import current_platform
         current_platform.validate_request(
