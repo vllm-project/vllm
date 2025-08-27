@@ -60,6 +60,19 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
 logger = init_logger(__name__)
 
 
+def get_feature_request_tip(
+    model: str,
+    trust_remote_code: bool,
+) -> str:
+    hf_url = f"a discussion at https://huggingface.co/{model}/discussions/new"
+    gh_url = "an issue at https://github.com/huggingface/transformers/issues/new/choose"
+    doc_url = "https://docs.vllm.ai/en/latest/models/supported_models.html#writing-custom-models"
+    return (
+        f"Please open {hf_url if trust_remote_code else gh_url} to request "
+        f"support for this feature. See {doc_url} for instructions on how to "
+        "do this yourself.")
+
+
 def vllm_flash_attention_forward(
         # Transformers args
         module: torch.nn.Module,
@@ -456,8 +469,11 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             return
 
         if not self.model.supports_pp_plan:
+            tip = get_feature_request_tip(self.model_config.model,
+                                          self.model_config.trust_remote_code)
             raise ValueError(
-                f"{type(self.model)} does not support pipeline parallel yet!")
+                f"{type(self.model)} does not support pipeline parallel. {tip}"
+            )
 
         module_lists = []
         module_list_idx = None
@@ -511,8 +527,10 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         models_with_tp_plan = filter(supports_tp_plan, pretrained_models)
 
         if not any(models_with_tp_plan) and self.tp_size > 1:
+            tip = get_feature_request_tip(self.model_config.model,
+                                          self.model_config.trust_remote_code)
             raise ValueError(
-                f"{type(self.model)} does not support tensor parallel yet!")
+                f"{type(self.model)} does not support tensor parallel. {tip}")
 
         def _tensor_parallel(module: nn.Module,
                              prefix: str = "",
