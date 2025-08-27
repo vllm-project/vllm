@@ -25,11 +25,12 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.dynamic_module import (
     try_get_class_from_dynamic_module)
 
-from .interfaces import (get_default_pooling_type, has_inner_state, has_noops,
-                         is_attention_free, is_hybrid, supports_cross_encoding,
+from .interfaces import (has_inner_state, has_noops, is_attention_free,
+                         is_hybrid, supports_cross_encoding,
                          supports_multimodal, supports_multimodal_raw_input,
                          supports_pp, supports_transcription, supports_v0_only)
-from .interfaces_base import is_pooling_model, is_text_generation_model
+from .interfaces_base import (get_default_pooling_type, is_pooling_model,
+                              is_text_generation_model)
 
 logger = init_logger(__name__)
 
