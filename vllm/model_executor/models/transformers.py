@@ -99,8 +99,8 @@ def enable_if(vllm_config: VllmConfig) -> bool:
     enable = True
     text_config = vllm_config.model_config.hf_config.get_text_config()
     # Dynamic rope scaling is not compatible with torch.compile
-    rope_scaling = getattr(text_config, "rope_scaling", None)
-    if rope_scaling.get("rope_type", None) == "dynamic":
+    rope_scaling: dict = getattr(text_config, "rope_scaling", {})
+    if rope_scaling.get("rope_type") == "dynamic":
         enable = False
     return enable
 
