@@ -1875,6 +1875,16 @@ def moe_forward_fake(
     return torch.empty_like(hidden_states)
 
 
+direct_register_custom_op(
+    op_name="moe_forward",
+    op_func=moe_forward,
+    mutates_args=["hidden_states"],
+    fake_impl=moe_forward_fake,
+    dispatch_key=current_platform.dispatch_key,
+    tags=(torch.Tag.needs_fixed_stride_order, ),
+)
+
+
 def moe_forward_shared(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
@@ -1891,18 +1901,10 @@ def moe_forward_shared_fake(
     router_logits: torch.Tensor,
     layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    out = torch.empty_like(hidden_states)
-    return out, out
+    shared_out = torch.empty_like(hidden_states)
+    fused_out = torch.empty_like(hidden_states)
+    return shared_out, fused_out
 
-
-direct_register_custom_op(
-    op_name="moe_forward",
-    op_func=moe_forward,
-    mutates_args=["hidden_states"],
-    fake_impl=moe_forward_fake,
-    dispatch_key=current_platform.dispatch_key,
-    tags=(torch.Tag.needs_fixed_stride_order, ),
-)
 
 direct_register_custom_op(
     op_name="moe_forward_shared",
