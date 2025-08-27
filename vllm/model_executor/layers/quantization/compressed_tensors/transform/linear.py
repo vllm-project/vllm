@@ -30,10 +30,19 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
                                                               TransformTuple],
         output_tfms: dict[int, TransformTuple]
     ) -> "CompressedTensorsLinearTransformMethod":
+        from vllm.model_executor.layers.quantization.compressed_tensors.transform.schemes.fwht import (  # noqa: E501
+            FastWalshHadamardTransform)
+
         assert input_tfms or output_tfms
 
         # TODO (@ksayers): implement QutlassLinearMethodNvFP4
         # hadacore and fwht can be selected by Transform module
+
+        if all(tfm.scheme.type == "hadamard"
+               for tfm in (list(input_tfms.values()) +
+                           list(output_tfms.values()))):
+            return FastWalshHadamardTransform(quant_method, input_tfms,
+                                              output_tfms)
 
         return cls(quant_method, input_tfms, output_tfms)
 
