@@ -97,6 +97,7 @@ __device__ __forceinline__ float silu(float x) {
 }
 
 __device__ __forceinline__ float2 silu2(float2 x) {
+  // TODO: Vectorize?
   return make_float2(silu(x.x), silu(x.y));
 }
 
@@ -176,9 +177,10 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   //        ↑
   //        |
   // [ (128 / 2) x BF16x2 ]
-  __shared__ __int128_t __align__(16) s_buff_128[2              // gate + up
-                                                 * GROUP_SIZE   // group size
-                                                 * NUM_WARPS];  // num warps
+  __shared__ __int128_t __align__(16)
+      s_buff_128[2                           // gate + up
+                 * GROUP_SIZE                // group size
+                 * NUM_WARPS * NUM_STAGES];  // num warps
   __shared__ Idx_t s_counts[NUM_WARPS];
 
   const Idx_t tid = threadIdx.x;
@@ -269,7 +271,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     auto s_up_compute = s_up_ptr + compute_pipeline_offset;
 #pragma unroll
     for (int i = 0; i < 2; i++) {
-      gate = silu(__bfloat1622float2(*s_gate_compute));
+      gate = silu2(__bfloat1622float2(*s_gate_compute));
       upv = __bfloat1622float2(*s_up_compute);
       results[i] = make_float2(gate.x * upv.x, gate.y * upv.y);
       y_max = fmaxf(results[i].x, results[i].y);
@@ -289,12 +291,12 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     float q;
 // TODO: Extract index calculation here.
 #pragma unroll
-    for (int i = 0; i < 2; i++) {
+    for (Idx_t i = 0; i < 2; i++) {
       q = fminf(fmaxf(results[i].x / absmax, fp8_min), fp8_max);
       *(y_q_ptr + (2u * i) * WARP_SIZE) = __nv_fp8_e4m3(q);
 
       q = fminf(fmaxf(results[i].y / absmax, fp8_min), fp8_max);
-      *(y_q_ptr + (2u * i + 1) * WARP_SIZE) = __nv_fp8_e4m3(q);
+      *(y_q_ptr + (2u * i + 1u) * WARP_SIZE) = __nv_fp8_e4m3(q);
     }
 
     y_q_ptr += stride_yq_t;
