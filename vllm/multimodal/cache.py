@@ -240,8 +240,9 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
             The same list of features with data fields updated from cache
         """
         for feature in mm_features:
-            feature.data = self.get_and_update_item(feature.data,
-                                                    feature.identifier)
+            if feature.data is not None:
+                feature.data = self.get_and_update_item(
+                    feature.data, feature.identifier)
         return mm_features
 
     @abstractmethod
