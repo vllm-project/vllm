@@ -5,13 +5,17 @@ import torch
 
 import vllm.envs as envs
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.compilation.activation_quant_fusion import ActivationQuantFusionPass
-from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe
+# yapf conflicts with isort for this block
+# yapf: disable
+from vllm.compilation.activation_quant_fusion import (
+    FUSED_OPS, SILU_MUL_OP, ActivationQuantFusionPass)
+# yapf: enable
+from vllm.compilation.fusion import QUANT_OPS
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import CompilationConfig, PassConfig, VllmConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape)
+    GroupShape, kFp8StaticTensorSym, kNvfp4Quant)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp)
 from vllm.platforms import current_platform
@@ -27,9 +31,6 @@ def is_nvfp4_supported():
 
 
 class TestSiluMulFp8QuantModel(torch.nn.Module):
-
-    fused_op = torch.ops._C.silu_and_mul_quant.default
-    quant_op = torch.ops._C.static_scaled_fp8_quant.default
 
     def __init__(self, hidden_size: int, force_fp8_e4m3fnuz: bool, **kwargs):
         super().__init__()
@@ -53,11 +54,14 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
                                    input_scale=self.wscale)
         return x2
 
+    def ops_in_model_before(self):
+        return [SILU_MUL_OP, QUANT_OPS[kFp8StaticTensorSym]]
+
+    def ops_in_model_after(self):
+        return [FUSED_OPS[kFp8StaticTensorSym]]
+
 
 class TestSiluMulNvfp4QuantModel(torch.nn.Module):
-
-    fused_op = torch.ops._C.silu_and_mul_nvfp4_quant.default
-    quant_op = torch.ops._C.scaled_fp4_quant.default
 
     def __init__(self, hidden_size: int, **kwargs):
         super().__init__()
@@ -79,6 +83,12 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
                                     alpha=self.scale * self.wscale2,
                                     out_dtype=y.dtype)
         return out
+
+    def ops_in_model_before(self):
+        return [SILU_MUL_OP, QUANT_OPS[kNvfp4Quant]]
+
+    def ops_in_model_after(self):
+        return [FUSED_OPS[kNvfp4Quant]]
 
 
 @pytest.mark.parametrize("num_tokens", [64])
@@ -122,14 +132,8 @@ def test_fusion_silu_and_mul_quant(num_tokens, hidden_size, model_class,
                                atol=1e-3,
                                rtol=1e-3)
 
-    # Check substitution worked
-    pre_nodes = backend.graph_pre_pass.nodes
-    post_nodes = backend.graph_post_pass.nodes
-
     # In pre-nodes, quant op should be present and fused kernels should not
-    assert find_auto_fn_maybe(pre_nodes, model_class.fused_op) is None
-    find_auto_fn(pre_nodes, model_class.quant_op)
+    backend.check_before_ops(model.ops_in_model_before())
 
     # In post-nodes, fused kernels should be present and quant op should not
-    find_auto_fn(post_nodes, model_class.fused_op)
-    assert find_auto_fn_maybe(post_nodes, model_class.quant_op) is None
+    backend.check_after_ops(model.ops_in_model_after())

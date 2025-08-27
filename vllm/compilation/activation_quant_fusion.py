@@ -7,11 +7,12 @@ import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import (PatternMatcherPass, fwd_only,
                                              register_replacement)
+from torch._ops import OpOverload
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey, kNvfp4Quant, kStaticTensorScale)
+    QuantKey, kFp8StaticTensorSym, kNvfp4Quant, kStaticTensorScale)
 from vllm.platforms import current_platform
 
 from .fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
@@ -21,6 +22,16 @@ logger = init_logger(__name__)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
+
+SILU_MUL_OP = torch.ops._C.silu_and_mul.default
+
+FUSED_OPS: dict[QuantKey, OpOverload] = {
+    kFp8StaticTensorSym: torch.ops._C.silu_and_mul_quant.default,  # noqa: E501
+}
+if current_platform.is_cuda() and hasattr(torch.ops._C,
+                                          "silu_and_mul_nvfp4_quant"):
+    FUSED_OPS[
+        kNvfp4Quant] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
 
 
 class ActivationQuantPattern(ABC):
@@ -39,6 +50,10 @@ class ActivationQuantPattern(ABC):
         assert self.quant_key in QUANT_OPS, \
             f"unsupported quantization scheme {self.quant_key}"
         self.QUANT_OP = QUANT_OPS[self.quant_key]
+
+        assert self.quant_key in FUSED_OPS, \
+            f"unsupported fusion scheme {self.quant_key}"
+        self.FUSED_OP = FUSED_OPS[self.quant_key]
 
     def empty_quant(self, *args, **kwargs):
         kwargs = {'dtype': self.quant_dtype, 'device': "cuda", **kwargs}
@@ -64,7 +79,7 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
 
         def pattern(result: torch.Tensor, result_silu_mul: torch.Tensor,
                     input: torch.Tensor, scale: torch.Tensor):
-            at1 = auto_functionalized(torch.ops._C.silu_and_mul.default,
+            at1 = auto_functionalized(SILU_MUL_OP,
                                       result=result_silu_mul,
                                       input=input)
             at2 = auto_functionalized(self.QUANT_OP,
@@ -75,7 +90,7 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
 
         def replacement(result: torch.Tensor, result_silu_mul: torch.Tensor,
                         input: torch.Tensor, scale: torch.Tensor):
-            at = auto_functionalized(torch.ops._C.silu_and_mul_quant.default,
+            at = auto_functionalized(self.FUSED_OP,
                                      result=result,
                                      input=input,
                                      scale=scale)
@@ -104,7 +119,7 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
         def pattern(result: torch.Tensor, output_scale: torch.Tensor,
                     result_silu_mul: torch.Tensor, input: torch.Tensor,
                     scale: torch.Tensor):
-            at1 = auto_functionalized(torch.ops._C.silu_and_mul.default,
+            at1 = auto_functionalized(SILU_MUL_OP,
                                       result=result_silu_mul,
                                       input=input)
             at2 = auto_functionalized(self.QUANT_OP,
@@ -117,12 +132,11 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
         def replacement(result: torch.Tensor, output_scale: torch.Tensor,
                         result_silu_mul: torch.Tensor, input: torch.Tensor,
                         scale: torch.Tensor):
-            at = auto_functionalized(
-                torch.ops._C.silu_and_mul_nvfp4_quant.default,
-                result=result,
-                result_block_scale=output_scale,
-                input=input,
-                input_global_scale=scale)
+            at = auto_functionalized(self.FUSED_OP,
+                                     result=result,
+                                     result_block_scale=output_scale,
+                                     input=input,
+                                     input_global_scale=scale)
             return at[1], at[2]
 
         inputs = [
