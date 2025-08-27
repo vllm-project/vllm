@@ -41,7 +41,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, PlaceholderRange)
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
@@ -237,7 +237,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ):
         """
         Given the original multi-modal items for this modality
@@ -310,7 +310,6 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        return_mm_hashes: bool = False,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -372,7 +371,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             mm_tokens_per_modality["num_image_patches"]
         ) if "num_image_patches" in mm_tokens_per_modality else None
         processed_data['num_image_patches'] = num_image_patches
-        mm_kwargs = MultiModalKwargs.from_hf_inputs(
+        mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             processed_data,
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs,
                                        num_image_patches),
@@ -694,10 +693,28 @@ class TransformersForCausalLM(TransformersBase):
         return logits
 
 
+def flatten_and_concat(x: list[torch.Tensor]) -> torch.Tensor:
+    """Flatten until a list of tensors can be concatenated then do concat"""
+
+    def _can_concat(x: list[torch.Tensor]):
+        return len(set(map(lambda _x: _x.shape[1:], x))) == 1
+
+    if _can_concat(x):
+        return torch.concat(x)
+    return flatten_and_concat(flatten_bn(x))
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     MultiModalProcessor,
     info=MultiModalProcessingInfo,
     dummy_inputs=MultiModalDummyInputsBuilder)
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    })  # set `positions` to last dim to support Qwen-mrope
 class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
     # Backwards compatibility for prev released models. State dicts back then
     # had different formats and cannot be loaded with `AutoModel` mapping as is
@@ -766,8 +783,7 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
             if isinstance(pixel_values, torch.Tensor):
                 pixel_values = flatten_bn(pixel_values).to(self.dtype)
             elif is_list_of(pixel_values, torch.Tensor):
-                pixel_values = flatten_bn(flatten_bn(pixel_values),
-                                          concat=True).to(self.dtype)
+                pixel_values = flatten_and_concat(pixel_values).to(self.dtype)
             else:
                 raise ValueError(
                     f"Unsupported pixel_values type {type(pixel_values)}. "

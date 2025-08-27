@@ -65,7 +65,7 @@ class Sampler(nn.Module):
             logits = self.apply_min_p(logits, sampling_metadata.min_p)
 
         # Apply top_k and/or top_p.
-        random_sampled = self.topk_topp_sampler(
+        random_sampled, _ = self.topk_topp_sampler(
             logits,
             sampling_metadata.generators,
             sampling_metadata.top_k,
