@@ -41,15 +41,13 @@ def kernel_warmup(worker: "Worker"):
     # Only warmup if the model has FlashInfer attention groups
     if any(group.backend.get_name() == "FLASHINFER_VLLM_V1"
            for groups in worker.model_runner.attn_groups for group in groups):
-        from vllm.config.compilation import CUDAGraphMode
-        logger.info("Warming up FlashInfer attention")
+        logger.info("Warming up FlashInfer attention.")
         # Warmup with mixed batch containing both prefill and decode tokens
         # This is to warm up both prefill and decode attention kernels
         worker.model_runner._dummy_run(
             num_tokens=16,
             skip_eplb=True,
             is_profile=True,
-            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
             force_attention=True,
             create_mixed_batch=True,
         )
