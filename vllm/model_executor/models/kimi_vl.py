@@ -56,6 +56,7 @@ from transformers.activations import GELUActivation
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
@@ -93,8 +94,10 @@ class MaxImageTokenMeta:
 
 class KimiVLMultiModalProjector(nn.Module):
 
-    def __init__(self, config: KimiVLConfig):
+    def __init__(self, config: KimiVLConfig, \
+                 use_data_parallel: bool = False, prefix: str = ""):
         super().__init__()
+        self.use_data_parallel = use_data_parallel
 
         self.hidden_size = (config.vision_config.hidden_size *
                             config.vision_config.merge_kernel_size[0] *
@@ -102,20 +105,36 @@ class KimiVLMultiModalProjector(nn.Module):
 
         self.pre_norm = torch.nn.LayerNorm(config.vision_config.hidden_size,
                                            eps=1e-5)
-        self.linear_1 = nn.Linear(self.hidden_size,
-                                  self.hidden_size,
-                                  bias=True)
-        self.act = GELUActivation()
-        self.linear_2 = nn.Linear(self.hidden_size,
+        if self.use_data_parallel:
+            self.linear_1 = ReplicatedLinear(self.hidden_size,
+                                    self.hidden_size,
+                                    bias=True,
+                                    prefix=maybe_prefix(prefix, "linear_1"))
+            self.linear_2 = ReplicatedLinear(self.hidden_size,
+                                  config.text_config.hidden_size,
+                                  bias=True,
+                                  prefix=maybe_prefix(prefix, "linear_2"))
+        else:
+            self.linear_1 = nn.Linear(self.hidden_size,
+                                    self.hidden_size,
+                                    bias=True)
+            self.linear_2 = nn.Linear(self.hidden_size,
                                   config.text_config.hidden_size,
                                   bias=True)
+        self.act = GELUActivation()
+        
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.pre_norm(image_features).view(
             -1, self.hidden_size)
-        hidden_states = self.linear_1(hidden_states)
-        hidden_states = self.act(hidden_states)
-        hidden_states = self.linear_2(hidden_states)
+        if self.use_data_parallel:
+            hidden_states, _ = self.linear_1(hidden_states)
+            hidden_states = self.act(hidden_states)
+            hidden_states, _ = self.linear_2(hidden_states)
+        else:
+            hidden_states = self.linear_1(hidden_states)
+            hidden_states = self.act(hidden_states)
+            hidden_states = self.linear_2(hidden_states)
         return hidden_states
 
 
@@ -284,6 +303,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         model_config = vllm_config.model_config
@@ -293,9 +313,13 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         assert isinstance(config.vision_config, MoonViTConfig)
 
-        self.vision_tower = MoonVitPretrainedModel(config.vision_config)
+        self.vision_tower = MoonVitPretrainedModel(\
+            config.vision_config, prefix=maybe_prefix(prefix, "vision_tower"))
 
-        self.multi_modal_projector = KimiVLMultiModalProjector(config=config)
+        self.multi_modal_projector = \
+            KimiVLMultiModalProjector(config=config, 
+            use_data_parallel=use_data_parallel,
+            prefix=maybe_prefix(prefix, "multi_modal_projector"))
 
         self.quant_config = quant_config
         sub_vllm_config = copy.deepcopy(vllm_config)
@@ -320,6 +344,8 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
         self.media_placeholder: int = self.config.media_placeholder_token_id
+
+        self.use_data_parallel = use_data_parallel
 
     # ref: qwen2_vl.py
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
@@ -465,6 +491,30 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata, **kwargs)
         return logits
+    
+    def _consolidate_qkv_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        qkv_idx_mappings = {
+            ".self_attn.q_proj": 0,
+            ".self_attn.k_proj": 1,
+            ".self_attn.v_proj": 2,
+        }
+        qkv_weights = {}
+        for name, loaded_weight in weights:
+            for weight_name, idx in qkv_idx_mappings.items():
+                if weight_name not in name:
+                    continue
+                new_name = name.replace(weight_name, ".self_attn.qkv_proj")
+                if new_name not in qkv_weights:
+                    qkv_weights[new_name] = [None] * 3
+                qkv_weights[new_name][idx] = loaded_weight
+                break
+            else:
+                yield name, loaded_weight
+        for key, weight in qkv_weights.items():
+            qkv_weight = torch.cat(weight, dim=0)
+            yield key, qkv_weight
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         config = self.config.text_config
@@ -496,6 +546,10 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
             expert_params_mapping = []
 
         params_dict = dict(self.named_parameters())
+
+        if self.use_data_parallel:
+            weights = self._consolidate_qkv_weights(weights)
+
         for args in weights:
             name, loaded_weight = args[:2]
             kwargs = args[2] if len(args) > 2 else {}

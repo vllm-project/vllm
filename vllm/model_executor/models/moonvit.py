@@ -55,6 +55,9 @@ from transformers.activations import ACT2FN, PytorchGELUTanh
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import is_flash_attn_2_available
 
+from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.models.utils import maybe_prefix
+from vllm.multimodal.utils import run_dp_sharded_vision_model
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 
 if is_flash_attn_2_available():
@@ -383,11 +386,27 @@ class MLP2(nn.Module):
         bias: whether to use bias in linear layer.
     """
 
-    def __init__(self, dims: list[int], activation, bias=True):
+    def __init__(self, dims: list[int],
+                 activation, bias=True,
+                 prefix: str = "",
+                 use_data_parallel: bool = False):
         super().__init__()
         assert len(dims) == 3
-        self.fc0 = nn.Linear(dims[0], dims[1], bias=bias)
-        self.fc1 = nn.Linear(dims[1], dims[2], bias=bias)
+        self.use_data_parallel = use_data_parallel
+        if self.use_data_parallel:
+            self.fc0 = ReplicatedLinear(
+                                dims[0],
+                                dims[1],
+                                bias=bias,
+                                prefix=maybe_prefix(prefix, "linear_1"))
+            self.fc1 = ReplicatedLinear(
+                                dims[1],
+                                dims[2],
+                                bias=bias,
+                                prefix=maybe_prefix(prefix, "linear_2"))
+        else:
+            self.fc0 = nn.Linear(dims[0], dims[1], bias=bias)
+            self.fc1 = nn.Linear(dims[1], dims[2], bias=bias)
         self.activation = activation
         for m in [self.fc0, self.fc1]:
             nn.init.trunc_normal_(m.weight, std=math.sqrt(2 / m.in_features))
@@ -395,9 +414,15 @@ class MLP2(nn.Module):
                 nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.fc0(x)
-        x = self.activation(x)
-        return self.fc1(x)
+        if self.use_data_parallel:
+            x, _ = self.fc0(x)
+            x = self.activation(x)
+            x, _ = self.fc1(x)
+        else:
+            x = self.fc0(x)
+            x = self.activation(x)
+            x = self.fc1(x)
+        return x
 
 
 class MoonVitEncoderLayer(nn.Module):
@@ -407,6 +432,8 @@ class MoonVitEncoderLayer(nn.Module):
         num_heads: int,
         hidden_dim: int,
         mlp_dim: int,
+        prefix: str = "",
+        use_data_parallel: bool = False,
         *,
         attn_implementation: str = "sdpa",
         activation=F.gelu,
@@ -423,9 +450,23 @@ class MoonVitEncoderLayer(nn.Module):
 
         self.norm0 = nn.LayerNorm(hidden_dim)
         self.norm1 = nn.LayerNorm(hidden_dim)
-        self.mlp = MLP2([hidden_dim, mlp_dim, hidden_dim], activation)
-        self.wqkv = nn.Linear(hidden_dim, hidden_dim * 3, bias=attn_bias)
-        self.wo = nn.Linear(hidden_dim, hidden_dim, bias=attn_bias)
+        self.use_data_parallel = use_data_parallel
+        self.mlp = MLP2([hidden_dim, mlp_dim, hidden_dim], 
+                        activation,
+                        prefix=f"{prefix}.mlp",
+                        use_data_parallel=use_data_parallel)
+        if self.use_data_parallel:
+            self.wqkv = ReplicatedLinear(hidden_dim,
+                                 hidden_dim * 3,
+                                 bias=attn_bias,
+                                 prefix=f"{prefix}.wqkv")
+            self.wo = ReplicatedLinear(hidden_dim,
+                                hidden_dim,
+                                bias=attn_bias,
+                                prefix=f"{prefix}.wo")
+        else:
+            self.wqkv = nn.Linear(hidden_dim, hidden_dim * 3, bias=attn_bias)
+            self.wo = nn.Linear(hidden_dim, hidden_dim, bias=attn_bias)
 
     def attention_qkvpacked(
         self,
@@ -438,7 +479,10 @@ class MoonVitEncoderLayer(nn.Module):
             x (torch.Tensor): (batch_size, seqlen, hidden_dim)
             cu_seqlens (torch.Tensor):
         """
-        xqkv = self.wqkv(x)
+        if self.use_data_parallel:
+            xqkv, _ = self.wqkv(x)
+        else:
+            xqkv = self.wqkv(x)
 
         qkv_shape = xqkv.size()[:-1] + (
             3,
@@ -457,8 +501,10 @@ class MoonVitEncoderLayer(nn.Module):
                              xv,
                              q_cu_seqlens=cu_seqlens,
                              k_cu_seqlens=cu_seqlens)
-
-        attn_out = self.wo(attn_out)
+        if self.use_data_parallel:
+            attn_out, _ = self.wo(attn_out)
+        else:
+            attn_out = self.wo(attn_out)
         return attn_out
 
     def forward(
@@ -494,13 +540,17 @@ class MoonVitEncoder(nn.Module):
         hidden_dim: int,
         num_layers: int,
         block_cfg: dict,
+        prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
 
         self.rope_2d = Rope2DPosEmb(
             block_cfg["hidden_dim"] // block_cfg["num_heads"], 512, 512)
         self.blocks = nn.ModuleList(
-            [MoonVitEncoderLayer(**block_cfg) for _ in range(num_layers)])
+            [MoonVitEncoderLayer(use_data_parallel=use_data_parallel, \
+                                 prefix=f"{prefix}.blocks.{layer_idx}", \
+                                 **block_cfg) for layer_idx in range(num_layers)])
         self.final_layernorm = nn.LayerNorm(hidden_dim)
 
     def forward(self, hidden_states: torch.Tensor,
@@ -587,9 +637,12 @@ class MoonVitPretrainedModel(PreTrainedModel):
     _supports_flash_attn_2 = True
     _supports_sdpa = True
 
-    def __init__(self, config: MoonViTConfig, *inputs, **kwargs):
+    def __init__(self, config: MoonViTConfig,
+                 use_data_parallel: bool = False,
+                 prefix: str = "", *inputs, **kwargs):
         super().__init__(config, *inputs, **kwargs)
         config = deepcopy(config)
+        self.use_data_parallel = use_data_parallel
         self.merge_kernel_size = config.merge_kernel_size
         self.patch_size = config.patch_size
         self.patch_embed = MoonVisionPatchEmbed(
@@ -610,6 +663,7 @@ class MoonVitPretrainedModel(PreTrainedModel):
                 "attn_bias": True,
                 "attn_implementation": config._attn_implementation,
             },
+            prefix=f"{prefix}.encoder",
         )
 
     def forward(self, pixel_values: torch.Tensor,
@@ -623,7 +677,10 @@ class MoonVitPretrainedModel(PreTrainedModel):
             torch.Tensor: The output tokens.
         """
         hidden_states = self.patch_embed(pixel_values, grid_hw)
-        hidden_states = self.encoder(hidden_states, grid_hw)
+        if self.use_data_parallel:
+            hidden_states = run_dp_sharded_vision_model(hidden_states, self.encoder, grid_hw)
+        else:
+            hidden_states = self.encoder(hidden_states, grid_hw)
         hidden_states = patch_merger(hidden_states,
                                      grid_hw,
                                      merge_kernel_size=self.merge_kernel_size)

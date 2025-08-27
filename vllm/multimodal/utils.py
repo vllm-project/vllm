@@ -436,7 +436,8 @@ def group_mm_kwargs_by_modality(
 
 
 def run_dp_sharded_vision_model(image_input: torch.Tensor,
-                                vision_model: torch.nn.Module) -> torch.Tensor:
+                                vision_model: torch.nn.Module,
+                                grid_hw: torch.Tensor = None) -> torch.Tensor:
     """Run a vision model with data parallelism (DP) sharding. The function 
     will shard the input image tensor on the first dimension and run the vision
     model
@@ -459,8 +460,11 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
     image_input_per_rank = image_input_padded[rank *
                                               num_chunks_per_rank:(rank + 1) *
                                               num_chunks_per_rank, ...]
-
-    vision_embeddings = vision_model(image_input_per_rank)
+    # for kimi_vl, grid_hw is required
+    if grid_hw is not None:
+        vision_embeddings = vision_model(image_input_per_rank, grid_hw)
+    else:
+        vision_embeddings = vision_model(image_input_per_rank)
     # Ensure tensor is contiguous before all_gather
     vision_embeddings = vision_embeddings.contiguous()
     vision_embeddings = tensor_model_parallel_all_gather(vision_embeddings,
