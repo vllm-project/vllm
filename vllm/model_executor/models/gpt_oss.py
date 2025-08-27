@@ -79,8 +79,6 @@ class OAIAttention(nn.Module):
                         dtype=torch.bfloat16,
                         requires_grad=False))
 
-        self.norm = RMSNorm(config.hidden_size, eps=1e-5)
-
         self.q_size = self.num_attention_heads * self.head_dim // tp_size
         self.kv_size = self.num_key_value_heads * self.head_dim // tp_size
         self.scaling = self.head_dim**-0.5
@@ -123,16 +121,13 @@ class OAIAttention(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor,
                 positions: torch.Tensor) -> torch.Tensor:
-        t = self.norm(hidden_states)
-
-        qkv, _ = self.qkv(t)
+        qkv, _ = self.qkv(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         v = v.contiguous()
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
-
-        return output + hidden_states
+        return output
 
 
 class MLPBlock(torch.nn.Module):
@@ -149,7 +144,6 @@ class MLPBlock(torch.nn.Module):
         self.num_experts = config.num_local_experts
         self.experts_per_token = config.num_experts_per_tok
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
-        self.norm = RMSNorm(config.hidden_size, eps=1e-5)
         self.router = torch.nn.Linear(config.hidden_size,
                                       config.num_local_experts,
                                       dtype=torch.bfloat16)
@@ -167,10 +161,9 @@ class MLPBlock(torch.nn.Module):
                                 activation="swigluoai")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        t = self.norm(x)
-        g = self.router(t)
-        t = self.experts(hidden_states=t, router_logits=g)
-        return x + t
+        g = self.router(x)
+        x = self.experts(hidden_states=x, router_logits=g)
+        return x
 
 
 class TransformerBlock(torch.nn.Module):
@@ -191,12 +184,28 @@ class TransformerBlock(torch.nn.Module):
                             self.layer_idx,
                             quant_config=quant_config,
                             prefix=f"{prefix}.mlp")
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
 
-    def forward(self, hidden_states: torch.Tensor,
-                positions: torch.Tensor) -> torch.Tensor:
-        attn_output = self.attn(hidden_states, positions)
-        output = self.mlp(attn_output)
-        return output
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        positions: torch.Tensor,
+        residual: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        # Self Attention
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
+        hidden_states = self.attn(hidden_states, positions)
+        # Fully Connected
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
+        output = self.mlp(hidden_states)
+        return output, residual
 
 
 @support_torch_compile
@@ -255,7 +264,8 @@ class GptOssModel(nn.Module):
             x = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers:
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
             x, residual = layer(x, positions, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -609,12 +619,9 @@ class GptOssForCausalLM(nn.Module, SupportsPP):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             ".self_attn.": ".attn.",
-            ".post_attention_layernorm.": ".mlp.norm.",
         },
         orig_to_new_suffix={
             ".embed_tokens.weight": ".embedding.weight",
-            ".input_layernorm.weight": ".attn.norm.weight",
-            ".post_attention_layernorm.weight": ".mlp.norm.weight",
 
             # MoE MXFP4 weights
             ".gate_up_proj_blocks": ".w13_weight",
