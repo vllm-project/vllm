@@ -351,7 +351,7 @@ class EngineArgs:
     mm_processor_kwargs: Optional[Dict[str, Any]] = \
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
-    mm_processor_cache_gb: int = MultiModalConfig.mm_processor_cache_gb
+    mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     # LoRA fields
@@ -1293,18 +1293,6 @@ class EngineArgs:
             worker_extension_cls=self.worker_extension_cls,
         )
 
-        if model_config.is_multimodal_model:
-            dp_supports_mm_processor_cache = (self.data_parallel_size == 1
-                                              or data_parallel_external_lb)
-            if (not dp_supports_mm_processor_cache
-                    and model_config.mm_processor_cache_gb > 0):
-                logger.warning(
-                    "Multi-modal processor cache is disabled because "
-                    "it is not compatible with data parallelism when "
-                    "there does not exist a one-to-one correspondance "
-                    "between API and engine core processes.")
-                model_config.set_mm_processor_cache_gb(0)
-
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
@@ -1433,15 +1421,15 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        # Need at least Ampere for now (FA support required).
-        # Skip this check if we are running on a non-GPU platform,
-        # or if the device capability is not available
-        # (e.g. in a Ray actor without GPUs).
+        # Triton v3.3 has f16 conversion regression issue on Turing and Volta,
+        # which broke fp16 inference
+        # see: https://github.com/triton-lang/triton/issues/6698
         if (current_platform.is_cuda()
-                and current_platform.get_device_capability()
-                and current_platform.get_device_capability().major < 8):
-            _raise_or_fallback(feature_name="Compute Capability < 8.0",
-                               recommend_to_remove=False)
+                and not current_platform.has_device_capability(80)
+                and model_config.dtype == torch.float16):
+            _raise_or_fallback(
+                feature_name="Compute Capability < 8.0 with FP16",
+                recommend_to_remove=False)
             return False
 
         if self.kv_cache_dtype != "auto":

@@ -508,7 +508,9 @@ def merge_multimodal_embeddings(
     """
     if isinstance(placeholder_token_id, list):
         placeholder_token_id = torch.tensor(placeholder_token_id,
-                                            device=input_ids.device)
+                                            pin_memory=True).to(
+                                                device=input_ids.device,
+                                                non_blocking=True)
         return _merge_multimodal_embeddings(
             inputs_embeds,
             torch.isin(input_ids, placeholder_token_id),
