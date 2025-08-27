@@ -138,15 +138,15 @@ def run_multi_api_server(args: argparse.Namespace):
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
-    args._api_process_count = num_api_servers
-    args._api_process_rank = -1
-
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
 
     listen_address, sock = setup_server(args)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
+    engine_args._api_process_count = num_api_servers
+    engine_args._api_process_rank = -1
+
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
