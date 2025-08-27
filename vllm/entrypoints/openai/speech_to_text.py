@@ -87,6 +87,9 @@ class OpenAISpeechToText(OpenAIServing):
     ) -> tuple[list[PromptType], float]:
         # Validate request
         language = self.model_cls.validate_language(request.language)
+        # Skip to_language validation to avoid extra logging for Whisper.
+        to_language = self.model_cls.validate_language(request.to_language) \
+            if request.to_language else None
 
         if len(audio_data) / 1024**2 > self.max_audio_filesize_mb:
             raise ValueError("Maximum file size exceeded.")
@@ -111,7 +114,7 @@ class OpenAISpeechToText(OpenAIServing):
                 language=language,
                 task_type=self.task_type,
                 request_prompt=request.prompt,
-                to_language=request.to_language,
+                to_language=to_language,
             )
             prompts.append(prompt)
         return prompts, duration
