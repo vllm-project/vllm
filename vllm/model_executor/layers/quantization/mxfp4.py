@@ -6,11 +6,10 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm import envs
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
                                                   FusedMoEMethodBase)
-from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    triton_kernel_moe_forward)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -113,6 +112,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.topk_indices_dtype = None
         self.moe = moe
         self.use_marlin = self._should_use_marlin()
+        self.max_capture_size = get_current_vllm_config(
+        ).compilation_config.max_capture_size
 
         if current_platform.is_device_capability(100) and not has_flashinfer():
             logger.warning_once(
@@ -520,7 +521,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 x_scale = None
             else:
                 x_quant, x_scale = mxfp8_quantize(x, False)  # to mxfp8
-                x_scale = x_scale.view(torch.float8_e4m3fn).reshape(-1)
+                x_scale = x_scale.view(torch.float8_e4m3fn).reshape(
+                    *x.shape[:-1], -1)
             trtllm_gen_output = trtllm_fp4_block_scale_moe(
                 router_logits.to(torch.bfloat16),
                 None,  # routing_bias
@@ -549,9 +551,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 self._get_tile_tokens_dim(x, top_k),
                 1 if renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
+                tune_max_num_tokens=self.max_capture_size,
             )[0]
             return trtllm_gen_output
         else:
+            from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
+                triton_kernel_moe_forward)
             return triton_kernel_moe_forward(
                 hidden_states=x,
                 w1=self.w13_weight_triton_tensor,
