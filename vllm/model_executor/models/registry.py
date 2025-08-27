@@ -25,11 +25,14 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.dynamic_module import (
     try_get_class_from_dynamic_module)
 
-from .interfaces import (get_default_pooling_type, has_inner_state, has_noops,
-                         is_attention_free, is_hybrid, supports_cross_encoding,
-                         supports_multimodal, supports_multimodal_raw_input,
-                         supports_pp, supports_transcription, supports_v0_only)
-from .interfaces_base import is_pooling_model, is_text_generation_model
+from .interfaces import (has_inner_state, has_noops, is_attention_free,
+                         is_hybrid, supports_cross_encoding,
+                         supports_multimodal,
+                         supports_multimodal_encoder_tp_data,
+                         supports_multimodal_raw_input, supports_pp,
+                         supports_transcription, supports_v0_only)
+from .interfaces_base import (get_default_pooling_type, is_pooling_model,
+                              is_text_generation_model)
 
 logger = init_logger(__name__)
 
@@ -217,6 +220,7 @@ _MULTIMODAL_MODELS = {
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "InternS1ForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),  # noqa: E501
+    "InternVLForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),  # noqa: E501
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
     "SmolVLMForConditionalGeneration": ("smolvlm","SmolVLMForConditionalGeneration"),  # noqa: E501
     "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
@@ -323,6 +327,7 @@ class _ModelInfo:
     supports_cross_encoding: bool
     supports_multimodal: bool
     supports_multimodal_raw_input: bool
+    supports_multimodal_encoder_tp_data: bool
     supports_pp: bool
     has_inner_state: bool
     is_attention_free: bool
@@ -342,6 +347,8 @@ class _ModelInfo:
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
             supports_multimodal_raw_input=supports_multimodal_raw_input(model),
+            supports_multimodal_encoder_tp_data=
+            supports_multimodal_encoder_tp_data(model),
             supports_pp=supports_pp(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
