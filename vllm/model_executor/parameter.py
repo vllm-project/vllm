@@ -122,7 +122,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
         param_data = self.data
 
-        tp_rank = get_tensor_model_parallel_rank()
+        tp_rank = kwargs.get("tp_rank", get_tensor_model_parallel_rank())
         param_data = param_data.narrow(self.output_dim, shard_offset,
                                        shard_size)
         loaded_weight = loaded_weight.narrow(self.output_dim,
