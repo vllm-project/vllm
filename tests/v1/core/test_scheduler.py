@@ -1827,7 +1827,7 @@ def test_priority_scheduling_preemption_when_out_of_kv():
         block_size=16,  # Standard block size
     )
 
-    # Create a request and schedule it
+    # Create a low request and schedule it
     request_low = create_requests_with_priority(
         num_requests=1,
         priorities=[1],
@@ -1856,7 +1856,7 @@ def test_priority_scheduling_preemption_when_out_of_kv():
     # Create a high priority request and schedule it
     request_high = create_requests_with_priority(
         num_requests=1,
-        priorities=[1],
+        priorities=[0],
         arrival_times=[1.0],
         num_tokens=32,
         starting_idx=1,
