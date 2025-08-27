@@ -10,8 +10,8 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backends.cpu_attn import TorchSDPAMetadataBuilderV1
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from vllm.v1.worker.utils import CpuGpuBuffer
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
