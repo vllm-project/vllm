@@ -17,6 +17,7 @@
 """Wrapper around `transformers` models"""
 from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Literal, Optional, Union
 
 import regex as re
@@ -66,11 +67,13 @@ def get_feature_request_tip(
 ) -> str:
     hf_url = f"a discussion at https://huggingface.co/{model}/discussions/new"
     gh_url = "an issue at https://github.com/huggingface/transformers/issues/new/choose"
+    url = hf_url if trust_remote_code else gh_url
+    prefix = f"Please open {url} to request support for this feature. "
+    if Path(model).exists():
+        prefix = ""
     doc_url = "https://docs.vllm.ai/en/latest/models/supported_models.html#writing-custom-models"
-    return (
-        f"Please open {hf_url if trust_remote_code else gh_url} to request "
-        f"support for this feature. See {doc_url} for instructions on how to "
-        "do this yourself.")
+    tip = f"See {doc_url} for instructions on how to add support yourself."
+    return f"{prefix}{tip}"
 
 
 def vllm_flash_attention_forward(
