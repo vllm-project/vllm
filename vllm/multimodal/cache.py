@@ -221,6 +221,48 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
             for mm_item, mm_hash in zip(mm_items, mm_hashes)
         ]
 
+    def update_multimodal_feature(
+        self,
+        feature: "MultiModalFeatureSpec",
+    ) -> "MultiModalFeatureSpec":
+        """
+        Update a single multimodal feature with cached data from this cache.
+        
+        Args:
+            feature: The MultiModalFeatureSpec to update
+            
+        Returns:
+            Updated MultiModalFeatureSpec with cached data
+        """
+        from .inputs import MultiModalFeatureSpec
+        
+        # Extract data and hash for cache lookup
+        updated_data = self.get_and_update_item(feature.data, feature.mm_identifier)
+        return MultiModalFeatureSpec(
+            data=updated_data,
+            modality=feature.modality,
+            mm_identifier=feature.mm_identifier,
+            mm_position=feature.mm_position
+        )
+
+    def update_multimodal_features(
+        self,
+        multimodal_features: list["MultiModalFeatureSpec"],
+    ) -> list["MultiModalFeatureSpec"]:
+        """
+        Update multimodal features with cached data from this cache.
+        
+        Args:
+            multimodal_features: List of MultiModalFeatureSpec to update
+            
+        Returns:
+            A new list of MultiModalFeatureSpec with cached data
+        """
+        return [
+            self.update_multimodal_feature(feature)
+            for feature in multimodal_features
+        ]
+
     @abstractmethod
     def clear_cache(self) -> None:
         """Clear the underlying cache."""
