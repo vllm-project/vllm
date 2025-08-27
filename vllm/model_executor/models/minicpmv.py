@@ -293,11 +293,13 @@ class Resampler4_5(Resampler2_5):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def forward(self,
-                x: torch.Tensor,
-                tgt_sizes: torch.Tensor,
-                # temporal_ids for high refresh rate videos
-                temporal_ids=None) -> torch.Tensor:
+    def forward(
+        self,
+        x: torch.Tensor,
+        tgt_sizes: torch.Tensor,
+        # temporal_ids for high refresh rate videos
+        temporal_ids=None
+    ) -> torch.Tensor:
         assert x.shape[0] == tgt_sizes.shape[0]
         bs = x.shape[0]
 
