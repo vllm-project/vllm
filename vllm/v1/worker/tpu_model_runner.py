@@ -552,7 +552,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return kv_cache_spec
 
     def _get_slot_mapping_metadata(self, num_reqs,
-                                   num_scheduled_tokens_per_req):
+                                   num_scheduled_tokens_per_req) -> np.ndarray:
         """
         Computes metadata for mapping slots to blocks in the key-value (KV)
         cache for a batch of requests.
@@ -565,15 +565,15 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Args:
             num_reqs (int): Number of requests in the current batch.
             num_scheduled_tokens_per_req (int or np.ndarray): Number of tokens
-            to be scheduled for each request.
+                to be scheduled for each request.
 
         Returns:
             np.ndarray: A 2D array of shape (total_block_len, 3), where each row
-            contains:
+                contains:
                 - kv_cache_start_index (int): The starting index in the KV cache
-                    for the corresponding slice.
+                  for the corresponding slice.
                 - new_kv_start_index (int): The starting index in the new KV
-                    cache for the corresponding slice.
+                  cache for the corresponding slice.
                 - slice_len (int): The length of the slice.
         """
         slices_start = self.input_batch.num_computed_tokens_cpu[:num_reqs]
