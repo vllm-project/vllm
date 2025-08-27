@@ -6,12 +6,16 @@ import importlib.util
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 DTYPE = ["bfloat16"]
 
 TORCHAO_AVAILABLE = importlib.util.find_spec("torchao") is not None
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="torchao is not supported on ROCm")
 def test_pre_quantized_model(vllm_runner):
     with vllm_runner("drisspg/fp8-opt-125m",
                      quantization="torchao",
@@ -30,6 +34,8 @@ def test_pre_quantized_model(vllm_runner):
         "cuda:0",
         # {"": "cuda"},
     ])
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="torchao is not supported on ROCm")
 def test_opt_125m_int8wo_model_loading_with_params(vllm_runner,
                                                    pt_load_map_location):
     torch._dynamo.reset()
@@ -46,6 +52,8 @@ def test_opt_125m_int8wo_model_loading_with_params(vllm_runner,
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="torchao is not supported on ROCm")
 def test_opt_125m_int4wo_model_per_module_quant(vllm_runner):
     torch._dynamo.reset()
     model_name = "jerryzh168/opt-125m-int4wo-per-module"
@@ -61,6 +69,8 @@ def test_opt_125m_int4wo_model_per_module_quant(vllm_runner):
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="torchao is not supported on ROCm")
 def test_qwenvl_int8wo_model_loading_with_params(vllm_runner):
     torch._dynamo.reset()
     model_name = "mobicham/Qwen2.5-VL-3B-Instruct_int8wo_ao"
