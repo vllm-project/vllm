@@ -170,6 +170,13 @@ class ParallelConfig:
     Set to be private as it's not intended to be configured by users.
     """
 
+    enable_context_parallel: bool = False
+    """Use for enable context parallel. Default is False."""
+
+    context_parallel_size: int = 1
+    """Number of context parallel groups. This parameter is automatically
+    inferred now, do not set it manually."""
+
     @property
     def world_size_across_dp(self) -> int:
         """world_size_across_dp is TPxPPxDP, it is the size of the world

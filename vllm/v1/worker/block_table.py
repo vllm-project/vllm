@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Optional
+
 import numpy as np
 import torch
 
+from vllm.distributed import get_cp_group
 from vllm.logger import init_logger
 from vllm.utils import cdiv
 
@@ -128,9 +131,13 @@ class MultiGroupBlockTable:
     def __init__(self, max_num_reqs: int, max_model_len: int,
                  max_num_batched_tokens: int, pin_memory: bool,
                  device: torch.device, block_sizes: list[int]) -> None:
+        self.cp_world_size = get_cp_group().world_size
+        self.cp_rank = get_cp_group().rank_in_group
+        # Note(hc): each cp rank only store (max_model_len//cp_world_size) tokens in kvcache,
+        # so the block_size which used for calc max_num_blocks_per_req must be multiplied by cp_world_size.
         self.block_tables = [
-            BlockTable(block_size, max_num_reqs, cdiv(max_model_len,
-                                                      block_size),
+            BlockTable(block_size, max_num_reqs,
+                       cdiv(max_model_len, block_size * self.cp_world_size),
                        max_num_batched_tokens, pin_memory, device)
             for block_size in block_sizes
         ]
@@ -152,10 +159,56 @@ class MultiGroupBlockTable:
         for block_table in self.block_tables:
             block_table.swap_row(src, tgt)
 
-    def compute_slot_mapping(self, req_indices: np.ndarray,
-                             positions: np.ndarray) -> None:
-        for block_table in self.block_tables:
-            block_table.compute_slot_mapping(req_indices, positions)
+    def compute_slot_mapping(
+            self, req_indices: np.ndarray, positions: np.ndarray,
+            num_reqs: int, num_decodes: int,
+            num_computed_tokens_cpu: np.ndarray, seq_lens_np: np.ndarray,
+            cp_num_computed_tokens_cpu: np.ndarray,
+            cp_local_token_select_indices_np: np.ndarray) -> Optional[int]:
+        # Note(hc): cp_local_token_cnt records the number of KV entries will be stored on the current CP rank.
+        cp_local_token_cnt: Optional[int] = None
+        if self.cp_world_size > 1:
+            assert len(self.block_tables) == 1
+            block_size = self.block_tables[0].block_size
+            block_table_array = self.block_tables[0].block_table_np.ravel()
+            max_num_blocks_per_req = self.block_tables[
+                0].max_num_blocks_per_req
+            slot_mapping_np = self.block_tables[0].slot_mapping_np
+            cp_local_token_cnt = 0
+            cu_token_idx = 0
+            for req_idx in range(num_reqs):
+                context_len = num_computed_tokens_cpu[req_idx]
+                seq_len = seq_lens_np[req_idx]
+                # calculate context lens under CP for prefill reqs
+                if req_idx >= num_decodes:
+                    cp_prefill_context_len = cdiv(context_len,
+                                                  self.cp_world_size)
+                    cp_num_computed_tokens_cpu[
+                        req_idx] = cp_prefill_context_len
+                for token_idx in range(context_len, seq_len):
+                    target_cp_rank = token_idx % self.cp_world_size
+                    cp_context_len = token_idx // self.cp_world_size
+                    if self.cp_rank <= target_cp_rank:
+                        cp_context_len += 1
+                    # update context length for decode reqs
+                    if req_idx < num_decodes:
+                        seq_lens_np[req_idx] = cp_context_len
+                    # update slot_mapping for both prefill & decode reqs
+                    if self.cp_rank == target_cp_rank:
+                        position = cp_context_len - 1
+                        block_table_indice = req_idx * max_num_blocks_per_req + position // block_size
+                        block_number = block_table_array[block_table_indice]
+                        block_offset = position % block_size
+                        slot_mapping_np[
+                            cp_local_token_cnt] = block_number * block_size + block_offset
+                        cp_local_token_select_indices_np[
+                            cp_local_token_cnt] = cu_token_idx + token_idx - context_len
+                        cp_local_token_cnt += 1
+                cu_token_idx += seq_len - context_len
+        else:
+            for block_table in self.block_tables:
+                block_table.compute_slot_mapping(req_indices, positions)
+        return cp_local_token_cnt
 
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:
