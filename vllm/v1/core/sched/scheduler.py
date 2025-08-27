@@ -518,8 +518,7 @@ class Scheduler(SchedulerInterface):
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
-                        new_computed_blocks + new_blocks,
-                        # self.kv_cache_manager.get_blocks(request.request_id),
+                        self.kv_cache_manager.get_blocks(request.request_id),
                         num_external_computed_tokens,
                     )
 
