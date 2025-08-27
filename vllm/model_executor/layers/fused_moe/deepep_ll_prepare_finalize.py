@@ -109,10 +109,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         return x, x_scales
 
-    def has_prepare_no_receive(self) -> bool:
+    def supports_async(self) -> bool:
         return True
 
-    def prepare_no_receive(
+    def prepare_async(
         self,
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
@@ -192,11 +192,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        receiver = self.prepare_no_receive(a1, a1_scale, a2_scale,
-                                           topk_weights, topk_ids, num_experts,
-                                           expert_map,
-                                           apply_router_weight_on_input,
-                                           quant_config)
+        receiver = self.prepare_async(a1, a1_scale, a2_scale, topk_weights,
+                                      topk_ids, num_experts, expert_map,
+                                      apply_router_weight_on_input,
+                                      quant_config)
         return receiver()
 
     def finalize(

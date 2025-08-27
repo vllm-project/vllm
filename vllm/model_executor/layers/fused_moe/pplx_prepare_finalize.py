@@ -89,10 +89,10 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
 
-    def has_prepare_no_receive(self) -> bool:
+    def supports_async(self) -> bool:
         return True
 
-    def prepare_no_receive(
+    def prepare_async(
         self,
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
@@ -270,7 +270,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
-        receiver = self.prepare_no_receive(
+        receiver = self.prepare_async(
             a1,
             a1_scale,
             a2_scale,

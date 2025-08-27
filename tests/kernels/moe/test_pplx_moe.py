@@ -4,6 +4,7 @@
 
 Run `pytest tests/kernels/test_pplx_moe.py`.
 """
+import copy
 import itertools
 import textwrap
 import traceback
@@ -21,6 +22,8 @@ try:
 except ImportError:
     has_pplx = False
 
+from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
+    _set_vllm_config)
 from tests.kernels.moe.utils import (make_shared_experts, make_test_weights,
                                      naive_batched_moe)
 from tests.kernels.quant_utils import dequant
@@ -732,10 +735,12 @@ def _pplx_moe(
         if shared_experts is None:
             pplx_shared_output = None
             pplx_output = pplx_outputs
+            assert isinstance(pplx_output, torch.Tensor)
         else:
             pplx_shared_output, pplx_output = pplx_outputs
 
         if shared_output is not None:
+            assert pplx_shared_output is not None
             chunked_shared_output = chunk_by_rank(
                 shared_output, pgi.rank,
                 pgi.world_size).to(pplx_shared_output.device)
@@ -840,6 +845,14 @@ def _pplx_test_loop(pgi: ProcessGroupInfo, dp_size: int, use_internode: bool,
         else:
             print(f"PASSED {msg}")
 
+    if use_shared_experts:
+        # Note: this config is only needed for the non-naive shared experts.
+        new_vllm_config = copy.deepcopy(vllm_config)
+        new_vllm_config.parallel_config.data_parallel_size = pgi.world_size
+        new_vllm_config.parallel_config.enable_expert_parallel = True
+        _set_vllm_config(new_vllm_config, pgi.world_size, pgi.rank,
+                         pgi.local_rank)
+
     current_platform.seed_everything(7)
     combos = itertools.product(PPLX_COMBOS, NUM_EXPERTS, TOP_KS, DTYPES,
                                [False, True], [None, [128, 128]])
@@ -892,7 +905,12 @@ def _pplx_test_loop(pgi: ProcessGroupInfo, dp_size: int, use_internode: bool,
             args["w2_s"] = w2_s
 
         if use_shared_experts:
-            args["shared_experts"] = make_shared_experts(n, k)
+            args["shared_experts"] = make_shared_experts(
+                n,
+                k,
+                in_dtype=a.dtype,
+                quant_dtype=quant_dtype,
+            )
 
         try:
             test_fn(
