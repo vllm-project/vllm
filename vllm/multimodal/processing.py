@@ -1022,7 +1022,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         *,
-        mm_hash_overrides: Optional[MultiModalHashes] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDs]] = None,
     ) -> MultiModalInputs:
         return self.apply(prompt,
                           mm_data,
