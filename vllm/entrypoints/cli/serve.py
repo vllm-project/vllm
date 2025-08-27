@@ -3,7 +3,7 @@
 
 import argparse
 import signal
-from typing import Any, Optional
+from typing import Optional
 
 import uvloop
 
@@ -174,7 +174,7 @@ def run_multi_api_server(args: argparse.Namespace):
                                                   coordinator, addresses):
 
         # Construct common args for the APIServerProcessManager up-front.
-        api_server_manager_kwargs = dict[str, Any](
+        api_server_manager_kwargs = dict(
             target_server_fn=run_api_server_worker_proc,
             listen_address=listen_address,
             sock=sock,

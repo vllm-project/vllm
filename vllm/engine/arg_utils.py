@@ -1287,8 +1287,6 @@ class EngineArgs:
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
-            api_process_count=self.api_process_count,
-            api_process_rank=self.api_process_rank,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
