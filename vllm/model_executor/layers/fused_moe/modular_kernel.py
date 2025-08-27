@@ -197,13 +197,13 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
-    def has_prepare_no_receive(self) -> bool:
+    def supports_async(self) -> bool:
         """
-        Indicates whether or not this class implements prepare_no_receive.
+        Indicates whether or not this class implements prepare_async.
         """
         return False
 
-    def prepare_no_receive(
+    def prepare_async(
         self,
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
@@ -233,7 +233,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         Returns a callback that when invoked waits for results from other
         workers and has the same return signature as `prepare`, e.g.
 
-        receiver = obj.prepare_no_receive(...)
+        receiver = obj.prepare_async(...)
         a, a_scales, expert_meta, topk_ids, topk_weights = receiver()
 
         is equivalent to:
@@ -789,7 +789,7 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         shared_output: torch.Tensor
 
-        if (not self.prepare_finalize.has_prepare_no_receive()
+        if (not self.prepare_finalize.supports_async()
                 or self.shared_experts is None):
 
             # Run shared experts serially with dispatch.
@@ -810,7 +810,7 @@ class FusedMoEModularKernel(torch.nn.Module):
              )
         else:
             # Overlap shared expert compute with all2all dispatch.
-            receiver = self.prepare_finalize.prepare_no_receive(
+            receiver = self.prepare_finalize.prepare_async(
                 a1,
                 a1_scale,
                 a2_scale,
