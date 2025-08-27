@@ -3,8 +3,8 @@
 
 #include <cmath>
 
-#include "../../../dispatch_utils.h"
-#include "../../vectorization_utils.cuh"
+#include "dispatch_utils.h"
+#include "quantization/vectorization_utils.cuh"
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
