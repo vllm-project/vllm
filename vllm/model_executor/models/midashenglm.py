@@ -30,7 +30,7 @@ from typing import Any, Callable, Optional, TypedDict, Union, cast
 import torch
 import torch.nn as nn
 import torchaudio.transforms as audio_transforms
-from transformers import BatchFeature, PreTrainedModel
+from transformers import BatchFeature
 
 from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
@@ -52,8 +52,6 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.midashenglm import DashengConfig
-from vllm.transformers_utils.processors.midashenglm import (
-    MiDashengLMProcessor, calculate_mel_frames_dasheng)
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
@@ -68,6 +66,22 @@ def _resolve_tuple2(x: _Tuple2) -> tuple[int, int]:
             f"Expected a sequence of length 2, got {x} with length {len(x)}")
         return cast(tuple[int, int], tuple(x))
     return (x, x)
+
+
+def calculate_mel_frames_dasheng(
+    audio_length_samples: int,
+    n_fft: int = 512,
+    hop_size: int = 160,
+    dasheng_subsampling: int = 4,
+    center=True,
+    model_subsampling: int = 5,
+) -> int:
+    """Calculate the number of Mel-spectrogram frames."""
+    if center:
+        audio_length_samples = audio_length_samples + n_fft
+
+    return (int(1 + ((audio_length_samples - n_fft) / hop_size)) //
+            dasheng_subsampling // model_subsampling)
 
 
 class AudioPatchEmbed(nn.Module):
@@ -128,7 +142,6 @@ class DashengMlp(nn.Module):
         in_features: int,
         hidden_features: Optional[int] = None,
         out_features: Optional[int] = None,
-        drop: float = 0.0,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
@@ -144,14 +157,11 @@ class DashengMlp(nn.Module):
                                      output_size=out_features,
                                      quant_config=quant_config,
                                      prefix=f"{prefix}.fc2")
-        self.drop = nn.Dropout(drop)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, _ = self.fc1(x)
         x = self.act(x)
-        x = self.drop(x)
         x, _ = self.fc2(x)
-        x = self.drop(x)
         return x
 
 
@@ -162,8 +172,6 @@ class DashengAttention(nn.Module):
         dim: int,
         num_heads: int = 8,
         qkv_bias: bool = False,
-        attn_drop: float = 0.0,
-        proj_drop: float = 0.0,
         causal: bool = False,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -204,14 +212,12 @@ class DashengAttention(nn.Module):
             self.scale,
             num_kv_heads=self.num_kv_heads,
         )
-        self.attn_drop = nn.Dropout(attn_drop)
         self.proj = RowParallelLinear(
             input_size=dim,
             output_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.proj",
         )
-        self.proj_drop = nn.Dropout(proj_drop)
         self.causal = causal
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
@@ -222,12 +228,10 @@ class DashengAttention(nn.Module):
                                 dim=-1)
 
         attn_out = self.attn(q, k, v)
-        attn_out = self.attn_drop(attn_out).contiguous()
         C_local = attn_out.numel() // (B * N)  # C_local for parallel
         attn_out = attn_out.view(B, N, C_local)
 
         x, _ = self.proj(attn_out)
-        x = self.proj_drop(x)
 
         return x
 
@@ -240,8 +244,6 @@ class DashengBlock(nn.Module):
         num_heads: int,
         mlp_ratio: float = 4.0,
         qkv_bias: bool = False,
-        drop: float = 0.0,
-        attn_drop: float = 0.0,
         init_values: Optional[float] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -252,8 +254,6 @@ class DashengBlock(nn.Module):
             dim,
             num_heads=num_heads,
             qkv_bias=qkv_bias,
-            attn_drop=attn_drop,
-            proj_drop=drop,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
@@ -264,7 +264,6 @@ class DashengBlock(nn.Module):
         self.mlp = DashengMlp(
             in_features=dim,
             hidden_features=int(dim * mlp_ratio),
-            drop=drop,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
@@ -282,7 +281,7 @@ class DashengBlock(nn.Module):
         return x
 
 
-class DashengAudioTransformer(PreTrainedModel):
+class DashengAudioTransformer(nn.Module):
     config_class = DashengConfig
     supports_gradient_checkpointing = True
 
@@ -292,7 +291,7 @@ class DashengAudioTransformer(PreTrainedModel):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
-        super().__init__(config)
+        super().__init__()
 
         self.target_length = config.target_length
         self.embed_dim = config.embed_dim
@@ -318,7 +317,6 @@ class DashengAudioTransformer(PreTrainedModel):
         self.freq_pos_embed = nn.Parameter(
             torch.randn(1, config.embed_dim, self.patch_embed.grid_size[0], 1)
             * 0.02)
-        self.pos_drop = nn.Dropout(p=config.drop_rate)
         self.blocks = nn.ModuleList(
             DashengBlock(
                 dim=config.embed_dim,
@@ -326,14 +324,10 @@ class DashengAudioTransformer(PreTrainedModel):
                 mlp_ratio=config.mlp_ratio,
                 qkv_bias=config.qkv_bias,
                 init_values=config.init_values,
-                drop=config.drop_rate,
-                attn_drop=config.attn_drop_rate,
                 quant_config=quant_config,
                 prefix=f"{prefix}.block{i}",
             ) for i in range(config.depth))
         self.norm = nn.LayerNorm(config.embed_dim, eps=1e-6)
-
-        self.post_init()
 
     def _init_front_end(self, config):
         ori_default_dtype = torch.get_default_dtype()
@@ -373,7 +367,6 @@ class DashengAudioTransformer(PreTrainedModel):
              )  # Just to support __getitem__ in posembed
         x = torch.permute(torch.flatten(x, 2, 3),
                           (0, 2, 1))  # rearrange(x, "b c f t -> b (f t) c")
-        x = self.pos_drop(x)
         for block in self.blocks:
             if self.gradient_checkpointing and self.training:
                 x = self._gradient_checkpointing_func(block, x, mask)
@@ -491,12 +484,6 @@ class MiDashengLMProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self):
         return self.ctx.get_hf_config()
-
-    def get_hf_processor(
-        self,
-        **kwargs: object,
-    ):
-        return self.ctx.get_hf_processor(MiDashengLMProcessor)
 
     def get_feature_extractor(self):
         hf_processor = self.get_hf_processor()
