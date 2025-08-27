@@ -102,6 +102,7 @@ def test_models(
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "0")
+        m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
         if model not in V0_UNSUPPORTED_MODELS:
             with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
                 vllm_v0_outputs = vllm_model.generate_greedy_logprobs(
@@ -110,9 +111,7 @@ def test_models(
             vllm_v0_outputs = None
 
     if model in V1_SUPPORTED_MODELS:
-        with vllm_runner(model,
-                         max_num_seqs=MAX_NUM_SEQS,
-                         enable_prefix_caching=False) as vllm_model:
+        with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
             vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, num_logprobs)
     else:
@@ -147,10 +146,6 @@ def test_batching(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    if model in V0_UNSUPPORTED_MODELS:
-        pytest.skip(
-            f"Unsupported V0 Engine. Skipping `test_batching` on {model}.")
-
     try:
         model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
         model_info.check_available_online(on_fail="skip")
@@ -413,8 +408,8 @@ def test_full_cuda_graph(
 
     with vllm_runner(model,
                      max_num_seqs=MAX_NUM_SEQS,
-                     compilation_config={'full_cuda_graph': True},
-                     enable_prefix_caching=False) as vllm_model:
+                     compilation_config={'full_cuda_graph':
+                                         True}) as vllm_model:
         vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
@@ -473,8 +468,7 @@ def test_fp32_state(
 
     with vllm_runner(model,
                      max_num_seqs=MAX_NUM_SEQS,
-                     mamba_ssm_cache_dtype="float32",
-                     enable_prefix_caching=False) as vllm_model:
+                     mamba_ssm_cache_dtype="float32") as vllm_model:
         vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs)
 
