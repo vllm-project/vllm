@@ -406,6 +406,14 @@ class WorkerProc:
         # Initializes a message queue for sending the model output
         self.worker_response_mq = MessageQueue(1, 1)
 
+        self.async_output_queue: queue.Queue = queue.Queue()
+        self.async_output_copy_stream = torch.cuda.Stream()
+        self.async_output_copy_thread = Thread(
+            target=self.async_output_busy_loop,
+            daemon=True,
+            name="WorkerAsyncOutputCopy")
+        self.async_output_copy_thread.start()
+
         # Initialize device and loads weights
         self.worker.init_device()
         self.worker.load_model()
@@ -587,46 +595,20 @@ class WorkerProc:
         SUCCESS = auto()
         FAILURE = auto()
 
+    def enqueue_worker_output(self, output: Any) -> None:
+        if isinstance(output, AsyncModelRunnerOutput):
+            output = output.serialize(self.async_output_copy_stream)
+        self.worker_response_mq.enqueue(
+            (WorkerProc.ResponseStatus.SUCCESS, output))
+
+    def async_output_busy_loop(self):
+        """Entrypoint for the thread which handles outputs asynchronously."""
+        while True:
+            output = self.async_output_queue.get()
+            self.enqueue_worker_output(output)
+
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
-
-        def process_output(output: Any, worker_response_mq: MessageQueue,
-                           copy_stream: torch.cuda.Stream) -> None:
-            if isinstance(output, AsyncModelRunnerOutput):
-                # Serialize the sampled token ids before sending the output
-                default_stream = torch.cuda.current_stream()
-                with torch.cuda.stream(copy_stream):
-                    copy_stream.wait_stream(default_stream)
-                    sampled_token_ids_list = output.sampled_token_ids_tensor.to(
-                        'cpu', non_blocking=True)
-                copy_stream.synchronize()
-                sampled_token_ids_list = sampled_token_ids_list.tolist()
-                for i in output.invalid_req_indices:
-                    sampled_token_ids_list[i].clear()
-                output = output.model_runner_output
-                output.sampled_token_ids = sampled_token_ids_list
-
-            worker_response_mq.enqueue(
-                (WorkerProc.ResponseStatus.SUCCESS, output))
-            return
-
-        def _output_processor_loop(input_queue: queue.Queue,
-                                   worker_response_mq: MessageQueue,
-                                   copy_stream: torch.cuda.Stream):
-            while True:
-                output = input_queue.get()
-                process_output(output, worker_response_mq, copy_stream)
-
-        output_queue: queue.Queue = queue.Queue()
-        copy_stream_ = torch.cuda.Stream()
-        output_processor_thread = Thread(target=_output_processor_loop,
-                                         args=(output_queue,
-                                               self.worker_response_mq,
-                                               copy_stream_),
-                                         daemon=True,
-                                         name="WorkerOutputProcessor")
-        output_processor_thread.start()
-
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue()
 
@@ -649,4 +631,4 @@ class WorkerProc:
                 continue
 
             if output_rank is None or self.rank == output_rank:
-                output_queue.put(output)
+                self.async_output_queue.put(output)

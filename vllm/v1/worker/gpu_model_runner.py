@@ -1752,9 +1752,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
+        sampled_token_ids = sampler_output.sampled_token_ids
         if not self.use_async_scheduling:
             # Get the valid generated tokens.
-            sampled_token_ids = sampler_output.sampled_token_ids
             max_gen_len = sampled_token_ids.shape[-1]
             if max_gen_len == 1:
                 # No spec decode tokens.
@@ -1770,16 +1770,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 valid_sampled_token_ids[i].clear()
         else:
             valid_sampled_token_ids = []
-            sampled_token_ids_tensor = sampler_output.sampled_token_ids
             invalid_req_indices = list(discard_sampled_tokens_req_indices)
             invalid_req_indices_set = set(invalid_req_indices)
-            assert sampled_token_ids_tensor.shape[-1] == 1
+            assert sampled_token_ids.shape[-1] == 1
 
             # Cache the sampled tokens on the GPU and avoid CPU sync.
             # These will be copied into input_ids in the next step
             # when preparing inputs.
             self.input_batch.prev_sampled_token_ids = \
-                sampled_token_ids_tensor
+                sampled_token_ids
             self.input_batch.prev_sampled_token_ids_invalid_indices = \
                 invalid_req_indices_set
             self.input_batch.prev_req_id_to_index = {
@@ -1848,7 +1847,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.use_async_scheduling:
             return AsyncModelRunnerOutput(
                 model_runner_output=output,
-                sampled_token_ids_tensor=sampled_token_ids_tensor,
+                sampled_token_ids=sampled_token_ids,
                 invalid_req_indices=invalid_req_indices,
             )
 
