@@ -573,7 +573,7 @@ void topk_softmax(
             stream);
     }
     else {
-        assert(topk_indices.scalar_type() == at::ScalarType::Int64);
+        TORCH_CHECK(topk_indices.scalar_type() == at::ScalarType::Long);
         vllm::moe::topkGatingSoftmaxKernelLauncher(
             gating_output.data_ptr<float>(),
             topk_weights.data_ptr<float>(),
