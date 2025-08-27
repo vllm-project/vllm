@@ -138,8 +138,8 @@ def run_multi_api_server(args: argparse.Namespace):
     num_api_servers: int = args.api_server_count
     assert num_api_servers > 0
 
-    # No need to set api_process_rank for EngineCore processes
-    args.api_process_count = num_api_servers
+    args._api_process_count = num_api_servers
+    args._api_process_rank = -1
 
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
@@ -216,8 +216,9 @@ def run_api_server_worker_proc(listen_address,
     """Entrypoint for individual API server worker processes."""
     client_config = client_config or {}
 
-    args.api_process_rank = server_index = client_config.get("client_index", 0)
-    args.api_process_count = client_config.get("client_count", 1)
+    args._api_process_rank = server_index = client_config.get(
+        "client_index", 0)
+    args._api_process_count = client_config.get("client_count", 1)
 
     # Set process title and add process-specific prefix to stdout and stderr.
     set_process_title("APIServer", str(server_index))

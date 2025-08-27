@@ -303,11 +303,11 @@ class EngineArgs:
     data_parallel_rpc_port: Optional[int] = None
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
-    api_process_count: int = ParallelConfig.api_process_count
-    api_process_rank: int = ParallelConfig.api_process_rank
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
+    _api_process_count: int = ParallelConfig._api_process_count
+    _api_process_rank: int = ParallelConfig._api_process_rank
     num_redundant_experts: int = EPLBConfig.num_redundant_experts
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
@@ -1285,8 +1285,6 @@ class EngineArgs:
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
-            api_process_count=self.api_process_count,
-            api_process_rank=self.api_process_rank,
             enable_expert_parallel=self.enable_expert_parallel,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
@@ -1298,6 +1296,8 @@ class EngineArgs:
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
+            _api_process_count=self._api_process_count,
+            _api_process_rank=self._api_process_rank,
         )
 
         speculative_config = self.create_speculative_config(

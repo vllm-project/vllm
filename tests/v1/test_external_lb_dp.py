@@ -177,8 +177,10 @@ def test_external_lb_server_info(server_manager):
         parallel_configs = [
             _get_parallel_config(server) for _ in range(n_reqs)
         ]
-        api_process_counts = [c["api_process_count"] for c in parallel_configs]
-        api_process_ranks = [c["api_process_rank"] for c in parallel_configs]
+        api_process_counts = [
+            c["_api_process_count"] for c in parallel_configs
+        ]
+        api_process_ranks = [c["_api_process_rank"] for c in parallel_configs]
 
         assert all(c == api_server_count
                    for c in api_process_counts), api_process_counts

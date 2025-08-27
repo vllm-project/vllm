@@ -97,23 +97,6 @@ class ParallelConfig:
     between vLLM nodes/replicas. Set explicitly in conjunction with
     --data-parallel-start-rank."""
 
-    api_process_count: int = 1
-    """
-    The number of API processes initialized.
-
-    Note:
-        This is an internal config that should only be set by API server
-        scale-out.
-    """
-    api_process_rank: int = 0
-    """
-    The rank of this API process.
-
-    Note:
-        This is an internal config that should only be set by API server
-        scale-out.
-    """
-
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
@@ -186,6 +169,26 @@ class ParallelConfig:
     _data_parallel_master_port_list: list[int] = field(default_factory=list)
     """List of open port auto-queried for data parallel messaging.
     Set to be private as it's not intended to be configured by users.
+    """
+
+    _api_process_count: int = -1
+    """
+    The number of API processes initialized, or `-1` if API server scale-out
+    is not used.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set by API server scale-out.
+    """
+    _api_process_rank: int = -1
+    """
+    The rank of this API process, or `-1` if API server scale-out
+    is not used. It is also `-1` for engine core processes
+    under API server scale-out.
+
+    Note:
+        This is an internal config that is only valid for and
+        should only be set by API server scale-out.
     """
 
     @property
@@ -423,6 +426,17 @@ class ParallelConfig:
 
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
+
+        if self._api_process_count == -1 and self._api_process_rank != -1:
+            raise ValueError("`_api_process_rank` is an internal config "
+                             "and should not be set by users")
+
+        if (self._api_process_count != -1 and
+                not -1 <= self._api_process_rank < self._api_process_count):
+            raise ValueError(
+                "Invalid value of `_api_process_rank`. "
+                f"Expected to be `-1` or `[0, {self._api_process_count})`, "
+                f"but found: {self._api_process_rank}")
 
     @property
     def use_ray(self) -> bool:
