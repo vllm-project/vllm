@@ -637,11 +637,9 @@ class FlashInferImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape -
-            # NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
-            # HND: [num_blocks, 2,  num_kv_heads, block_size, head_size]
-
-
+            kv_cache: KV cache tensor with different possible shapes:
+                - NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
+                - HND: [num_blocks, 2, num_kv_heads, block_size, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]

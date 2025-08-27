@@ -657,7 +657,7 @@ class Scheduler:
                 `budget.num_batched_tokens` has not enough capacity to schedule
                 all tokens.
             partial_prefill_metadata: information about the partial prefills
-            that are currently running
+                that are currently running
 
         Returns:
             SchedulerRunningOutputs.

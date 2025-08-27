@@ -119,7 +119,8 @@ class KVCacheCoordinator(ABC):
 
         Args:
             request: The request.
-            num_tokens: The total number of tokens that need to be cached 
+            num_computed_tokens: The total number of tokens
+                that need to be cached
                 (including tokens that are already cached).
         """
         for manager in self.single_type_managers:

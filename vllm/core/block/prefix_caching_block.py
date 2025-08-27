@@ -61,7 +61,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     Args:
         num_blocks (int): The total number of blocks to manage.
         block_size (int): The size of each block in tokens.
-        block_ids(Optional[Iterable[int]], optional): An optional iterable of
+        block_ids (Optional[Iterable[int]], optional): An optional iterable of
             block IDs. If not provided, block IDs will be assigned sequentially
             from 0 to num_blocks - 1.
     """
