@@ -2735,10 +2735,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # they are cached correctly, there will be different objects per
             # layer.
             for layer_name in layer_names:
-                attn_backend = layers[layer_name].get_attn_backend()
-                key = attn_backend.full_cls_name()
-                attn_backends[key] = attn_backend
-                attn_backend_layers[key].append(layer_name)
+                # we need this to ensure PP is working
+                if layer_name in layers:
+                    attn_backend = layers[layer_name].get_attn_backend()
+                    key = attn_backend.full_cls_name()
+                    attn_backends[key] = attn_backend
+                    attn_backend_layers[key].append(layer_name)
             return {
                 attn_backends[k]: v
                 for k, v in attn_backend_layers.items()
