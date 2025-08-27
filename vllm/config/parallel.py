@@ -171,15 +171,15 @@ class ParallelConfig:
     Set to be private as it's not intended to be configured by users.
     """
 
-    _api_process_count: int = -1
+    _api_process_count: int = 1
     """
-    The number of API processes initialized, or `-1` if API server scale-out
-    is not used.
+    The number of API processes initialized.
 
     Note:
         This is an internal config that is only valid for and
         should only be set by API server scale-out.
     """
+
     _api_process_rank: int = -1
     """
     The rank of this API process, or `-1` if API server scale-out
@@ -427,11 +427,11 @@ class ParallelConfig:
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
 
-        if self._api_process_count == -1 and self._api_process_rank != -1:
+        if self._api_process_count == 1 and self._api_process_rank != -1:
             raise ValueError("`_api_process_rank` is an internal config "
                              "and should not be set by users")
 
-        if (self._api_process_count != -1 and
+        if (self._api_process_count > 1 and
                 not -1 <= self._api_process_rank < self._api_process_count):
             raise ValueError(
                 "Invalid value of `_api_process_rank`. "
