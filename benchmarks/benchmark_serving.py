@@ -954,7 +954,7 @@ def create_argument_parser():
     parser.add_argument(
         "--base-url",
         type=str,
-        nargs='+',
+        nargs='*',
         default=None,
         help="Server or API base url(s) if not using http host and port. "
         "Multiple URLs can be provided for round-robin load balancing.",
