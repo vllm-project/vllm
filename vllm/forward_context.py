@@ -13,6 +13,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
+import os
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -24,6 +25,9 @@ last_logging_time: float = 0
 forward_start_time: float = 0
 batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
 batchsize_forward_time: defaultdict = defaultdict(list)
+
+# PATCH
+disable_gloo_all = bool(os.environ.get("DISABLE_GLOO_ALLREDUCE", False))
 
 
 class BatchDescriptor(NamedTuple):
@@ -81,7 +85,8 @@ class DPMetadata:
                                          device="cpu",
                                          dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
-        dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
+        if not disable_gloo_all:
+            dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
         return num_tokens_tensor
 
     @staticmethod
