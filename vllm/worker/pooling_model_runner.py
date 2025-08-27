@@ -199,8 +199,9 @@ class PoolingModelRunner(
 
             pooling_params = seq_group_metadata.pooling_params
             assert pooling_params is not None
-            assert (task := pooling_params.task) is not None, (
-                "You did not set `task` in the API")
+
+            task = pooling_params.task
+            assert task is not None, "You did not set `task` in the API"
 
             model = cast(VllmModelForPooling, self.model)
             to_update = model.pooler.get_pooling_updates(task)
