@@ -88,7 +88,7 @@ def log_replacement(name: str, old_module: nn.Module, new_module: nn.Module):
     logger.debug("%s: %s -> %s", name, old_module, new_module)
 
 
-def enable_if(vllm_config: VllmConfig) -> bool:
+def can_enable_torch_compile(vllm_config: VllmConfig) -> bool:
     """
     Callable to be passed to `@support_torch_compile`'s `enable_if` argument.
 
@@ -658,7 +658,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
-@support_torch_compile(enable_if=enable_if)
+@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersModel(TransformersBase):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -670,7 +670,7 @@ class TransformersModel(TransformersBase):
         })
 
 
-@support_torch_compile(enable_if=enable_if)
+@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersForCausalLM(TransformersBase):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -733,7 +733,7 @@ def flatten_and_concat(x: list[torch.Tensor]) -> torch.Tensor:
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
     },
-    enable_if=enable_if)
+    enable_if=can_enable_torch_compile)
 class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
     # Backwards compatibility for prev released models. State dicts back then
     # had different formats and cannot be loaded with `AutoModel` mapping as is
