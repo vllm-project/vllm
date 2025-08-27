@@ -154,7 +154,8 @@ def is_online_quantization(quantization: Any) -> bool:
 
 @functools.lru_cache(maxsize=30)
 def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
-    cls_docs = get_attr_docs(cls)
+    # Save time only getting attr docs if we're generating help text
+    cls_docs = get_attr_docs(cls) if "--help" in (sys.argv) else {}
     kwargs = {}
     for field in fields(cls):
         # Get the set of possible types for the field
@@ -172,7 +173,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
 
         # Get the help text for the field
         name = field.name
-        help = cls_docs[name].strip()
+        help = cls_docs.get(name, "").strip()
         # Escape % for argparse
         help = help.replace("%", "%%")
 
