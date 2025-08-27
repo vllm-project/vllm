@@ -1787,6 +1787,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_tokens_across_dp=num_tokens_after_padding,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 batch_descriptor=batch_descriptor,
+                ubatch_slices=ubatch_slices
         ), self.maybe_get_kv_connector_output(
                 scheduler_output) as kv_connector_output:
 
