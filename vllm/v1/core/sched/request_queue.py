@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import heapq
+import time
 from abc import ABC, abstractmethod
 from collections import deque
 from collections.abc import Iterable, Iterator
@@ -136,6 +137,32 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
         return super().__reversed__()
 
 
+class PrioritizedItem:
+
+    def __init__(self, request: Request, aging_factor: float = 0.1):
+        self.request = request
+        self.aging_factor = aging_factor
+        self.insert_time = request.arrival_time
+
+    @property
+    def priority(self) -> float:
+        """Calculate the effective priority of the request, factoring in aging.
+        The effective priority decreases over time based on the aging factor.
+        """
+        # Aging is based on the time since the request was inserted
+        # into the queue and the aging factor.
+        if self.aging_factor <= 0:
+            return self.request.priority
+        now = time.time()
+        return self.request.priority - self.aging_factor * (now -
+                                                            self.insert_time)
+
+    def __lt__(self, other: PrioritizedItem) -> bool:
+        if self.priority != other.priority:
+            return self.priority < other.priority
+        return self.insert_time < other.insert_time
+
+
 class PriorityRequestQueue(RequestQueue):
     """
     A priority queue that supports heap operations.
@@ -143,29 +170,31 @@ class PriorityRequestQueue(RequestQueue):
     Requests with a smaller value of `priority` are processed first.
     If multiple requests have the same priority, the one with the earlier
     `arrival_time` is processed first.
+    Requests are aged over time based on the `aging_factor`, which
+    reduces their effective priority as time passes.
     """
 
-    def __init__(self) -> None:
-        self._heap: list[tuple[int, float, Request]] = []
+    def __init__(self, aging_factor: float = 0.1) -> None:
+        self._heap: list[PrioritizedItem] = []
+        self.aging_factor = aging_factor
 
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to priority policy."""
-        heapq.heappush(self._heap,
-                       (request.priority, request.arrival_time, request))
+        item = PrioritizedItem(request, self.aging_factor)
+        heapq.heappush(self._heap, item)
 
     def pop_request(self) -> Request:
         """Pop a request from the queue according to priority policy."""
         if not self._heap:
             raise IndexError("pop from empty heap")
-        _, _, request = heapq.heappop(self._heap)
+        request = heapq.heappop(self._heap).request
         return request
 
     def peek_request(self) -> Request:
         """Peek at the next request in the queue without removing it."""
         if not self._heap:
             raise IndexError("peek from empty heap")
-        _, _, request = self._heap[0]
-        return request
+        return self._heap[0].request
 
     def prepend_request(self, request: Request) -> None:
         """Add a request to the queue according to priority policy.
@@ -184,14 +213,16 @@ class PriorityRequestQueue(RequestQueue):
 
     def remove_request(self, request: Request) -> None:
         """Remove a specific request from the queue."""
-        self._heap = [(p, t, r) for p, t, r in self._heap if r != request]
+        self._heap = [item for item in self._heap if item.request != request]
         heapq.heapify(self._heap)
 
     def remove_requests(self, requests: Iterable[Request]) -> None:
         """Remove multiple specific requests from the queue."""
         requests_to_remove = set(requests)
-        self._heap = [(p, t, r) for p, t, r in self._heap
-                      if r not in requests_to_remove]
+        self._heap = [
+            item for item in self._heap
+            if item.request not in requests_to_remove
+        ]
         heapq.heapify(self._heap)
 
     def __bool__(self) -> bool:
@@ -206,7 +237,7 @@ class PriorityRequestQueue(RequestQueue):
         """Iterate over the queue according to priority policy."""
         heap_copy = self._heap[:]
         while heap_copy:
-            _, _, request = heapq.heappop(heap_copy)
+            request = heapq.heappop(heap_copy).request
             yield request
 
     def __reversed__(self) -> Iterator[Request]:
