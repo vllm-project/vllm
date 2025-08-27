@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -175,12 +175,6 @@ class XPUPlatform(Platform):
                     "Intel Arc A770 have bfloat16 accuracy known issue. "
                     "You can use float16 instead by explicitly setting the "
                     "`dtype` flag in CLI, for example: --dtype=half.")
-
-    def get_global_graph_pool(self) -> Any:
-        """
-        Currently xpu does NOT support Graph model.
-        """
-        raise NotImplementedError("XPU does not support Graph model.")
 
     @classmethod
     def opaque_attention_op(cls) -> bool:
