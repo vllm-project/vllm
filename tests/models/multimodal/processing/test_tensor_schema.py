@@ -38,7 +38,12 @@ ARCH_NEEDS_EXTRAS = [
     "MiniCPMV",
     "PaliGemmaForConditionalGeneration",
 ]
-REPO_ID_TO_SKIP = {"nm-testing/pixtral-12b-FP8-dynamic": "duplicated test"}
+REPO_ID_TO_SKIP = {
+    "nm-testing/pixtral-12b-FP8-dynamic": "duplicated test",
+    # FIXME(Isotr0py): enable GPT-OSS based InternVL3.5 model
+    # after support PP for GPT-OSS
+    "OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview": "Broken model",
+}
 
 ImageInput = list[Image.Image]
 VideoInput = Union[list[Image.Image], list[np.ndarray],

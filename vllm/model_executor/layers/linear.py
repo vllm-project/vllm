@@ -233,10 +233,10 @@ class LinearBase(CustomOp):
     Args:
         input_size: input dimension of the linear layer.
         output_size: output dimension of the linear layer.
-        bias: If true, add bias.
         skip_bias_add: If true, skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
         quant_config: Quantization configure.
+        prefix: Prefix for parameter names.
         return_bias: If true, return bias together with outputs in forward pass.
     """
 
@@ -378,13 +378,14 @@ class MergedReplicatedLinear(ReplicatedLinear):
 
     Args:
         input_size: input dimension of the linear layer.
-        output_size: output dimension of the linear layer.
+        output_sizes: list of output dimensions of the linear layer.
         bias: If true, add bias.
         skip_bias_add: If true, skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
         quant_config: Quantization configure.
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
     """
 
     def __init__(

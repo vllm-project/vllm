@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the machete kernel.
 
-Run `pytest tests/kernels/test_machete_mm.py`.
+Run `pytest tests/kernels/quantization/test_machete_mm.py`.
 """
 
 import math
