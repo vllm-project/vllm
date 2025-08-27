@@ -57,7 +57,7 @@ from transformers.utils import is_flash_attn_2_available
 
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.multimodal.utils import run_dp_sharded_vision_model
+from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model_tensor
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 
 if is_flash_attn_2_available():
@@ -678,7 +678,10 @@ class MoonVitPretrainedModel(PreTrainedModel):
         """
         hidden_states = self.patch_embed(pixel_values, grid_hw)
         if self.use_data_parallel:
-            hidden_states = run_dp_sharded_vision_model(hidden_states, self.encoder, grid_hw)
+            hidden_states = run_dp_sharded_mrope_vision_model_tensor(
+                self.encoder,
+                hidden_states,
+                grid_hw)
         else:
             hidden_states = self.encoder(hidden_states, grid_hw)
         hidden_states = patch_merger(hidden_states,
