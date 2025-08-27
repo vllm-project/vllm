@@ -9,6 +9,7 @@ from contextlib import AsyncExitStack
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import requests
 
 from tests.utils import RemoteOpenAIServer
 from vllm.platforms import current_platform
@@ -70,6 +71,8 @@ class ExternalLBServerManager:
                         sargs,
                         auto_port=False,
                         env_dict={
+                            "VLLM_SERVER_DEV_MODE":
+                            "1",
                             current_platform.device_control_env_var:
                             ",".join(
                                 str(
@@ -127,11 +130,18 @@ def default_server_args():
 
 
 @pytest.fixture(scope="module", params=[1, 4])
-def servers(request, default_server_args):
+def server_manager(request, default_server_args):
     api_server_count = request.param
-    with ExternalLBServerManager(MODEL_NAME, DP_SIZE, api_server_count,
-                                 default_server_args) as server_list:
-        yield server_list
+    server_manager = ExternalLBServerManager(MODEL_NAME, DP_SIZE,
+                                             api_server_count,
+                                             default_server_args)
+
+    with server_manager:
+        yield server_manager
+
+
+def servers(server_manager):
+    return server_manager.servers
 
 
 @pytest_asyncio.fixture
@@ -142,6 +152,22 @@ async def clients(servers: list[tuple[RemoteOpenAIServer, list[str]]]):
             await stack.enter_async_context(server.get_async_client())
             for server, _ in servers
         ]
+
+
+def test_external_lb_server_info(server_manager):
+    servers = server_manager.servers
+    api_server_count = server_manager.api_server_count
+
+    for i, (server, _) in enumerate(servers):
+        response = requests.get(server.url_for("/server_info"))
+        response.raise_for_status()
+
+        vllm_config = response.json()
+        parallel_config = vllm_config["parallel_config"]
+
+        assert parallel_config[
+            "api_process_count"] == api_server_count, f"Failed ({i=})"
+        assert parallel_config["api_process_rank"] == 0, f"Failed ({i=})"
 
 
 @pytest.mark.asyncio

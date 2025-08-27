@@ -10,6 +10,7 @@ from typing import Optional, cast
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
+import requests
 
 from tests.utils import RemoteOpenAIServer
 from tests.v1.test_utils import check_request_balancing
@@ -230,6 +231,8 @@ class APIOnlyServerManager:
                     engines_server_args,
                     auto_port=False,
                     env_dict={
+                        "VLLM_SERVER_DEV_MODE":
+                        "1",
                         current_platform.device_control_env_var:
                         ",".join(
                             str(
@@ -293,14 +296,20 @@ def default_server_args():
 
 
 @pytest.fixture(scope="module", params=[1, 4])
-def servers(request, default_server_args):
+def server_manager(request, default_server_args):
     api_server_count = request.param
-    with MultinodeInternalLBServerManager(MODEL_NAME, DP_SIZE,
-                                          api_server_count,
-                                          default_server_args,
-                                          DP_SIZE // NUM_NODES,
-                                          TP_SIZE) as server_list:
-        yield server_list
+    server_manager = MultinodeInternalLBServerManager(MODEL_NAME, DP_SIZE,
+                                                      api_server_count,
+                                                      default_server_args,
+                                                      DP_SIZE // NUM_NODES,
+                                                      TP_SIZE)
+
+    with server_manager:
+        yield server_manager
+
+
+def servers(server_manager):
+    return server_manager.servers
 
 
 @pytest.fixture(scope="module", params=[1, 4])
@@ -329,6 +338,22 @@ async def api_only_client(api_only_servers: list[tuple[RemoteOpenAIServer,
     api_server = api_only_servers[0][0]
     async with api_server.get_async_client() as client:
         yield client
+
+
+def test_multinode_dp_server_info(server_manager):
+    servers = server_manager.servers
+    api_server_count = server_manager.api_server_count
+
+    for i, (server, _) in enumerate(servers):
+        response = requests.get(server.url_for("/server_info"))
+        response.raise_for_status()
+
+        vllm_config = response.json()
+        parallel_config = vllm_config["parallel_config"]
+
+        assert parallel_config[
+            "api_process_count"] == api_server_count, f"Failed ({i=})"
+        assert parallel_config["api_process_rank"] == i, f"Failed ({i=})"
 
 
 @pytest.mark.asyncio
