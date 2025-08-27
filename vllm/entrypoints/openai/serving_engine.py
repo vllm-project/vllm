@@ -882,6 +882,11 @@ class OpenAIServing:
         )
         _chat_template_kwargs.update(chat_template_kwargs or {})
 
+        # NOTE: Prevent infinite repetition in thinking models
+        # Remove enable_thinking=False to avoid dummy thinking tokens
+        if (_chat_template_kwargs.get('enable_thinking') is False):
+            _chat_template_kwargs.pop('enable_thinking', None)
+
         request_prompt: Union[str, list[int]]
 
         if tokenizer is None:

@@ -216,6 +216,17 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 tool_dicts = [tool.model_dump() for tool in request.tools]
 
+            # NOTE: Prevent infinite repetition in thinking models with n > 1
+            # Dummy thinking tokens cause generation loops when n > 1
+            if (request.n and request.n > 1 and request.chat_template_kwargs
+                    and request.chat_template_kwargs.get('enable_thinking')
+                    is False):
+                request = request.model_copy(deep=False)
+                assert request.chat_template_kwargs is not None
+                request.chat_template_kwargs = (
+                    request.chat_template_kwargs.copy())
+                request.chat_template_kwargs.pop('enable_thinking', None)
+
             if not self.use_harmony:
                 # Common case.
                 (
