@@ -292,8 +292,9 @@ class Processor:
         # NOTE: when users explicitly turn off BOTH prefix caching and input
         # processing caching, no multimodal features or embeddings will be
         # reused across requests, therefore hashing is no longer necessary.
-        if self.model_config.multimodal_config.mm_processor_cache_gb == 0 and (
-                not self.cache_config.enable_prefix_caching):
+        if (self.model_config.multimodal_config and
+                self.model_config.multimodal_config.mm_processor_cache_gb == 0
+                and not self.cache_config.enable_prefix_caching):
             mm_hash_overrides = self._maybe_build_mm_hash_overrides(
                 request_id, prompt)
         else:
