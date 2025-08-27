@@ -215,7 +215,6 @@ def run_api_server_worker_proc(listen_address,
                                **uvicorn_kwargs) -> None:
     """Entrypoint for individual API server worker processes."""
     client_config = client_config or {}
-
     server_index = client_config.get("client_index", 0)
 
     # Set process title and add process-specific prefix to stdout and stderr.

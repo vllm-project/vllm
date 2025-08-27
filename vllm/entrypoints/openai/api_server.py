@@ -17,6 +17,7 @@ import uuid
 from argparse import Namespace
 from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from functools import partial
 from http import HTTPStatus
 from typing import Annotated, Any, Callable, Literal, Optional
@@ -1952,6 +1953,7 @@ async def run_server_worker(listen_address,
     """Run a single API server worker."""
     client_config = client_config or {}
 
+    args = deepcopy(args)
     args._api_process_count = client_config.get("client_count", 1)
     args._api_process_rank = client_config.get("client_index", 0)
 
