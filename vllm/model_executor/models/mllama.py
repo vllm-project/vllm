@@ -186,8 +186,11 @@ class MllamaMultiModalProcessor(EncDecMultiModalProcessor[MllamaProcessingInfo]
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
         mm_hash_overrides: Optional[dict[str, list[str]]] = None,
     ) -> MultiModalEncDecInputs:
-        mm_inputs = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
-                                  tokenization_kwargs, mm_hash_overrides)
+        mm_inputs = super().apply(prompt,
+                                  mm_data,
+                                  hf_processor_mm_kwargs,
+                                  tokenization_kwargs,
+                                  mm_hash_overrides=mm_hash_overrides)
 
         image_token_id = self.info.get_hf_config().image_token_index
         # Check that the number of image tokens in the decoder prompt matches

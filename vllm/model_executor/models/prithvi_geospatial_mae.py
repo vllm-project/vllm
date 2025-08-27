@@ -146,6 +146,7 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
             mm_data = {"image": mm_data}
 
         mm_items = self._to_mm_items(mm_data)
+        tokenization_kwargs = tokenization_kwargs or {}
         mm_hashes = (mm_hash_overrides if mm_hash_overrides is not None else
                      self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
                                          tokenization_kwargs))
