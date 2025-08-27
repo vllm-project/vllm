@@ -110,12 +110,11 @@ def test_models(
             vllm_v0_outputs = None
 
     if model in V1_SUPPORTED_MODELS:
-        with monkeypatch.context() as m:
-            with vllm_runner(model,
-                             max_num_seqs=MAX_NUM_SEQS,
-                             enable_prefix_caching=False) as vllm_model:
-                vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
-                    example_prompts, max_tokens, num_logprobs)
+        with vllm_runner(model,
+                         max_num_seqs=MAX_NUM_SEQS,
+                         enable_prefix_caching=False) as vllm_model:
+            vllm_v1_outputs = vllm_model.generate_greedy_logprobs(
+                example_prompts, max_tokens, num_logprobs)
     else:
         vllm_v1_outputs = None
 
