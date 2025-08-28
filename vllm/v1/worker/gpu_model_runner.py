@@ -1251,9 +1251,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             req_start_idx += num_scheduled_tokens
 
-        self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
+        is_mm_embed = self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
 
-        return self.is_mm_embed.gpu[:total_num_scheduled_tokens], mm_embeds
+        return is_mm_embed, mm_embeds
 
     def get_model(self) -> nn.Module:
         # get raw model out of the cudagraph wrapper.
