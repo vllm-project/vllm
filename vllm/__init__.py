@@ -5,6 +5,7 @@
 # The version.py should be independent library, and we always import the
 # version library first.  Such assumption is critical for some customization.
 from .version import __version__, __version_tuple__  # isort:skip
+from ._bc_linter import bc_linter_skip, bc_linter_include # isort:skip
 
 import typing
 
@@ -70,6 +71,7 @@ else:
 
 __all__ = [
     "__version__",
+    "bc_linter_skip", "bc_linter_include",
     "__version_tuple__",
     "LLM",
     "ModelRegistry",
