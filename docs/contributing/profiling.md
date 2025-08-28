@@ -73,6 +73,8 @@ apt install nsight-systems-cli
 
 ### Example commands and usage
 
+When profiling with `nsys`, it is advisable to set the environment variable `VLLM_WORKER_MULTIPROC_METHOD=spawn`. The default is to use the `fork` method instead of `spawn`, which is [generally not recommended](https://forums.developer.nvidia.com/t/cuda8-0-bug-child-process-forked-after-cuinit-get-cuda-error-not-initialized-on-cuinit/45764).
+
 #### Offline Inference
 
 For basic usage, you can just append `nsys profile -o report.nsys-rep --trace-fork-before-exec=true --cuda-graph-trace=node` before any existing script you would run for offline inference.
