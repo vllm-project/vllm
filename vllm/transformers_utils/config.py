@@ -27,7 +27,8 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.s3_utils import get_s3
+from vllm.transformers_utils.utils import check_gguf_file, is_s3
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -330,14 +331,20 @@ def maybe_override_with_speculators_target_model(
         gguf_model_repo = Path(model).parent
     else:
         gguf_model_repo = None
-    kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
-    config_dict, _ = PretrainedConfig.get_config_dict(
-        model if gguf_model_repo is None else gguf_model_repo,
-        revision=revision,
-        trust_remote_code=trust_remote_code,
-        token=_get_hf_token(),
-        **kwargs,
-    )
+    if is_s3(model):
+        destination_file = get_s3().pull_file_name(model, HF_CONFIG_NAME)
+        with open(destination_file, encoding="utf-8") as reader:
+            text = reader.read()
+        config_dict = json.loads(text)
+    else:
+        kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
+        config_dict, _ = PretrainedConfig.get_config_dict(
+            model if gguf_model_repo is None else gguf_model_repo,
+            revision=revision,
+            trust_remote_code=trust_remote_code,
+            token=_get_hf_token(),
+            **kwargs,
+        )
     spec_config = config_dict.get("speculators_config", None)
     # Return the target model
     if spec_config is not None:

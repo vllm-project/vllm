@@ -47,7 +47,7 @@ from vllm.transformers_utils.config import (
     is_interleaved, maybe_override_with_speculators_target_model,
     try_get_generation_config, try_get_safetensors_metadata,
     try_get_tokenizer_config, uses_mrope)
-from vllm.transformers_utils.s3_utils import S3Model
+from vllm.transformers_utils.s3_utils import get_s3
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         STR_DUAL_CHUNK_FLASH_ATTN_VAL, LayerBlockType,
@@ -852,11 +852,14 @@ class ModelConfig:
             return
 
         if is_s3(model):
-            s3_model = S3Model()
+            s3_model = get_s3()
             s3_model.pull_files(model,
-                                allow_pattern=["*.model", "*.py", "*.json"])
+                                allow_pattern=[
+                                    "*.model", "*.py", "*.json", "*.pt",
+                                    "*.safetensors", "*.bin", "*.tensors"
+                                ])
             self.model_weights = model
-            self.model = s3_model.dir
+            self.model = s3_model.get_model_path(model)
 
             # If tokenizer is same as model, download to same directory
             if model == tokenizer:
@@ -865,12 +868,12 @@ class ModelConfig:
                                         "*.pt", "*.safetensors", "*.bin",
                                         "*.tensors"
                                     ])
-                self.tokenizer = s3_model.dir
+                self.tokenizer = s3_model.get_model_path(model)
                 return
 
         # Only download tokenizer if needed and not already handled
         if is_s3(tokenizer):
-            s3_tokenizer = S3Model()
+            s3_tokenizer = get_s3()
             s3_tokenizer.pull_files(
                 model,
                 ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors"])
