@@ -1380,13 +1380,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         for modality, items in mm_items.items():
             if modality in mm_hash_overrides:
-                if isinstance(mm_hash_list := mm_hash_overrides[modality],
-                              str):
-                    mm_hash_list = [mm_hash_list]
+                mm_hashes = mm_hash_overrides[modality]
+                if isinstance(mm_hashes, str):
+                    mm_hashes = [mm_hashes]
+
                 # For None entries, compute a hash; otherwise, use provided ID.
                 computed: list[str] = []
                 for i, item in enumerate(items):
-                    mm_hash = mm_hash_list[i]
+                    mm_hash = mm_hashes[i]
 
                     # NOTE: Even if a mm_hash is provided, we still compute a
                     # hash if `hf_processor_mm_kwargs` or `tokenization_kwargs`
