@@ -429,6 +429,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                  "3.5-qwen3moe": "OpenGVLab/InternVL3_5-30B-A3B",   # noqa: E501
                                                  "3.5-gptoss": "OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview"},  # noqa: E501
                                          trust_remote_code=True),
+    "InternVLForConditionalGeneration": _HfExamplesInfo("OpenGVLab/InternVL3-1B-hf"),    # noqa: E501
     "KeyeForConditionalGeneration": _HfExamplesInfo("Kwai-Keye/Keye-VL-8B-Preview", # noqa: E501
                                                     trust_remote_code=True),
     "KimiVLForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-VL-A3B-Instruct",  # noqa: E501
@@ -584,7 +585,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
 _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersModel": _HfExamplesInfo("Qwen/Qwen3-Embedding-0.6B"),
     "TransformersForCausalLM": _HfExamplesInfo("hmellor/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
-    "TransformersForMultimodalLM": _HfExamplesInfo("OpenGVLab/InternVL3-1B-hf"),
+    "TransformersForMultimodalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
 }
 
 _EXAMPLE_MODELS = {

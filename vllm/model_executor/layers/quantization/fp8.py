@@ -897,6 +897,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         from vllm.model_executor.layers.fused_moe import (
             BatchedTritonOrDeepGemmExperts, TritonOrDeepGemmExperts)

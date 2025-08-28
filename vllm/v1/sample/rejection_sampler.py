@@ -68,7 +68,7 @@ class RejectionSampler(nn.Module):
                 different requests are flattened into a single tensor because
                 this is the shape of the output logits.
                 NOTE: `target_logits` can be updated in place to save memory.
-            bonus_token_ids_tensor (torch.Tensor):
+            bonus_token_ids (torch.Tensor):
                 A tensor containing bonus tokens. Shape is [batch_size, 1].
                 Bonus tokens are added to the end of the sequence if all
                 proposed tokens are accepted. We generate the bonus tokens

@@ -311,6 +311,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         experts = select_cutlass_fp8_gemm_impl(
             moe,
@@ -890,7 +891,11 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         assert (layer.weight_scale.dtype == torch.float8_e4m3fn), (
             "Weight Block scale must be represented as FP8-E4M3")
 
-        if self.backend == "flashinfer-trtllm":
+        if self.backend == "marlin":
+            prepare_fp4_layer_for_marlin(layer)
+            del layer.alpha
+            del layer.input_scale
+        elif self.backend == "flashinfer-trtllm":
             # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
             # FlashInfer provides nvfp4_quantize to quantize + shuffle the
             # layout but we use our own quantization so we have to call
@@ -914,11 +919,6 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer.weight_scale = Parameter(swizzled_weight_scale,
                                            requires_grad=False)
             layer.weight = Parameter(layer.weight.data, requires_grad=False)
-
-            if self.backend == "marlin":
-                prepare_fp4_layer_for_marlin(layer)
-                del layer.alpha
-                del layer.input_scale
 
     def apply(
         self,
@@ -1032,6 +1032,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         experts = select_nvfp4_gemm_impl(
             moe,
@@ -1310,6 +1311,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             del layer.w2_weight_scale
             del layer.w13_weight
             del layer.w13_weight_scale
+        elif self.use_marlin:
+            # Marlin processing
+            prepare_moe_fp4_layer_for_marlin(layer)
+            del layer.g1_alphas
+            del layer.g2_alphas
+            del layer.w13_input_scale_quant
+            del layer.w2_input_scale_quant
         else:
             # Non-TRT-LLM processing (Cutlass or non-flashinfer)
             assert (layer.w13_weight_scale.shape[2] % 16 == 0), (
@@ -1330,13 +1338,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                                               requires_grad=False)
             layer.w2_weight = Parameter(layer.w2_weight.data,
                                         requires_grad=False)
-
-        if self.use_marlin:
-            prepare_moe_fp4_layer_for_marlin(layer)
-            del layer.g1_alphas
-            del layer.g2_alphas
-            del layer.w13_input_scale_quant
-            del layer.w2_input_scale_quant
 
     def apply(
         self,
