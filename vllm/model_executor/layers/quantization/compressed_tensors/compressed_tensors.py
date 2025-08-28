@@ -11,6 +11,7 @@ from compressed_tensors.config import (CompressionFormat,
 from compressed_tensors.quantization import (QuantizationArgs,
                                              QuantizationStrategy,
                                              QuantizationType)
+from compressed_tensors.transform import TransformConfig
 from pydantic import BaseModel
 
 import vllm.envs as envs
@@ -30,6 +31,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A16Fp4, CompressedTensorsW4A16Sparse24,
     CompressedTensorsW8A8Fp8, CompressedTensorsW8A8Int8,
     CompressedTensorsW8A16Fp8, CompressedTensorsWNA16)
+from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear import (  # noqa: E501
+    CompressedTensorsLinearTransformMethod, get_linear_transform_schemes)
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     find_matched_target, is_activation_quantization_format,
     should_ignore_layer)
@@ -60,6 +63,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         sparsity_ignore_list: list[str],
         kv_cache_scheme: Optional[dict[str, Any]] = None,
         config: Optional[dict[str, Any]] = None,
+        transform_config: Optional[TransformConfig] = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -70,6 +74,12 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.sparsity_scheme_map = sparsity_scheme_map
         self.sparsity_ignore_list = sparsity_ignore_list
         self.config = config
+
+        if transform_config is not None:
+            self.transform_config = TransformConfig.model_validate(
+                transform_config)
+        else:
+            self.transform_config = None
 
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
@@ -103,18 +113,27 @@ class CompressedTensorsConfig(QuantizationConfig):
     ) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
-        # Check if the layer is skipped for quantization.
-        # TODO (@robertgshaw2): support module names
-        if should_ignore_layer(prefix,
-                               ignore=self.ignore,
-                               fused_mapping=self.packed_modules_mapping):
-            return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
-            scheme = self.get_scheme(layer=layer, layer_name=prefix)
-            if scheme is None:
-                return UnquantizedLinearMethod()
-            layer.scheme = scheme
-            return CompressedTensorsLinearMethod(self)
+            # collect schemes
+            quant_scheme = self.get_scheme(layer=layer, layer_name=prefix)
+            input_tfms, output_tfms = get_linear_transform_schemes(
+                layer, prefix, self.transform_config,
+                self.packed_modules_mapping)
+
+            # choose quantization method
+            quant_method: LinearMethodBase = UnquantizedLinearMethod()
+            if quant_scheme is not None:
+                layer.scheme = quant_scheme
+                quant_method = CompressedTensorsLinearMethod(self)
+
+            # choose transform method
+            if any((input_tfms, output_tfms)):
+                return CompressedTensorsLinearTransformMethod.from_schemes(
+                    quant_method, input_tfms, output_tfms)
+
+            else:
+                return quant_method
+
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
@@ -129,6 +148,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             config=config)
         sparsity_scheme_map, sparsity_ignore_list = cls._parse_sparsity_config(
             config=config)
+        transform_config = config.get("transform_config")
 
         return cls(
             target_scheme_map=target_scheme_map,
@@ -137,6 +157,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             sparsity_scheme_map=sparsity_scheme_map,
             sparsity_ignore_list=sparsity_ignore_list,
             config=config,
+            transform_config=transform_config,
         )
 
     @classmethod
@@ -537,9 +558,11 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         # Find the "target" in the compressed-tensors config
         # that our layer conforms to.
-        # TODO (@robertgshaw): add compressed-tensors as dep
-        # so we do not have to re-write these functions
-        # need to make accelerate optional in ct to do this
+        # TODO (@kylesayrs): support ignore module names with ct matching utils
+        if should_ignore_layer(layer_name,
+                               ignore=self.ignore,
+                               fused_mapping=self.packed_modules_mapping):
+            return None
 
         # Will be empty for models with only sparsity
         weight_quant = input_quant = None
@@ -722,7 +745,6 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         layer input.  See LinearMethodBase for param details
 
         """
-
         scheme = layer.scheme
         if scheme is None:
             raise ValueError("A scheme must be defined for each layer")

@@ -719,3 +719,25 @@ def test_compressed_tensors_w4a8_fp8(vllm_runner, args):
         output = llm.generate_greedy("Hello my name is", max_tokens=20)
         print(output)
         assert output
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(),
+                    reason="This test is skipped on non-CUDA platform.")
+@pytest.mark.parametrize("model,prompt,exp_perplexity", [
+    (
+        "nm-testing/Llama-3.2-1B-Instruct-spinquantR1R2R4-w4a16",
+        "Flat is better than nested.\nSparse is better than dense.",
+        150.0,
+    ),
+    (
+        "nm-testing/Llama-3.2-1B-Instruct-quip-w4a16",
+        "Flat is better than nested.\nSparse is better than dense.",
+        150.0,
+    ),
+])
+def test_compressed_tensors_transforms_perplexity(vllm_runner, model, prompt,
+                                                  exp_perplexity):
+    with vllm_runner(model, enforce_eager=True) as llm:
+        perplexity = llm.generate_prompt_perplexity([prompt])[0]
+        print(perplexity)
+        assert perplexity <= exp_perplexity
