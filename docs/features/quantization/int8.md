@@ -19,7 +19,7 @@ pip install llmcompressor
 Additionally, install `vllm` and `lm-evaluation-harness` for evaluation:
 
 ```bash
-pip install vllm lm-eval==0.4.4
+pip install vllm git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d#egg=lm-eval[api]
 ```
 
 ## Quantization Process
