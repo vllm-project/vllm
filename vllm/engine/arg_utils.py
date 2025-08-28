@@ -1053,7 +1053,7 @@ class EngineArgs:
                                    self.trust_remote_code, self.revision,
                                    self.code_revision, self.config_format)
 
-            # if loading a SpeculatorsConfig, load the specualtive_config
+            # if loading a SpeculatorsConfig, load the speculative_config
             # details from the config directly
             # no user input required / expected
             if isinstance(hf_config, SpeculatorsConfig):
@@ -1461,11 +1461,6 @@ class EngineArgs:
         if not model_config.is_v1_compatible:
             _raise_or_fallback(feature_name=model_config.architectures,
                                recommend_to_remove=False)
-            return False
-
-        # V1 mamba models are unoptimized.
-        if model_config.has_inner_state and _warn_or_fallback(
-                feature_name="Mamba"):
             return False
 
         # No Concurrent Partial Prefills so far.
