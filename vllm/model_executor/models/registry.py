@@ -255,6 +255,7 @@ _MULTIMODAL_MODELS = {
     "Step3VLForConditionalGeneration": ("step3_vl", "Step3VLForConditionalGeneration"),  # noqa: E501
     "TarsierForConditionalGeneration": ("tarsier", "TarsierForConditionalGeneration"),  # noqa: E501
     "Tarsier2ForConditionalGeneration": ("qwen2_vl", "Tarsier2ForConditionalGeneration"),  # noqa: E501
+    "ValleyQwen2ForCausalLM": ("valley", "ValleyQwen2ForCausalLM"), 
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     # [Encoder-decoder]
     "DonutForConditionalGeneration": ("donut", "DonutForConditionalGeneration"),
