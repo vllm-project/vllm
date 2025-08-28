@@ -310,8 +310,8 @@ class Worker(WorkerBase):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size,
                                          skip_eplb=True,
-                                         reset_lora=False)
-        self.model_runner.maybe_reset_loras(self.model_runner.lora_config)
+                                         remove_lora=False)
+        self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.

@@ -89,7 +89,7 @@ class LoRAModelRunnerMixin:
     @contextmanager
     def maybe_setup_dummy_loras(self,
                                 lora_config: Optional[LoRAConfig],
-                                reset_lora: bool = True):
+                                remove_lora: bool = True):
         if lora_config is None:
             yield
         else:
@@ -116,7 +116,7 @@ class LoRAModelRunnerMixin:
                 yield
 
             # __exit__ code
-            if reset_lora:
+            if remove_lora:
                 self.lora_manager.remove_all_adapters()
 
     @contextmanager
@@ -157,15 +157,15 @@ class LoRAModelRunnerMixin:
     def maybe_dummy_run_with_lora(self,
                                   lora_config: Optional[LoRAConfig],
                                   num_scheduled_tokens: np.ndarray,
-                                  reset_lora: bool = True):
+                                  remove_lora: bool = True):
         with (
-                self.maybe_setup_dummy_loras(lora_config, reset_lora),
+                self.maybe_setup_dummy_loras(lora_config, remove_lora),
                 self.maybe_select_dummy_loras(lora_config,
                                               num_scheduled_tokens),
         ):
             yield
 
-    def maybe_reset_loras(self, lora_config: Optional[LoRAConfig]):
+    def maybe_remove_all_loras(self, lora_config: Optional[LoRAConfig]):
         if lora_config is None:
             return
         self.lora_manager.remove_all_adapters()
