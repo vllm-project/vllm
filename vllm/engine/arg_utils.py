@@ -637,7 +637,6 @@ class EngineArgs:
             **parallel_kwargs["pipeline_parallel_size"])
         parallel_group.add_argument("--tensor-parallel-size", "-tp",
                                     **parallel_kwargs["tensor_parallel_size"])
-        # Note(hc): This parameter is automatically inferred now, do not set it manually.
         parallel_group.add_argument("--context-parallel-size", "-cp",
                                     **parallel_kwargs["context_parallel_size"])
         parallel_group.add_argument("--data-parallel-size", "-dp",
