@@ -15,7 +15,7 @@ import vllm.env_override  # noqa: F401
 
 MODULE_ATTRS = {
     "bc_linter_skip": "._bc_linter:bc_linter_skip",
-    + "bc_linter_include": "._bc_linter:bc_linter_include",
+    "bc_linter_include": "._bc_linter:bc_linter_include",
     "AsyncEngineArgs": ".engine.arg_utils:AsyncEngineArgs",
     "EngineArgs": ".engine.arg_utils:EngineArgs",
     "AsyncLLMEngine": ".engine.async_llm_engine:AsyncLLMEngine",
