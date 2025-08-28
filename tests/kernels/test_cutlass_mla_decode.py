@@ -35,7 +35,7 @@ CUTLASS_MLA_UNSUPPORTED_REASON = \
 @pytest.mark.parametrize("b", [128])
 @pytest.mark.parametrize("s_q", [1])
 @pytest.mark.parametrize("mean_sk", [4096, 8192, 16384])
-@pytest.mark.parametrize("h_q", [128])
+@pytest.mark.parametrize("h_q", [16, 32, 64, 128])
 @pytest.mark.parametrize("h_kv", [1])
 @pytest.mark.parametrize("d", [576])
 @pytest.mark.parametrize("dv", [512])
@@ -71,6 +71,7 @@ def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causa
     total_seqlens = cache_seqlens.sum().item()
     max_seqlen = cache_seqlens.max().item()
     max_seqlen_pad = triton.cdiv(max_seqlen, 256) * 256
+
     q = torch.randn(b, s_q, h_q, d)
     block_table = torch.arange(b * max_seqlen_pad // block_size,
                                dtype=torch.int32).view(
@@ -92,18 +93,33 @@ def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causa
         descale_k = None
 
     def cutlass_mla():
-        # For decode, we need to reshape to match the kernel interface
-        out_ans = torch.empty(b, h_q, dv, dtype=init_dtype)
-        q_reshaped = q.squeeze(1)  # Remove s_q=1 dimension: [b, h_q, d]
+        MAX_HEADS = 128
+
+        q_reshaped = q.squeeze(1)
         q_nope = q_reshaped[:, :, :dv].clone()
         q_pe = q_reshaped[:, :, dv:].clone()
+
+        if h_q < MAX_HEADS:
+            q_nope_padded = q_nope.new_empty((b, MAX_HEADS, dv))
+            q_nope_padded[:, :h_q] = q_nope
+            q_nope = q_nope_padded
+
+            q_pe_padded = q_pe.new_empty((b, MAX_HEADS, d - dv))
+            q_pe_padded[:, :h_q] = q_pe
+            q_pe = q_pe_padded
         
-        # Convert blocked format to the format expected by cutlass kernel
-        # The kernel expects kv_cache to have h_kv=1 squeezed out: [num_blocks, block_size, d]
-        kv_cache_flat = blocked_k.squeeze(2)  # Remove h_kv=1 dimension
-        ops.cutlass_mla_decode(out_ans, q_nope, q_pe, kv_cache_flat, cache_seqlens,
-                               block_table, scale)
-        return out_ans
+        kv_cache_flat = blocked_k.squeeze(2)
+        device_properties = torch.cuda.get_device_properties(torch.device("cuda:0"))
+        sm_count = device_properties.multi_processor_count
+        workspace_size = ops.sm100_cutlass_mla_get_workspace_size(
+            max_seqlen * block_size, b, sm_count, num_kv_splits=1)
+        workspace = torch.empty(workspace_size, device="cuda", dtype=torch.uint8)
+        
+        out_ans = torch.empty(b, MAX_HEADS, dv, dtype=init_dtype)
+        
+        ops.sm100_cutlass_mla_decode(out_ans, q_nope, q_pe, kv_cache_flat, cache_seqlens,
+                                     block_table, workspace, scale, 1)
+        return out_ans[:, :h_q].contiguous()
 
     def scaled_dot_product_attention(query, key, value, is_causal=False):
         query = query.float()
