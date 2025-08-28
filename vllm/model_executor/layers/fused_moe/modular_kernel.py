@@ -141,6 +141,18 @@ class TopKWeightAndReduce(ABC):
         raise NotImplementedError
 
 
+#
+# PrepareResultType is a tuple of:
+# - quantized + dispatched a.
+# - quantized + dispatched a1_scales.
+# - Optional ExpertTokensMetadata containing gpu/cpu tensors
+#   as big as the number of local experts with the information about the
+#   number of tokens assigned to each local expert.
+# - Optional dispatched expert topk IDs
+# - Optional dispatched expert topk weight
+#
+# See `prepare` method below.
+#
 PrepareResultType = tuple[
     torch.Tensor,
     Optional[torch.Tensor],

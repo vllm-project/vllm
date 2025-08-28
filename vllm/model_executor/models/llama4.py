@@ -74,70 +74,37 @@ class Llama4MoE(nn.Module):
                                        quant_config=None,
                                        prefix=f"{prefix}.router")
 
-        # This is a temporary flag for testing.
-        self.use_shared_fused = True
+        self.shared_expert = LlamaMLP(
+            hidden_size=config.hidden_size,
+            intermediate_size=intermediate_size_moe,
+            hidden_act="silu",
+            quant_config=quant_config,
+            bias=False,
+            prefix=f"{prefix}.shared_expert",
+            reduce_results=False,
+        )
 
-        if not self.use_shared_fused:
-            self.experts = FusedMoE(
-                num_experts=config.num_local_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                custom_routing_function=Llama4MoE.custom_routing_function,
-                intermediate_size=intermediate_size_moe,
-                apply_router_weight_on_input=True,
-                reduce_results=False,
-                renormalize=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.experts")
-
-            self.shared_expert = LlamaMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=intermediate_size_moe,
-                hidden_act="silu",
-                quant_config=quant_config,
-                bias=False,
-                prefix=f"{prefix}.shared_expert",
-                reduce_results=self.experts.must_reduce_shared_expert_outputs(
-                ),
-            )
-        else:
-            self.shared_expert = LlamaMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=intermediate_size_moe,
-                hidden_act="silu",
-                quant_config=quant_config,
-                bias=False,
-                prefix=f"{prefix}.shared_expert",
-                reduce_results=False,
-            )
-            self.experts = SharedFusedMoE(
-                shared_experts=self.shared_expert,
-                num_experts=config.num_local_experts,
-                top_k=config.num_experts_per_tok,
-                hidden_size=config.hidden_size,
-                custom_routing_function=Llama4MoE.custom_routing_function,
-                intermediate_size=intermediate_size_moe,
-                apply_router_weight_on_input=True,
-                reduce_results=False,
-                renormalize=False,
-                quant_config=quant_config,
-                prefix=f"{prefix}.experts",
-            )
+        self.experts = SharedFusedMoE(
+            shared_experts=self.shared_expert,
+            num_experts=config.num_local_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            custom_routing_function=Llama4MoE.custom_routing_function,
+            intermediate_size=intermediate_size_moe,
+            apply_router_weight_on_input=True,
+            reduce_results=False,
+            renormalize=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+        )
 
     def forward(self, hidden_states):
         router_logits, _ = self.router(hidden_states)
 
-        if not self.use_shared_fused:
-            shared_out = self.shared_expert(hidden_states)
-            routed_out = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-            )
-        else:
-            shared_out, routed_out = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-            )
+        shared_out, routed_out = self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+        )
         experts_out = routed_out + shared_out
 
         if self.tp_size > 1:
