@@ -1114,27 +1114,15 @@ def initialize_model_parallel(
     # Build the context model-parallel groups.
     global _CP
     assert _CP is None, ("context model parallel group is already initialized")
-    if context_model_parallel_size > 1:
-        # TODO(hc): In the future, Context Parallel will support cases where context_model_parallel_size
-        # is smaller than tensor_model_parallel_size, for example, QGA8-TP16 can enable CP2 to deduplicate KV-cache storage.
-        assert context_model_parallel_size == tensor_model_parallel_size
-        # _CP = _TP
-        # Note(hc): In multi-node inference, we’ve found that letting _CP use its own independent process group
-        # ( reuse tp_group_ranks ) rather than use _CP=_TP, can lower the risk of nccl hang.
-        _CP = init_model_parallel_group(tp_group_ranks,
-                                        get_world_group().local_rank,
-                                        backend,
-                                        use_message_queue_broadcaster=True,
-                                        group_name="cp")
-    else:
-        assert context_model_parallel_size == 1
-        group_ranks = all_ranks.reshape(-1,
-                                        context_model_parallel_size).unbind(0)
-        group_ranks = [x.tolist() for x in group_ranks]
-        _CP = init_model_parallel_group(group_ranks,
-                                        get_world_group().local_rank,
-                                        backend,
-                                        group_name="cp")
+    # Note(hc): In the current implementation of decode context parallel, cp_size must not exceed tp_size,
+    # because the world size does not change by cp, it simply reuse the GPUs of TP group.
+    group_ranks = all_ranks.reshape(-1, context_model_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    _CP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank,
+                                    backend,
+                                    use_message_queue_broadcaster=True,
+                                    group_name="cp")
 
     # Build the pipeline model-parallel groups.
     global _PP
