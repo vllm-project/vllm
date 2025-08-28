@@ -44,6 +44,7 @@ from vllm.model_executor.models.interfaces import (is_mixture_of_experts,
                                                    supports_transcription)
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
+from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (BatchedTensorInputs, MultiModalKwargsItem,
                                     PlaceholderRange)
@@ -1519,16 +1520,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mm_embeds = []
 
         if self.supports_mm_inputs and get_pp_group().is_first_rank:
-            is_embed = ...  # TODO
-
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
             inputs_embeds_scheduled = self.model.get_input_embeddings(
-                input_ids=self.input_ids.gpu[:num_scheduled_tokens],
-                multimodal_embeddings=mm_embeds or None,
-                is_embed=is_embed if mm_embeds else None,
-            )
+                self.input_ids.gpu[:num_scheduled_tokens])
+
+            if mm_embeds:
+                is_mm_embed = ...  # TODO
+
+                inputs_embeds_scheduled = _merge_multimodal_embeddings(
+                    inputs_embeds_scheduled,
+                    is_mm_embed,
+                    multimodal_embeddings=mm_embeds,
+                )
 
             # TODO(woosuk): Avoid the copy. Optimize.
             self.inputs_embeds[:num_scheduled_tokens].copy_(
