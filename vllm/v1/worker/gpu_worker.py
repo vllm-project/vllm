@@ -313,6 +313,7 @@ class Worker(WorkerBase):
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
         kernel_warmup(self)
+
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
 

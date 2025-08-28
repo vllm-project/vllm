@@ -769,16 +769,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Iterate over the dictionary rather than all requests since not all
             # requests have draft tokens.
             num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
-            # Cache scheduled drafts for _calc_spec_decode_metadata logging
-            self._last_scheduled_spec_decode_tokens = (
-                scheduler_output.scheduled_spec_decode_tokens)
             for req_id, draft_token_ids in (
                     scheduler_output.scheduled_spec_decode_tokens.items()):
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 num_draft_tokens[req_idx] = len(draft_token_ids)
             spec_decode_metadata = self._calc_spec_decode_metadata(
-                num_draft_tokens, cu_num_tokens,
-                scheduler_output.scheduled_spec_decode_tokens)
+                num_draft_tokens, cu_num_tokens)
             logits_indices = spec_decode_metadata.logits_indices
 
         logits_indices_padded = None
@@ -1062,7 +1058,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         num_draft_tokens: np.ndarray,
         cu_num_scheduled_tokens: np.ndarray,
-        scheduled_spec_decode_tokens: dict[str, list[int]],
     ) -> SpecDecodeMetadata:
         # Inputs:
         # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
@@ -1125,17 +1120,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             bonus_logits_indices=bonus_logits_indices,
             logits_indices=logits_indices,
         )
-        try:
-            logger.info(
-                "[EAGLE3 dbg] spec meta: num_drafts=%s, logits_indices[0:8]=%s, target_indices[0:8]=%s, bonus_indices[0:8]=%s, draft_token_ids[0:8]=%s",  # noqa: G004
-                num_draft_tokens.tolist(),
-                logits_indices[:8].tolist(),
-                target_logits_indices[:8].tolist(),
-                bonus_logits_indices[:8].tolist(),
-                metadata.draft_token_ids[:8].tolist(),
-            )
-        except Exception:
-            pass
+
         return metadata
 
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
@@ -1639,7 +1624,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
-
         if spec_decode_metadata is None:
             sampler_output = self.sampler(
                 logits=logits,
@@ -1663,21 +1647,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # it is safe to update `target_logits` in place.
             target_logits = logits[spec_decode_metadata.target_logits_indices]
 
-            try:
-                # Debug alignment between draft ids and target logits
-                _n = min(4, spec_decode_metadata.draft_token_ids.shape[0])
-                if _n > 0:
-                    _draft_ids = spec_decode_metadata.draft_token_ids[:_n]
-                    _targ = target_logits[:_n]
-                    _targ_argmax = _targ.argmax(dim=-1)
-                    logger.info(
-                        "[EAGLE3 dbg] target_logits check: n=%s, draft_ids=%s, targ_argmax=%s, targ_shape=%s",  # noqa: G004
-                        int(_n),
-                        _draft_ids.tolist(),
-                        _targ_argmax.tolist(),
-                        tuple(target_logits.shape))
-            except Exception:
-                pass
             output_token_ids = self.rejection_sampler(
                 spec_decode_metadata,
                 None,  # draft_probs
@@ -1774,7 +1743,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 spec_decode_metadata,
                 spec_decode_common_attn_metadata,
             )
+
         self.eplb_step()
+
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -2790,7 +2761,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return attn_groups
 
         for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-
             kv_cache_spec = kv_cache_group_spec.kv_cache_spec
             attn_backends = get_attn_backends_for_layers(
                 kv_cache_group_spec.layer_names)
