@@ -43,7 +43,7 @@ CUTLASS_MLA_UNSUPPORTED_REASON = \
 @pytest.mark.parametrize("causal", [True])
 @pytest.mark.parametrize("varlen", [False, True])
 @pytest.mark.parametrize("torch_dtype",
-                         [torch.bfloat16, torch.float16])
+                         [torch.bfloat16, torch.float16, torch.float8_e4m3fn])
 @torch.inference_mode()
 def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal,
                             varlen, torch_dtype):
@@ -76,9 +76,6 @@ def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causa
                                dtype=torch.int32).view(
                                    b, max_seqlen_pad // block_size)
     blocked_k = torch.randn(block_table.numel(), block_size, h_kv, d)
-    # Note: For cutlass MLA, we don't set NaN for unused positions since the kernel
-    # handles sequence boundaries through cache_seqlens. The flashmla reference 
-    # will still work correctly with the causal mask and sequence length handling.
     blocked_v = blocked_k[..., :dv]
 
     init_dtype = q.dtype
