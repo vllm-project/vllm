@@ -708,7 +708,7 @@ class TransformersMoEBase(TransformersBase):
 
         # Positional arguments
         num_experts = self.model_config.get_num_experts()
-        top_k = text_config.num_experts_per_token
+        top_k = text_config.num_experts_per_tok
         hidden_size = text_config.hidden_size
         names = ["moe_intermediate_size", "intermediate_size"]
         intermediate_size = getattr_iter(text_config, names, None)
