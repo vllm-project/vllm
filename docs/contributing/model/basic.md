@@ -136,7 +136,7 @@ For the mamba layers themselves, please use the [`MambaMixer`](gh-file:vllm/mode
 The model should also be added to the [`MODELS_CONFIG_MAP`](gh-file:vllm/model_executor/models/config.py#L419-L421) dictionary to ensure that the runtime defaults are optimized.
 
 For case (2), we recommend using as a reference the implementation of [`JambaForCausalLM`](gh-file:vllm/model_executor/models/jamba.py) (for an example of a model that uses Mamba-1 and attention together) or [`BambaForCausalLM`](gh-file:vllm/model_executor/models/bamba.py) (for an example of a model that uses Mamba-2 and attention together).
-These models should follow the same instructions as case (1), but they should inherit protocol `IsHybrid` (instead of `IsAttentionFree`) and it is _not_ necessary to add them to the `MODELS_CONFIG_MAP` (their runtime defaults will be inferred from the protocol).
+These models should follow the same instructions as case (1), but they should inherit protocol `IsHybrid` (instead of `IsAttentionFree`) and it is *not* necessary to add them to the `MODELS_CONFIG_MAP` (their runtime defaults will be inferred from the protocol).
 
 For case (3), we recommend looking at the implementation of [`MiniMaxText01ForCausalLM`](gh-file:vllm/model_executor/models/minimax_text_01.py) or [`Lfm2ForCausalLM`](gh-file:vllm/model_executor/models/lfm2.py) as a reference, which use custom "mamba-like" layers [`MiniMaxText01LinearAttention`](gh-file:vllm/model_executor/models/minimax_text_01.py#L287) and [`ShortConv`](gh-file:vllm/model_executor/layers/mamba/short_conv.py) respectively.
 Please follow the same guidelines as case (2) for implementing these models.
