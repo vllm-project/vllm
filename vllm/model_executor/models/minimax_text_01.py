@@ -124,17 +124,7 @@ class MiniMaxText01RMSNormTP(CustomOp):
             variance = tensor_model_parallel_all_reduce(
                 variance) / self.tp_world
         x = x * torch.rsqrt(variance + self.variance_epsilon)
-
-        weight = self.weight
-        if x.size(-1) != self.weight.size(0):
-            if self.weight.size(0) < x.size(-1):
-                repeat_count = (x.size(-1) + self.weight.size(0)) // x.size(-1)
-                full_weight = self.weight.repeat(repeat_count)
-                weight = full_weight[:x.size(-1)]
-            else:
-                weight = self.weight[:x.size(-1)]
-
-        x = x.to(orig_dtype) * weight
+        x = x.to(orig_dtype) * self.weight
         return x
 
     def forward(
@@ -684,7 +674,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 layer_idx=self._ilayer,
                 linear_layer_idx=linear_layer_id,
-                prefix=prefix)
+                prefix=f"{prefix}.self_attn")
         elif config.attention_type == 1:
             self.self_attn = MiniMaxText01Attention(
                 hidden_size=self.hidden_size,
@@ -699,7 +689,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 layer_idx=self._ilayer,
                 cache_config=cache_config,
-                prefix=prefix)
+                prefix=f"{prefix}.self_attn")
         else:
             raise ValueError(
                 f"Unsupported attention type: {self.config.attention_type}")
