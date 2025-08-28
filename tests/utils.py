@@ -839,6 +839,7 @@ def fork_new_process_for_each_test(
                     tb_string = traceback.format_exc()
 
                     # Try to serialize the exception object first
+                    exc_to_serialize: dict[str, Any]
                     try:
                         # First, try to pickle the actual exception with
                         # its traceback.
