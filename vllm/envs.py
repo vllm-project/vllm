@@ -1191,18 +1191,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_RESPONSES_API_STORE":
     lambda: bool(int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))),
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
     # If set, use the fp8 mfma in rocm paged attention.
     "VLLM_ROCM_FP8_MFMA_PAGE_ATTN":
     lambda: bool(int(os.getenv("VLLM_ROCM_FP8_MFMA_PAGE_ATTN", "0"))),
-<<<<<<< HEAD
-  
->>>>>>> c588bf50e (Update vllm/envs.py)
-=======
 
->>>>>>> 0c785a544 (clean up space)
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM":
     lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))),
@@ -1211,11 +1203,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TUNED_CONFIG_FOLDER":
     lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
 
-=======
-    # If set, use the fp8 mfma in rocm paged attention.
-    "VLLM_USE_FP8_MFMA":
-    lambda: bool(int(os.getenv("VLLM_USE_FP8_MFMA", "0"))),
->>>>>>> 0b5617bf4 (Support VLLM_USE_FP8_MFMA in envs)
 }
 
 # --8<-- [end:env-vars-definition]
