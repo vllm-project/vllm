@@ -1136,6 +1136,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NIXL_SIDE_CHANNEL_PORT":
     lambda: int(os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5557")),
 
+    # Backend for vllm's NIXL communication.
+    "VLLM_NIXL_BACKEND":
+    lambda: os.getenv("VLLM_NIXL_BACKEND", "UCX"),
+
     # all2all backend for vllm's expert parallel communication
     # Available options:
     # - "naive": naive all2all implementation using broadcasts
