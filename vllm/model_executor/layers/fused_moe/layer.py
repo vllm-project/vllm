@@ -474,7 +474,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_map=expert_map,
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
-            logical_replica_count=logical_replica_count)
+            logical_replica_count=logical_replica_count,
+            num_fused_shared_experts=layer.num_fused_shared_experts,
+            routed_scaling_factor=layer.routed_scaling_factor,
+        )
 
         if self.rocm_aiter_moe_enabled:
             return self.rocm_aiter_fused_experts(
@@ -1501,11 +1504,11 @@ class FusedMoE(CustomOp):
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
                 **({
-                    "routed_scaling_factor": routed_scaling_factor
-                } if is_rocm_aiter_moe_enabled() else {}),
-                **({
                     "num_fused_shared_experts": num_fused_shared_experts
-                } if is_rocm_aiter_fusion_shared_expert_enabled() else {}))
+                } if is_rocm_aiter_fusion_shared_expert_enabled() else {}),
+                **({
+                    "routed_scaling_factor": routed_scaling_factor
+                } if is_rocm_aiter_moe_enabled() else {}))
             if indices_type is not None:
                 topk_ids = topk_ids.to(dtype=indices_type)
         elif custom_routing_function is None:

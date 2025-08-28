@@ -882,11 +882,77 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            # Special handling: when AITER fusion_shared_experts is enabled,
+            # checkpoints may provide a single widened shared_experts tensor
+            # without explicit expert indices
+            # (e.g. ...mlp.shared_experts.gate_proj.weight).
+            # For models with multiple shared experts, split that tensor
+            # evenly into per-shared-expert slices and load them into
+            # appended expert slots mlp.experts.{n_routed_experts + j}.*
+            # accordingly.
             if (is_rocm_aiter_fusion_shared_expert_enabled()
                     and "mlp.shared_experts" in name):
-                name = name.replace(
-                    "mlp.shared_experts",
-                    f"mlp.experts.{self.config.n_routed_experts}")
+                num_shared = getattr(self.config, "n_shared_experts", 0) or 0
+                if num_shared > 0:
+                    # Determine split axis based on op type
+                    # gate/up: ColumnParallel → split along dim 0
+                    # down: RowParallel → split along dim 1
+                    split_dim = 1 if name.endswith("down_proj.weight") else 0
+                    total = loaded_weight.shape[split_dim]
+                    assert total % num_shared == 0, (
+                        f"Shared expert weight dim {total} "
+                        f"not divisible by num_shared {num_shared}")
+                    chunk = total // num_shared
+
+                    for j in range(num_shared):
+                        if split_dim == 0:
+                            w_slice = loaded_weight[j * chunk:(j + 1) *
+                                                    chunk, :]
+                        else:
+                            w_slice = loaded_weight[:,
+                                                    j * chunk:(j + 1) * chunk]
+
+                        # Synthesize an expert-style name so expert mapping
+                        # can route it
+                        name_j = name.replace(
+                            "mlp.shared_experts",
+                            f"mlp.experts.{self.config.n_routed_experts + j}")
+
+                        # Use expert_params_mapping to locate the destination
+                        # param and delegate to its expert-aware weight_loader
+                        # with expert_id.
+                        is_loaded = False
+                        for mapping in expert_params_mapping:
+                            param_name, weight_name, expert_id, shard_id = \
+                                mapping
+                            if weight_name not in name_j:
+                                continue
+
+                            name_mapped = name_j.replace(
+                                weight_name, param_name)
+                            if is_pp_missing_parameter(name_mapped, self):
+                                continue
+
+                            param = params_dict[name_mapped]
+                            weight_loader = typing.cast(
+                                Callable[..., bool], param.weight_loader)
+                            success = weight_loader(param,
+                                                    w_slice,
+                                                    name_mapped,
+                                                    shard_id=shard_id,
+                                                    expert_id=expert_id,
+                                                    return_success=True)
+                            if success:
+                                is_loaded = True
+                                break
+                        if not is_loaded:
+                            # Fall back: skip if this shard/expert not present
+                            # on this rank
+                            pass
+
+                    # Mark original shared_experts weight as handled
+                    loaded_params.add(name)
+                    continue
 
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
