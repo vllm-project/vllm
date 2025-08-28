@@ -113,7 +113,7 @@ class EngineClient(ABC):
         tokenized_length = len(prompt_token_ids)
 
         sort_beams_key = create_sort_beams_key_function(
-            tokenizer.eos_token_id, length_penalty)
+            stop_token_ids, stop, tokenizer, length_penalty)
 
         beam_search_params = SamplingParams(
             logprobs=2 * beam_width,

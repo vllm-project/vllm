@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict
@@ -62,7 +63,9 @@ class BeamSearchInstance:
 def get_beam_search_score(
     tokens: list[int],
     cumulative_logprob: float,
-    eos_token_id: int,
+    stop_token_ids: list[int],
+    stop_tokens: list[str],
+    tokenizer: AnyTokenizer,
     length_penalty: float = 1.0,
 ) -> float:
     """Calculate the beam search score with length penalty.
@@ -72,16 +75,20 @@ def get_beam_search_score(
     https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/generation/beam_search.py#L938
     """
     seq_len = len(tokens)
-    if tokens[-1] == eos_token_id:
+    if tokens[-1] in stop_token_ids or tokenizer.decode([tokens[-1]
+                                                         ]) in stop_tokens:
         seq_len -= 1
 
     return cumulative_logprob / (seq_len**length_penalty)
 
 
-def create_sort_beams_key_function(eos_token_id: int, length_penalty: float):
+def create_sort_beams_key_function(stop_token_ids: list[int],
+                                   stop_tokens: list[str],
+                                   tokenizer: AnyTokenizer,
+                                   length_penalty: float):
 
     def sort_beams_key(x: BeamSearchSequence) -> float:
-        return get_beam_search_score(x.tokens, x.cum_logprob, eos_token_id,
-                                     length_penalty)
+        return get_beam_search_score(x.tokens, x.cum_logprob, stop_token_ids,
+                                     stop_tokens, tokenizer, length_penalty)
 
     return sort_beams_key
