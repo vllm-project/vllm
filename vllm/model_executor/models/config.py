@@ -265,7 +265,7 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
         if len(scheduler_config.cuda_graph_sizes) == 1:
             max_capture_size = scheduler_config.cuda_graph_sizes[0]
             # FIXME(woosuk): When using full cuda graph with FA3, the max
-            # supported size is 1024.
+            # supported size is 992.
             if max_capture_size < 1024:
                 cuda_graph_sizes = [1, 2, 4]
                 # Step size 8 for small batch sizes
