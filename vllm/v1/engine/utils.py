@@ -314,6 +314,8 @@ class CoreEngineActorManager:
         local_dp_ranks: list[int] = []
 
         for node in nodes:
+            if len(placement_groups) == dp_size:
+                break
             node_ip = node.node_ip
             node_resources = available_resources[node.node_id]
             if "GPU" not in node_resources:
@@ -322,19 +324,18 @@ class CoreEngineActorManager:
             # TODO(rui): support allocating a single DP rank
             # to multiple nodes
             dp_size_available = int(node_resources["GPU"]) // world_size
-            if node_ip == dp_master_ip:
-                assert dp_size_available >= dp_size_local, (
-                    "Not enough resources to allocate DP ranks "
-                    f"on DP master node {node_ip}")
-            else:
-                # TODO(rui): support non-uniform data parallel placement
-                logger.info(
-                    "Skipping node %s as %s DP ranks could not fit "
-                    "possible to fit: %s", node_ip, dp_size_local,
-                    dp_size_available)
-                continue
-            if len(placement_groups) == dp_size:
-                break
+            if dp_size_available < dp_size_local:
+                if node_ip == dp_master_ip:
+                    raise ValueError(
+                        "Not enough resources to allocate DP ranks "
+                        f"on DP master node {node_ip}")
+                else:
+                    logger.info(
+                        "Skipping node %s as %s DP ranks could not fit, "
+                        "possible to fit: %s", node_ip, dp_size_local,
+                        dp_size_available)
+                    continue
+
             for i in range(dp_size_local):
                 bundles = [{
                     "GPU": 1.0,
