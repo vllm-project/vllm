@@ -434,6 +434,8 @@ class XIELU(CustomOp):
 
     def _xielu_cuda(self, x: torch.Tensor) -> torch.Tensor:
         """Firewall function to prevent torch.compile from seeing .item()"""
+        assert self._xielu_cuda_obj is not None, (
+            "XIELU CUDA object must not be None")
         original_shape = x.shape
         # CUDA kernel expects 3D tensors, reshape if needed
         while x.dim() < 3:
