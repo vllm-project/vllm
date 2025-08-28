@@ -106,8 +106,11 @@ def can_enable_torch_compile(vllm_config: VllmConfig) -> bool:
 
 
 def replace_linear_class(
-    linear: nn.Linear, style: Literal["colwise", "rowwise"],
-    quant_config: QuantizationConfig
+    linear: nn.Linear,
+    style: Literal["colwise", "rowwise"],
+    quant_config: QuantizationConfig,
+    *,
+    prefix: str = "",
 ) -> Union[ColumnParallelLinear, RowParallelLinear, ReplicatedLinear]:
     """
     Replace nn.Linear with one of vLLM's tensor parallel linear classes.
@@ -141,6 +144,7 @@ def replace_linear_class(
         output_size=linear.out_features,
         bias=linear.bias is not None,
         quant_config=quant_config,
+        prefix=prefix,
         return_bias=False,
         **vllm_linear_kwargs,
     )
@@ -327,6 +331,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
+        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -393,9 +398,11 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             self._get_mm_fields_config(processed_data, hf_processor_mm_kwargs,
                                        num_image_patches),
         )
+        # Use overrides if provided; fallback to data-dependent hashing.
+        mm_hashes = (mm_hash_overrides if mm_hash_overrides is not None else
+                     self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
+                                         tokenization_kwargs))
 
-        mm_hashes = self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
-                                        tokenization_kwargs)
         return MultiModalInputs(
             type="multimodal",
             prompt=prompt,
@@ -554,8 +561,10 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
                     generator = (p for p in tp_plan if re.match(p, qual_name))
                     pattern = next(generator, None)
                     style = tp_plan.get(pattern, "replicate")
-                    new_module = replace_linear_class(child_module, style,
-                                                      self.quant_config)
+                    new_module = replace_linear_class(child_module,
+                                                      style,
+                                                      self.quant_config,
+                                                      prefix=qual_name)
                     setattr(module, child_name, new_module)
                     log_replacement(qual_name, child_module, new_module)
                 else:
