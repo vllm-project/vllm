@@ -57,7 +57,6 @@ from transformers.utils import is_flash_attn_2_available
 
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model_tensor
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 
 if is_flash_attn_2_available():
@@ -644,6 +643,7 @@ class MoonVitPretrainedModel(PreTrainedModel):
         config = deepcopy(config)
         self.use_data_parallel = use_data_parallel
         self.merge_kernel_size = config.merge_kernel_size
+        self.hidden_size = config.hidden_size
         self.patch_size = config.patch_size
         self.patch_embed = MoonVisionPatchEmbed(
             out_dim=config.hidden_size,
@@ -677,13 +677,7 @@ class MoonVitPretrainedModel(PreTrainedModel):
             torch.Tensor: The output tokens.
         """
         hidden_states = self.patch_embed(pixel_values, grid_hw)
-        if self.use_data_parallel:
-            hidden_states = run_dp_sharded_mrope_vision_model_tensor(
-                self.encoder,
-                hidden_states,
-                grid_hw)
-        else:
-            hidden_states = self.encoder(hidden_states, grid_hw)
+        hidden_states = self.encoder(hidden_states, grid_hw)
         hidden_states = patch_merger(hidden_states,
                                      grid_hw,
                                      merge_kernel_size=self.merge_kernel_size)

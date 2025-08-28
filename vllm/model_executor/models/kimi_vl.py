@@ -77,6 +77,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model_tensor_Kimi
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
@@ -303,7 +304,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
-        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         model_config = vllm_config.model_config
@@ -312,13 +312,15 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         quant_config = vllm_config.quant_config
 
         assert isinstance(config.vision_config, MoonViTConfig)
+        self.use_data_parallel = model_config.multimodal_config.mm_encoder_tp_mode == "data"
+        self.hidden_size = config.text_config.hidden_size
+        self.vision_tower = MoonVitPretrainedModel(
+            config.vision_config, self.use_data_parallel,
+            prefix=maybe_prefix(prefix, "vision_tower"))
 
-        self.vision_tower = MoonVitPretrainedModel(\
-            config.vision_config, prefix=maybe_prefix(prefix, "vision_tower"))
-
-        self.multi_modal_projector = \
-            KimiVLMultiModalProjector(config=config, 
-            use_data_parallel=use_data_parallel,
+        self.multi_modal_projector = KimiVLMultiModalProjector(
+            config=config,
+            use_data_parallel=self.use_data_parallel,
             prefix=maybe_prefix(prefix, "multi_modal_projector"))
 
         self.quant_config = quant_config
@@ -344,8 +346,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
         self.media_placeholder: int = self.config.media_placeholder_token_id
-
-        self.use_data_parallel = use_data_parallel
 
     # ref: qwen2_vl.py
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
@@ -402,7 +402,13 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         pixel_values = inputs["pixel_values"]
         image_grid_hws = inputs["image_grid_hws"]
-        return self.vision_tower(pixel_values, image_grid_hws)
+        if self.use_data_parallel:
+            return run_dp_sharded_mrope_vision_model_tensor_Kimi(
+                self.vision_tower,
+                pixel_values,
+                image_grid_hws)
+        else:
+            return self.vision_tower(pixel_values, image_grid_hws)
 
     def _process_image_input(self,
                              image_input: KimiVLImageInputs) -> torch.Tensor:
@@ -546,9 +552,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
             expert_params_mapping = []
 
         params_dict = dict(self.named_parameters())
-
-        if self.use_data_parallel:
-            weights = self._consolidate_qkv_weights(weights)
 
         for args in weights:
             name, loaded_weight = args[:2]

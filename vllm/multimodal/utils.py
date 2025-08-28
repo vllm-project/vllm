@@ -436,8 +436,7 @@ def group_mm_kwargs_by_modality(
 
 
 def run_dp_sharded_vision_model(image_input: torch.Tensor,
-                                vision_model: torch.nn.Module,
-                                grid_hw: torch.Tensor = None) -> torch.Tensor:
+                                vision_model: torch.nn.Module) -> torch.Tensor:
     """Run a vision model with data parallelism (DP) sharding. The function 
     will shard the input image tensor on the first dimension and run the vision
     model
@@ -445,7 +444,7 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
     Args:
         image_input (torch.Tensor): Image input tensor.
         vision_model (torch.nn.Module): Vision model.
-
+        
     Returns:
         torch.Tensor: Output image embeddings
     """
@@ -460,11 +459,8 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
     image_input_per_rank = image_input_padded[rank *
                                               num_chunks_per_rank:(rank + 1) *
                                               num_chunks_per_rank, ...]
-    # for kimi_vl, grid_hw is required
-    if grid_hw is not None:
-        vision_embeddings = vision_model(image_input_per_rank, grid_hw)
-    else:
-        vision_embeddings = vision_model(image_input_per_rank)
+
+    vision_embeddings = vision_model(image_input_per_rank)
     # Ensure tensor is contiguous before all_gather
     vision_embeddings = vision_embeddings.contiguous()
     vision_embeddings = tensor_model_parallel_all_gather(vision_embeddings,
@@ -472,18 +468,18 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
     vision_embeddings = vision_embeddings[:num_chunks, ...]
     return vision_embeddings
 
-def run_dp_sharded_mrope_vision_model_tensor(
+def run_dp_sharded_mrope_vision_model_tensor_Kimi(
     vision_model: torch.nn.Module,
     pixel_values: torch.Tensor,
     grid_thw: torch.Tensor,
-) -> tuple[torch.Tensor, ...]:
+) -> list[torch.Tensor]:
     """Run a vision model with data parallelism (DP) sharding for tensor 
     grid_thw. Optimized version specifically for torch.Tensor grid_thw input.
     
     Args:
         vision_model (torch.nn.Module): Vision model.
         pixel_values (torch.Tensor): Image/Video input tensor.
-        grid_thw (torch.Tensor): Grid dimensions tensor of shape [num_items, 3]
+        grid_thw (torch.Tensor): Grid dimensions tensor of shape [num_items, 2]
         
     Returns:
         tuple[torch.Tensor, ...]: Output image embeddings per item
@@ -491,10 +487,10 @@ def run_dp_sharded_mrope_vision_model_tensor(
     Example:
         ```
         vision_model.out_hidden_size = 64
-        vision_model.spatial_merge_size = 2
+        vision_model.merge_kernel_size = 2
         pixel_values.shape = (1350, channel)
-        grid_thw.shape = (4, 3)  # [[1, 10, 100], [1, 10, 10], 
-        [1, 10, 20], [1, 5, 10]]
+        grid_thw.shape = (4, 2)  # [[10, 100], [10, 10], 
+        [10, 20], [5, 10]]
         tp_size=2
         ```
     """
@@ -556,9 +552,8 @@ def run_dp_sharded_mrope_vision_model_tensor(
             (0, grid_thw.shape[1]), device=grid_thw.device, dtype=grid_thw.dtype)
 
     # Calculate output dimensions
-    embed_dim_reduction_factor = (vision_model.spatial_merge_size *
-                                  vision_model.spatial_merge_size)
-
+    embed_dim_reduction_factor = (vision_model.merge_kernel_size[0] *
+                                  vision_model.merge_kernel_size[1])
     # Find max length for padding
     max_len_per_rank = (max(grouped_pixel_values_len) // 
                        embed_dim_reduction_factor)
@@ -566,8 +561,20 @@ def run_dp_sharded_mrope_vision_model_tensor(
     # Run the vision model on local data
     if pixel_values_local.shape[0] > 0:
         image_embeds_local = vision_model(pixel_values_local, grid_thw_local)
+        # Compatible for list/tensor
+        if isinstance(image_embeds_local, list):
+            image_embeds_local = torch.cat(image_embeds_local, dim=0)
     else:
-        image_embeds_local = torch.empty((0, vision_model.out_hidden_size),
+        out_dim = None
+        # 1. use projector output size first
+        if hasattr(vision_model, "multi_modal_projector"):
+            out_dim = getattr(vision_model.multi_modal_projector.linear_2, "out_features", None)
+        # 2. MoonVit: config.hidden_size
+        elif hasattr(vision_model, "config"):
+            out_dim = getattr(vision_model.config, "hidden_size", None)
+        # 3. QwenVL: out_hidden_size
+        out_dim = out_dim or getattr(vision_model, "out_hidden_size", None)
+        image_embeds_local = torch.empty((0, embed_dim_reduction_factor, out_dim),
                                          device=pixel_values.device,
                                          dtype=pixel_values.dtype)
 
@@ -575,7 +582,7 @@ def run_dp_sharded_mrope_vision_model_tensor(
     current_len = image_embeds_local.shape[0]
     if current_len < max_len_per_rank:
         padding_size = max_len_per_rank - current_len
-        padding = torch.empty((padding_size, image_embeds_local.shape[1]),
+        padding = torch.empty((padding_size, image_embeds_local.shape[1],image_embeds_local.shape[2]),
                               dtype=image_embeds_local.dtype,
                               device=image_embeds_local.device)
         image_embeds_local_padded = torch.cat(
@@ -586,7 +593,6 @@ def run_dp_sharded_mrope_vision_model_tensor(
     # Gather embeddings from all ranks
     gathered_embeds = tensor_model_parallel_all_gather(
         image_embeds_local_padded, dim=0)
-
     # Remove padding and reconstruct per-rank embeddings
     rank_embeddings = []
     for rank in range(tp_size):
@@ -616,8 +622,8 @@ def run_dp_sharded_mrope_vision_model_tensor(
                 embed_start += item_patches
             current_idx += count
 
-    out_embeddings = tuple(embed for embed in original_order_embeddings
-                           if embed is not None)
+    out_embeddings = [embed for embed in original_order_embeddings
+                           if embed is not None]
     assert (len(out_embeddings) == len(original_order_embeddings)), \
         "Found unassigned embeddings"
     return out_embeddings
