@@ -700,7 +700,7 @@ def multi_process_parallel(
             VLLM_PATH,
             "excludes": [
                 "build", ".git", "cmake-build-*", "shellcheck", "dist",
-                "ep_kernels_workspace"
+                "ep_kernels_workspace", ".mypy_cache", ".deps"
             ]
         })
 
