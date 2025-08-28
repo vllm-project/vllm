@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 import warnings
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from multiprocessing import Process
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Union
@@ -815,14 +815,19 @@ def fork_new_process_for_each_test(
         # Create a unique temporary file to store exception info from child
         # process. Use test function name and process ID to avoid collisions.
         with tempfile.NamedTemporaryFile(
+                delete=False,
                 mode='w+b',
                 prefix=f"vllm_test_{func.__name__}_{os.getpid()}_",
-                suffix=".exc") as exc_file:
+                suffix=".exc") as exc_file, ExitStack() as delete_after:
             exc_file_path = exc_file.name
+            delete_after.callback(os.remove, exc_file_path)
 
             pid = os.fork()
             print(f"Fork a new process to run a test {pid}")
             if pid == 0:
+                # Parent process responsible for deleting, don't delete
+                # in child.
+                delete_after.pop_all()
                 try:
                     func(*args, **kwargs)
                 except Skipped as e:
@@ -841,7 +846,7 @@ def fork_new_process_for_each_test(
                         # Test if it can be pickled
                         cloudpickle.dumps(exc_to_serialize)
                     except Exception:
-                        # Fall back to string-based approach
+                        # Fall back to string-based approach.
                         exc_to_serialize = {
                             'exception_type': type(e).__name__,
                             'exception_msg': str(e),
@@ -874,8 +879,8 @@ def fork_new_process_for_each_test(
                             open(exc_file_path, 'rb') as f:
                             exc_info = cloudpickle.load(f)
 
-                    if (original_exception := exc_info.get(
-                            'pickled_exception')) is not None:
+                    if (original_exception :=
+                            exc_info.get('pickled_exception')) is not None:
                         # Re-raise the actual exception object if it was
                         # successfully pickled.
                         assert isinstance(original_exception, Exception)
