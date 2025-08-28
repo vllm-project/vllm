@@ -1579,6 +1579,13 @@ class EngineArgs:
                     "sha256 is not supported for prefix caching in V0 engine. "
                     "Please use 'builtin'.")
 
+            if self.enable_prompt_embeds:
+                logger.warning(
+                    "--enable-prompt-embeds and --enable-prefix-caching "
+                    "are not supported together in V0. Prefix caching has "
+                    "been disabled.")
+                self.enable_prefix_caching = False
+
         # Set max_num_seqs to 256 for VLLM_V0.
         if self.max_num_seqs is None:
             self.max_num_seqs = 256
