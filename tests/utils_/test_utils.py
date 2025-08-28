@@ -5,13 +5,17 @@
 import asyncio
 import hashlib
 import json
+import os
 import pickle
 import socket
+import tempfile
 from collections.abc import AsyncIterator
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import torch
+import yaml
 import zmq
 from transformers import AutoTokenizer
 from vllm_test_utils.monitor import monitor
@@ -991,3 +995,40 @@ def test_current_stream_multithread():
         child_thread.join(timeout=5)
         if child_thread.is_alive():
             pytest.fail("Child thread failed to exit properly")
+
+
+def test_load_config_file(tmp_path):
+    # Define the configuration data
+    config_data = {
+        "enable-logging": True,
+        "list-arg": ["item1", "item2"],
+        "port": 12323,
+        "tensor-parallel-size": 4
+    }
+
+    # Write the configuration data to a temporary YAML file
+    config_file_path = tmp_path / "config.yaml"
+    with open(config_file_path, "w") as config_file:
+        yaml.dump(config_data, config_file)
+
+    # Initialize the parser
+    parser = FlexibleArgumentParser()
+
+    # Call the function with the temporary file path
+    processed_args = parser.load_config_file(str(config_file_path))
+
+    # Expected output
+    expected_args = [
+        "--enable-logging",
+        "--list-arg",
+        "item1",
+        "item2",
+        "--port",
+        "12323",
+        "--tensor-parallel-size",
+        "4",
+    ]
+
+    # Assert that the processed arguments match the expected output
+    assert processed_args == expected_args
+    os.remove(str(config_file_path))
