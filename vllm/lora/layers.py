@@ -162,20 +162,12 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
             self.embeddings_slice = None
             self.embeddings_weights = None
 
-        self.embeddings_tensors = torch.zeros(
-            (
-                max_loras,
-                lora_config.lora_extra_vocab_size,
-                self.base_layer.embedding_dim,
-            ),
-            dtype=self.base_layer.weight.dtype,
-            device=self.base_layer.weight.device,
-        )
+        # No embeddings tensors since we don't support extra vocab
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,
                 self.base_layer.org_vocab_size +
-                lora_config.lora_extra_vocab_size,
+                0,  # No extra vocab size
                 lora_config.max_lora_rank,
             ),
             dtype=lora_config.lora_dtype,
@@ -199,7 +191,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
-        self.embeddings_tensors[index] = 0
+        # No embeddings tensor to reset
 
     def set_lora(
         self,
@@ -215,39 +207,18 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[index,
                             0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
                                 lora_b.T, non_blocking=True)
-        if embeddings_tensor is not None:
-            self.embeddings_tensors[
-                index,
-                :embeddings_tensor.shape[0],
-                :embeddings_tensor.shape[1],
-            ].copy_(embeddings_tensor, non_blocking=True)
-            if self.embeddings_slice is not None:
-                # TODO(yard1): Optimize this copy, we don't need to copy
-                # everything, just the modified part
-                embeddings = self.embeddings_tensors.view(
-                    self.embeddings_tensors.shape[0] *
-                    self.embeddings_tensors.shape[1],
-                    self.embeddings_tensors.shape[2],
-                )[self.embeddings_slice[0]:self.embeddings_slice[1]]
-                assert self.embeddings_weights is not None
-                self.embeddings_weights[:embeddings.shape[0]].copy_(embeddings)
+        # No embeddings tensor to set
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        added_tokens_mask = torch.where(x > self.base_layer.org_vocab_size - 1,
-                                        1, 0)
-
-        # NB: Don't use torch.narrow here. torch.narrow triggers some
-        # Dynamic Shape specialization in torch.compile
+        # No additional vocabulary support - simplified forward
         num_tokens = x.shape[0]
         indices_1 = self.punica_wrapper._embeddings_indices[1][:num_tokens]
-        indices_0 = self.punica_wrapper._embeddings_indices[0][:num_tokens]
 
         full_lora_a_embeddings = F.embedding(
             x + indices_1,
             self.lora_a_stacked_2d,
         )
-        full_output = self.base_layer.forward(x +
-                                              (indices_0 * added_tokens_mask))
+        full_output = self.base_layer.forward(x)
 
         full_output_org = full_output
         if full_output.ndim == 3:
@@ -1056,12 +1027,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
-        self.embeddings_tensors = torch.full(
-            (max_loras, lora_config.lora_extra_vocab_size, self.hidden_size),
-            fill_value=float("-inf"),
-            dtype=self.dtype,
-            device=self.device,
-        )
+        # No embeddings tensors since we don't support extra vocab
         if self.sharded_to_full_mapping is not None:
             self.sharded_to_full_mapping_gpu = torch.tensor(
                 self.sharded_to_full_mapping,
@@ -1073,7 +1039,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     def reset_lora(self, index: int):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
-        self.embeddings_tensors[index] = float("-inf")
+        # No embeddings tensor to reset
 
     def set_lora(
         self,
@@ -1090,12 +1056,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked[index,
                             0, :lora_b.shape[1], :lora_b.shape[0]].copy_(
                                 lora_b.T, non_blocking=True)
-        if embeddings_tensor is not None:
-            self.embeddings_tensors[
-                index,
-                :embeddings_tensor.shape[0],
-                :embeddings_tensor.shape[1],
-            ] = embeddings_tensor
+        # No embeddings tensor to set
 
     def _get_logits(
         self,
@@ -1133,37 +1094,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
             # token_id: [0, 1, 2, 3, 4, 5, -1, -1]
             logits = logits[:, self.sharded_to_full_mapping_gpu]
 
-        lora_logits = torch.empty(
-            self.embeddings_tensors.shape[0] + 1,
-            self.embeddings_tensors.shape[1],
-            hidden_states.shape[0],
-            dtype=self.embeddings_tensors.dtype,
-            device=self.embeddings_tensors.device,
-        )
-        torch.matmul(self.embeddings_tensors,
-                     hidden_states.T,
-                     out=lora_logits[:-1])
-
-        neg_inf, pos_inf = current_platform.get_infinity_values(
-            lora_logits.dtype)
-
-        lora_logits[-1] = neg_inf
-        lora_logits = lora_logits.mT
-        indices_padded = self.punica_wrapper.sampler_indices_padded
-
-        if current_platform.is_tpu():
-            indices_padded = indices_padded[:logits.size(0)]
-
-        lora_logits = (lora_logits.reshape(
-            lora_logits.shape[0] * lora_logits.shape[1],
-            lora_logits.shape[2],
-        ).index_select(0, indices_padded).nan_to_num_(nan=neg_inf,
-                                                      posinf=pos_inf,
-                                                      neginf=neg_inf))
-
-        logits[:,
-               self.base_layer.org_vocab_size:self.base_layer.org_vocab_size +
-               lora_logits.shape[1]] = lora_logits
+        # No additional vocabulary support - skip embedding tensor operations
 
         lora_output: Optional[
             torch.Tensor] = self.punica_wrapper.add_lora_logits(

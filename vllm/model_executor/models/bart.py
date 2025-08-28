@@ -712,9 +712,9 @@ class BartModel(nn.Module, SupportsQuant):
 
         self.config = config
 
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
-        self.vocab_size = config.vocab_size + lora_vocab
+        # No additional vocabulary support for LoRA
+        lora_vocab = 0
+        self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
 
         self.encoder = BartEncoder(config,
@@ -823,8 +823,7 @@ class BartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
                                prefix=maybe_prefix(prefix, "model"))
 
         self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        # No additional vocabulary for LoRA
 
         embed_scale = math.sqrt(
             config.d_model) if config.scale_embedding else 1.0
@@ -1165,9 +1164,9 @@ class MBartModel(nn.Module, SupportsQuant):
 
         self.config = config
 
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
-        self.vocab_size = config.vocab_size + lora_vocab
+        # No additional vocabulary support for LoRA
+        lora_vocab = 0
+        self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
 
         self.encoder = MBartEncoder(config,
@@ -1242,8 +1241,7 @@ class MBartForConditionalGeneration(nn.Module, SupportsV0Only, SupportsQuant):
                                 prefix=maybe_prefix(prefix, "model"))
 
         self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        # No additional vocabulary for LoRA
 
         embed_scale = math.sqrt(
             config.d_model) if config.scale_embedding else 1.0

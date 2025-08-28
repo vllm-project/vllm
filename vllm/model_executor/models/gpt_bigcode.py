@@ -211,9 +211,9 @@ class GPTBigCodeModel(nn.Module):
         assert not config.add_cross_attention
 
         self.embed_dim = config.hidden_size
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
-        self.vocab_size = config.vocab_size + lora_vocab
+        # No additional vocabulary support for LoRA
+        lora_vocab = 0
+        self.vocab_size = config.vocab_size
         self.wte = VocabParallelEmbedding(self.vocab_size,
                                           self.embed_dim,
                                           org_num_embeddings=config.vocab_size)
@@ -303,8 +303,7 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 self.transformer.embed_dim,
                 org_num_embeddings=self.config.vocab_size)
         self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        # No additional vocabulary for LoRA
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
         self.make_empty_intermediate_tensors = (
