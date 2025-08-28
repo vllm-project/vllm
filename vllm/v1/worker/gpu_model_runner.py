@@ -1459,6 +1459,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_connector_output=kv_connector_output,
         )
 
+    def pull_kvcache(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> "ModelRunnerOutput":
+        if not has_kv_transfer_group():
+            # Return empty ModelRunnerOutput if there's no work to do.
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1503,11 +1513,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_input_tokens = round_up(num_scheduled_tokens, tp_size)
             else:
                 num_input_tokens = num_scheduled_tokens
-
         # Padding for DP
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
         num_input_tokens += num_pad
-
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
         if self.supports_mm_inputs:
@@ -1516,7 +1524,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             mm_embeds = self._gather_mm_embeddings(scheduler_output)
         else:
             mm_embeds = []
-
         if self.supports_mm_inputs and get_pp_group().is_first_rank:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
@@ -1554,14 +1561,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                 num_input_tokens, intermediate_tensors, True)
-
         uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
             num_scheduled_tokens == self.input_batch.num_reqs * max_query_len)
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                            uniform_decode=uniform_decode)
         cudagraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(batch_descriptor)
-
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with set_forward_context(
@@ -1587,7 +1592,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             hidden_states = model_output
             aux_hidden_states = None
-
         # Broadcast PP output for external_launcher (torchrun)
         # to make sure we are synced across pp ranks
         # TODO: Support overlapping mirco-batches
@@ -1619,11 +1623,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 model_output_broadcast_data, src=len(get_pp_group().ranks) - 1)
             assert model_output_broadcast_data is not None
             logits = model_output_broadcast_data["logits"]
-
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
             self.apply_grammar_bitmask(scheduler_output, logits)
-
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         if spec_decode_metadata is None:
@@ -1656,11 +1658,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampling_metadata,
             )
             sampler_output.sampled_token_ids = output_token_ids
-
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             num_nans_in_logits = self._get_nans_in_logits(logits)
-
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         discard_sampled_tokens_req_indices = []
@@ -1678,7 +1678,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Record the index of the request that should not be sampled,
                 # so that we could clear the sampled tokens before returning.
                 discard_sampled_tokens_req_indices.append(i)
-
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
         logprobs_tensors = sampler_output.logprobs_tensors
@@ -1706,7 +1705,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
-
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
         # NOTE(woosuk): As an exception, when using PP, the scheduler sends
@@ -1731,7 +1729,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_id = req_ids[req_idx]
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
-        logger.info(f"======step valid_sampled_token_ids {valid_sampled_token_ids}")
         if self.speculative_config:
             assert spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(
@@ -1746,7 +1743,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         self.eplb_step()
-
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,

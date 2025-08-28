@@ -350,6 +350,13 @@ class Worker(WorkerBase):
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
+    
+    def pull_kvcache(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> ModelRunnerOutput:
+        output = self.model_runner.pull_kvcache(scheduler_output)
+        return output
 
     @torch.inference_mode()
     def execute_model(
@@ -362,7 +369,6 @@ class Worker(WorkerBase):
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
-
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
         if isinstance(output, ModelRunnerOutput):

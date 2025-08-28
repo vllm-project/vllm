@@ -143,6 +143,15 @@ try:
                 assert not output or not output.req_ids
                 output = scheduler_output, None
             return output
+        
+        def pull_kvcache_ray(
+            self,
+            scheduler_output: "SchedulerOutput") -> "ModelRunnerOutput":
+            assert self.worker is not None, "Worker is not initialized"
+
+            output = self.worker.model_runner.pull_kvcache(
+                scheduler_output)
+            return output
 
         def override_env_vars(self, vars: Dict[str, str]):
             os.environ.update(vars)

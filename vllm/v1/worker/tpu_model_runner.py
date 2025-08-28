@@ -932,6 +932,16 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # then the embedding layer is not included in the CUDA graph.
             return input_ids, None
 
+    def pull_kvcache(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> ModelRunnerOutput:
+        if not has_kv_transfer_group():
+            # Return empty ModelRunnerOutput if there's no work to do.
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+
     @torch.no_grad()
     def execute_model(
         self,

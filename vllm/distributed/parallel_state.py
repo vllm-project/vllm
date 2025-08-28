@@ -307,6 +307,11 @@ class GroupCoordinator:
         return self.ranks[(rank_in_group + 1) % world_size]
 
     @property
+    def current_rank(self):
+        """Return the current rank of the process"""
+        return self.rank
+
+    @property
     def prev_rank(self):
         """Return the global rank of the process that precedes the caller"""
         rank_in_group = self.rank_in_group
@@ -1229,6 +1234,14 @@ def get_tensor_model_parallel_rank():
 def get_pipeline_model_parallel_rank():
     """Return my rank for the pipeline model parallel group."""
     return get_pp_group().rank_in_group
+
+
+def get_rank():
+    """Return rank for the dp group."""
+    global _WORLD
+    if _WORLD is not None:
+        return _WORLD.current_rank
+    return 0
 
 
 def get_node_count() -> int:
