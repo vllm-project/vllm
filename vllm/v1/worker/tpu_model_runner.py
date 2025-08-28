@@ -262,6 +262,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                         pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
+        # Only relevant for multimodal models
+        self.is_mm_embed_cpu = torch.zeros(self.max_num_tokens,
+                                           dtype=torch.bool,
+                                           device="cpu",
+                                           pin_memory=self.pin_memory)
+
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens
         # Keep in int64 to avoid overflow with long context
@@ -810,31 +816,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return per_layer_attn_metadata, logits_indices, padded_num_reqs,\
             num_reqs, end_index
 
-    def _scatter_placeholders(
-        self,
-        embeds: torch.Tensor,
-        is_embed: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        if is_embed is None:
-            return embeds
-
-        placeholders = embeds.new_full(
-            (is_embed.shape[0], embeds.shape[-1]),
-            fill_value=torch.nan,
-        )
-        placeholders[is_embed] = embeds
-        return placeholders
-
-    def _gather_placeholders(
-        self,
-        placeholders: torch.Tensor,
-        is_embed: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        if is_embed is None:
-            return placeholders
-
-        return placeholders[is_embed]
-
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
         if not scheduled_encoder_inputs:
@@ -908,11 +889,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        is_mm_embed = torch.zeros(
-            scheduler_output.total_num_scheduled_tokens,
-            dtype=torch.bool,
-            pin_memory=self.pin_memory,
-        )
+        is_mm_embed = self.is_mm_embed_cpu
         mm_embeds = list[torch.Tensor]()
 
         req_start_idx = 0
@@ -958,7 +935,10 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             req_start_idx += num_scheduled_tokens
 
-        return is_mm_embed.to(self.device), mm_embeds
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        is_mm_embed = is_mm_embed[:total_num_scheduled_tokens].to(self.device)
+
+        return is_mm_embed, mm_embeds
 
     def _get_model_inputs(
         self,

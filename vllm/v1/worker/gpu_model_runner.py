@@ -258,6 +258,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             dtype=self.dtype,
             device=self.device)
 
+        # Only relevant for multimodal models
+        self.is_mm_embed = self._make_buffer(self.max_num_tokens,
+                                             dtype=torch.bool)
+
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
             # NOTE: `mrope_positions` is implemented with one additional dummy
@@ -1187,11 +1191,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         shift_computed_tokens: int = 0,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        is_mm_embed = torch.zeros(
-            scheduler_output.total_num_scheduled_tokens,
-            dtype=torch.bool,
-            pin_memory=self.pin_memory,
-        )
+        is_mm_embed = self.is_mm_embed.cpu
         mm_embeds = list[torch.Tensor]()
 
         req_start_idx = 0
@@ -1247,7 +1247,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             req_start_idx += num_scheduled_tokens
 
-        return is_mm_embed.to(self.device), mm_embeds
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
+
+        return self.is_mm_embed.gpu[:total_num_scheduled_tokens], mm_embeds
 
     def get_model(self) -> nn.Module:
         # get raw model out of the cudagraph wrapper.
