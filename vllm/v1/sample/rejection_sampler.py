@@ -595,7 +595,8 @@ def sample_recovered_tokens_kernel(
         draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
         prob = tl.load(target_probs_ptr + (start_idx + pos) * vocab_size +
                        vocab_offset,
-                       mask=((vocab_offset < vocab_size) & (vocab_offset != draft_token_id)),
+                       mask=((vocab_offset < vocab_size) &
+                             (vocab_offset != draft_token_id)),
                        other=0)
     else:
         draft_prob = tl.load(draft_probs_ptr + (start_idx + pos) * vocab_size +
