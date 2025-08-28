@@ -559,10 +559,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # batch_idx -> req_id
         req_ids = sorted(scheduler_output.num_scheduled_tokens,
                          key=scheduler_output.num_scheduled_tokens.get)
-
         # req_id -> batch_idx
         req_id_to_batch_idx = {req_id: i for i, req_id in enumerate(req_ids)}
-
         # batch_idx -> req_idx
         idx_mapping_list = [
             self.requests.req_id_to_index[req_id] for req_id in req_ids
@@ -633,7 +631,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if draft_token_ids:
                     num_draft_tokens[i] = len(draft_token_ids)
             spec_decode_metadata = self._calc_spec_decode_metadata(
-                num_draft_tokens, self.query_start_loc_np[1:num_reqs + 1])
+                num_draft_tokens, self.query_start_loc.np[1:num_reqs + 1])
             logits_indices = spec_decode_metadata.logits_indices
 
         logits_indices_padded = None
