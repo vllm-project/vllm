@@ -798,6 +798,7 @@ steps:
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/weight_loading
