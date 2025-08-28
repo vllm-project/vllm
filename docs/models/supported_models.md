@@ -40,7 +40,7 @@ If it is `TransformersForCausalLM` or `TransformersForMultimodalLM` then it mean
 
 #### Custom models
 
-If a model is neither supported natively by vLLM or Transformers, it can still be used in vLLM!
+If a model is neither supported natively by vLLM nor Transformers, it can still be used in vLLM!
 
 For a model to be compatible with the Transformers backend for vLLM it must:
 
