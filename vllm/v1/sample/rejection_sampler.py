@@ -68,7 +68,7 @@ class RejectionSampler(nn.Module):
                 different requests are flattened into a single tensor because
                 this is the shape of the output logits.
                 NOTE: `target_logits` can be updated in place to save memory.
-            bonus_token_ids_tensor (torch.Tensor):
+            bonus_token_ids (torch.Tensor):
                 A tensor containing bonus tokens. Shape is [batch_size, 1].
                 Bonus tokens are added to the end of the sequence if all
                 proposed tokens are accepted. We generate the bonus tokens
@@ -365,9 +365,14 @@ def generate_uniform_probs(
             A tensor of shape `(num_tokens, )` containing uniform
             random values in the range [0, 1).
     """
+    # NOTE(woosuk): We deliberately use float64 instead of float32 here
+    # because when using float32, there's a non-negligible chance that
+    # uniform_prob is sampled to be exact 0.0 as reported in
+    # https://github.com/pytorch/pytorch/issues/16706. Using float64
+    # mitigates the issue.
     uniform_probs = torch.rand(
         (num_tokens, ),
-        dtype=torch.float32,
+        dtype=torch.float64,
         device=device,
     )
     start_idx = 0

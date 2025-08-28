@@ -207,7 +207,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
         Args:
             absolute_id (int): The absolute block id for the block 
-            in whole allocator.
+                in whole allocator.
 
         Returns:
             int: The zero-offset block id on certain device.

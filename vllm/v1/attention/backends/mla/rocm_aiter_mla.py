@@ -7,6 +7,7 @@ from typing import ClassVar, Optional
 import torch
 
 import vllm.envs as envs
+from vllm.attention.backends.abstract import AttentionLayer
 from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
 from vllm.config import VllmConfig
 from vllm.utils import cdiv
@@ -221,6 +222,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: AiterMLAMetadata,
+        layer: AttentionLayer,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
