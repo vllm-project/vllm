@@ -12,10 +12,9 @@ from vllm.compilation.backends import set_model_tag
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import (ignore_torch_compile,
                                          support_torch_compile)
-from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
-                         set_current_vllm_config)
-from vllm.envs import VLLM_USE_V1
-from vllm.forward_context import set_forward_context
+from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
+                         VllmConfig, set_current_vllm_config)
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils import direct_register_custom_op
 
 # create a library to hold the custom op
@@ -164,104 +163,34 @@ class SimpleModelWithTwoGraphs(ParentModel):
         return x
 
 
-def test_ignore_torch_compile_decorator():
-    assert VLLM_USE_V1
-
-    # piecewise
-    vllm_config = VllmConfig(compilation_config=CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
-        use_cudagraph=True,
-        splitting_ops=["silly.attention"],
-        cudagraph_capture_sizes=[1, 2],
-    ))
-
-    @support_torch_compile
-    class A(nn.Module):
-
-        def __init__(self,
-                     *,
-                     vllm_config: VllmConfig,
-                     prefix: str = '',
-                     **kwargs) -> None:
-            super().__init__()
-
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            x = x + x
-            attn_output = torch.empty_like(x)
-            torch.ops.silly.attention(x, x, x, attn_output)
-            x = attn_output
-            x = x * 3
-            return x
-
-    @ignore_torch_compile
-    class B(A):
-        ...
-
-    @support_torch_compile
-    class C(B):
-        ...
-
-    with set_current_vllm_config(vllm_config):
-        mod_A = A(vllm_config=vllm_config, prefix='').eval().cuda()
-
-    # A has support_torch_compile
-    with compilation_counter.expect(
-            num_graphs_seen=1,
-            num_piecewise_graphs_seen=3,
-            num_piecewise_capturable_graphs_seen=2,
-            num_backend_compilations=2,
-            num_cudagraph_captured=4,
-            # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
-    ), set_forward_context({}, vllm_config=vllm_config):
-        # first run is for compile
-        mod_A(torch.randn(BATCH_SIZE, MLP_SIZE).cuda())
-        # run cudagraph captured sizes
-        mod_A(torch.randn(2, MLP_SIZE).cuda())
-        mod_A(torch.randn(1, MLP_SIZE).cuda())
-
-    with set_current_vllm_config(vllm_config):
-        mod_B = B(vllm_config=vllm_config, prefix='').eval().cuda()
-
-    # B's ignore_torch_compile should override A's support_torch_compile
-    with compilation_counter.expect(
-            num_graphs_seen=0,
-            num_piecewise_graphs_seen=0,
-            num_piecewise_capturable_graphs_seen=0,
-            num_backend_compilations=0,
-            num_cudagraph_captured=0,
-    ), set_forward_context({}, vllm_config=vllm_config):
-        mod_B(torch.randn(BATCH_SIZE, MLP_SIZE).cuda())
-        mod_B(torch.randn(2, MLP_SIZE).cuda())
-        mod_B(torch.randn(1, MLP_SIZE).cuda())
-
-    with set_current_vllm_config(vllm_config):
-        mod_C = C(vllm_config=vllm_config, prefix='').eval().cuda()
-
-    # C's support_torch_compile should override B's ignore_torch_compile
-    with compilation_counter.expect(
-            num_graphs_seen=1,
-            num_piecewise_graphs_seen=3,
-            num_piecewise_capturable_graphs_seen=2,
-            num_backend_compilations=2,
-            num_cudagraph_captured=4,
-            # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
-    ), set_forward_context({}, vllm_config=vllm_config):
-        mod_C(torch.randn(BATCH_SIZE, MLP_SIZE).cuda())
-        mod_C(torch.randn(2, MLP_SIZE).cuda())
-        mod_C(torch.randn(1, MLP_SIZE).cuda())
-
-
 @torch.inference_mode
-def run_model(vllm_config, model: nn.Module, inputs: torch.Tensor):
+def run_model(vllm_config: VllmConfig, model: nn.Module, inputs: torch.Tensor,
+              cudagraph_runtime_mode: CUDAGraphMode):
     with set_forward_context({}, vllm_config=vllm_config):
-        # First run is for compile
+        # warmup for the model with cudagraph_mode NONE
         model(inputs)
 
-        # Run CUDAGraph captured sizes
-        model(inputs[:2])
-        model(inputs[:1])
+        # simulate cudagraphs capturing
+        with set_forward_context({},
+                                 vllm_config=vllm_config,
+                                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                                 batch_descriptor=BatchDescriptor(
+                                     num_tokens=2, )):
+            model(inputs[:2])
+        with set_forward_context({},
+                                 vllm_config=vllm_config,
+                                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                                 batch_descriptor=BatchDescriptor(
+                                     num_tokens=1, )):
+            model(inputs[:1])
 
-        output = model(inputs[:2])
+        # simulate cudagraphs replay
+        with set_forward_context({},
+                                 vllm_config=vllm_config,
+                                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                                 batch_descriptor=BatchDescriptor(
+                                     num_tokens=2, )):
+            output = model(inputs[:2])
 
         output = output.cpu()
         return output.cpu()
@@ -277,6 +206,7 @@ def test_multi_graph_piecewise_compile_outputs_equal():
         splitting_ops=["silly.attention"],
         cudagraph_capture_sizes=[1, 2],
     ))
+    cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
 
     with set_current_vllm_config(vllm_config):
         model = SimpleModelWithTwoGraphs(mlp_size=MLP_SIZE,
@@ -299,11 +229,13 @@ def test_multi_graph_piecewise_compile_outputs_equal():
             num_cudagraph_captured=8,
             # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
     ):
-        outputs.append(run_model(vllm_config, model, inputs))
+        outputs.append(
+            run_model(vllm_config, model, inputs, cudagraph_runtime_mode))
 
     # no compile or cudagraph
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.NO_COMPILATION, ))
+    cudagraph_runtime_mode = CUDAGraphMode.NONE
 
     with set_current_vllm_config(vllm_config):
         model = SimpleModelWithTwoGraphs(mlp_size=MLP_SIZE,
@@ -318,7 +250,8 @@ def test_multi_graph_piecewise_compile_outputs_equal():
             num_backend_compilations=0,
             num_cudagraph_captured=0,
     ):
-        outputs.append(run_model(vllm_config, model, inputs))
+        outputs.append(
+            run_model(vllm_config, model, inputs, cudagraph_runtime_mode))
 
     # piecewise compile without CUDA graph
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
@@ -326,6 +259,7 @@ def test_multi_graph_piecewise_compile_outputs_equal():
         use_cudagraph=False,
         splitting_ops=["silly.attention"],
     ))
+    cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
 
     with set_current_vllm_config(vllm_config):
         model = SimpleModelWithTwoGraphs(mlp_size=MLP_SIZE,
@@ -340,7 +274,8 @@ def test_multi_graph_piecewise_compile_outputs_equal():
             num_backend_compilations=4,
             num_cudagraph_captured=0,  # no cudagraph captured
     ):
-        outputs.append(run_model(vllm_config, model, inputs))
+        outputs.append(
+            run_model(vllm_config, model, inputs, cudagraph_runtime_mode))
 
     # Generally don't expect outputs with and without inductor
     # to be bitwise equivalent

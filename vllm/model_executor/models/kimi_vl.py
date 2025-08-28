@@ -54,8 +54,7 @@ from transformers import BatchFeature
 from transformers.activations import GELUActivation
 
 from vllm.config import VllmConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size)
+from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -63,13 +62,14 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.deepseek_v2 import DeepseekV2Model
-from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.interfaces import (SupportsMultiModal,
+                                                   SupportsPP)
 from vllm.model_executor.models.moonvit import MoonVitPretrainedModel
 from vllm.model_executor.models.utils import merge_multimodal_embeddings
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -81,7 +81,7 @@ from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .utils import is_pp_missing_parameter, maybe_prefix
+from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
 
 
 # For dummy input only
@@ -239,7 +239,7 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         image_token_id = self.info.image_token_id
 
@@ -270,7 +270,8 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
 @MULTIMODAL_REGISTRY.register_processor(KimiVLMultiModalProcessor,
                                         info=KimiVLProcessingInfo,
                                         dummy_inputs=KimiVLDummyInputsBuilder)
-class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
+class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                     SupportsPP):
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -304,17 +305,21 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal):
             prefix=maybe_prefix(prefix, "language_model"),
         )
         self.unpadded_vocab_size = config.text_config.vocab_size
-        self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
-            config.text_config.hidden_size,
-            org_num_embeddings=self.config.text_config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE)
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                self.unpadded_vocab_size,
+                config.text_config.hidden_size,
+                org_num_embeddings=self.config.text_config.vocab_size,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+            )
+        else:
+            self.lm_head = PPMissingLayer()
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors)
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
         self.media_placeholder: int = self.config.media_placeholder_token_id
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.tp_world_size = get_tensor_model_parallel_world_size()
 
     # ref: qwen2_vl.py
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
