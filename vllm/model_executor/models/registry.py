@@ -191,12 +191,14 @@ _EMBEDDING_MODELS = {
 
 _CROSS_ENCODER_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+    "GteNewForSequenceClassification": ("bert_with_rope",
+                                        "GteNewForSequenceClassification"),
+    "ModernBertForSequenceClassification": ("modernbert",
+                                            "ModernBertForSequenceClassification"),
     "RobertaForSequenceClassification": ("roberta",
                                          "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": ("roberta",
                                             "RobertaForSequenceClassification"),
-    "ModernBertForSequenceClassification": ("modernbert",
-                                            "ModernBertForSequenceClassification"),
     # [Auto-converted (see adapters.py)]
     "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"), # noqa: E501,
 }
