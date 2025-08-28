@@ -306,7 +306,6 @@ class EngineArgs:
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
-    enable_context_parallel: bool = ParallelConfig.enable_context_parallel
     context_parallel_size: int = ParallelConfig.context_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: Optional[int] = None
@@ -641,9 +640,6 @@ class EngineArgs:
         # Note(hc): This parameter is automatically inferred now, do not set it manually.
         parallel_group.add_argument("--context-parallel-size", "-cp",
                                     **parallel_kwargs["context_parallel_size"])
-        parallel_group.add_argument(
-            "--enable-context-parallel",
-            **parallel_kwargs["enable_context_parallel"])
         parallel_group.add_argument("--data-parallel-size", "-dp",
                                     **parallel_kwargs["data_parallel_size"])
         parallel_group.add_argument(
@@ -1164,17 +1160,11 @@ class EngineArgs:
             # global layers in interleaved sliding window models.
             sliding_window = model_config.get_sliding_window()
 
-        assert self.context_parallel_size == 1
-        if self.enable_context_parallel:
-            # Note(hc): CP only support mla_attention + V1_engine now.
-            if model_config.use_mla and envs.VLLM_USE_V1 and self.tensor_parallel_size > 1:
-                self.context_parallel_size = self.tensor_parallel_size
-                logger.warning(
-                    "Context parallel is enabled, `context-parallel-size` override to `tensor-parallel-size`."
-                )
-            else:
-                self.enable_context_parallel = False
-                logger.warning("enable_context_parallel is override to False.")
+        # Note(hc): In the current implementation of decode context parallel, tp_size
+        # needs to be divisible by tp_size, because the world size does not change by
+        # cp, it simply reuse the GPUs of TP group, and split one TP group into tp_size//cp_size
+        # CP groups.
+        assert self.tensor_parallel_size % self.context_parallel_size == 0, "cp_size must not exceed tp_size now."
 
         cache_config = CacheConfig(
             block_size=self.block_size,

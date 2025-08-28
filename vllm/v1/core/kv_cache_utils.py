@@ -848,7 +848,9 @@ def _get_kv_cache_config_uniform_type(vllm_config: VllmConfig,
     num_tokens = num_blocks * vllm_config.cache_config.block_size
     if vllm_config.parallel_config.context_parallel_size > 1:
         num_tokens *= vllm_config.parallel_config.context_parallel_size
-        logger.info("Multiplying the GPU KV cache size by the cp_world_size.")
+        logger.info(
+            "Multiplying the GPU KV cache size by the cp_world_size %d.",
+            vllm_config.parallel_config.context_parallel_size)
 
     num_tokens_str = f"{num_tokens:,}"
     logger.info("GPU KV cache size: %s tokens", num_tokens_str)
