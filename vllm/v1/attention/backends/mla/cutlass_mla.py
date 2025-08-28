@@ -189,7 +189,10 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             page_table.dtype == torch.int32
         ), f"page_table.dtype needs to be int32 but got {page_table.dtype}."
 
-        out = q_nope.new_empty((B_q, MAX_HEADS, D_latent))
+        if self.kv_cache_dtype.startswith("fp8"):
+            out = torch.empty_like(q_nope, dtype=torch.bfloat16)
+        else:
+            out = q_nope.new_empty((B_q, MAX_HEADS, D_latent))
 
         ops.sm100_cutlass_mla_decode(
             out,
@@ -228,9 +231,6 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
                                            attn_metadata.decode.block_table,
                                            self._workspace.get_buf(),
                                            self.scale, self._num_kv_splits)
-
-        if self.kv_cache_dtype.startswith("fp8"):
-            o = o.to(torch.bfloat16)
 
         return self._v_up_proj(o)
 
