@@ -89,15 +89,15 @@ class FullAttentionSpec(AttentionSpec):
         return cdiv(max_model_len, self.block_size) * self.page_size_bytes
 
     @classmethod
-    def merge_window_sizes(cls, window_sizes: set[int]) -> Optional[int]:
-        if len(window_sizes) == 0:
+    def merge_ints(cls, ints: set[int], field: str) -> Optional[int]:
+        if len(ints) == 0:
             return None
-        elif len(window_sizes) == 1:
-            return window_sizes.pop()
+        elif len(ints) == 1:
+            return next(iter(ints))
         else:
             raise ValueError(
-                "All attention layers in the same KV cache group must have the "
-                "same window size.")
+                f"All attention layers in the same KV cache group must have "
+                f"the same {field}.")
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:
@@ -119,8 +119,9 @@ class FullAttentionSpec(AttentionSpec):
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
             use_mla=specs[0].use_mla,
-            sliding_window=cls.merge_window_sizes(sliding_window),
-            attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
+            sliding_window=cls.merge_ints(sliding_window, "sliding window"),
+            attention_chunk_size=cls.merge_ints(attention_chunk_size,
+                                                "attention chunk size"),
         )
         for spec in specs:
             for f in fields(AttentionSpec):
