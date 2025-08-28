@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Optional, Union
 import torch
 
 from vllm.logger import init_logger
-from vllm.logits_process import LogitsProcessor as LogitsProcessorV0
+from vllm.logits_process import LogitsProcessor as RequestLogitsProcessor
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.logits_processor.builtin import (LogitBiasLogitsProcessor,
                                                      MinPLogitsProcessor,
@@ -181,54 +181,42 @@ def build_logitsprocs(
             BUILTIN_LOGITS_PROCESSORS, custom_logitsprocs_classes))
 
 
-V0WrapperState = tuple[LogitsProcessorV0, list[int], list[int]]
+RequestLPState = tuple[RequestLogitsProcessor, list[int], list[int]]
 
 
-class LogitsProcessorV0Wrapper(LogitsProcessor):
-    """Wrapper for vLLM V0-style `Callable` logits processors
+class AdapterLogitsProcessor(LogitsProcessor):
+    """Wrapper for per-request logits processors
     
-    To wrap a specific `Callable` logits processor, 
+    To wrap a specific per-request logits processor, 
     * Implement `self.is_argmax_invariant()` base-class method
     * Implement `self._new_logits_processor()`
-    * Implement `self._nargs` property
-    
+    * `__init__()` must call `super().__init__()`
     """
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device,
                  is_pin_memory: bool):
-        # For each request that is assigned a key in self.req_info, store an
-        # optional V0-style logits processor, prompt token ids, and previously
-        # decoded token ids
-        self.req_info: dict[int, V0WrapperState] = {}
+        # For each request that is assigned a key in self.req_info, store a
+        # tuple of per-request logits processor, prompt token ids, and
+        # previously decoded token ids
+        self.req_info: dict[int, RequestLPState] = {}
 
-        # Preserve config info for use when constructing V0-style logits
-        # processors
-        self.vllm_config = vllm_config
-        self.device = device
-        self.is_pin_memory = is_pin_memory
-
-        # V0 logits processors can have 2 or 3 arguments
+        # Per-request logits processors can have 2 or 3 arguments
         assert (nargs := self._nargs) in {2, 3}
         self.nargs = nargs
 
     @property
     @abstractmethod
     def _nargs(self) -> int:
-        """Returns the number of arguments supported by this V0 logits
+        """Returns the number of arguments supported by this per-request logits
         processor. Must be 2 or 3"""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     @abstractmethod
     def _new_logits_processor(
         self,
         params: SamplingParams,
-    ) -> Optional[LogitsProcessorV0]:
-        """Consume request info; return a V0-style logits processor.
-
-        Implementer can assume that the vLLM engine config, the hardware
-        accelerator device, and an indication of whether pin memory is
-        available can respectively be found in self.vllm_config, self.device,
-        and self.is_pin_memory
+    ) -> Optional[RequestLogitsProcessor]:
+        """Consume request info; return a per-request logits processor.
 
         Return None if logits processor does not need to be applied to request
 
@@ -237,17 +225,17 @@ class LogitsProcessorV0Wrapper(LogitsProcessor):
 
         Returns:
           None if logits processor should not be applied to request; otherwise
-          returns a `LogitsProcessorV0` instance
+          returns a `RequestLogitsProcessor` instance
         
         """
-        raise NotImplementedError()
+        raise NotImplementedError
 
     def _new_state(
         self,
         params: SamplingParams,
         prompt_tok_ids: list[int],
         out_tok_ids: list[int],
-    ) -> Optional[V0WrapperState]:
+    ) -> Optional[RequestLPState]:
         """Return state representation for new request
 
         Returns None if logits processor is not applicable to request
@@ -281,7 +269,8 @@ class LogitsProcessorV0Wrapper(LogitsProcessor):
         if not self.req_info:
             return logits
 
-        # Apply V0 logits processors to corresponding rows of logits tensor
+        # Apply per-request logits processors to corresponding rows of logits
+        # tensor
         if self.nargs == 2:
             for req_idx, (v0_lp, _, out_tok_ids) in self.req_info.items():
                 logits[req_idx] = v0_lp(out_tok_ids,
@@ -301,5 +290,5 @@ __all__ = [
     "MinTokensLogitsProcessor", "BatchUpdate", "BatchUpdateBuilder",
     "MoveDirectionality", "LogitsProcessors", "build_logitsprocs",
     "STR_POOLING_REJECTS_LOGITSPROCS", "LOGITSPROCS_GROUP",
-    "LogitsProcessorV0Wrapper"
+    "AdapterLogitsProcessor"
 ]
