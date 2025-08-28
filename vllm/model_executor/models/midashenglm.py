@@ -577,12 +577,15 @@ class MiDashengLMMultiModalProcessor(
 
         out_mm_data = out_mm_kwargs.get_data()
         audio_length = out_mm_data.get("audio_length")
-        audio_length_np = audio_length.cpu().numpy() if isinstance(
-            audio_length, torch.Tensor) else audio_length
-        audio_output_lengths = [
-            calculate_mel_frames_dasheng(int(length))
-            for length in audio_length_np
-        ]
+        if audio_length is None:
+            audio_output_lengths = []
+        else:
+            audio_length_np = audio_length.cpu().numpy() if isinstance(
+                audio_length, torch.Tensor) else audio_length
+            audio_output_lengths = [
+                calculate_mel_frames_dasheng(int(length))
+                for length in audio_length_np
+            ]
 
         def get_replacement_midashenglm(item_idx: int):
             num_features = audio_output_lengths[item_idx]
