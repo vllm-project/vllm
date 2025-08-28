@@ -345,8 +345,11 @@ class AsyncLLM(EngineClient):
             tokenization_kwargs: dict[str, Any] = {}
             truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
 
-            _validate_truncation_size(self.model_config.max_model_len,
-                                  truncate_prompt_tokens, tokenization_kwargs)
+            _validate_truncation_size(
+                self.model_config.max_model_len,
+                truncate_prompt_tokens,
+                tokenization_kwargs,
+            )
 
             q = await self.add_request(
                 request_id,
@@ -507,9 +510,11 @@ class AsyncLLM(EngineClient):
 
             if tokenization_kwargs is None:
                 tokenization_kwargs = dict[str, Any]()
-            _validate_truncation_size(self.model_config.max_model_len,
-                                          truncate_prompt_tokens,
-                                          tokenization_kwargs)
+            _validate_truncation_size(
+                self.model_config.max_model_len,
+                truncate_prompt_tokens,
+                tokenization_kwargs,
+            )
 
             q = await self.add_request(
                 request_id,
