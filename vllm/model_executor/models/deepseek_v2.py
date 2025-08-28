@@ -148,9 +148,8 @@ class DeepseekV2MoE(nn.Module):
         self.physical_expert_end = (self.physical_expert_start +
                                     self.n_local_physical_experts)
 
-        self.use_shared_fused = True
-        self.use_shared_fused = (self.use_shared_fused
-                                 and config.n_shared_experts is not None)
+        # This is a temporary flag for testing.
+        self.use_shared_fused = config.n_shared_experts is not None
 
         if not self.use_shared_fused:
             self.experts = FusedMoE(
@@ -188,6 +187,7 @@ class DeepseekV2MoE(nn.Module):
             assert config.n_shared_experts is not None
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)
+
             self.shared_experts = DeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
@@ -223,39 +223,28 @@ class DeepseekV2MoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
+        shared_output = None
+        if not self.use_shared_fused:
+            shared_output = self.shared_experts(hidden_states)
+
+        fused_moe_out = self.experts(hidden_states=hidden_states,
+                                     router_logits=router_logits)
+
         if self.use_shared_fused:
-            shared_output, final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=router_logits)
-
-            if hidden_states.dtype != torch.float16:
-                final_hidden_states = (
-                    (final_hidden_states * self.routed_scaling_factor) +
-                    (shared_output * (1. / self.routed_scaling_factor)))
-            else:
-                final_hidden_states = final_hidden_states + shared_output
+            assert shared_output is None
+            shared_output, final_hidden_states = fused_moe_out
         else:
-            if self.n_shared_experts is not None:
-                shared_output = self.shared_experts(hidden_states)
-            else:
-                shared_output = None
+            final_hidden_states = fused_moe_out
 
-            if hidden_states.dtype != torch.float16:
-                final_hidden_states = self.experts(
-                    hidden_states=hidden_states,
-                    router_logits=router_logits) * self.routed_scaling_factor
-            else:
-                # Fix FP16 overflow
-                # See DeepseekV2DecoderLayer for more details.
-                final_hidden_states = self.experts(hidden_states=hidden_states,
-                                                   router_logits=router_logits)
-            if shared_output is not None:
-                if hidden_states.dtype != torch.float16:
-                    final_hidden_states = final_hidden_states + shared_output
-                else:
-                    # Fix FP16 overflow
-                    # See DeepseekV2DecoderLayer for more details.
-                    final_hidden_states = final_hidden_states + shared_output \
-                        * (1. / self.routed_scaling_factor)
+        # Fix FP16 overflow
+        # See DeepseekV2DecoderLayer for more details.
+        if hidden_states.dtype != torch.float16:
+            final_hidden_states *= self.routed_scaling_factor
+        elif shared_output is not None:
+            shared_output *= (1. / self.routed_scaling_factor)
+
+        if shared_output is not None:
+            final_hidden_states += shared_output
 
         if self.tp_size > 1:
             final_hidden_states = (
