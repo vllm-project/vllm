@@ -56,8 +56,23 @@ class BasevLLMParameter(Parameter):
         self._weight_loader = weight_loader
 
     @property
-    def weight_loader(self):
+    def weight_loader(self) -> Callable:
+        # NOTE(@ksayers) some models such as mamba_mixer2 override the
+        # weight loader to support custom loading. In the future, model-specific
+        # weight loading should be implemented via Model.load_weights. In the
+        # meantime, support deleting and overriding `weight_loader`` attribute
+        if self._weight_loader is None:
+            raise AttributeError(f"{self.__class__.__name__} weight_loader "
+                                 "attribute has been deleted")
         return self._weight_loader
+
+    @weight_loader.setter
+    def weight_loader(self, value: Callable):
+        self._weight_loader = value
+
+    @weight_loader.deleter
+    def weight_loader(self):
+        self._weight_loader = None  # type: ignore[assignment]
 
     def _is_1d_and_scalar(self, loaded_weight: torch.Tensor):
         cond1 = self.data.ndim == 1 and self.data.numel() == 1
@@ -80,6 +95,12 @@ class BasevLLMParameter(Parameter):
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
         self._assert_and_load(loaded_weight)
+
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+        return super().__torch_function__(func, types, args, kwargs)
 
 
 class _ColumnvLLMParameter(BasevLLMParameter):

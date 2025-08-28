@@ -299,10 +299,25 @@ def _support_torch_compile(
                 logger.debug(
                     "enable_cpp_symbolic_shape_guards config not available")
 
+            def return_false(*args, **kwargs):
+                return False
+
             with patch.object(InliningInstructionTranslator, 'inline_call',
                               patched_inline_call), torch._dynamo.config.patch(
                                   **dynamo_config_patches):
-                output = self.compiled_callable(*args, **kwargs)
+                from vllm.model_executor.parameter import (
+                    BasevLLMParameter, ModelWeightParameter, RowvLLMParameter,
+                    _ColumnvLLMParameter)
+                with (
+                        torch._dynamo.config.patch(
+                            "traceable_tensor_subclasses", [
+                                BasevLLMParameter, ModelWeightParameter,
+                                _ColumnvLLMParameter, RowvLLMParameter
+                            ]),
+                        patch(
+                            "torch._dynamo.variables.torch.can_dispatch_torch_function",  # noqa: E501
+                            return_false)):
+                    output = self.compiled_callable(*args, **kwargs)
             return output
 
         # usually, capturing the model once is enough, and then we can
