@@ -380,7 +380,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 
 ### Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"
 
-If the startup or readiness probe failureThreshold is too low for the time needed to startup the server, Kubernetes scheduler will kill the container. A couple of indications that this has happened:
+If the startup or readiness probe failureThreshold is too low for the time needed to start up the server, Kubernetes scheduler will kill the container. A couple of indications that this has happened:
 
 1. container log contains "KeyboardInterrupt: terminated"
 2. `kubectl get events` shows message `Container $NAME failed startup probe, will be restarted`
