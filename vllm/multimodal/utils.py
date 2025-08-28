@@ -580,7 +580,7 @@ def run_dp_sharded_mrope_vision_model(
         grid_thw = grid_thw_list
         patches_per_image_tensor = grid_thw.prod(dim=1)  # [num_items]
         total_patches = patches_per_image_tensor.sum().item()
-        
+
         if pixel_values.shape[0] != total_patches:
             raise ValueError(
                 f"Pixel values shape {pixel_values.shape[0]} doesn't match "
@@ -589,7 +589,7 @@ def run_dp_sharded_mrope_vision_model(
         # Convert to list only for load balancing algorithm
         # patches_per_image = [1000, 100, 200, 50]
         patches_per_image = patches_per_image_tensor.tolist()
-        
+
         # Calculate cumulative patches using tensor operations
         cum_patches_tensor = torch.cat([
             torch.zeros(1,
@@ -597,7 +597,7 @@ def run_dp_sharded_mrope_vision_model(
                         dtype=patches_per_image_tensor.dtype),
             patches_per_image_tensor.cumsum(dim=0)
         ])
-        
+
         use_tensor_path = True
     else:
         # List input path - original implementation

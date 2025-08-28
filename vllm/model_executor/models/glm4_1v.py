@@ -1322,6 +1322,8 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             "model.visual.": "visual.",
         })
 
+    supports_encoder_tp_data = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
