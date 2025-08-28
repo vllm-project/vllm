@@ -19,6 +19,7 @@ from PIL import Image
 from transformers import AutoModel, BatchEncoding, PretrainedConfig, TensorType
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
                                                    MultiModalEmbeddings,
@@ -26,6 +27,7 @@ from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
                                                    SupportsV0Only)
 from vllm.model_executor.models.internvl import get_internvl_target_ratios
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.nemotron_vl import find_closest_aspect_ratio
 from vllm.model_executor.models.utils import (flatten_bn,
                                               init_vllm_registered_model,
                                               maybe_prefix,
@@ -54,7 +56,7 @@ IMG_END = "</img>"
 IMG_CONTEXT = "<image>"
 
 
-class CustomImagePixelInputs(TypedDict):
+class NanoNemotronVLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     pixel_values_flat: torch.Tensor
     """
@@ -66,7 +68,7 @@ class CustomImagePixelInputs(TypedDict):
     """Shape: `(batch_size * num_images)`"""
 
 
-class CustomImageEmbeddingInputs(TypedDict):
+class NanoNemotronVLImageEmbeddinInputs(TypedDict):
     type: Literal["image_embeds"]
     data: Union[torch.Tensor, list[torch.Tensor]]
     """ 
@@ -77,28 +79,14 @@ class CustomImageEmbeddingInputs(TypedDict):
     """
 
 
-CustomImageInputs = Union[CustomImagePixelInputs, CustomImageEmbeddingInputs]
+NanoNemotronVLImageInputs = Union[NanoNemotronVLImagePixelInputs,
+                                  NanoNemotronVLImageEmbeddinInputs]
 
 
 class SquaredReLU(nn.Module):
 
     def forward(self, x):
         return torch.pow(torch.nn.functional.relu(x), 2)
-
-
-class RMSNorm(nn.Module):
-
-    def __init__(self, hidden_size, eps=1e-5):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.eps = eps
-
-    def forward(self, hidden_states):
-        input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
-        variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
-        return (self.weight.to(torch.float32) * hidden_states).to(input_dtype)
 
 
 def build_transform(input_size):
@@ -116,24 +104,6 @@ def build_transform(input_size):
 def input_conditioner(x, norm_mean, norm_std):
     y = (x - norm_mean) / norm_std
     return y
-
-
-def find_closest_aspect_ratio(aspect_ratio, target_ratios, width, height,
-                              image_size):
-    best_factor = float("-inf")
-    best_ratio = (1, 1)
-    area = width * height
-    for ratio in target_ratios:
-        target_aspect_ratio = ratio[0] / ratio[1]
-        factor_based_on_area_n_ratio = min(
-            (ratio[0] * ratio[1] * image_size * image_size) / area, 0.6) * min(
-                target_aspect_ratio / aspect_ratio,
-                aspect_ratio / target_aspect_ratio,
-            )
-        if factor_based_on_area_n_ratio > best_factor:
-            best_factor = factor_based_on_area_n_ratio
-            best_ratio = ratio
-    return best_ratio
 
 
 def calculate_targets(
@@ -224,7 +194,7 @@ def image_to_pixel_values(
     return pixel_values
 
 
-class BaseCustomProcessor(ABC):
+class BaseNanoNemotronVLProcessor(ABC):
     """
     This model doesn't define its own HF processor,
     so we implement our own one here.
@@ -349,7 +319,7 @@ class BaseCustomProcessor(ABC):
         return input_item
 
 
-class CustomProcessor(BaseCustomProcessor):
+class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
     """
     HF Processor for InternVLChatModel with extended video processing logic.
 
@@ -398,20 +368,18 @@ class CustomProcessor(BaseCustomProcessor):
         return PromptUpdateDetails.select_text(repl_full, IMG_CONTEXT)
 
 
-class BaseCustomProcessingInfo(BaseProcessingInfo):
+class BaseNanoNemotronVLProcessingInfo(BaseProcessingInfo):
     """Basic image-only ProcessingInfo for InternVL-style models."""
 
     @abstractmethod
     def get_hf_processor(
         self,
         **kwargs: object,
-    ) -> BaseCustomProcessor:
+    ) -> BaseNanoNemotronVLProcessor:
         raise NotImplementedError
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
-        # FIXME(peter)
         return {"image": 1000000}
-        # return {"image": None}
 
     def get_num_image_tokens(
         self,
@@ -419,7 +387,7 @@ class BaseCustomProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         max_num_tiles: int,
-        processor: Optional[BaseCustomProcessor],
+        processor: Optional[BaseNanoNemotronVLProcessor],
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor()
@@ -472,25 +440,26 @@ class BaseCustomProcessingInfo(BaseProcessingInfo):
         )
 
 
-_I = TypeVar("_I", bound=BaseCustomProcessingInfo)
+_I = TypeVar("_I", bound=BaseNanoNemotronVLProcessingInfo)
 
 
-class CustomProcessingInfo(BaseCustomProcessingInfo):
+class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
     """InternVL ProcessingInfo extended for video processing"""
 
     def get_hf_processor(
         self,
         **kwargs: object,
-    ) -> CustomProcessor:
+    ) -> NanoNemotronVLProcessor:
         return self.ctx.init_processor(
-            CustomProcessor,
+            NanoNemotronVLProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
             **kwargs,
         )
 
 
-class CustomMultiModalProcessor(BaseMultiModalProcessor[CustomProcessingInfo]):
+class NanoNemotronVLMultiModalProcessor(
+        BaseMultiModalProcessor[NanoNemotronVLProcessingInfo]):
     """Basic image-only MultiModalProcessor for InternVL-style models."""
 
     def _call_hf_processor(
@@ -546,14 +515,12 @@ class CustomMultiModalProcessor(BaseMultiModalProcessor[CustomProcessingInfo]):
             assert isinstance(image_num_patches, torch.Tensor)
             image_num_patches = image_num_patches.tolist()
         elif "image_embeds" in out_mm_kwargs:
-            # TODO: Use image size information in dictionary embedding inputs
             # to compute num_patches (similar to Qwen2-VL)
             image_num_patches = [None] * len(out_mm_kwargs["image_embeds"])
         else:
             image_num_patches = []
 
         def get_replacement_custom(item_idx: int):
-            print(f"====> item_idx: {item_idx}")
             images = mm_items.get_items(
                 "image", (ImageEmbeddingItems, ImageProcessorItems))
 
@@ -590,7 +557,8 @@ class CustomMultiModalProcessor(BaseMultiModalProcessor[CustomProcessingInfo]):
         ]
 
 
-class CustomDummyInputsBuilder(BaseDummyInputsBuilder[CustomProcessingInfo]):
+class NanoNemotronVLDummyInputsBuilder(
+        BaseDummyInputsBuilder[NanoNemotronVLProcessingInfo]):
     """Basic image-only DummyInputsBuilder for InternVL-style models."""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -618,9 +586,9 @@ class CustomDummyInputsBuilder(BaseDummyInputsBuilder[CustomProcessingInfo]):
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    CustomMultiModalProcessor,
-    info=CustomProcessingInfo,
-    dummy_inputs=CustomDummyInputsBuilder,
+    NanoNemotronVLMultiModalProcessor,
+    info=NanoNemotronVLProcessingInfo,
+    dummy_inputs=NanoNemotronVLDummyInputsBuilder,
 )
 class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
                         SupportsV0Only):
@@ -651,8 +619,7 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
         self.vision_model2 = self.get_vision_model(self.vision_model)
         # Move input normalization to processor to mirror original HF
         # implementation where normalization is done in fp32
-        self.vision_model.radio_model.make_preprocessor_external(
-        )  # todo check this as well
+        self.vision_model.radio_model.make_preprocessor_external()
         self.vision_model = self.vision_model.to(
             self.language_model.config.torch_dtype)
 
@@ -664,7 +631,8 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
         llm_hidden_size = config.text_config.hidden_size
 
         self.mlp1 = nn.Sequential(
-            RMSNorm(vit_hidden_size * int(1 / self.downsample_ratio)**2,
+            RMSNorm(hidden_size=vit_hidden_size *
+                    int(1 / self.downsample_ratio)**2,
                     eps=1e-5),
             nn.Linear(
                 vit_hidden_size * int(1 / self.downsample_ratio)**2,
@@ -678,7 +646,6 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
         )
         self.mlp1 = self.mlp1.to(self.language_model.config.torch_dtype)
 
-        # TODO(amalasanjayd): Fix this
         self.img_context_token_id = None
         self.config = config
 
@@ -727,7 +694,7 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
         return vit_embeds
 
     def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[CustomImageInputs]:
+            self, **kwargs: object) -> Optional[NanoNemotronVLImageInputs]:
         pixel_values_flat = kwargs.pop("pixel_values_flat", None)
         image_num_patches = kwargs.pop("image_num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -740,7 +707,7 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
 
-            return CustomImageEmbeddingInputs(
+            return NanoNemotronVLImageEmbeddinInputs(
                 type="image_embeds",
                 data=flatten_bn(image_embeds),
             )
@@ -761,7 +728,7 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
             pixel_values_flat = flatten_bn(pixel_values_flat, concat=True)
             image_num_patches = flatten_bn(image_num_patches, concat=True)
 
-            return CustomImagePixelInputs(
+            return NanoNemotronVLImagePixelInputs(
                 type="pixel_values",
                 pixel_values_flat=pixel_values_flat,
                 num_patches=image_num_patches,
@@ -769,9 +736,8 @@ class NemotronH_Nano_VL(nn.Module, HasInnerState, IsHybrid, SupportsMultiModal,
 
         raise AssertionError("This line should be unreachable.")
 
-    def _process_image_input(self,
-                             image_input: CustomImageInputs) -> torch.Tensor:
-        # TODO(amalasanjayd)
+    def _process_image_input(
+            self, image_input: NanoNemotronVLImageInputs) -> torch.Tensor:
         if image_input["type"] == "image_embeds":
             return image_input["data"]
 
