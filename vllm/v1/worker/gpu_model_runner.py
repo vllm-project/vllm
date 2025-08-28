@@ -269,6 +269,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device=self.device,
             pin_memory=self.pin_memory,
         )
+        self.idx_mapping = self._make_buffer(self.max_num_reqs,
+                                             dtype=torch.int32)
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
         # Keep in int64 to avoid overflow with long context
@@ -276,13 +278,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                        self.max_model_len,
                                        self.max_num_tokens),
                                    dtype=np.int64)
-
-        self.index_mapping_cpu = torch.zeros(self.max_num_reqs,
-                                             dtype=torch.int32,
-                                             device="cpu",
-                                             pin_memory=self.pin_memory)
-        self.index_mapping_np = self.index_mapping_cpu.numpy()
-        self.index_mapping = self.index_mapping_cpu.to(self.device)
 
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
@@ -572,10 +567,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         idx_mapping_list = [
             self.requests.req_id_to_index[req_id] for req_id in req_ids
         ]
-        self.index_mapping_np[:num_reqs] = idx_mapping_list
-        index_mapping_np = self.index_mapping_np[:num_reqs]
-        idx_mapping = self.index_mapping[:num_reqs].copy_(
-            self.index_mapping_cpu[:num_reqs], non_blocking=True)
+        self.idx_mapping.np[:num_reqs] = idx_mapping_list
+        idx_mapping_np = self.idx_mapping.np[:num_reqs]
+        idx_mapping = self.idx_mapping.copy_to_gpu(num_reqs)
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -587,7 +581,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         max_num_scheduled_tokens = max(tokens)
 
         prepare_inputs(
-            idx_mapping=index_mapping_np,
+            idx_mapping=idx_mapping_np,
             token_ids=self.requests.token_ids.np,
             num_computed_tokens=self.requests.num_computed_tokens.np,
             num_scheduled_tokens=num_scheduled_tokens,
@@ -774,7 +768,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_scheduled_tokens=num_scheduled_tokens,
             req_id_to_batch_idx=req_id_to_batch_idx,
             idx_mapping=idx_mapping,
-            idx_mapping_np=index_mapping_np,
+            idx_mapping_np=idx_mapping_np,
             num_reqs=num_reqs,
             total_num_tokens=total_num_scheduled_tokens,
             max_num_tokens=max_num_scheduled_tokens,
@@ -1378,8 +1372,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
         num_input_tokens += num_pad
 
-        # _prepare_inputs may reorder the batch, so we must gather multi
-        # modal outputs after that to ensure the correct order
+        # _prepare_inputs decides the order of the requests, so we must gather
+        # multimodal outputs after that.
         if self.supports_mm_inputs:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)

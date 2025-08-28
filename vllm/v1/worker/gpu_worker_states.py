@@ -249,6 +249,7 @@ class RequestState:
         batch_idx_to_req_idx: torch.Tensor,
     ) -> SamplingMetadata:
         batch_size = batch_idx_to_req_idx.shape[0]
+        # TODO(woosuk): Use UVA to optimize CPU -> GPU copy.
         _make_sampling_metadata_kernel[(batch_size, )](
             batch_idx_to_req_idx,
             self.temperature.mirror_to_gpu(),
