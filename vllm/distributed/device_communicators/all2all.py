@@ -10,13 +10,12 @@ from vllm.logger import init_logger
 from vllm.utils import has_deep_ep, has_pplx
 from vllm.utils.flashinfer import has_flashinfer_all2all
 
-
 from .base_device_communicator import All2AllManagerBase, Cache
 
 if has_flashinfer_all2all():
-    from flashinfer.comm.trtllm_alltoall import (MnnvlMoe, MoEAlltoallInfo)
     from flashinfer.comm import Mapping
     from flashinfer.comm.mnnvl import MnnvlConfig
+    from flashinfer.comm.trtllm_alltoall import MnnvlMoe
 
 logger = init_logger(__name__)
 
@@ -270,57 +269,35 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         handle.set_num_sms(self.num_sms)
         return handle
 
-def ensure_alltoall_workspace_initialized():
-    """Ensure workspace is initialized"""
-    if not has_flashinfer_all2all():
-        return False
-
-    world_size = get_tensor_model_parallel_world_size()
-    if world_size <= 1:
-        return False
-
-    rank = dist.get_rank()
-
-    if (
-        not _alltoall_workspace_manager.initialized
-        or _alltoall_workspace_manager.world_size != world_size
-    ):
-        _alltoall_workspace_manager.initialize(
-            world_size=world_size,
-            rank=rank,
-            # TODO(tmorris): Get num gpus per node
-        )
-
-    return _alltoall_workspace_manager.initialized
 
 class FlashInferAllToAllManager(All2AllManagerBase):
     """
     All2All communication based on flashinfer kernels.
     """
-    
+
     def __init__(self, cpu_group):
-        assert has_flashinfer_all2all(), "flashinfer all2all module not found. Please install/check flashinfer"  # noqa
+        assert has_flashinfer_all2all(
+        ), "flashinfer all2all module not found. Please install/check flashinfer"  # noqa
         super().__init__(cpu_group)
         logger.debug(
-                "Initialize for flashinfer All2All "
-                "rank=%d, world size=%d", self.rank, self.world_size)
+            "Initialize for flashinfer All2All "
+            "rank=%d, world size=%d", self.rank, self.world_size)
         self.initialized = False
         self.alltoall_info = None
-        
+
     def initialize(
-        self,
-        world_size: int,
-        rank: int,
-        gpus_per_node: int = 4, #TODO(shuw): remove hardcode
+            self,
+            world_size: int,
+            rank: int,
+            gpus_per_node: int = 4,  #TODO(shuw): remove hardcode
     ):
         """Initialize workspace"""
         if self.initialized and self.world_size == world_size:
             return
 
         self.cleanup()
-        logger.debug(
-                "making map: "
-                "rank=%d, world size=%d", rank, world_size)
+        logger.debug("making map: "
+                     "rank=%d, world size=%d", rank, world_size)
         self.mapping = Mapping(
             world_size,
             rank,
@@ -328,28 +305,32 @@ class FlashInferAllToAllManager(All2AllManagerBase):
             tp_size=world_size,
         )
 
+        from vllm.distributed import get_dp_group
         from vllm.distributed.device_communicators.mnnvl_compat import (
-            vLLMCommBackend)
+            CustomCommunicator)
+
         def get_vllm_mnnvl_config() -> MnnvlConfig:
             """Ready-to-use config for vLLM"""
             return MnnvlConfig(
-                comm_backend=vLLMCommBackend(),
+                comm_backend=CustomCommunicator(get_dp_group()),
                 fabric_page_size=1 << 29,  # 512MB
-                allocation_granularity=0    # Auto-detect
+                allocation_granularity=0  # Auto-detect
             )
+
         self.dp_config = get_vllm_mnnvl_config()
-        
-        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(self.mapping, self.dp_config)
+
+        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(
+            self.mapping, self.dp_config)
+        self.prepare_workspace = MnnvlMoe.get_moe_prepare_workspace(
+            self.mapping, self.dp_config)
 
         self.world_size = world_size
         self.rank = rank
-        self.gpus_per_node = gpus_per_node 
+        self.gpus_per_node = gpus_per_node
         self.initialized = True
 
-        logger.info(
-            f"FlashInfer AllToAll workspace initialized for rank {rank}, "
-            f"world_size {world_size}"
-        )
+        logger.info("FlashInfer All2All initialized for rank %s, size %s",
+                    rank, world_size)
 
     def ensure_alltoall_workspace_initialized(self):
         """Ensure workspace is initialized"""
@@ -371,88 +352,13 @@ class FlashInferAllToAllManager(All2AllManagerBase):
 
     def cleanup(self):
         """Clean up workspace"""
-        if self.initialized and self.workspace_tensor is not None:# and self.prepare_workspace_tensor is not None:
+        if self.initialized and self.workspace_tensor is not None \
+            and self.prepare_workspace_tensor is not None:
             try:
                 del self.workspace_tensor
             except Exception as e:
-                logger.warning(f"Failed to cleanup FlashInfer workspace: {e}")
+                logger.warning("Failed to cleanup FlashInfer workspace: %s", e)
             finally:
                 self.workspace_tensor = None
                 self.mapping = None
                 self.initialized = False
-
-    def dispatch(
-        self,
-        comm,
-        global_num_tokens_cpu: list[int],
-        x: torch.Tensor,
-        topk_ids: torch.Tensor,
-        topk_weights: torch.Tensor,
-        top_k: int,
-        num_experts: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, MoEAlltoallInfo]:
-        assert (
-            self.ensure_alltoall_workspace_initialized()
-        ), "FlashInfer AllToAll workspace not available"
-
-        # gather router info
-        # Assume same number of tokens across all devices if global_num_tokens_cpu is None
-        ep_rank = self.rank
-        ep_size = self.world_size
-        max_num_token = max(global_num_tokens_cpu
-                            ) if global_num_tokens_cpu is not None else x.shape[0]
-        topk_ids = torch.nn.functional.pad(
-            topk_ids, (0, 0, 0, max_num_token - topk_ids.shape[0]), "constant",
-            num_experts)
-        topk_weights = torch.nn.functional.pad(
-            topk_weights, (0, 0, 0, max_num_token - topk_weights.shape[0]))
-        gathered_topk_ids, gathered_topk_weights = (comm.all_gatherv(
-            [topk_ids, topk_weights]))
-        gathered_topk_ids = torch.flatten(gathered_topk_ids.contiguous(),
-                                        start_dim=0,
-                                        end_dim=-2)
-        gathered_topk_weights = torch.flatten(gathered_topk_weights.contiguous(),
-                                            start_dim=0,
-                                            end_dim=-2)
-        gathered_target_rank_ids = MnnvlMoe.compute_target_rank_id(
-            gathered_topk_ids, num_experts, ep_size)
-        
-        alltoall_info, topk_ids, topk_weights = (
-            MnnvlMoe.mnnvl_moe_alltoallv_prepare(
-                gathered_target_rank_ids,
-                None,
-                gathered_topk_ids,
-                gathered_topk_weights,
-                max_num_token,
-                num_experts,
-                top_k,
-                ep_rank,
-                ep_size,
-            ))
-
-        x = MnnvlMoe.mnnvl_moe_alltoallv(
-            x, alltoall_info, self.workspace_tensor, ep_rank, ep_size)
-        return x, topk_ids, topk_weights, alltoall_info
-
-    def flashinfer_alltoall_combine(
-        self,
-        output: torch.Tensor,
-        top_k: int,
-        token_count: int,
-        alltoall_info,
-    ):
-        # TODO(shuw): add later
-        assert (
-            self.ensure_alltoall_workspace_initialized()
-        ), "FlashInfer AllToAll workspace not available"
-        ep_rank = self.rank
-        ep_size = self.world_size
-        return MnnvlMoe.mnnvl_moe_alltoallv_combine(
-            output,
-            alltoall_info,
-            self.workspace_tensor,
-            ep_rank=ep_rank,
-            ep_size=ep_size,
-            top_k=top_k,
-            token_count=token_count,
-        )
