@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
-from collections import deque
 from typing import Optional
 
 from vllm.logger import init_logger
@@ -35,7 +35,7 @@ class LogprobsProcessor:
 
     conf_grouped: float
     conf_list: Optional[list[float]]
-    conf_group_list: Optional[deque]
+    conf_group_list: Optional[deque[float]]
     conf_group_size: int
     conf_threshold: Optional[float]
 
@@ -52,8 +52,10 @@ class LogprobsProcessor:
         if hasattr(request.sampling_params, "extra_args") \
             and request.sampling_params.extra_args is not None \
             and request.sampling_params.extra_args.get("enable_conf", False):
-            conf_group_size = request.sampling_params.extra_args.get("window_size", 2048)
-            conf_threshold = request.sampling_params.extra_args.get("threshold", 17)
+            conf_group_size = request.sampling_params.extra_args.get(
+                 "window_size", 2048)
+            conf_threshold = request.sampling_params.extra_args.get(
+                "threshold", 17)
             conf_grouped = 0.0
             conf_group_list = deque(maxlen=conf_group_size)
             conf_list = []
@@ -81,6 +83,8 @@ class LogprobsProcessor:
 
     def check_conf_stop(self) -> bool:
         """Return True if the confidence window triggers early stopping."""
+        if self.conf_threshold is None:
+            return False
         if self.conf_group_list is None or len(self.conf_group_list) == 0:
             return False
         # Require a full window; trigger when the moving average is below threshold.
@@ -126,12 +130,13 @@ class LogprobsProcessor:
                     self.num_logprobs,
                 ))
 
-            if self.conf_list is not None:
+            if self.conf_list is not None and self.conf_group_list is not None:
                 # logprobs[0] is the sampled token; use the remaining candidates
                 if len(logprobs) > 1:
                     new_conf = -sum(logprobs[1:]) / len(logprobs[1:])
                 else:
                     new_conf = 0.0
+
                 self.conf_list.append(new_conf)
 
                 if len(self.conf_group_list) < self.conf_group_size:
