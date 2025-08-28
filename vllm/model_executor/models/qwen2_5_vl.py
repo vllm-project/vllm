@@ -66,7 +66,7 @@ from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
 
-from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+from .interfaces import (MultiModalEmbeddings, SupportsEagle3, SupportsLoRA,
                          SupportsMultiModal, SupportsPP, SupportsQuant)
 from .qwen2_vl import Qwen2VLDummyInputsBuilder as Qwen2_5_VLDummyInputsBuilder
 from .qwen2_vl import (Qwen2VLMultiModalProcessor, Qwen2VLProcessingInfo,
@@ -848,9 +848,9 @@ class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
     Qwen2_5_VLMultiModalProcessor,
     info=Qwen2_5_VLProcessingInfo,
     dummy_inputs=Qwen2_5_VLDummyInputsBuilder)
-class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                         SupportsLoRA, SupportsPP,
-                                         SupportsQuant):
+class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsEagle3,
+                                        SupportsMultiModal, SupportsLoRA,
+                                        SupportsPP, SupportsQuant):
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
