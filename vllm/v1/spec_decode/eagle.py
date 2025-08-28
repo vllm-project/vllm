@@ -21,6 +21,8 @@ from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.v1.attention.backends.flashinfer import (FlashInferMetadata,
+                                                   FlashInferMetadataBuilder)
 from vllm.v1.attention.backends.tree_attn import (TreeAttentionMetadata,
                                                   TreeAttentionMetadataBuilder)
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
@@ -119,7 +121,8 @@ class EagleProposer:
             self.allowed_attn_types = tuple(rocm_types)
         else:
             self.allowed_attn_types = (FlashAttentionMetadata,
-                                       TreeAttentionMetadata)
+                                       TreeAttentionMetadata,
+                                       FlashInferMetadata)
 
         # Parse the speculative token tree.
         spec_token_tree = self.speculative_config.speculative_token_tree
@@ -159,6 +162,8 @@ class EagleProposer:
         sampling_metadata: SamplingMetadata,
         mm_embeds: Optional[list[torch.Tensor]] = None,
     ) -> torch.Tensor:
+        # Ensure locals are always initialized to avoid UnboundLocalError
+        inputs_embeds = None
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
@@ -179,9 +184,92 @@ class EagleProposer:
         assert self.runner is not None
 
         # FIXME: need to consider multiple kv_cache_groups
-        attn_metadata = self.runner.attn_groups[0][0].metadata_builder\
-            .build_for_drafting(common_attn_metadata=common_attn_metadata,
-                                draft_index=0)
+        builder = self.runner.attn_groups[0][0].metadata_builder
+        new_common = None
+        # For FlashInfer first pass, reorder to decode-first contiguous layout
+        # so that prefill slice matches num_prefill_tokens.
+        if isinstance(builder, FlashInferMetadataBuilder):
+            qsl_cpu = common_attn_metadata.query_start_loc_cpu
+            query_lens_cpu = qsl_cpu[1:] - qsl_cpu[:-1]
+            decode_req_idxs = torch.nonzero(query_lens_cpu <= 1,
+                                            as_tuple=False).view(-1)
+            prefill_req_idxs = torch.nonzero(query_lens_cpu > 1,
+                                             as_tuple=False).view(-1)
+            if decode_req_idxs.numel() > 0 and prefill_req_idxs.numel() > 0:
+                req_order = torch.cat([decode_req_idxs, prefill_req_idxs], 0)
+
+                # Build token permutation by concatenating per-request spans
+                spans_start = qsl_cpu[:-1]
+                spans_end = qsl_cpu[1:]
+                token_indices = []
+                for r in req_order.tolist():
+                    start = int(spans_start[r].item())
+                    end = int(spans_end[r].item())
+                    if end > start:
+                        token_indices.append(
+                            torch.arange(start, end, dtype=torch.int64))
+                if token_indices:
+                    token_perm_cpu = torch.cat(token_indices, dim=0)
+                else:
+                    token_perm_cpu = torch.arange(
+                        0,
+                        common_attn_metadata.num_actual_tokens,
+                        dtype=torch.int64)
+
+                # Build reordered CommonAttentionMetadata
+                reordered_query_lens = query_lens_cpu[req_order]
+                new_qsl_cpu = torch.zeros_like(qsl_cpu)
+                new_qsl_cpu[1:] = torch.cumsum(reordered_query_lens,
+                                               dim=0,
+                                               dtype=qsl_cpu.dtype)
+                new_max_q_len = int(reordered_query_lens.max().item())
+                new_seq_lens = common_attn_metadata.seq_lens[req_order].to(
+                    device=common_attn_metadata.seq_lens.device,
+                    non_blocking=True)
+                new_max_seq_len = int(new_seq_lens.max().item())
+                new_common = CommonAttentionMetadata(
+                    query_start_loc=new_qsl_cpu.to(
+                        device=common_attn_metadata.query_start_loc.device,
+                        non_blocking=True),
+                    query_start_loc_cpu=new_qsl_cpu,
+                    seq_lens=new_seq_lens,
+                    seq_lens_cpu=common_attn_metadata.seq_lens_cpu[req_order],
+                    num_computed_tokens_cpu=common_attn_metadata.
+                    num_computed_tokens_cpu[req_order],
+                    num_reqs=common_attn_metadata.num_reqs,
+                    num_actual_tokens=common_attn_metadata.num_actual_tokens,
+                    max_query_len=new_max_q_len,
+                    max_seq_len=new_max_seq_len,
+                    block_table_tensor=common_attn_metadata.
+                    block_table_tensor[req_order],
+                    slot_mapping=common_attn_metadata.slot_mapping[
+                        token_perm_cpu.to(
+                            device=common_attn_metadata.slot_mapping.device)],
+                    causal=True,
+                )
+
+                # Apply new order to inputs
+                token_perm = token_perm_cpu.to(device=target_positions.device,
+                                               dtype=torch.int64)
+                target_positions = target_positions[token_perm]
+                target_hidden_states = target_hidden_states[token_perm]
+
+                # Rebuild input_ids for new order: start from existing shifted
+                # view, then set last tokens per reordered request
+                permuted_input_ids = self.input_ids[:num_tokens][token_perm]
+                last_token_indices = (new_common.query_start_loc[1:].to(
+                    device=target_positions.device, dtype=torch.int64) - 1)
+                next_token_ids_reordered = next_token_ids[req_order.to(
+                    device=next_token_ids.device)]
+                permuted_input_ids[last_token_indices] = (
+                    next_token_ids_reordered)
+                self.input_ids[:num_tokens] = permuted_input_ids
+
+        # Build attention metadata once, using reordered metadata if created
+        attn_metadata = builder.build_for_drafting(
+            common_attn_metadata=new_common
+            if new_common is not None else common_attn_metadata,
+            draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -206,7 +294,7 @@ class EagleProposer:
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
             input_ids = None
         else:
-            inputs_embeds = None
+            # inputs_embeds = None
             input_ids = self.input_ids[:num_input_tokens]
 
         with set_forward_context(per_layer_attn_metadata,
@@ -262,6 +350,39 @@ class EagleProposer:
         attn_metadata.num_actual_tokens = batch_size
         attn_metadata.max_query_len = 1
         attn_metadata.query_start_loc = self.arange[:batch_size + 1]
+
+        # After the first draft forward, switch FlashInfer to decode-only (len=1)
+        if isinstance(builder, FlashInferMetadataBuilder):
+            qsl_gpu = self.arange[:batch_size + 1]
+            qsl_cpu = qsl_gpu.cpu().to(torch.int32)
+            seq_lens_gpu = attn_metadata.seq_lens[:batch_size]
+            seq_lens_cpu = seq_lens_gpu.detach().cpu().to(torch.int32)
+            block_table_tensor = getattr(attn_metadata, 'block_table_tensor',
+                                         None)
+            if block_table_tensor is None:
+                block_table_tensor = attn_metadata.block_table
+
+            new_common = CommonAttentionMetadata(
+                query_start_loc=qsl_gpu,
+                query_start_loc_cpu=qsl_cpu,
+                seq_lens=seq_lens_gpu,
+                seq_lens_cpu=seq_lens_cpu,
+                num_computed_tokens_cpu=torch.zeros(batch_size,
+                                                    dtype=torch.int32),
+                num_reqs=batch_size,
+                num_actual_tokens=batch_size,
+                max_query_len=attn_metadata.max_query_len,
+                max_seq_len=attn_metadata.max_seq_len,
+                block_table_tensor=block_table_tensor[:batch_size],
+                slot_mapping=attn_metadata.slot_mapping,
+                causal=True,
+            )
+
+            attn_metadata = builder.build_for_drafting(
+                common_attn_metadata=new_common, draft_index=0)
+
+            for layer_name in self.attn_layer_names:
+                per_layer_attn_metadata[layer_name] = attn_metadata
         for _ in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
@@ -308,6 +429,7 @@ class EagleProposer:
             self.input_ids[:batch_size] = input_ids
             self.positions[:batch_size] = clamped_positions
             self.hidden_states[:batch_size] = hidden_states
+
             if self.is_multimodal_model:
                 inputs_embeds = self.model.get_input_embeddings(input_ids)
                 self.inputs_embeds[:batch_size] = inputs_embeds
@@ -335,6 +457,14 @@ class EagleProposer:
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
+        try:
+            head = draft_token_ids[0, :min(8, draft_token_ids.shape[1])]
+            logger.info(
+                "[EAGLE3 dbg] proposed draft ids (req0) head=%s shape=%s",  # noqa: G004
+                head.tolist(),
+                tuple(draft_token_ids.shape))
+        except Exception:
+            pass
         return draft_token_ids
 
     def propose_tree(
@@ -641,13 +771,15 @@ class EagleProposer:
                 "The EAGLE head's vocab embedding will be loaded separately"
                 " from the target model.")
 
-        # share lm_head with the target model if needed
-        # some model definition do not define lm_head explicitly
-        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.vllm_config.speculative_config.method != "eagle3" and \
-                hasattr(target_language_model, "lm_head"):
-            logger.info("Loading EAGLE LM head weights from the target model.")
+        if (get_pp_group().world_size == 1 and self.model.lm_head.weight.shape
+                == target_language_model.lm_head.weight.shape):
+            logger.info("Assuming the EAGLE head shares the same lm_head"
+                        " with the target model.")
+            del self.model.lm_head
             self.model.lm_head = target_language_model.lm_head
+        else:
+            logger.info("The EAGLE head's lm_head will be loaded separately"
+                        " from the target model.")
 
     @torch.inference_mode()
     def dummy_run(
