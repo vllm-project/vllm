@@ -306,7 +306,8 @@ class EngineArgs:
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
-    enable_zigzag_expert_placement: bool = ParallelConfig.enable_zigzag_expert_placement
+    enable_zigzag_expert_placement: bool = \
+        ParallelConfig.enable_zigzag_expert_placement
     num_redundant_experts: int = EPLBConfig.num_redundant_experts
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
