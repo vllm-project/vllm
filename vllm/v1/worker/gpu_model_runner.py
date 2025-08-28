@@ -1247,7 +1247,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             req_start_idx += num_scheduled_tokens
 
-        return is_mm_embed, mm_embeds
+        return is_mm_embed.to(self.device), mm_embeds
 
     def get_model(self) -> nn.Module:
         # get raw model out of the cudagraph wrapper.
