@@ -28,6 +28,7 @@ class RequestData:
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
 
+    mm_hashes: list[str]
     # M-RoPE (only for Qwen2/2.5-VL)
     mrope_positions: Optional[torch.Tensor] = None
     mrope_position_delta: Optional[int] = None
