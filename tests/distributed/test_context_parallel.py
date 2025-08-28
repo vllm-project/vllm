@@ -28,6 +28,7 @@ VLLM_MULTI_NODE = os.getenv("VLLM_MULTI_NODE", "0") == "1"
 class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
+    cp_size: int
     eager_mode: bool
     chunked_prefill: bool
 
@@ -60,8 +61,9 @@ class CPTestSettings:
     @staticmethod
     def detailed(
         *,
-        tp_base: int = 2,
+        tp_base: int = 4,
         pp_base: int = 1,
+        cp_base: int = 1,
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
         load_format: Optional[str] = None,
@@ -69,12 +71,14 @@ class CPTestSettings:
         parallel_setups = []
         for eager_mode_val in [False, True]:
             for pp_multiplier in [1, 2]:
-                for chunked_prefill_val in [False, True]:
-                    parallel_setups.append(
-                        ParallelSetup(tp_size=tp_base,
-                                      pp_size=pp_multiplier * pp_base,
-                                      eager_mode=eager_mode_val,
-                                      chunked_prefill=chunked_prefill_val))
+                for cp_multiplier in [2, 4]:
+                    for chunked_prefill_val in [False, True]:
+                        parallel_setups.append(
+                            ParallelSetup(tp_size=tp_base,
+                                        pp_size=pp_multiplier * pp_base,
+                                        cp_size=cp_multiplier * cp_base,
+                                        eager_mode=eager_mode_val,
+                                        chunked_prefill=chunked_prefill_val))
         return CPTestSettings(
             parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
@@ -109,6 +113,7 @@ def _compare_cp_with_tp(
     (
         tp_size,
         pp_size,
+        cp_size,
         eager_mode,
         chunked_prefill,
     ) = parallel_setup
@@ -182,9 +187,10 @@ def _compare_cp_with_tp(
         str(tp_size),
         "--pipeline-parallel-size",
         str(pp_size),
+        "--context-parallel-size",
+        str(cp_size),
         "--distributed-executor-backend",
         distributed_backend,
-        "--enable-context-parallel",
     ]
 
     tp_args = [
@@ -195,7 +201,6 @@ def _compare_cp_with_tp(
         str(pp_size),
         "--distributed-executor-backend",
         distributed_backend,
-        "--no-enable-context-parallel",
     ]
 
     try:
