@@ -365,6 +365,10 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
 
     # [Cross-encoder]
     "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2", v0_only=True),  # noqa: E501
+    "GteNewForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-multilingual-reranker-base",  # noqa: E501
+                                                       trust_remote_code=True,
+                                                       hf_overrides={
+                                                           "architectures": ["GteNewForSequenceClassification"]}),# noqa: E501
     "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True), # noqa: E501
     "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
     "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3", v0_only=True),  # noqa: E501
@@ -429,6 +433,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
                                                  "3.5-qwen3moe": "OpenGVLab/InternVL3_5-30B-A3B",   # noqa: E501
                                                  "3.5-gptoss": "OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview"},  # noqa: E501
                                          trust_remote_code=True),
+    "InternVLForConditionalGeneration": _HfExamplesInfo("OpenGVLab/InternVL3-1B-hf"),    # noqa: E501
     "KeyeForConditionalGeneration": _HfExamplesInfo("Kwai-Keye/Keye-VL-8B-Preview", # noqa: E501
                                                     trust_remote_code=True),
     "KimiVLForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-VL-A3B-Instruct",  # noqa: E501
@@ -451,7 +456,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6",
                                 trust_remote_code=True),
     "MiniCPMV": _HfExamplesInfo("openbmb/MiniCPM-Llama3-V-2_5",
-                                extras={"2.6": "openbmb/MiniCPM-V-2_6", "4.0": "openbmb/MiniCPM-V-4"},  # noqa: E501
+                                extras={"2.6": "openbmb/MiniCPM-V-2_6", "4.0": "openbmb/MiniCPM-V-4", "4.5": "openbmb/MiniCPM-V-4_5"},  # noqa: E501
                                 trust_remote_code=True),
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo("MiniMaxAI/MiniMax-VL-01", # noqa: E501
                                               trust_remote_code=True,
@@ -584,7 +589,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
 _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersModel": _HfExamplesInfo("Qwen/Qwen3-Embedding-0.6B"),
     "TransformersForCausalLM": _HfExamplesInfo("hmellor/Ilama-3.2-1B", trust_remote_code=True),  # noqa: E501
-    "TransformersForMultimodalLM": _HfExamplesInfo("OpenGVLab/InternVL3-1B-hf"),
+    "TransformersForMultimodalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
 }
 
 _EXAMPLE_MODELS = {

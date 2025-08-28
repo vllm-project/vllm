@@ -292,12 +292,13 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             return
 
         model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
         compilation_config = vllm_config.compilation_config
 
-        model_cls, _ = ModelRegistry.resolve_model_cls(
-            model_config.architecture,
-            model_config=model_config,
-        )
+        # TODO(tdoublep): remove once prefix caching is enabled
+        cache_config.enable_prefix_caching = False
+        logger.info("Hybrid or mamba-based model detected: disabling prefix "
+                    "caching since it is not yet supported.")
 
         # TODO(tdoublep): remove as full cuda graph support is added
         FCG_NOT_SUPPORTED_MODELS = [
@@ -405,6 +406,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
+    "GteNewForSequenceClassification": GteNewModelConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
@@ -416,4 +418,5 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "MambaForCausalLM": MambaModelConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
+    "FalconMambaForCausalLM": MambaModelConfig,
 }
