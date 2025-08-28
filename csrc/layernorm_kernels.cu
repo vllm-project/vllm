@@ -10,7 +10,7 @@
   #include <hipcub/hipcub.hpp>
 #endif
 
-#if defined(CCCL_MAJOR_VERSION) && (CCCL_MAJOR_VERSION >= 3)
+#if !defined(USE_ROCM) && defined(CCCL_MAJOR_VERSION) && (CCCL_MAJOR_VERSION >= 3)
   #include <cuda/std/functional>
   #include <cuda/functional>
   using Sum_fix = cuda::std::plus<>;
@@ -43,7 +43,7 @@ __global__ void rms_norm_kernel(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum_fix{}, blockDim.x);
+  variance = BlockReduce(reduceStore).Reduce(variance, Sum_fix{}, blockDim.x);
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
@@ -98,7 +98,7 @@ fused_add_rms_norm_kernel(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum_fix{}, blockDim.x);
+  variance = BlockReduce(reduceStore).Reduce(variance, Sum_fix{}, blockDim.x);
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
@@ -139,7 +139,7 @@ fused_add_rms_norm_kernel(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum_fix{}, blockDim.x);
+  variance = BlockReduce(reduceStore).Reduce(variance, Sum_fix{}, blockDim.x);
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);

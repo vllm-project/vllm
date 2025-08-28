@@ -18,7 +18,7 @@
   #include <hipcub/util_type.hpp>
 #endif
 
-#if defined(CCCL_MAJOR_VERSION) && (CCCL_MAJOR_VERSION >= 3)
+#if !defined(USE_ROCM) && defined(CCCL_MAJOR_VERSION) && (CCCL_MAJOR_VERSION >= 3)
   #include <cuda/std/functional>
   #include <cuda/functional>
   using Sum_fix = cuda::std::plus<>;
@@ -186,7 +186,7 @@ __global__ void dynamic_scaled_int8_quant_kernel(
       });
   using BlockReduce = cub::BlockReduce<float, 256>;
   __shared__ typename BlockReduce::TempStorage tmp;
-  float block_max = BlockReduce(tmp).Reduce(thread_max, cub::Max_fix{}, blockDim.x);
+  float block_max = BlockReduce(tmp).Reduce(thread_max, Max_fix{}, blockDim.x);
   __shared__ float absmax;
   if (tid == 0) {
     absmax = block_max;
