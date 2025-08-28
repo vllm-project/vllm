@@ -541,7 +541,7 @@ def get_load_balance_assignment(
 def run_dp_sharded_mrope_vision_model(
     vision_model: torch.nn.Module,
     pixel_values: torch.Tensor,
-    grid_thw_list: list[list[int]],
+    grid_thw_list: Union[list[list[int]], torch.Tensor],
 ) -> tuple[torch.Tensor, ...]:
     """Run a vision model with data parallelism (DP) sharding. 
     The function will shard the input image tensor on the 
@@ -551,9 +551,10 @@ def run_dp_sharded_mrope_vision_model(
     Args:
         vision_model (torch.nn.Module): Vision model.
         pixel_values (torch.Tensor): Image/Video input tensor.
-        grid_thw_list: List of grid dimensions for each image
+        grid_thw_list: List of grid dimensions for each image or 
+                      tensor of shape [num_items, 3]
     Returns:
-        torch.Tensor: Output image embeddings
+        tuple[torch.Tensor, ...]: Output image embeddings
 
     Example:
         ```
@@ -561,6 +562,8 @@ def run_dp_sharded_mrope_vision_model(
         vision_model.spatial_merge_size = 2
         pixel_values.shape = (1350, channel)
         grid_thw_list = [[1, 10, 100], [1, 10, 10], [1, 10, 20], [1, 50]]
+        # or 
+        grid_thw_list = torch.tensor([[1, 10, 100], [1, 10, 10], [1, 10, 20], [1, 50]])
         tp_size=2
         ```
 
@@ -571,10 +574,38 @@ def run_dp_sharded_mrope_vision_model(
     # GPU_1 tp_rank_local = 1
     tp_rank_local = get_tensor_model_parallel_rank()
 
-    # patches_per_image = [1000, 100, 200, 50]
-    patches_per_image = [math.prod(grid_thw) for grid_thw in grid_thw_list]
-    # patches_per_image = [0, 1000, 1100, 1300, 1350]
-    cum_patches_per_image = [0, *itertools.accumulate(patches_per_image)]
+    # Handle both list and tensor input types
+    if isinstance(grid_thw_list, torch.Tensor):
+        # Tensor input path - optimized for tensor operations
+        grid_thw = grid_thw_list
+        patches_per_image_tensor = grid_thw.prod(dim=1)  # [num_items]
+        total_patches = patches_per_image_tensor.sum().item()
+        
+        if pixel_values.shape[0] != total_patches:
+            raise ValueError(
+                f"Pixel values shape {pixel_values.shape[0]} doesn't match "
+                f"expected total patches {total_patches}")
+
+        # Convert to list only for load balancing algorithm
+        # patches_per_image = [1000, 100, 200, 50]
+        patches_per_image = patches_per_image_tensor.tolist()
+        
+        # Calculate cumulative patches using tensor operations
+        cum_patches_tensor = torch.cat([
+            torch.zeros(1,
+                        device=patches_per_image_tensor.device,
+                        dtype=patches_per_image_tensor.dtype),
+            patches_per_image_tensor.cumsum(dim=0)
+        ])
+        
+        use_tensor_path = True
+    else:
+        # List input path - original implementation
+        # patches_per_image = [1000, 100, 200, 50]
+        patches_per_image = [math.prod(grid_thw) for grid_thw in grid_thw_list]
+        # patches_per_image = [0, 1000, 1100, 1300, 1350]
+        cum_patches_per_image = [0, *itertools.accumulate(patches_per_image)]
+        use_tensor_path = False
 
     # Get load balancing assignment with all metadata
     # image_to_tp_rank = [0, 2, 1, 3]
@@ -595,15 +626,38 @@ def run_dp_sharded_mrope_vision_model(
 
     # Get the pixel values for the local images based on the image_idxs_local
     if len(image_idxs_local) > 0:
-        pixel_values_local = torch.cat([
-            pixel_values[cum_patches_per_image[i]:cum_patches_per_image[i + 1]]
-            for i in image_idxs_local
-        ])
+        if use_tensor_path:
+            # Extract pixel values for local items using tensor operations
+            pixel_values_local = torch.cat([
+                pixel_values[cum_patches_tensor[i].item(
+                ):cum_patches_tensor[i + 1].item()] for i in image_idxs_local
+            ])
+
+            # Extract grid_thw for local items using tensor indexing
+            image_idxs_tensor = torch.tensor(image_idxs_local,
+                                             device=grid_thw.device,
+                                             dtype=torch.long)
+            local_grid_thw_tensor = grid_thw[image_idxs_tensor]
+        else:
+            # Original list-based approach
+            pixel_values_local = torch.cat([
+                pixel_values[cum_patches_per_image[i]:cum_patches_per_image[i +
+                                                                            1]]
+                for i in image_idxs_local
+            ])
+            local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
     else:
         # Handle case where this rank has no images
         pixel_values_local = torch.empty((0, pixel_values.shape[1]),
                                          device=pixel_values.device,
                                          dtype=pixel_values.dtype)
+        if use_tensor_path:
+            local_grid_thw_tensor = torch.empty((0, 3),
+                                                device=grid_thw.device,
+                                                dtype=grid_thw.dtype)
+        else:
+            local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
+
     # embed_dim_reduction_factor = 2 * 2
     embed_dim_reduction_factor = (vision_model.spatial_merge_size *
                                   vision_model.spatial_merge_size)
@@ -614,12 +668,15 @@ def run_dp_sharded_mrope_vision_model(
     # to work
     max_len_per_rank = max(
         grouped_pixel_values_len) // embed_dim_reduction_factor
-    local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
 
     # Run the vision model on the local pixel_values_local
     if pixel_values_local.shape[0] > 0:
-        image_embeds_local = vision_model(pixel_values_local,
-                                          local_grid_thw_list)
+        if use_tensor_path:
+            image_embeds_local = vision_model(pixel_values_local,
+                                              local_grid_thw_tensor)
+        else:
+            image_embeds_local = vision_model(pixel_values_local,
+                                              local_grid_thw_list)
     else:
         # Handle empty case
         image_embeds_local = torch.empty((0, vision_model.out_hidden_size),
@@ -655,7 +712,10 @@ def run_dp_sharded_mrope_vision_model(
                                 for patch_size in patches_per_image]
 
     # Reconstruct embeddings in the original order
-    original_order_embeddings = [None] * len(grid_thw_list)
+    if use_tensor_path:
+        original_order_embeddings = [None] * len(patches_per_image)
+    else:
+        original_order_embeddings = [None] * len(grid_thw_list)
     current_idx = 0
     for rank in range(tp_size):
         count = gpu_sample_counts[rank]
