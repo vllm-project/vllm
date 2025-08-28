@@ -6,28 +6,25 @@ import torch
 
 from tests.conftest import VllmRunner
 
-MODEL_NAME = "mgazz/Prithvi_v2_eo_300_tl_unet_agb"
 DTYPE = "float16"
 
 
 @pytest.mark.parametrize(
     "model",
     [
-        "mgazz/Prithvi_v2_eo_300_tl_unet_agb",
-        "mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11"
+        "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
+        "mgazz/Prithvi_v2_eo_300_tl_unet_agb"
     ],
 )
-@pytest.mark.parametrize("dtype", ["float16"])
 def test_inference(
     vllm_runner: type[VllmRunner],
     model: str,
-    dtype: str,
 ) -> None:
 
     with vllm_runner(model,
                      skip_tokenizer_init=True,
                      enforce_eager=True,
-                     dtype=dtype,
+                     dtype=DTYPE,
                      runner="pooling",
                      model_impl="terratorch") as vllm_model:
 
