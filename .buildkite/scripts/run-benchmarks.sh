@@ -11,10 +11,10 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
 
 # run python-based benchmarks and upload the result to buildkite
-python3 benchmarks/benchmark_latency.py --output-json latency_results.json 2>&1 | tee benchmark_latency.txt
+vllm bench latency --output-json latency_results.json 2>&1 | tee benchmark_latency.txt
 bench_latency_exit_code=$?
 
-python3 benchmarks/benchmark_throughput.py --input-len 256 --output-len 256 --output-json throughput_results.json 2>&1 | tee benchmark_throughput.txt
+vllm bench throughput --input-len 256 --output-len 256 --output-json throughput_results.json 2>&1 | tee benchmark_throughput.txt
 bench_throughput_exit_code=$?
 
 # run server-based benchmarks and upload the result to buildkite
@@ -24,7 +24,7 @@ wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/r
 
 # wait for server to start, timeout after 600 seconds
 timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
-python3 benchmarks/benchmark_serving.py \
+vllm bench serve \
     --backend vllm \
     --dataset-name sharegpt \
     --dataset-path ./ShareGPT_V3_unfiltered_cleaned_split.json \

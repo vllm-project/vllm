@@ -3,6 +3,7 @@
 This script automates the process of finding the optimal server parameter combination (`max-num-seqs` and `max-num-batched-tokens`) to maximize throughput for a vLLM server. It also supports additional constraints such as E2E latency and prefix cache hit rate.
 
 ## Table of Contents
+
 - [Prerequisites](#prerequisites)
 - [Configuration](#configuration)
 - [How to Run](#how-to-run)
@@ -39,6 +40,7 @@ You must set the following variables at the top of the script before execution.
 | `DOWNLOAD_DIR` | **Required.** Directory to download and load model weights from. | `""` (default download path) |
 | `INPUT_LEN` | **Required.** Request input length. | `4000` |
 | `OUTPUT_LEN` | **Required.** Request output length. | `16` |
+| `MAX_MODEL_LEN` | **Required.** Max model length. | `4096` |
 | `MIN_CACHE_HIT_PCT` | Prefix cache hit rate in percentage (0-100). Set to `0` to disable. | `60` |
 | `MAX_LATENCY_ALLOWED_MS` | The maximum allowed P99 end-to-end latency in milliseconds. Set to a very large number (e.g., `100000000000`) to effectively ignore the latency constraint. | `500` |
 | `NUM_SEQS_LIST` | A space-separated string of `max-num-seqs` values to test. | `"128 256"` |
@@ -51,7 +53,7 @@ You must set the following variables at the top of the script before execution.
 1. **Configure**: Edit the script and set the variables in the [Configuration](#configuration) section.
 2. **Execute**: Run the script. Since the process can take a long time, it is highly recommended to use a terminal multiplexer like `tmux` or `screen` to prevent the script from stopping if your connection is lost.
 
-```
+```bash
 cd <FOLDER_OF_THIS_SCRIPT>
 bash auto_tune.sh
 ```
@@ -63,34 +65,40 @@ bash auto_tune.sh
 Here are a few examples of how to configure the script for different goals:
 
 ### 1. Maximize Throughput (No Latency Constraint)
+
 - **Goal**: Find the best `max-num-seqs` and `max-num-batched-tokens` to get the highest possible throughput for 1800 input tokens and 20 output tokens.
 - **Configuration**:
 
 ```bash
 INPUT_LEN=1800
 OUTPUT_LEN=20
+MAX_MODEL_LEN=2048
 MIN_CACHE_HIT_PCT=0
 MAX_LATENCY_ALLOWED_MS=100000000000 # A very large number
 ```
 
 #### 2. Maximize Throughput with a Latency Requirement
+
 - **Goal**: Find the best server parameters when P99 end-to-end latency must be below 500ms.
 - **Configuration**:
 
 ```bash
 INPUT_LEN=1800
 OUTPUT_LEN=20
+MAX_MODEL_LEN=2048
 MIN_CACHE_HIT_PCT=0
 MAX_LATENCY_ALLOWED_MS=500
 ```
 
 #### 3. Maximize Throughput with Prefix Caching and Latency Requirements
+
 - **Goal**: Find the best server parameters assuming a 60% prefix cache hit rate and a latency requirement of 500ms.
 - **Configuration**:
 
 ```bash
 INPUT_LEN=1800
 OUTPUT_LEN=20
+MAX_MODEL_LEN=2048
 MIN_CACHE_HIT_PCT=60
 MAX_LATENCY_ALLOWED_MS=500
 ```
@@ -101,11 +109,11 @@ After the script finishes, you will find the results in a new, timestamped direc
 
 - **Log Files**: The directory (`$BASE/auto-benchmark/YYYY_MM_DD_HH_MM/`) contains detailed logs for each run:
     - `vllm_log_...txt`: The log output from the vLLM server for each parameter combination.
-    - `bm_log_...txt`: The log output from the `benchmark_serving.py` script for each benchmark run.
+    - `bm_log_...txt`: The log output from the `vllm bench serve` command for each benchmark run.
 
 - **Final Result Summary**: A file named `result.txt` is created in the log directory. It contains a summary of each tested combination and concludes with the overall best parameters found.
 
-```
+```text
 # Example result.txt content
 hash:a1b2c3d4...
 max_num_seqs: 128, max_num_batched_tokens: 2048, request_rate: 10.0, e2el: 450.5, throughput: 9.8, goodput: 9.8

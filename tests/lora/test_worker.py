@@ -4,17 +4,14 @@
 import os
 import random
 import tempfile
-from typing import Union
 from unittest.mock import patch
 
-import vllm.envs as envs
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ParallelConfig, SchedulerConfig,
                          VllmConfig)
 from vllm.lora.models import LoRAMapping
 from vllm.lora.request import LoRARequest
-from vllm.v1.worker.gpu_worker import Worker as V1Worker
-from vllm.worker.worker import Worker
+from vllm.v1.worker.gpu_worker import Worker
 
 NUM_LORAS = 16
 
@@ -22,29 +19,17 @@ NUM_LORAS = 16
 @patch.dict(os.environ, {"RANK": "0"})
 def test_worker_apply_lora(sql_lora_files):
 
-    def set_active_loras(worker: Union[Worker, V1Worker],
-                         lora_requests: list[LoRARequest]):
+    def set_active_loras(worker: Worker, lora_requests: list[LoRARequest]):
         lora_mapping = LoRAMapping([], [])
-        if isinstance(worker, Worker):
-            # v0 case
-            worker.model_runner.set_active_loras(lora_requests, lora_mapping)
-        else:
-            # v1 case
-            worker.model_runner.lora_manager.set_active_adapters(
-                lora_requests, lora_mapping)
 
-    worker_cls = V1Worker if envs.VLLM_USE_V1 else Worker
+        worker.model_runner.lora_manager.set_active_adapters(
+            lora_requests, lora_mapping)
 
     vllm_config = VllmConfig(
         model_config=ModelConfig(
             "meta-llama/Llama-2-7b-hf",
-            task="auto",
-            tokenizer="meta-llama/Llama-2-7b-hf",
-            tokenizer_mode="auto",
-            trust_remote_code=False,
             seed=0,
             dtype="float16",
-            revision=None,
             enforce_eager=True,
         ),
         load_config=LoadConfig(
@@ -67,7 +52,7 @@ def test_worker_apply_lora(sql_lora_files):
                                max_cpu_loras=NUM_LORAS,
                                max_loras=NUM_LORAS),
     )
-    worker = worker_cls(
+    worker = Worker(
         vllm_config=vllm_config,
         local_rank=0,
         rank=0,

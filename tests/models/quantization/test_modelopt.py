@@ -45,7 +45,7 @@ EXPECTED_STRS_MAP = {
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_name", MODELS)
 def test_models(example_prompts, model_name) -> None:
-    model = LLM(
+    llm = LLM(
         model=model_name,
         max_model_len=MAX_MODEL_LEN,
         trust_remote_code=True,
@@ -68,9 +68,9 @@ def test_models(example_prompts, model_name) -> None:
     # Note: these need to be run 1 at a time due to numerical precision,
     # since the expected strs were generated this way.
     for prompt in formatted_prompts:
-        outputs = model.generate(prompt, params)
+        outputs = llm.generate(prompt, params)
         generations.append(outputs[0].outputs[0].text)
-    del model
+    del llm
 
     print(model_name, generations)
     expected_strs = EXPECTED_STRS_MAP[model_name]

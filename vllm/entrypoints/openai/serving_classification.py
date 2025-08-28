@@ -49,18 +49,10 @@ class ClassificationMixin(OpenAIServing):
             return None
 
         try:
-            (
-                ctx.lora_request,
-                ctx.prompt_adapter_request,
-            ) = self._maybe_get_adapters(ctx.request)
+            ctx.lora_request = self._maybe_get_adapters(ctx.request)
 
             ctx.tokenizer = await self.engine_client.get_tokenizer(
                 ctx.lora_request)
-
-            if ctx.prompt_adapter_request is not None:
-                raise NotImplementedError(
-                    "Prompt adapter is not supported for classification models"
-                )
 
             (
                 ctx.request_prompts,
@@ -137,12 +129,14 @@ class ServingClassification(ClassificationMixin):
         models: OpenAIServingModels,
         *,
         request_logger: Optional[RequestLogger],
+        log_error_stack: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
             model_config=model_config,
             models=models,
             request_logger=request_logger,
+            log_error_stack=log_error_stack,
         )
 
     async def create_classify(

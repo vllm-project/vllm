@@ -49,7 +49,7 @@ def test_random_sample_with_seed(
     sampling_params_seed_2 = copy.deepcopy(sampling_params)
     sampling_params_seed_2.seed = 200
 
-    llm = vllm_model.model
+    llm = vllm_model.llm
 
     for prompt in example_prompts:
         for params in (

@@ -39,11 +39,13 @@ class OpenAIServingTokenization(OpenAIServing):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
+        log_error_stack: bool = False,
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
-                         request_logger=request_logger)
+                         request_logger=request_logger,
+                         log_error_stack=log_error_stack)
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -60,10 +62,7 @@ class OpenAIServingTokenization(OpenAIServing):
         request_id = f"tokn-{self._base_request_id(raw_request)}"
 
         try:
-            (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+            lora_request = self._maybe_get_adapters(request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
@@ -104,11 +103,8 @@ class OpenAIServingTokenization(OpenAIServing):
             self._log_inputs(request_id,
                              request_prompts[i],
                              params=None,
-                             lora_request=lora_request,
-                             prompt_adapter_request=prompt_adapter_request)
+                             lora_request=lora_request)
 
-            # Silently ignore prompt adapter since it does not affect
-            # tokenization (Unlike in Embeddings API where an error is raised)
             if isinstance(engine_prompt,
                           dict) and "prompt_token_ids" in engine_prompt:
                 input_ids.extend(engine_prompt["prompt_token_ids"])
@@ -133,21 +129,14 @@ class OpenAIServingTokenization(OpenAIServing):
 
         request_id = f"tokn-{self._base_request_id(raw_request)}"
 
-        (
-            lora_request,
-            prompt_adapter_request,
-        ) = self._maybe_get_adapters(request)
+        lora_request = self._maybe_get_adapters(request)
 
         tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
         self._log_inputs(request_id,
                          request.tokens,
                          params=None,
-                         lora_request=lora_request,
-                         prompt_adapter_request=prompt_adapter_request)
-
-        # Silently ignore prompt adapter since it does not affect tokenization
-        # (Unlike in Embeddings API where an error is raised)
+                         lora_request=lora_request)
 
         prompt_input = await self._tokenize_prompt_input_async(
             request,

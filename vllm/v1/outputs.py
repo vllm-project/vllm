@@ -71,6 +71,13 @@ class SamplerOutput:
     logprobs_tensors: Optional[LogprobsTensors]
 
 
+@dataclass
+class KVConnectorOutput:
+    # [req_ids]
+    finished_sending: Optional[set[str]] = None
+    finished_recving: Optional[set[str]] = None
+
+
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
@@ -87,9 +94,6 @@ class ModelRunnerOutput:
     # each request due to speculative/jump decoding.
     sampled_token_ids: list[list[int]]
 
-    # num_reqs x num_spec_tokens
-    spec_token_ids: Optional[list[list[int]]]
-
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]
@@ -104,21 +108,25 @@ class ModelRunnerOutput:
     # [num_reqs, hidden_size]
     pooler_output: list[Optional[torch.Tensor]]
 
-    # [req_ids]
-    finished_sending: Optional[set[str]] = None
-    finished_recving: Optional[set[str]] = None
+    kv_connector_output: Optional[KVConnectorOutput] = None
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
 
 
+@dataclass
+class DraftTokenIds:
+
+    # [num_reqs]
+    req_ids: list[str]
+    # num_reqs x num_draft_tokens
+    draft_token_ids: list[list[int]]
+
+
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
                                               req_id_to_index={},
                                               sampled_token_ids=[],
-                                              spec_token_ids=None,
                                               logprobs=None,
                                               prompt_logprobs_dict={},
                                               pooler_output=[],
-                                              finished_sending=None,
-                                              finished_recving=None,
                                               num_nans_in_logits=None)

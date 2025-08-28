@@ -113,8 +113,7 @@ def test_llama_lora(sql_lora_files):
         enable_lora=True,
         # also test odd max_num_seqs
         max_num_seqs=13,
-        max_loras=4,
-        enable_chunked_prefill=True)
+        max_loras=4)
     generate_and_test(llm, sql_lora_files)
 
 
@@ -128,7 +127,6 @@ def test_llama_lora_tp4(sql_lora_files):
         max_num_seqs=16,
         max_loras=4,
         tensor_parallel_size=4,
-        enable_chunked_prefill=True,
     )
     generate_and_test(llm, sql_lora_files)
 
@@ -144,7 +142,6 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
         max_loras=4,
         tensor_parallel_size=4,
         fully_sharded_loras=True,
-        enable_chunked_prefill=True,
     )
     generate_and_test(llm, sql_lora_files)
 
@@ -186,25 +183,25 @@ def test_tp2_serialize_and_deserialize_lora(tmp_path, sql_lora_files,
     model_uri = tmp_path / "vllm" / model_ref / suffix / model_name
     tensorizer_config = TensorizerConfig(tensorizer_uri=str(model_uri))
 
-    loaded_vllm_model = LLM(model=model_ref,
-                            load_format="tensorizer",
-                            enable_lora=True,
-                            enforce_eager=True,
-                            model_loader_extra_config=tensorizer_config,
-                            max_num_seqs=13,
-                            tensor_parallel_size=2,
-                            max_loras=2)
+    loaded_llm = LLM(model=model_ref,
+                     load_format="tensorizer",
+                     enable_lora=True,
+                     enforce_eager=True,
+                     model_loader_extra_config=tensorizer_config,
+                     max_num_seqs=13,
+                     tensor_parallel_size=2,
+                     max_loras=2)
 
     tc_as_dict = tensorizer_config.to_serializable()
 
     print("lora adapter created")
-    assert do_sample(loaded_vllm_model,
+    assert do_sample(loaded_llm,
                      sql_lora_files,
                      tensorizer_config_dict=tc_as_dict,
                      lora_id=0) == EXPECTED_NO_LORA_OUTPUT
 
     print("lora 1")
-    assert do_sample(loaded_vllm_model,
+    assert do_sample(loaded_llm,
                      sql_lora_files,
                      tensorizer_config_dict=tc_as_dict,
                      lora_id=1) == EXPECTED_LORA_OUTPUT

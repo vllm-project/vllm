@@ -46,7 +46,7 @@ def _listen_for_register(poller, router_socket):
                 global prefill_instances
                 global prefill_cv
                 with prefill_cv:
-                    node = prefill_instances.pop(data["http_address"], None)
+                    node = prefill_instances.get(data["http_address"], None)
                     prefill_instances[data["http_address"]] = (
                         data["zmq_address"],
                         time.time() + DEFAULT_PING_SECONDS,
@@ -57,7 +57,7 @@ def _listen_for_register(poller, router_socket):
                 global decode_instances
                 global decode_cv
                 with decode_cv:
-                    node = decode_instances.pop(data["http_address"], None)
+                    node = decode_instances.get(data["http_address"], None)
                     decode_instances[data["http_address"]] = (
                         data["zmq_address"],
                         time.time() + DEFAULT_PING_SECONDS,
@@ -69,6 +69,7 @@ def _listen_for_register(poller, router_socket):
                     remote_address,
                     data,
                 )
+                return
 
             if node is None:
                 print(f"🔵Add [HTTP:{data['http_address']}, ZMQ:{data['zmq_address']}]")
@@ -120,6 +121,7 @@ async def forward_request(url, data, request_id):
 
 
 @app.route("/v1/completions", methods=["POST"])
+@app.route("/v1/chat/completions", methods=["POST"])
 async def handle_request():
     try:
         original_request_data = await request.get_json()
@@ -127,6 +129,8 @@ async def handle_request():
         prefill_request = original_request_data.copy()
         # change max_tokens = 1 to let it only do prefill
         prefill_request["max_tokens"] = 1
+        if "max_completion_tokens" in prefill_request:
+            prefill_request["max_completion_tokens"] = 1
 
         global count
         global prefill_instances
@@ -157,13 +161,13 @@ async def handle_request():
 
         # finish prefill
         async for _ in forward_request(
-            f"http://{prefill_addr}/v1/completions", prefill_request, request_id
+            f"http://{prefill_addr}{request.path}", prefill_request, request_id
         ):
             continue
 
         # return decode
         generator = forward_request(
-            f"http://{decode_addr}/v1/completions", original_request_data, request_id
+            f"http://{decode_addr}{request.path}", original_request_data, request_id
         )
         response = await make_response(generator)
         response.timeout = None
