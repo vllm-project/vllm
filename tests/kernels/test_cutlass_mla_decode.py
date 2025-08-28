@@ -45,8 +45,8 @@ CUTLASS_MLA_UNSUPPORTED_REASON = \
 @pytest.mark.parametrize("torch_dtype",
                          [torch.bfloat16, torch.float16, torch.float8_e4m3fn])
 @torch.inference_mode()
-def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal,
-                            varlen, torch_dtype):
+def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size,
+                            causal, varlen, torch_dtype):
     device = torch.device("cuda:0")
     if torch_dtype == torch.float8_e4m3fn:
         init_dtype = torch.bfloat16
@@ -107,18 +107,22 @@ def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causa
             q_pe_padded = q_pe.new_empty((b, MAX_HEADS, d - dv))
             q_pe_padded[:, :h_q] = q_pe
             q_pe = q_pe_padded
-        
+
         kv_cache_flat = blocked_k.squeeze(2)
-        device_properties = torch.cuda.get_device_properties(torch.device("cuda:0"))
+        device_properties = torch.cuda.get_device_properties(
+            torch.device("cuda:0"))
         sm_count = device_properties.multi_processor_count
         workspace_size = ops.sm100_cutlass_mla_get_workspace_size(
             max_seqlen * block_size, b, sm_count, num_kv_splits=1)
-        workspace = torch.empty(workspace_size, device="cuda", dtype=torch.uint8)
-        
+        workspace = torch.empty(workspace_size,
+                                device="cuda",
+                                dtype=torch.uint8)
+
         out_ans = torch.empty(b, MAX_HEADS, dv, dtype=init_dtype)
-        
-        ops.sm100_cutlass_mla_decode(out_ans, q_nope, q_pe, kv_cache_flat, cache_seqlens,
-                                     block_table, workspace, scale, 1)
+
+        ops.sm100_cutlass_mla_decode(out_ans, q_nope, q_pe, kv_cache_flat,
+                                     cache_seqlens, block_table, workspace,
+                                     scale, 1)
         return out_ans[:, :h_q].contiguous()
 
     def scaled_dot_product_attention(query, key, value, is_causal=False):
