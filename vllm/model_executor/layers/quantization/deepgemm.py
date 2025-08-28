@@ -23,8 +23,6 @@ def prepare_block_fp8_matmul_inputs(
     assert len(block_size) == 2
     block_n, block_k = block_size[0], block_size[1]
 
-    print(f"A/B {A.shape} {B.shape}")
-
     assert A.shape[-1] == B.shape[-1]
     assert A.shape[:-1] == As.shape[:-1]
     assert A.is_contiguous()
