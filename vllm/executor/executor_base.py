@@ -54,6 +54,7 @@ class ExecutorBase(ABC):
         self._init_executor()
         self.is_sleeping = False
         self.sleeping_tags: set[str] = set()
+        self.kv_output_aggregator = None
 
     @abstractmethod
     def _init_executor(self) -> None:
@@ -251,6 +252,9 @@ class ExecutorBase(ABC):
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
         self.check_health()
+
+    def init_kv_output_aggregator(self) -> None:
+        pass
 
 
 class DistributedExecutorBase(ExecutorBase):
