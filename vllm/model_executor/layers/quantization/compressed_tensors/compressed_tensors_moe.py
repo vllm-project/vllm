@@ -71,7 +71,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
     ) -> "CompressedTensorsMoEMethod":
         # TODO: @dsikka: refactor this to use schemes as other kernels
         # are supported + check if the layer is being ignored.
-        # Check if a using "Linear" to select scheems
+        # Check if a using "Linear" to select schemes
         if "Linear" in quant_config.target_scheme_map:
             matched_target = "Linear"
         else:
@@ -322,6 +322,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         """Return the appropriate GEMM experts implementation."""
         experts = select_nvfp4_gemm_impl(
@@ -719,10 +720,9 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 dtype=torch.int64)
 
     def select_gemm_impl(
-        self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
-        moe: FusedMoEConfig,
-    ) -> FusedMoEPermuteExpertsUnpermute:
+            self, prepare_finalize: FusedMoEPrepareAndFinalize,
+            moe: FusedMoEConfig,
+            layer: torch.nn.Module) -> FusedMoEPermuteExpertsUnpermute:
         # cutlass path
         if self.use_cutlass:
             from vllm.model_executor.layers.fused_moe import (
