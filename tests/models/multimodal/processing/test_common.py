@@ -14,8 +14,9 @@ from PIL import Image
 from vllm.config import ModelConfig
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
+from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs
-from vllm.multimodal.processing import BaseMultiModalProcessor, ProcessingCache
+from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                cached_tokenizer_from_config,
                                                encode_tokens)
@@ -63,6 +64,8 @@ def _test_processing_correctness(
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
+        # Ensure that the cache can fit all of the data
+        mm_processor_cache_gb=2048,
     )
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
@@ -71,8 +74,7 @@ def _test_processing_correctness(
         model_config,
         tokenizer=cached_tokenizer_from_config(model_config),
     )
-    # Ensure that it can fit all of the data
-    cache = ProcessingCache(capacity_gb=2048)
+    cache = MultiModalProcessorOnlyCache(model_config)
 
     processing_info = factories.info(ctx)
     supported_mm_limits = processing_info.get_supported_mm_limits()
@@ -272,6 +274,7 @@ def _test_processing_correctness_one(
     "CohereLabs/command-a-vision-07-2025",
     "deepseek-ai/deepseek-vl2-tiny",
     "naver-clova-ix/donut-base-finetuned-docvqa",
+    "baidu/ERNIE-4.5-VL-28B-A3B-PT",
     "microsoft/Florence-2-base",
     "adept/fuyu-8b",
     "google/gemma-3-4b-it",
