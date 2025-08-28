@@ -10,6 +10,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+from .inductor_pass import enable_fake_mode
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
@@ -61,6 +62,7 @@ class ActivationQuantFusionPass(VllmInductorPass):
     https://github.com/pytorch/pytorch/pull/139321#issuecomment-2452354980
     """
 
+    @enable_fake_mode
     def __init__(self, config: VllmConfig):
         super().__init__(config)
 
