@@ -797,10 +797,12 @@ class ValleyQwen2ForCausalLM(nn.Module, SupportsMultiModal,
             if multimodal_embeddings is not None and len(multimodal_embeddings) != 0:
                 logger.info("【Valley】get_input_embeddings - 需要合并多模态嵌入（待实现）")
                 # 可以参考 merge_multimodal_embeddings 函数
+                if not hasattr(self.config, 'image_token_id'):
+                    raise ValueError("The model config must have 'image_token_id'.")
+                
                 inputs_embeds = merge_multimodal_embeddings(
                     input_ids, inputs_embeds, multimodal_embeddings,
-                    # TODO: 需要正确的 image_token_id
-                    [getattr(self.config, 'image_token_id', 151655)]  # 使用默认值
+                    [self.config.image_token_id]
                 )
             else:
                 logger.info("【Valley】get_input_embeddings - 无多模态嵌入需要合并")
