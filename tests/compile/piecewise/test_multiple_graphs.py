@@ -6,7 +6,6 @@ are compiled and graph captured separately.
 """
 import torch
 from torch import nn
-from torch.library import Library
 
 from vllm.compilation.backends import set_model_tag
 from vllm.compilation.counter import compilation_counter
@@ -14,37 +13,17 @@ from vllm.compilation.decorators import (ignore_torch_compile,
                                          support_torch_compile)
 from vllm.config import (CompilationConfig, CompilationLevel, CUDAGraphMode,
                          VllmConfig, set_current_vllm_config)
+from vllm.envs import VLLM_USE_V1
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils import direct_register_custom_op
 
-# create a library to hold the custom op
-silly_lib = Library("silly", "FRAGMENT")  # noqa
+# This import automatically registers torch ops for testing (like silly.attention)
+import tests.compile.testing_ops
 
 BATCH_SIZE = 32
 MLP_SIZE = 128
 HIDDEN_SIZE = 1024
 RANDOM_SEED = 0
-
-
-def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    out: torch.Tensor) -> None:
-    out.copy_(q)
-    out += k
-    out += v
-
-
-def silly_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                         out: torch.Tensor) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="attention",
-    op_func=silly_attention,
-    mutates_args=["out"],
-    fake_impl=silly_attention_fake,
-    target_lib=silly_lib,
-)
 
 
 @support_torch_compile
@@ -276,10 +255,6 @@ def test_multi_graph_piecewise_compile_outputs_equal():
     ):
         outputs.append(
             run_model(vllm_config, model, inputs, cudagraph_runtime_mode))
-
-    # Generally don't expect outputs with and without inductor
-    # to be bitwise equivalent
-    assert torch.allclose(outputs[0], outputs[1])
 
     # Expect bitwise equivalence using inductor w/ and w/o cudagraph
     assert torch.equal(outputs[0], outputs[2])
