@@ -131,9 +131,19 @@ def test_multi_modal_uuids_missing_modality_raises(monkeypatch):
         )
 
 
-def test_multi_modal_uuids_accepts_none_and_passes_through_by_default(
-        monkeypatch):
-    processor = _mk_processor(monkeypatch)
+@pytest.mark.parametrize(
+    "mm_cache_gb, enable_prefix_caching",
+    [
+        (4.0, True),  # default behavior
+        (4.0, False),  # prefix caching disabled
+        (0.0, True),  # processor cache disabled
+    ],
+)
+def test_multi_modal_uuids_accepts_none_and_passes_through(
+        monkeypatch, mm_cache_gb: float, enable_prefix_caching: bool):
+    processor = _mk_processor(monkeypatch,
+                              mm_cache_gb=mm_cache_gb,
+                              enable_prefix_caching=enable_prefix_caching)
 
     # Capture the overrides passed to InputPreprocessor.preprocess
     captured: dict[str, object] = {}
@@ -153,91 +163,13 @@ def test_multi_modal_uuids_accepts_none_and_passes_through_by_default(
                         fake_preprocess,
                         raising=True)
 
-    mm_uuids = {"image": [None, "hash-2"]}
+    # Use a consistent two-image scenario across all configurations
+    mm_uuids = {"image": [None, "hash_stop"], "video": None}
     prompt = {
-        "prompt": "USER: <image>\nTwo images\nASSISTANT:",
+        "prompt": "USER: <image><image>\nTwo images\nASSISTANT:",
         "multi_modal_data": {
-            "image": [cherry_pil_image, stop_pil_image]
-        },
-        "multi_modal_uuids": mm_uuids,
-    }
-
-    processor.process_inputs(
-        request_id="req-3",
-        prompt=prompt,  # type: ignore[arg-type]
-        params=SamplingParams(),
-    )
-
-    assert captured["mm_hash_overrides"] == mm_uuids
-
-
-def test_multi_modal_uuids_accepts_none_and_passes_through_with_prefix_caching_disabled(  # noqa E501
-        monkeypatch):
-    processor = _mk_processor(monkeypatch, enable_prefix_caching=False)
-
-    # Capture the overrides passed to InputPreprocessor.preprocess
-    captured: dict[str, object] = {}
-
-    def fake_preprocess(prompt,
-                        *,
-                        tokenization_kwargs=None,
-                        lora_request=None,
-                        mm_hash_overrides=None):
-        captured["mm_hash_overrides"] = mm_hash_overrides
-        # Minimal processed inputs for decoder-only flow
-        return {"type": "token", "prompt_token_ids": [1]}
-
-    # Monkeypatch only the bound preprocess method on this instance
-    monkeypatch.setattr(processor.input_preprocessor,
-                        "preprocess",
-                        fake_preprocess,
-                        raising=True)
-
-    mm_uuids = {"image": [None, "hash-2"]}
-    prompt = {
-        "prompt": "USER: <image>\nTwo images\nASSISTANT:",
-        "multi_modal_data": {
-            "image": [cherry_pil_image, stop_pil_image]
-        },
-        "multi_modal_uuids": mm_uuids,
-    }
-
-    processor.process_inputs(
-        request_id="req-3",
-        prompt=prompt,  # type: ignore[arg-type]
-        params=SamplingParams(),
-    )
-
-    assert captured["mm_hash_overrides"] == mm_uuids
-
-
-def test_multi_modal_uuids_accepts_none_and_passes_through_with_processor_cache_disabled(  # noqa E501
-        monkeypatch):
-    processor = _mk_processor(monkeypatch, mm_cache_gb=0.0)
-
-    # Capture the overrides passed to InputPreprocessor.preprocess
-    captured: dict[str, object] = {}
-
-    def fake_preprocess(prompt,
-                        *,
-                        tokenization_kwargs=None,
-                        lora_request=None,
-                        mm_hash_overrides=None):
-        captured["mm_hash_overrides"] = mm_hash_overrides
-        # Minimal processed inputs for decoder-only flow
-        return {"type": "token", "prompt_token_ids": [1]}
-
-    # Monkeypatch only the bound preprocess method on this instance
-    monkeypatch.setattr(processor.input_preprocessor,
-                        "preprocess",
-                        fake_preprocess,
-                        raising=True)
-
-    mm_uuids = {"image": [None, "hash-2"]}
-    prompt = {
-        "prompt": "USER: <image>\nTwo images\nASSISTANT:",
-        "multi_modal_data": {
-            "image": [cherry_pil_image, stop_pil_image]
+            "image": [cherry_pil_image, stop_pil_image],
+            "video": baby_reading_np_ndarrays,
         },
         "multi_modal_uuids": mm_uuids,
     }
@@ -274,15 +206,14 @@ def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
                         raising=True)
 
     request_id = "req-42"
+    mm_uuids = {"image": ["hash_cherry", "hash_stop"], "video": "hash_video"}
     prompt = {
-        "prompt": "USER: <image>\nTwo images\nASSISTANT:",
+        "prompt": "USER: <image><image><video>\nDescribe\nASSISTANT:",
         "multi_modal_data": {
-            "image": [cherry_pil_image, stop_pil_image]
+            "image": [cherry_pil_image, stop_pil_image],
+            "video": baby_reading_np_ndarrays,
         },
-        # Should be ignored in this configuration
-        "multi_modal_uuids": {
-            "image": ["hash_cherry", "hash_stop"]
-        },
+        "multi_modal_uuids": mm_uuids,
     }
 
     processor.process_inputs(
@@ -293,5 +224,6 @@ def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
 
     # Expect request-id-based overrides are passed through
     assert captured["mm_hash_overrides"] == {
-        "image": [f"{request_id}-image-0", f"{request_id}-image-1"]
+        "image": [f"{request_id}-image-0", f"{request_id}-image-1"],
+        "video": [f"{request_id}-video-0"],
     }
