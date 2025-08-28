@@ -365,9 +365,7 @@ class LLM:
             sampling_params = self.get_default_sampling_params()
 
         tokenization_kwargs: dict[str, Any] = {}
-        truncate_prompt_tokens = None
-        if isinstance(sampling_params, SamplingParams):
-            truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
+        truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
 
         _validate_truncation_size(model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
