@@ -38,6 +38,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 
 logger = init_logger(__name__)
 
+
 @bc_linter_include
 class Scheduler(SchedulerInterface):
 
