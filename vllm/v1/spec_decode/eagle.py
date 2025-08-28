@@ -167,7 +167,6 @@ class EagleProposer:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
-
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
             target_hidden_states = self.model.combine_hidden_states(
@@ -183,9 +182,20 @@ class EagleProposer:
 
         assert self.runner is not None
 
-        # FIXME: need to consider multiple kv_cache_groups
-        builder = self.runner.attn_groups[0][0].metadata_builder
-        new_common = None
+        # Select the correct attention metadata builder for EAGLE layers.
+        builder = None
+        chosen_layer = self.attn_layer_names[0]
+
+        for kv_cache_group in self.runner.attn_groups:
+            for attn_group in kv_cache_group:
+                if chosen_layer in attn_group.layer_names:
+                    builder = attn_group.metadata_builder
+                    break
+            if builder is not None:
+                break
+        assert builder is not None, (
+            "Failed to find attention metadata builder for EAGLE layers.")
+        new_common_attn_metadata = None
         # For FlashInfer first pass, reorder to decode-first contiguous layout
         # so that prefill slice matches num_prefill_tokens.
         if isinstance(builder, FlashInferMetadataBuilder):
@@ -227,7 +237,7 @@ class EagleProposer:
                     device=common_attn_metadata.seq_lens.device,
                     non_blocking=True)
                 new_max_seq_len = int(new_seq_lens.max().item())
-                new_common = CommonAttentionMetadata(
+                new_common_attn_metadata = CommonAttentionMetadata(
                     query_start_loc=new_qsl_cpu.to(
                         device=common_attn_metadata.query_start_loc.device,
                         non_blocking=True),
@@ -257,19 +267,18 @@ class EagleProposer:
                 # Rebuild input_ids for new order: start from existing shifted
                 # view, then set last tokens per reordered request
                 permuted_input_ids = self.input_ids[:num_tokens][token_perm]
-                last_token_indices = (new_common.query_start_loc[1:].to(
-                    device=target_positions.device, dtype=torch.int64) - 1)
+                last_token_indices = (
+                    new_common_attn_metadata.query_start_loc[1:].to(
+                        device=target_positions.device, dtype=torch.int64) - 1)
                 next_token_ids_reordered = next_token_ids[req_order.to(
                     device=next_token_ids.device)]
                 permuted_input_ids[last_token_indices] = (
                     next_token_ids_reordered)
                 self.input_ids[:num_tokens] = permuted_input_ids
 
-        # Build attention metadata once, using reordered metadata if created
+        base_common = new_common_attn_metadata if new_common_attn_metadata is not None else common_attn_metadata
         attn_metadata = builder.build_for_drafting(
-            common_attn_metadata=new_common
-            if new_common is not None else common_attn_metadata,
-            draft_index=0)
+            common_attn_metadata=base_common, draft_index=0)
 
         # At this moment, we assume all eagle layers belong to the same KV
         # cache group, thus using the same attention metadata.
@@ -362,7 +371,7 @@ class EagleProposer:
             if block_table_tensor is None:
                 block_table_tensor = attn_metadata.block_table
 
-            new_common = CommonAttentionMetadata(
+            new_common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=qsl_gpu,
                 query_start_loc_cpu=qsl_cpu,
                 seq_lens=seq_lens_gpu,
@@ -379,7 +388,7 @@ class EagleProposer:
             )
 
             attn_metadata = builder.build_for_drafting(
-                common_attn_metadata=new_common, draft_index=0)
+                common_attn_metadata=new_common_attn_metadata, draft_index=0)
 
             for layer_name in self.attn_layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata

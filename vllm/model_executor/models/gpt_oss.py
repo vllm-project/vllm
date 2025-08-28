@@ -31,6 +31,7 @@ from .interfaces import SupportsEagle3
 from .utils import (AutoWeightsLoader, WeightsMapper, extract_layer_index,
                     maybe_prefix)
 
+
 class OAIAttention(nn.Module):
 
     def __init__(
@@ -120,34 +121,11 @@ class OAIAttention(nn.Module):
     def forward(self, hidden_states: torch.Tensor,
                 positions: torch.Tensor) -> torch.Tensor:
         t = self.norm(hidden_states)
-        # if self.layer_idx <5:
-        #     _slice = t[:, :100].detach().cpu()
-        #     print("layer_idx:", self.layer_idx)
-        #     print("qkv_input[:, :100]")
-        #     print(_slice)
         qkv, _ = self.qkv(t)
-        # if self.layer_idx < 5:
-        #     _slice = qkv[:, :100].detach().cpu()
-        #     print("qkv output[:, :100]")
-        #     print(_slice)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         v = v.contiguous()
-        # if self.layer_idx < 5:
-        #     _slice = q[:, :100].detach().cpu()
-        #     print("q[:, :100]")
-        #     print(_slice)
-        #     _slice = k[:, :100].detach().cpu()
-        #     print("k[:, :100]")
-        #     print(_slice)
-        #     _slice = v[:, :100].detach().cpu()
-        #     print("v[:, :100]")
-        #     print(_slice)
         attn_output = self.attn(q, k, v)
-        # if self.layer_idx < 5:
-        #     _slice = attn_output[:, :100].detach().cpu()
-        #     print("attn_output[:, :100]")
-        #     print(_slice)
         output, _ = self.o_proj(attn_output)
 
         return output + hidden_states
