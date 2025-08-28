@@ -53,12 +53,12 @@ class LogprobsProcessor:
             and request.sampling_params.extra_args is not None \
             and request.sampling_params.extra_args.get("enable_conf", False):
             conf_group_size = request.sampling_params.extra_args.get(
-                 "window_size", 2048)
+                "window_size", 2048)
             conf_threshold = request.sampling_params.extra_args.get(
                 "threshold", 17)
             conf_grouped = 0.0
-            conf_group_list = deque(maxlen=conf_group_size)
-            conf_list = []
+            conf_group_list: deque[float] = deque(maxlen=conf_group_size)
+            conf_list: list[float] = []
         else:
             conf_group_size = -1
             conf_threshold = None
@@ -87,7 +87,8 @@ class LogprobsProcessor:
             return False
         if self.conf_group_list is None or len(self.conf_group_list) == 0:
             return False
-        # Require a full window; trigger when the moving average is below threshold.
+        # Require a full window;
+        # trigger when the moving average is below threshold.
         return (len(self.conf_group_list) >= self.conf_group_size \
                 and self.conf_grouped / len(self.conf_group_list) \
                     < self.conf_threshold)
