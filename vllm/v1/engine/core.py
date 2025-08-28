@@ -388,7 +388,7 @@ class EngineCore:
         return self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
-        self.model_executor.collective_rpc("execute_dummy_batch")
+        self.model_executor.execute_dummy_batch()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
