@@ -149,7 +149,7 @@ class MLPBlock(torch.nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=1e-5)
         self.router = ReplicatedLinear(config.hidden_size,
                                       config.num_local_experts,
-                                      bias=False,
+                                      bias=True,
                                       quant_config=quant_config)
         assert config.intermediate_size % self.world_size == 0
         self.experts = FusedMoE(num_experts=config.num_local_experts,
