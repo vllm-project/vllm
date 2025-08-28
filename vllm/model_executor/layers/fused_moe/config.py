@@ -45,7 +45,6 @@ def get_quant_config_weight_quant(
     return _get_quant_config_quantization_args(quant_config, "weights")
 
 
-# TODO (bnell): use scalar_type instead of bools?
 def get_config_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
@@ -65,7 +64,8 @@ def get_config_quant_dtype(
 @dataclass
 class FusedMoEQuantConfig:
     # The post quantization activation type.
-    quant_dtype: Optional[torch.dtype] = None
+    # TODO (bnell): use scalar_type instead of Union.
+    quant_dtype: Union[torch.dtype, str, None] = None
     per_act_token_quant: bool = False
     per_out_ch_quant: bool = False
     block_shape: Optional[list[int]] = None
@@ -141,6 +141,7 @@ class FusedMoEQuantConfig:
                 use_int8_w8a8,
                 use_int8_w8a16,
                 use_int4_w4a16,
+                use_mxfp4_w4a4,
             ]
         ]) <= 1, "Quantization flags are mutually exclusive."
 
@@ -334,7 +335,7 @@ class FusedMoEConfig:
         assert self.max_num_tokens > 0
 
     @property
-    def quant_dtype(self) -> Optional[torch.dtype]:
+    def quant_dtype(self) -> Union[torch.dtype, str, None]:
         if self.quant_config is not None:
             return self.quant_config.quant_dtype
         else:
@@ -429,7 +430,7 @@ class FusedMoEConfig:
                 block_shape = None
             per_act_token_quant = False
             per_out_ch_quant = False
-            quant_dtype: Optional[torch.dtype] = None
+            quant_dtype: Union[torch.dtype, str, None] = None
 
             input_quant = get_quant_config_input_quant(quant_config)
             weight_quant = get_quant_config_weight_quant(quant_config)
@@ -449,11 +450,17 @@ class FusedMoEConfig:
             if quant_dtype is None and isinstance(quant_config, Fp8Config):
                 quant_dtype = torch.float8_e4m3fn
 
+            from vllm.model_executor.layers.quantization.mxfp4 import (
+                Mxfp4Config)
+            if (quant_dtype is None and isinstance(quant_config, Mxfp4Config)
+                    and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8):
+                quant_dtype = "mxfp8"
+
             from vllm.model_executor.layers.quantization.modelopt import (
                 ModelOptNvFp4Config)
             if quant_dtype is None and isinstance(quant_config,
                                                   ModelOptNvFp4Config):
-                quant_dtype = torch.uint8
+                quant_dtype = "nvfp4"
 
             if weight_quant is not None:
                 per_out_ch_quant = (

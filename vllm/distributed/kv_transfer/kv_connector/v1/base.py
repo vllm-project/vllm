@@ -131,8 +131,8 @@ class KVConnectorBase_V1(ABC):
         Initialize with the KV caches. Useful for pre-registering the
         KV Caches in the KVConnector (e.g. for NIXL).
 
-        Args: kv_caches:
-            dictionary of layer names, kv cache
+        Args: 
+            kv_caches: dictionary of layer names, kv cache
         """
         return
 
@@ -325,4 +325,8 @@ class KVConnectorBase_V1(ABC):
             str: the required KV cache layout. e.g. HND, or NHD.
             None if the connector does not require a specific layout.
         """
+
+        if cls is KVConnectorBase_V1:
+            raise TypeError("get_required_kvcache_layout should not be called "
+                            "on the abstract base class")
         return None

@@ -28,7 +28,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import convert_image_mode
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -797,18 +797,19 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        if "image_num_patches" in out_mm_kwargs:
-            image_num_patches = out_mm_kwargs["image_num_patches"]
+        out_mm_data = out_mm_kwargs.get_data()
+        if "image_num_patches" in out_mm_data:
+            image_num_patches = out_mm_data["image_num_patches"]
             assert isinstance(image_num_patches, torch.Tensor)
             image_num_patches = image_num_patches.tolist()
-        elif "image_embeds" in out_mm_kwargs:
+        elif "image_embeds" in out_mm_data:
             # TODO: Use image size information in dictionary embedding inputs
             # to compute num_patches (similar to Qwen2-VL)
-            image_num_patches = [None] * len(out_mm_kwargs["image_embeds"])
+            image_num_patches = [None] * len(out_mm_data["image_embeds"])
         else:
             image_num_patches = []
 
@@ -854,9 +855,13 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
 
     def get_video_token(self) -> Optional[str]:
         text_model_type = self.get_hf_config().get_text_config().model_type
-        if text_model_type == "qwen2":
-            return "<|video_pad|>"
-        return None
+        video_token_map = {
+            "qwen2": "<|video_pad|>",
+            "qwen3": "<|video_pad|>",
+            "qwen3_moe": "<|video_pad|>",
+            "gpt_oss": "<|reserved_200000|>",
+        }
+        return video_token_map.get(text_model_type)
 
     def get_num_frames_with_most_features(
         self,
@@ -966,15 +971,19 @@ class InternVLMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        prompt_repl: list[PromptUpdate] = super()._get_prompt_updates(
-            mm_items, hf_processor_mm_kwargs, out_mm_kwargs)
+        prompt_repl = super()._get_prompt_updates(
+            mm_items=mm_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            out_mm_kwargs=out_mm_kwargs,
+        )
 
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
-        if "video_num_patches" in out_mm_kwargs:
-            video_num_patches = out_mm_kwargs["video_num_patches"]
+        out_mm_data = out_mm_kwargs.get_data()
+        if "video_num_patches" in out_mm_data:
+            video_num_patches = out_mm_data["video_num_patches"]
             assert isinstance(video_num_patches, torch.Tensor)
             video_num_patches = video_num_patches.tolist()
         else:
@@ -992,12 +1001,15 @@ class InternVLMultiModalProcessor(
                 video_context_token=hf_processor.video_token)
 
         if self.info.supports_video:
-            prompt_repl.append(
+            prompt_repl = [
+                *prompt_repl,
                 PromptReplacement(
                     modality="video",
                     target="<video>",
                     replacement=get_video_replacement_internvl,
-                ))
+                )
+            ]
+
         return prompt_repl
 
 

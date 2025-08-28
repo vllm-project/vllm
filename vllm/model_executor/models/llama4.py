@@ -195,7 +195,9 @@ class Llama4Attention(nn.Module):
             is_neox_style=is_neox_style,
         ) if not self.nope else None
 
-        attn_cls = Attention if self.nope else ChunkedLocalAttention
+        use_chunked_local_attn = not self.nope and config.attention_chunk_size
+        attn_cls = (ChunkedLocalAttention
+                    if use_chunked_local_attn else Attention)
         self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
@@ -206,7 +208,7 @@ class Llama4Attention(nn.Module):
             prefix=f"{prefix}.attn",
             **({
                 "attention_chunk_size": config.attention_chunk_size
-            } if not self.nope else {}))
+            } if use_chunked_local_attn else {}))
 
     def _get_attn_scale(self, positions: torch.Tensor) -> torch.Tensor:
         floor = torch.floor((positions + 1.0) / self.floor_scale)
@@ -224,10 +226,14 @@ class Llama4Attention(nn.Module):
 
         if self.rotary_emb is not None:
             q, k = self.rotary_emb(positions, q, k)
+
         if self.qk_norm is not None:
-            q = q.reshape(-1, self.num_heads, self.head_dim)
+            # Normalization is applied on the head_dim dimension. The rest of
+            # the dimensions are collapsed into a single dimension to support
+            # custom rms_norm cuda kernel.
+            q = q.reshape(-1, self.head_dim)
             q = self.qk_norm(q.float()).reshape(-1, self.q_size).to(q.dtype)
-            k = k.reshape(-1, self.num_kv_heads, self.head_dim)
+            k = k.reshape(-1, self.head_dim)
             k = self.qk_norm(k.float()).reshape(-1, self.kv_size).to(k.dtype)
 
         # We are applying temperature tuning (https://arxiv.org/abs/2501.19399)
