@@ -826,7 +826,8 @@ class InputPreprocessor:
         tokenization_kwargs: Optional[dict[str, Any]] = None,
         lora_request: Optional[LoRARequest] = None,
         *,
-        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+        mm_hash_overrides: Optional[Union[dict[str, list[str]],
+                                          MultiModalUUIDs]] = None,
     ) -> DecoderOnlyInputs:
         """
         For decoder-only models:
