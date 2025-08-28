@@ -1539,13 +1539,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
               and self.is_inputs_embeds[:num_scheduled_tokens].any()
               and get_pp_group().is_first_rank):
             # Get the input embeddings for the tokens that are not input embeds,
-            # then put them into the place.
-            is_token_ids = ~self.is_inputs_embeds[:num_scheduled_tokens]
-            if is_token_ids.any():
+            # then put them into the appropriate positions.
+            token_ids_idx = self.is_inputs_embeds[:num_scheduled_tokens] \
+                .logical_not() \
+                .nonzero(as_tuple=False) \
+                .squeeze(1) \
+                .to(self.input_ids.device)
+            if token_ids_idx.numel(
+            ) > 0:  # Some tokens ids need to become embeds
+                token_ids = self.input_ids.index_select(0, token_ids_idx)
                 tokens_to_embeds = self.model.get_input_embeddings(
-                    input_ids=self.input_ids[:num_scheduled_tokens])
-                self.inputs_embeds[:num_scheduled_tokens][is_token_ids].copy_(
-                    tokens_to_embeds[is_token_ids])
+                    input_ids=token_ids)
+                self.inputs_embeds.index_copy_(0, token_ids_idx,
+                                               tokens_to_embeds)
+
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
             model_mm_kwargs = {}
             input_ids = None
@@ -1601,10 +1608,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             hidden_states = model_output
             aux_hidden_states = None
 
-        # Broadcast PP output for external_launcher (torchrun)
-        # to make sure we are synced across pp ranks
-        # TODO: Support overlapping mirco-batches
-        # https://github.com/vllm-project/vllm/issues/18019
+    # Broadcast PP output for external_launcher (torchrun)
+    # to make sure we are synced across pp ranks
+    # TODO: Support overlapping mirco-batches
+    # https://github.com/vllm-project/vllm/issues/18019
         broadcast_pp_output = \
             self.parallel_config.distributed_executor_backend \
             == "external_launcher" and len(get_pp_group().ranks) > 0
