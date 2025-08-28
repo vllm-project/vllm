@@ -49,6 +49,9 @@ class LogprobsProcessor:
         num_logprobs = request.sampling_params.logprobs
         num_prompt_logprobs = request.sampling_params.prompt_logprobs
 
+        conf_list: Optional[list[float]] = None
+        conf_group_list: Optional[deque[float]] = None
+
         if hasattr(request.sampling_params, "extra_args") \
             and request.sampling_params.extra_args is not None \
             and request.sampling_params.extra_args.get("enable_conf", False):
@@ -56,15 +59,12 @@ class LogprobsProcessor:
                 "window_size", 2048)
             conf_threshold = request.sampling_params.extra_args.get(
                 "threshold", 17)
-            conf_grouped = 0.0
-            conf_group_list: deque[float] = deque(maxlen=conf_group_size)
-            conf_list: list[float] = []
+            conf_group_list = deque(maxlen=conf_group_size)
+            conf_list = []
         else:
             conf_group_size = -1
             conf_threshold = None
-            conf_grouped = 0.0
-            conf_group_list = None
-            conf_list = None
+
 
         return cls(
             tokenizer=tokenizer,
@@ -75,7 +75,7 @@ class LogprobsProcessor:
             num_prompt_logprobs=num_prompt_logprobs,
             num_logprobs=num_logprobs,
             conf_group_size=conf_group_size,
-            conf_grouped=conf_grouped,
+            conf_grouped=0.0,
             conf_list=conf_list,
             conf_threshold=conf_threshold,
             conf_group_list=conf_group_list,
