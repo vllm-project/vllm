@@ -9,6 +9,25 @@ requires = [
     "torch == 2.8.0",
     "wheel",
     "jinja2",
+    # necessary for _ModelInfo properties file generation
+    "transformers >= 4.55.2",
+    "pydantic >= 2.11.7",
+    "cachetools",
+    "cbor2",
+    "cloudpickle",
+    "psutil",
+    "setproctitle",
+    "pyzmq >= 25.0.0",
+    "msgspec",
+    "blake3",
+    "pillow",
+    "pybase64",
+    "compressed-tensors == 0.11.0",
+    "gguf >= 0.13.0",
+    "einops",
+    "timm",
+    "mistral_common[image,audio] >= 1.8.2",
+    "aiohttp",
 ]
 build-backend = "setuptools.build_meta"
 
