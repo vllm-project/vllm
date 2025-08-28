@@ -113,6 +113,7 @@ class CachedRequestData:
         )
 
 
+@bc_linter_include
 @dataclass
 class SchedulerOutput:
 
