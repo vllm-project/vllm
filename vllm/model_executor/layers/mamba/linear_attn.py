@@ -114,7 +114,7 @@ class MiniMaxText01LinearKernel:
                                   kv_caches: torch.Tensor,
                                   slope_rate: torch.Tensor,
                                   block_size: int,
-                                  layer_idx: int = None,
+                                  layer_idx: Optional[int] = None,
                                   **kwargs) -> torch.Tensor:
 
         slope_rate = slope_rate.to(torch.float32)
@@ -149,12 +149,14 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
         return LinearAttentionBackend
 
     def get_state_dtype(self) -> tuple[torch.dtype]:
+        assert self.model_config is not None
+        assert self.cache_config is not None
         return MambaStateDtypeCalculator.linear_attention_state_dtype(
             self.model_config.dtype,
             self.cache_config.mamba_cache_dtype,
         )
 
-    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    def get_state_shape(self) -> tuple[tuple[int, int, int], ...]:
         return MambaStateShapeCalculator.linear_attention_state_shape(
             num_heads=self.num_heads,
             tp_size=self.tp_size,
@@ -382,6 +384,7 @@ class MiniMaxText01LinearAttention(nn.Module, MambaBase):
                                 num_decode_tokens + prefill_idx]
                             kv_cache[block_to_clear, ...] = 0
         else:
+            assert kv_caches is not None
             kv_cache = kv_caches.minimax_cache
             state_indices_tensor = kv_caches.state_indices_tensor
 
