@@ -4,6 +4,7 @@
 from abc import abstractmethod
 from collections.abc import Iterable
 from enum import Enum
+from functools import partial
 from typing import Callable, Literal, Optional, overload
 
 import torch
@@ -251,6 +252,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        num_fused_shared_experts: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
@@ -406,6 +409,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        num_fused_shared_experts: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         if enable_eplb:
             assert expert_load_view is not None
@@ -433,6 +438,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
+            num_fused_shared_experts=num_fused_shared_experts,
+            routed_scaling_factor=routed_scaling_factor,
         )
 
     def forward_cuda(
@@ -456,6 +463,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        num_fused_shared_experts: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
 
         topk_weights, topk_ids = FusedMoE.select_experts(
@@ -475,8 +484,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
-            num_fused_shared_experts=layer.num_fused_shared_experts,
-            routed_scaling_factor=layer.routed_scaling_factor,
+            num_fused_shared_experts=num_fused_shared_experts,
+            routed_scaling_factor=routed_scaling_factor,
         )
 
         if self.rocm_aiter_moe_enabled:
@@ -543,6 +552,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        num_fused_shared_experts: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ):
         if enable_eplb is not False or expert_load_view is not None or \
                 logical_to_physical_map is not None or \
@@ -588,6 +599,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        num_fused_shared_experts: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ):
         if enable_eplb is not False or expert_load_view is not None or \
                 logical_to_physical_map is not None or \
@@ -626,6 +639,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        num_fused_shared_experts: int = 0,
+        routed_scaling_factor: Optional[float] = None,
     ) -> torch.Tensor:
         assert not use_grouped_topk
         assert num_expert_group is None
@@ -1494,7 +1509,13 @@ class FusedMoE(CustomOp):
         if use_grouped_topk:
             assert topk_group is not None
             assert num_expert_group is not None
-            topk_weights, topk_ids = grouped_topk(
+            grouped_topk_impl = grouped_topk
+            if is_rocm_aiter_fusion_shared_expert_enabled():
+                grouped_topk_impl = partial(
+                    grouped_topk,
+                    num_fused_shared_experts=num_fused_shared_experts,
+                    routed_scaling_factor=routed_scaling_factor)
+            topk_weights, topk_ids = grouped_topk_impl(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
                 topk=top_k,
@@ -1503,12 +1524,7 @@ class FusedMoE(CustomOp):
                 topk_group=topk_group,
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
-                **({
-                    "num_fused_shared_experts": num_fused_shared_experts
-                } if is_rocm_aiter_fusion_shared_expert_enabled() else {}),
-                **({
-                    "routed_scaling_factor": routed_scaling_factor
-                } if is_rocm_aiter_moe_enabled() else {}))
+            )
             if indices_type is not None:
                 topk_ids = topk_ids.to(dtype=indices_type)
         elif custom_routing_function is None:
@@ -1682,6 +1698,8 @@ class FusedMoE(CustomOp):
                 expert_load_view=self.expert_load_view,
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+                routed_scaling_factor=self.routed_scaling_factor,
             )
 
             if not skip_result_store:
@@ -1752,6 +1770,8 @@ class FusedMoE(CustomOp):
             expert_load_view=self.expert_load_view,
             logical_to_physical_map=self.logical_to_physical_map,
             logical_replica_count=self.logical_replica_count,
+            num_fused_shared_experts=self.num_fused_shared_experts,
+            routed_scaling_factor=self.routed_scaling_factor,
         )
 
         if do_naive_dispatch_combine:

@@ -195,7 +195,7 @@ class DeepseekV2MoE(nn.Module):
         if hidden_states.dtype != torch.float16:
             final_hidden_states = self.experts(hidden_states=hidden_states,
                                                router_logits=router_logits)
-            if not is_rocm_aiter_moe_enabled():  # TODO
+            if not is_rocm_aiter_moe_enabled():
                 final_hidden_states = \
                     final_hidden_states * self.routed_scaling_factor
         else:
