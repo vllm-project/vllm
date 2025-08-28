@@ -97,6 +97,13 @@ class FixFunctionalizationPass(VllmInductorPass):
                                      node,
                                      mutated_args,
                                      args=('result', 'input', 'scale'))
+            elif at_target == torch.ops._C.silu_and_mul_nvfp4_quant.default:
+                mutated_args = {1: 'result', 2: 'result_block_scale'}
+                self.defunctionalize(graph,
+                                     node,
+                                     mutated_args,
+                                     args=('result', 'result_block_scale',
+                                           'input', 'input_global_scale'))
             else:
                 continue  # skip the count
 

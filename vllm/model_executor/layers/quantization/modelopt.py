@@ -885,6 +885,10 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.alpha = Parameter(layer.input_scale * layer.weight_scale_2,
                                 requires_grad=False)
 
+        # Calculate `1 / input_scale` so that we don't need to do so at runtime
+        layer.input_scale_inv = Parameter(
+            (1 / layer.input_scale).to(torch.float32), requires_grad=False)
+
         # Swizzle the weight blockscale.
         # contracting dimension is input dimension
         # block_size = 16;
@@ -941,8 +945,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         output_shape = [x.shape[0], layer.weight.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        s_quant = 1 / layer.input_scale
-        x_fp4, x_blockscale = scaled_fp4_quant(x, s_quant)
+        x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv)
 
         # validate dtypes of quantized input, input block scale,
         # weight and weight_blockscale

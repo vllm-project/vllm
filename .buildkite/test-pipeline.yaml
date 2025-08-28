@@ -668,6 +668,7 @@ steps:
     # Quantization
     - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
+    - pytest -v -s tests/kernels/quantization/test_silu_nvfp4_quant_fusion.py
     - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
@@ -677,6 +678,7 @@ steps:
     - pytest -v -s tests/compile/test_fusion_all_reduce.py
     - pytest -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
+    - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
