@@ -11,8 +11,8 @@ from typing import Any, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
-from vllm.distributed.kv_transfer.kv_connector.factory import (
-    KVConnectorFactory)
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          ensure_kv_transfer_initialized)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 from vllm.logger import init_logger
@@ -87,8 +87,8 @@ class Scheduler(SchedulerInterface):
             assert not self.is_encoder_decoder, (
                 "Encoder-decoder models are not currently supported "
                 "with KV connectors")
-            self.connector = KVConnectorFactory.create_connector(
-                config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
+            ensure_kv_transfer_initialized(self.vllm_config, KVConnectorRole.SCHEDULER)
+            self.connector = get_kv_transfer_group()
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,

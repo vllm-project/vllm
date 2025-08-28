@@ -354,3 +354,6 @@ class KVConnectorBase_V1(ABC):
             raise TypeError("get_required_kvcache_layout should not be called "
                             "on the abstract base class")
         return None
+
+    def get_finished_count(self) -> Optional[int]:
+        return None
