@@ -131,7 +131,7 @@ We consider 3 different scenarios:
 3. Models that combine Mamba-like mechanisms (e.g., Linear Attention, ShortConv) together with attention layers.
 
 For case (1), we recommend looking at the implementation of [`MambaForCausalLM`](gh-file:vllm/model_executor/models/mamba.py) (for Mamba-1) or [`Mamba2ForCausalLM`](gh-file:vllm/model_executor/models/mamba2.py) (for Mamba-2) as a reference.
-The model should inherit protocol `IsAttentionFree` and also implement class methods `get_mamba_state_dtype_from_config` and `get_mamba_state_shape_from_config` to calculate the state shapes and data dtypes from the config.
+The model should inherit protocol `IsAttentionFree` and also implement class methods `get_mamba_state_dtype_from_config` and `get_mamba_state_shape_from_config` to calculate the state shapes and data types from the config.
 For the mamba layers themselves, please use the [`MambaMixer`](gh-file:vllm/model_executor/layers/mamba/mamba_mixer.py) (for Mamba-1) or [`MambaMixer2`](gh-file:vllm/model_executor/layers/mamba/mamba_mixer2.py) (for Mamba-2) classes.
 The model should also be added to the [`MODELS_CONFIG_MAP`](gh-file:vllm/model_executor/models/config.py#L419-L421) dictionary to ensure that the runtime defaults are optimized.
 
@@ -140,7 +140,7 @@ These models should follow the same instructions as case (1), but they should in
 
 For case (3), we recommend looking at the implementation of [`MiniMaxText01ForCausalLM`](gh-file:vllm/model_executor/models/minimax_text_01.py) or [`Lfm2ForCausalLM`](gh-file:vllm/model_executor/models/lfm2.py) as a reference, which use custom "mamba-like" layers [`MiniMaxText01LinearAttention`](gh-file:vllm/model_executor/models/minimax_text_01.py#L287) and [`ShortConv`](gh-file:vllm/model_executor/layers/mamba/short_conv.py) respectively.
 Please follow the same guidelines as case (2) for implementing these models.
-We use "mamba-like" to refer to layers that posses a state that is updated in-place, rather than being conconcated-to (like KV cache for attention).
+We use "mamba-like" to refer to layers that posses a state that is updated in-place, rather than being concatenated-to (like KV cache for attention).
 For implementing new custom mamba-like layers, one should inherit from `MambaBase` and implement the methods `get_state_dtype`, `get_state_shape` to calculate the data types and state shapes at runtime, as well as `mamba_type` and `get_attn_backend`.
 It is also necessary to implement the "attention meta-data" class which handles the meta-data that is common across all layers.
 Please see [`LinearAttentionMetadata`](gh-file:vllm/v1/attention/backends/linear_attn.py) or [`ShortConvAttentionMetadata`](gh-file:v1/attention/backends/short_conv_attn.py) for examples of this.
