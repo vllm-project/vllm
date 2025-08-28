@@ -9,7 +9,6 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
-from vllm import bc_linter_include
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
@@ -39,7 +38,6 @@ from vllm.v1.structured_output import StructuredOutputManager
 logger = init_logger(__name__)
 
 
-@bc_linter_include
 class Scheduler(SchedulerInterface):
 
     def __init__(
