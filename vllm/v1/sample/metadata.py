@@ -30,6 +30,8 @@ class SamplingMetadata:
     repetition_penalties: torch.Tensor
 
     token_ids: Optional[torch.Tensor]
+    num_tokens: Optional[torch.Tensor]
+    num_prompt_tokens: Optional[torch.Tensor]
 
     # `allowed_token_ids_mask` is a 2D bool tensor of shape (max batch size,
     # vocab size).

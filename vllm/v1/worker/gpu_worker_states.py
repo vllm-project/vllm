@@ -282,6 +282,8 @@ class RequestState:
             # TODO
             generators={},
             token_ids=None,
+            num_tokens=None,
+            num_prompt_tokens=None,
             max_num_logprobs=None,
             allowed_token_ids_mask=None,
             bad_words_token_ids={},

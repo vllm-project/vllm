@@ -7,7 +7,7 @@ import triton
 import triton.language as tl
 
 from vllm.utils import cdiv
-from vllm.v1.worker.utils import CpuGpuBuffer
+from vllm.v1.utils import CpuGpuBuffer
 
 PAD_SLOT_ID = -1
 
