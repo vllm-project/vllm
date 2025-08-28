@@ -550,7 +550,9 @@ class LLM:
 
         tokenizer = self.get_tokenizer()
         sort_beams_key = create_sort_beams_key_function(
-            tokenizer.eos_token_id,
+            [tokenizer.eos_token_id],
+            [],
+            tokenizer,
             length_penalty,
         )
 
