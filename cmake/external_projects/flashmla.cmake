@@ -52,7 +52,7 @@ if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.3 AND FLASH_MLA_ARCHS)
 
     define_gpu_extension_target(
         _flashmla_C
-        DESTINATION vllm
+        DESTINATION ${BUILD_DESTINATION}
         LANGUAGE ${VLLM_GPU_LANG}
         SOURCES ${FlashMLA_SOURCES}
         COMPILE_FLAGS ${VLLM_GPU_FLAGS}
