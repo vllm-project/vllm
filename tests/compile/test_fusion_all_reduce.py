@@ -6,12 +6,14 @@ import pytest
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.compilation.collective_fusion import AllReduceFusionPass
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
+from vllm.compilation.fx_utils import find_op_nodes
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import (CompilationConfig, CompilationLevel, DeviceConfig,
                          ModelConfig, PassConfig, VllmConfig,
-                         set_current_vllm_config)
+                         get_current_vllm_config, set_current_vllm_config)
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (init_distributed_environment,
                                              initialize_model_parallel)
@@ -25,7 +27,19 @@ from ..utils import has_module_attribute, multi_gpu_test
 from .backend import TestBackend
 
 
+def finisher(hidden_states):
+    custom_ops = get_current_vllm_config().compilation_config.custom_ops
+    if not custom_ops or "+quant_fp8" not in custom_ops:
+        # Hack: use dynamic fp8 quantization to
+        # suppress torch.compile optimizations
+        # that prevent pattern matching
+        return ops.scaled_fp8_quant(hidden_states)
+    else:
+        return hidden_states
+
+
 class TestAllReduceRMSNormModel(torch.nn.Module):
+    pattern_code = 1
 
     def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
         super().__init__()
@@ -34,10 +48,14 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
         self.norm = RMSNorm(hidden_size, eps)
 
     def forward(self, hidden_states, residual):
-        view = hidden_states.reshape(-1, self.hidden_size)
-        all_reduce = tensor_model_parallel_all_reduce(view)
-        norm = self.norm(all_reduce)
-        return norm
+        # view = hidden_states.reshape(-1, self.hidden_size)
+        all_reduce = tensor_model_parallel_all_reduce(hidden_states)
+
+        hidden_states = self.norm(all_reduce)
+
+        hidden_states = finisher(hidden_states)
+
+        return hidden_states
 
     def ops_in_model_before(self):
         return [torch.ops.vllm.all_reduce.default]
@@ -47,6 +65,7 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
 
 
 class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
+    pattern_code = 1
 
     def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
         super().__init__()
@@ -57,35 +76,54 @@ class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
     def forward(self, hidden_states, residual):
         view = hidden_states.reshape(-1, self.hidden_size)
         all_reduce = tensor_model_parallel_all_reduce(view)
-        norm, _ = self.norm(all_reduce, residual)
-        return norm
-
-    def ops_in_model_before(self):
-        return [torch.ops.vllm.all_reduce.default]
+        hidden_states, residual = self.norm(all_reduce, residual)
+        # Hack: use dynamic fp8 quantization to
+        # suppress torch.compile optimizations
+        # that prevent pattern matching
+        hidden_states = finisher(hidden_states)
+        return hidden_states, residual
 
     def ops_in_model_after(self):
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
 
+    def ops_in_model_before(self):
+        return [
+            torch.ops.vllm.all_reduce.default,
+        ]
+
 
 class TestAllReduceFusedAddRMSNormStaticQuantFP8Model(torch.nn.Module):
+    pattern_code = 2
 
     def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
         super().__init__()
         self.hidden_size = hidden_size
         self.eps = eps
         self.norm = RMSNorm(hidden_size, eps)
-        self.quant_fp8 = QuantFP8(static=True,
-                                  group_shape=GroupShape.PER_TENSOR)
-        self.scale = torch.rand(1, dtype=torch.float32)
         self.output = torch.empty((token_num, hidden_size),
-                                  dtype=torch.float32)
+                                  dtype=current_platform.fp8_dtype())
+
+        def _quant_fp8_wrapper(x, scale):
+            torch.ops._C.static_scaled_fp8_quant(self.output, x, scale)
+            return self.output, scale
+
+        vllm_config = get_current_vllm_config()
+        if "+quant_fp8" in vllm_config.compilation_config.custom_ops:
+            # Need to use static_scaled_fp8_quant instead of QuantFP8
+            # due to failure in TestBackend with copying graph
+            self.quant_fp8 = _quant_fp8_wrapper
+        else:
+            self.quant_fp8 = QuantFP8(static=True,
+                                      group_shape=GroupShape.PER_TENSOR)
+        self.scale = torch.rand(1, dtype=torch.float32)
 
     def forward(self, hidden_states, residual):
         view = hidden_states.reshape(-1, self.hidden_size)
         all_reduce = tensor_model_parallel_all_reduce(view)
         norm_output, residual_output = self.norm(all_reduce, residual)
-        self.output, _ = self.quant_fp8(norm_output, self.scale)
-        return self.output, residual_output
+        output, _ = self.quant_fp8(norm_output, self.scale)
+        hidden_states = finisher(output.to(hidden_states.dtype))
+        return hidden_states, residual_output
 
     def ops_in_model_after(self):
         return [torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default]
@@ -97,6 +135,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP8Model(torch.nn.Module):
 
 
 class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
+    pattern_code = 3
 
     def __init__(self, hidden_size=16, token_num=16, eps=1e-6):
         super().__init__()
@@ -143,6 +182,9 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
         # TODO: Enable with torch==2.8.0
         # TestAllReduceFusedAddRMSNormStaticQuantFP4Model,
     ])
+@pytest.mark.parametrize(
+    "custom_ops",
+    [[], ["+rms_norm"], ["+quant_fp8"], ["+rms_norm", "+quant_fp8"]])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [8])
 @pytest.mark.parametrize("hidden_size", [16])
@@ -155,19 +197,23 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
     reason="flashinfer is not found or flashinfer "
     "is not compiled with trtllm_allreduce_fusion")
 def test_all_reduce_fusion_pass_replace(test_model: torch.nn.Module,
-                                        batch_size: int, seq_len: int,
-                                        hidden_size: int, dtype: torch.dtype):
+                                        custom_ops: list[str], batch_size: int,
+                                        seq_len: int, hidden_size: int,
+                                        dtype: torch.dtype):
     num_processes = 2
     if (test_model == TestAllReduceFusedAddRMSNormStaticQuantFP4Model
             and not current_platform.has_device_capability(100)):
         pytest.skip("Skip as nvfp4 is only supported on "
                     "devices with compute capability 10.0 (Blackwell)")
+    if (test_model != TestAllReduceFusedAddRMSNormStaticQuantFP8Model
+            and ("+quant_fp8" in custom_ops)):
+        pytest.skip()
 
     def run_torch_spawn(fn, nprocs):
         torch.multiprocessing.spawn(fn,
                                     args=(num_processes, test_model,
                                           batch_size, seq_len, hidden_size,
-                                          dtype),
+                                          dtype, custom_ops),
                                     nprocs=nprocs)
 
     run_torch_spawn(all_reduce_fusion_pass_on_test_model, num_processes)
@@ -176,7 +222,8 @@ def test_all_reduce_fusion_pass_replace(test_model: torch.nn.Module,
 def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
                                          test_model_cls: torch.nn.Module,
                                          batch_size: int, seq_len: int,
-                                         hidden_size: int, dtype: torch.dtype):
+                                         hidden_size: int, dtype: torch.dtype,
+                                         custom_ops: list[str]):
     current_platform.seed_everything(0)
 
     device = torch.device(f"cuda:{local_rank}")
@@ -196,10 +243,9 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
     initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
-        level=CompilationLevel.PIECEWISE,
-        custom_ops=["+rms_norm", "+quant_fp8"]))
+        level=CompilationLevel.PIECEWISE, custom_ops=custom_ops))
     vllm_config.compilation_config.pass_config = PassConfig(
-        enable_fi_allreduce_fusion=True, enable_noop=False)
+        enable_fi_allreduce_fusion=True, enable_noop=True)
     vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
 
     # this is a fake model name to construct the model config
@@ -221,7 +267,9 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
 
         hidden_states = torch.randn((token_num, hidden_size),
                                     requires_grad=False)
-        residual = torch.randn((token_num, hidden_size), requires_grad=False)
+        residual = torch.randn((token_num, hidden_size),
+                               dtype=torch.float32,
+                               requires_grad=False)
 
         compiled_model = torch.compile(model, backend=backend)
         compiled_model(hidden_states, residual)
@@ -229,3 +277,8 @@ def all_reduce_fusion_pass_on_test_model(local_rank: int, world_size: int,
         backend.check_before_ops(model.ops_in_model_before(),
                                  fully_replaced=False)
         backend.check_after_ops(model.ops_in_model_after())
+        for node in find_op_nodes(
+                torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default,
+                backend.graph_post_pass):
+            assert (
+                node.kwargs.get("pattern_code") == test_model_cls.pattern_code)
