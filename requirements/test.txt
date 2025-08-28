@@ -156,6 +156,8 @@ datasets==3.0.2
     #   mteb
 decorator==5.1.1
     # via librosa
+decord==0.6.0
+    # via -r requirements/test.in
 dill==0.3.8
     # via
     #   datasets
@@ -493,6 +495,7 @@ numpy==1.26.4
     #   contourpy
     #   cupy-cuda12x
     #   datasets
+    #   decord
     #   einx
     #   encodec
     #   evaluate

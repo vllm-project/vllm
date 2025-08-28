@@ -78,14 +78,14 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from .utils import (AttentionGroup, CpuGpuBuffer, MultiModalBudget,
-                    bind_kv_cache, gather_mm_placeholders,
-                    initialize_kv_cache_for_kv_sharing,
+from .utils import (AttentionGroup, MultiModalBudget, bind_kv_cache,
+                    gather_mm_placeholders, initialize_kv_cache_for_kv_sharing,
                     sanity_check_mm_encoder_outputs, scatter_mm_placeholders)
 
 if TYPE_CHECKING:
@@ -139,8 +139,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cache_config.cache_dtype]
 
         self.is_pooling_model = model_config.pooler_config is not None
-        self.is_multimodal_raw_input_supported = (
-            model_config.is_multimodal_raw_input_supported)
+        self.is_multimodal_raw_input_only_model = (
+            model_config.is_multimodal_raw_input_only_model)
+
         self.max_model_len = model_config.max_model_len
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
@@ -612,7 +613,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> BatchedTensorInputs:
-        if not self.is_multimodal_raw_input_supported or not scheduler_output:  # noqa: SIM102
+        if not scheduler_output or not self.is_multimodal_raw_input_only_model:
             return {}
 
         mm_kwargs = list[MultiModalKwargsItem]()
@@ -631,8 +632,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return mm_kwargs_combined
 
     def _dummy_mm_kwargs(self, num_seqs: int) -> BatchedTensorInputs:
-        if not self.is_multimodal_raw_input_supported:
+        if not self.is_multimodal_raw_input_only_model:
             return {}
+
         mm_budget = self.mm_budget
         assert mm_budget is not None
 
@@ -1489,6 +1491,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                and not envs.VLLM_DISABLE_PAD_FOR_CUDAGRAPH
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use CUDA graphs.
             # Add padding to the batch size.
@@ -2186,10 +2189,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         max_items_per_batch: int,
     ) -> BatchedTensorInputs:
         """Dummy data for profiling and precompiling multimodal models."""
+        assert self.mm_budget is not None
+
         dummy_decoder_data = self.mm_registry.get_decoder_dummy_data(
             model_config=self.model_config,
             seq_len=self.max_num_tokens,
             mm_counts={modality: 1},
+            cache=self.mm_budget.cache,
         )
         dummy_mm_data = dummy_decoder_data.multi_modal_data
 
@@ -2950,7 +2956,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Args:
             kv_cache_config: The KV cache config
             kv_cache_raw_tensors: The KV cache buffer of each layer, with
-            correct size but uninitialized shape.
+                correct size but uninitialized shape.
         Returns:
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
