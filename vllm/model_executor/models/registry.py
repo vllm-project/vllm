@@ -26,7 +26,6 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.dynamic_module import (
     try_get_class_from_dynamic_module)
 
-from ._cached_model_info import _CACHED_MODEL_INFO
 from .interfaces import (has_inner_state, has_noops, is_attention_free,
                          is_hybrid, supports_cross_encoding,
                          supports_multimodal,
@@ -423,18 +422,25 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
     module_name: str
     class_name: str
 
-    # Performed in another process to avoid initializing CUDA
     def inspect_model_cls(self) -> _ModelInfo:
+        try:
+            from vllm.model_executor.models._model_info import _MODEL_INFO
+        except Exception:
+            _MODEL_INFO = {}
+            logger.exception(
+                "Error loading _ModelInfo properties, load model instead.")
+
         start_time = time.perf_counter()
-        model_info_dict = _CACHED_MODEL_INFO.get(self.class_name)
+        model_info_dict = _MODEL_INFO.get(self.class_name)
         if model_info_dict is not None:
             mi = _ModelInfo(**model_info_dict["modelinfo"])
             elapsed_time = time.perf_counter() - start_time
             logger.info(
-                "Retrieving cached model info for class %s took %.7f secs",
+                "Retrieving model info properties for class %s took %.7f secs",
                 self.class_name, elapsed_time)
             return mi
 
+        # Performed in another process to avoid initializing CUDA
         mi = _run_in_subprocess(
             lambda: _ModelInfo.from_model_cls(self.load_model_cls()))
         elapsed_time = time.perf_counter() - start_time
