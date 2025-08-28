@@ -207,7 +207,8 @@ number: "1" | "2"
 def zephyr_lora_files():
     """Download zephyr LoRA files once per test session."""
     from huggingface_hub import snapshot_download
-    return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
+    return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora",
+                             local_files_only=True)
 
 
 @pytest.fixture(scope="session")
@@ -230,10 +231,3 @@ def zephyr_lora_added_tokens_files(zephyr_lora_files):
     tokenizer.save_pretrained(tmp_model_dir)
     yield tmp_model_dir
     tmp_dir.cleanup()
-
-
-@pytest.fixture(scope="session")
-def pa_files():
-    """Download PA files once per test session."""
-    from huggingface_hub import snapshot_download
-    return snapshot_download(repo_id="swapnilbp/llama_tweet_ptune")

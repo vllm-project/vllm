@@ -9,8 +9,6 @@ from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
 
-# downloading lora to test lora requests
-
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 PROMPTS = [
