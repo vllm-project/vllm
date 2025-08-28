@@ -2,18 +2,6 @@
 #   Powers what instance types are available for GHA auto-scaled
 #   runners. Runners listed here will be available as self hosted
 #   runners, configuration is directly pulled from the main branch.
-#
-#
-# NOTES:
-#  - When updating this file, run the following command to validate the YAML and to generate
-#    corresponding versions of scale-config for the pytorch/pytorch repo and merge the
-#    pytorch/pytorch changes before merging these changes.
-#    `python .github/scripts/validate_scale_config.py --generate`
-#
-# TODO: Add some documentation on how the auto-scaling works
-#
-# NOTE: Default values,
-#
 # runner_types:
 #   runner_label:
 #     instance_type: m4.large
