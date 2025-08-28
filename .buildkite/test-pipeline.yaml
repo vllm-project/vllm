@@ -234,7 +234,7 @@ steps:
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
 
-- label: Test V1 e2e + engine
+- label: V1 Test e2e + engine
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
@@ -245,7 +245,7 @@ steps:
     - pytest -v -s v1/e2e
     - pytest -v -s v1/engine
 
-- label: Test V1 entrypoints
+- label: V1 Test entrypoints
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
@@ -253,7 +253,7 @@ steps:
   commands:
     - pytest -v -s v1/entrypoints
 
-- label: Test V1 others
+- label: V1 Test others
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
