@@ -65,7 +65,6 @@ class LogprobsProcessor:
             conf_group_size = -1
             conf_threshold = None
 
-
         return cls(
             tokenizer=tokenizer,
             cumulative_logprob=(None if num_logprobs is None else 0.),
