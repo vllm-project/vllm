@@ -12,7 +12,6 @@ from vllm.sampling_params import SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.block_table import MultiGroupBlockTable
-from vllm.v1.worker.gpu_input_batch import CachedRequestState
 
 _SAMPLING_EPS = 1e-5
 
