@@ -263,10 +263,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
         # Only relevant for multimodal models
-        self.is_mm_embed_cpu = torch.zeros(self.max_num_tokens,
-                                           dtype=torch.bool,
-                                           device="cpu",
-                                           pin_memory=self.pin_memory)
+        if self.supports_mm_inputs:
+            self.is_mm_embed_cpu = torch.zeros(self.max_num_tokens,
+                                               dtype=torch.bool,
+                                               device="cpu",
+                                               pin_memory=self.pin_memory)
 
         # Range tensor with values [0 .. self.max_num_tokens - 1].
         # Used to initialize positions / context_lens / seq_lens

@@ -259,8 +259,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device=self.device)
 
         # Only relevant for multimodal models
-        self.is_mm_embed = self._make_buffer(self.max_num_tokens,
-                                             dtype=torch.bool)
+        if self.supports_mm_inputs:
+            self.is_mm_embed = self._make_buffer(self.max_num_tokens,
+                                                 dtype=torch.bool)
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
