@@ -301,6 +301,7 @@ def download_weights_from_hf(
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
+        assert len(allow_patterns) > 0
         start_time = time.perf_counter()
         for allow_pattern in allow_patterns:
             hf_folder = snapshot_download(
