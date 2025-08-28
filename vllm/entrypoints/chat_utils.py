@@ -640,7 +640,7 @@ class BaseMultiModalContentParser(ABC):
     def __init__(self) -> None:
         super().__init__()
 
-        # stores model placehodlers list with corresponding
+        # stores model placeholders list with corresponding
         # general MM placeholder:
         # {
         #   "<##IMAGE##>": ["<image>", "<image>", "<image>"],

@@ -71,7 +71,7 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
     ) -> "CompressedTensorsMoEMethod":
         # TODO: @dsikka: refactor this to use schemes as other kernels
         # are supported + check if the layer is being ignored.
-        # Check if a using "Linear" to select scheems
+        # Check if a using "Linear" to select schemes
         if "Linear" in quant_config.target_scheme_map:
             matched_target = "Linear"
         else:

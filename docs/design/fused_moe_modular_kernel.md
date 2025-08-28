@@ -138,7 +138,7 @@ Typically a FusedMoEPrepareAndFinalize type is backed by an All2All Dispatch & C
 
 #### Step 1: Add an All2All manager
 
-The purpose of the All2All Manager is to setup the All2All kernel implementations. The `FusedMoEPrepareAndFinalize` implementations typically fetch a kernel-implementation "handle" from the All2All Manager to invoke the Dispatch and Combine functions. Please look at the All2All Manager implementations [here](gh-file:vllm/distributed/device_communicators/all2all.py).
+The purpose of the All2All Manager is to set up the All2All kernel implementations. The `FusedMoEPrepareAndFinalize` implementations typically fetch a kernel-implementation "handle" from the All2All Manager to invoke the Dispatch and Combine functions. Please look at the All2All Manager implementations [here](gh-file:vllm/distributed/device_communicators/all2all.py).
 
 #### Step 2: Add a FusedMoEPrepareAndFinalize Type
 
