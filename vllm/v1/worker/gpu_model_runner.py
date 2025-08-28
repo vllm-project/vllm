@@ -2270,6 +2270,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             bad_words_token_ids={},
             logitsprocs=LogitsProcessors(),
             token_ids=None,
+            num_tokens=None,
+            num_prompt_tokens=None,
         )
         try:
             sampler_output = self.sampler(logits=logits,
