@@ -343,9 +343,7 @@ class AsyncLLM(EngineClient):
             self._run_output_handler()
 
             tokenization_kwargs: dict[str, Any] = {}
-            truncate_prompt_tokens = None
-            if isinstance(sampling_params, SamplingParams):
-                truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
+            truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
 
             _validate_truncation_size(self.model_config.max_model_len,
                                   truncate_prompt_tokens, tokenization_kwargs)
