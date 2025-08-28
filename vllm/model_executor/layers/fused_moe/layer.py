@@ -842,11 +842,12 @@ class FusedMoE(CustomOp):
             zigzag_requested = vllm_config.parallel_config.\
                 enable_zigzag_expert_placement
             if zigzag_requested:
-                assert (num_redundant_experts == 0 and
-                        num_expert_group is not None and
-                        num_expert_group > 1), \
-                    "Zigzag expert placement is not supported with redundant " \
-                    "experts or num_expert_group == 1"
+                assert num_redundant_experts == 0, (
+                    "Zigzag expert placement is not supported with redundant "
+                    "experts (num_redundant_experts > 0).")
+                assert num_expert_group is not None and num_expert_group > 1, (
+                    "Zigzag expert placement is only supported for models with "
+                    "multiple expert groups (num_expert_group > 1).")
                 self.local_num_experts, self.expert_map = determine_expert_map(
                     ep_size=self.ep_size,
                     ep_rank=self.ep_rank,
