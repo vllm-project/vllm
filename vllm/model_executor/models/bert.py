@@ -8,7 +8,7 @@ import torch
 from torch import nn
 from transformers import BertConfig
 
-from vllm.attention import Attention, AttentionType
+from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -28,8 +28,8 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
 
-from .interfaces import (SupportsCrossEncoding, SupportsQuant,
-                         default_pooling_type)
+from .interfaces import SupportsCrossEncoding, SupportsQuant
+from .interfaces_base import default_pooling_type
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -239,14 +239,13 @@ class BertSelfAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj")
 
-        self.attn = Attention(num_heads=self.num_heads,
-                              head_size=self.head_dim,
-                              scale=self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn",
-                              attn_type=AttentionType.ENCODER_ONLY)
+        self.attn = EncoderOnlyAttention(num_heads=self.num_heads,
+                                         head_size=self.head_dim,
+                                         scale=self.scaling,
+                                         num_kv_heads=self.num_kv_heads,
+                                         cache_config=cache_config,
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.attn")
 
     def forward(
         self,

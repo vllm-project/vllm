@@ -75,7 +75,7 @@ class LlavaOnevisionImagePixelInputs(TensorSchema):
 
     pixel_values: Annotated[
         Union[torch.Tensor, list[torch.Tensor]],
-        TensorShape("bn", "np", 3, "h", "w"),
+        TensorShape("bn", "np", 3, "h", "w", dynamic_dims={"np"}),
     ]
 
     image_sizes: Annotated[Optional[torch.Tensor], TensorShape("bn", 2)]

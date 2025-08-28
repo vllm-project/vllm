@@ -196,7 +196,8 @@ class TpuPlatform(Platform):
             raise ValueError("Torch XLA does not support per-request seed.")
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
         return True
 
 

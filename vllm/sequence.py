@@ -16,14 +16,17 @@ import msgspec
 import torch
 
 from vllm.inputs import SingletonInputs
-from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 if TYPE_CHECKING:
+    from vllm.lora.request import LoRARequest
     from vllm.v1.worker.kv_connector_model_runner_mixin import (
         KVConnectorOutput)
+else:
+    LoRARequest = Any
+    KVConnectorOutput = Any
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
@@ -144,18 +147,7 @@ class SequenceDataDelta(
 
 class SequenceData(msgspec.Struct,
                    omit_defaults=True):  # type: ignore[call-arg]
-    """Data associated with a sequence.
-
-    Args:
-        prompt_token_ids: The token IDs of the prompt.
-        output_token_ids: The token IDs of the output. Set to an empty list if
-            None.
-
-    Attributes:
-        prompt_token_ids: The token IDs of the prompt.
-        output_token_ids: The token IDs of the output.
-        cumulative_logprob: The cumulative log probability of the output.
-    """
+    """Data associated with a sequence."""
     # NOTE: we cannot use Union[list, array] because msgspec cannot support
     # union of 2 list types.
     _prompt_token_ids: array
@@ -253,10 +245,12 @@ class SequenceData(msgspec.Struct,
 
     @property
     def cumulative_logprob(self) -> float:
+        """The cumulative log probability of the output."""
         return self._cumulative_logprob
 
     @property
     def prompt_token_ids(self) -> tuple[int, ...]:
+        """The token IDs of the prompt."""
         return self._prompt_token_ids_tuple
 
     @prompt_token_ids.setter
@@ -274,6 +268,7 @@ class SequenceData(msgspec.Struct,
 
     @property
     def output_token_ids(self) -> tuple[int, ...]:
+        """The token IDs of the output."""
         return tuple(self._output_token_ids)
 
     @output_token_ids.setter
@@ -937,7 +932,7 @@ class SequenceGroupMetadata(
         omit_defaults=True):  # type: ignore[call-arg]
     """Metadata for a sequence group. Used to create `AttentionMetadata`.
 
-    Args:
+    Attributes:
         request_id: The ID of the request.
         is_prompt: Whether the request is at prompt stage.
         seq_data: The sequence data. (Seq id -> sequence data)
@@ -947,14 +942,14 @@ class SequenceGroupMetadata(
         do_sample: True if sampling is required. Sampling is not required when
             e.g., prefill is chunked, and the current iteration only computes
             query tokens for prefill, we don't need sampling.
-        token_chunk_size: The number of tokens to be processed (per sequence).
-            None if chunking is not required.
+        pooling_params: Pooling parameters.
         lora_request: LoRA request.
         computed_block_nums: The block numbers that are already computed,
             used in prefix caching.
         state: Internal state tied to this sequence group.
+        token_type_ids: Token type IDs.
         multi_modal_data: Multi modal data.
-        mm_processor_kwargs: Multimodal input processor / mapper overrides.
+        multi_modal_placeholders: Multi modal placeholders.
         encoder_seq_data: Optional sequence data for encoder prompt
                           (SequenceGroup.encoder_seq). Should be None
                           unless you are working with an encoder/decoder
@@ -1040,12 +1035,13 @@ class SequenceOutput(
         array_like=True):  # type: ignore[call-arg]
     """The model output associated with a sequence.
 
-    Args:
+    Attributes:
         parent_seq_id: The ID of the parent sequence (for forking in beam
             search).
         output_token: The output token ID.
         logprobs: The logprobs of the output token.
             (Token id -> logP(x_i+1 | x_0, ..., x_i))
+        output_embed: Optional output embedding tensor.
     """
     parent_seq_id: int
     output_token: int
@@ -1138,7 +1134,7 @@ class IntermediateTensors:
     """
 
     tensors: dict[str, torch.Tensor]
-    kv_connector_output: Optional["KVConnectorOutput"]
+    kv_connector_output: Optional[KVConnectorOutput]
 
     def __init__(self, tensors):
         # manually define this function, so that

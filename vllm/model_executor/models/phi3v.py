@@ -38,9 +38,11 @@ from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, BoundPromptUpdate,
+                                        BaseProcessingInfo,
+                                        MultiModalPromptUpdates,
                                         PlaceholderFeaturesInfo,
-                                        PromptReplacement, PromptUpdate)
+                                        PromptReplacement, PromptUpdate,
+                                        ResolvedPromptUpdate)
 # yapf: enable
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
@@ -431,24 +433,38 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
 
             return [_IMAGE_TOKEN_ID] * num_image_tokens
 
-        num_images = mm_items.get_count("image", strict=False)
-
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=image_tokens.__getitem__,
                 replacement=get_replacement_phi3v,
-            ) for image_token in image_tokens[:num_images]
+            )
         ]
+
+    def _recompute_cached_prompt_update(
+        self,
+        cached_update: ResolvedPromptUpdate,
+        new_item_idx: int,
+    ) -> ResolvedPromptUpdate:
+        new_update = super()._recompute_cached_prompt_update(
+            cached_update,
+            new_item_idx,
+        )
+
+        if cached_update.modality == "image":
+            hf_processor = self.info.get_hf_processor()
+            image_tokens: list[str] = hf_processor.img_tokens  # type: ignore
+            new_update = new_update.with_target(image_tokens[new_item_idx])
+
+        return new_update
 
     def _apply_prompt_updates(
         self,
         token_ids: list[int],
-        mm_prompt_updates: Mapping[str, Sequence[BoundPromptUpdate]],
-        mm_item_counts: Mapping[str, int],
+        mm_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
         # align to hf behavior when there are images
-        if len(mm_item_counts):
+        if len(mm_prompt_updates):
             tokenizer = self.info.get_tokenizer()
             # to decode token_ids to the original text, we need to
             # 1. remove the first bos token
@@ -484,7 +500,6 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
         token_ids, text, placeholders = super()._apply_prompt_updates(
             token_ids=token_ids,
             mm_prompt_updates=mm_prompt_updates,
-            mm_item_counts=mm_item_counts,
         )
 
         # Keep the behavior in line with HF processor

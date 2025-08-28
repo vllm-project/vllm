@@ -110,7 +110,7 @@ class BlockTable:
         self.block_table_cpu.fill_(0)
 
     def get_device_tensor(self) -> torch.Tensor:
-        """Ruturns the device tensor of the block table."""
+        """Returns the device tensor of the block table."""
         return self.block_table
 
     def get_cpu_tensor(self) -> torch.Tensor:

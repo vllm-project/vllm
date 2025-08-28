@@ -140,8 +140,8 @@ Alternatively, users can directly call the NxDI library to trace and compile you
 
 - `NEURON_COMPILED_ARTIFACTS`: set this environment variable to point to your pre-compiled model artifacts directory to avoid
   compilation time upon server initialization. If this variable is not set, the Neuron module will perform compilation and save the
-  artifacts under `neuron-compiled-artifacts/{unique_hash}/` sub-directory in the model path. If this environment variable is set,
-  but the directory does not exist, or the contents are invalid, Neuron will also fallback to a new compilation and store the artifacts
+  artifacts under `neuron-compiled-artifacts/{unique_hash}/` subdirectory in the model path. If this environment variable is set,
+  but the directory does not exist, or the contents are invalid, Neuron will also fall back to a new compilation and store the artifacts
   under this specified path.
 - `NEURON_CONTEXT_LENGTH_BUCKETS`: Bucket sizes for context encoding. (Only applicable to `transformers-neuronx` backend).
 - `NEURON_TOKEN_GEN_BUCKETS`: Bucket sizes for token generation. (Only applicable to `transformers-neuronx` backend).

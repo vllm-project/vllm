@@ -382,7 +382,7 @@ run_genai_perf_tests() {
       client_command="genai-perf profile \
         -m $model \
         --service-kind openai \
-        --backend vllm \
+        --backend "$backend" \
         --endpoint-type chat \
         --streaming \
         --url localhost:$port \

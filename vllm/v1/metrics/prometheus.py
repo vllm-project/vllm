@@ -36,7 +36,7 @@ def setup_multiprocess_prometheus():
                        "and vLLM will properly handle cleanup.")
 
 
-def get_prometheus_registry():
+def get_prometheus_registry() -> CollectorRegistry:
     """Get the appropriate prometheus registry based on multiprocessing 
     configuration.
     

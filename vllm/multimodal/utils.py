@@ -461,6 +461,8 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
                                               num_chunks_per_rank, ...]
 
     vision_embeddings = vision_model(image_input_per_rank)
+    # Ensure tensor is contiguous before all_gather
+    vision_embeddings = vision_embeddings.contiguous()
     vision_embeddings = tensor_model_parallel_all_gather(vision_embeddings,
                                                          dim=0)
     vision_embeddings = vision_embeddings[:num_chunks, ...]

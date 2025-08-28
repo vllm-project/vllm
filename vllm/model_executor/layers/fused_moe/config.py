@@ -190,12 +190,6 @@ class FusedMoEParallelConfig:
         return (self.use_all2all_kernels
                 and envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency")
 
-    @property
-    def use_flashinfer_cutlass_kernels(self):
-        return (envs.VLLM_USE_FLASHINFER_MOE_FP4
-                and has_flashinfer_cutlass_fused_moe()
-                and envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput")
-
     @staticmethod
     def make(tp_size_: int, dp_size_: int,
              vllm_parallel_config: ParallelConfig) -> "FusedMoEParallelConfig":
@@ -404,7 +398,14 @@ class FusedMoEConfig:
 
     @property
     def use_flashinfer_cutlass_kernels(self):
-        return self.moe_parallel_config.use_flashinfer_cutlass_kernels
+        """
+        Whether to use FlashInfer cutlass kernels for NVFP4 MoE.
+        """
+        return (self.quant_config is not None
+                and self.quant_config.quant_dtype == "nvfp4"
+                and envs.VLLM_USE_FLASHINFER_MOE_FP4
+                and has_flashinfer_cutlass_fused_moe()
+                and envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput")
 
     @staticmethod
     def make(
@@ -449,6 +450,12 @@ class FusedMoEConfig:
             from vllm.model_executor.layers.quantization.fp8 import Fp8Config
             if quant_dtype is None and isinstance(quant_config, Fp8Config):
                 quant_dtype = torch.float8_e4m3fn
+
+            from vllm.model_executor.layers.quantization.mxfp4 import (
+                Mxfp4Config)
+            if (quant_dtype is None and isinstance(quant_config, Mxfp4Config)
+                    and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8):
+                quant_dtype = "mxfp8"
 
             from vllm.model_executor.layers.quantization.modelopt import (
                 ModelOptNvFp4Config)

@@ -352,7 +352,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         with num_lookahead_slots.
 
         Args:
-            sequence_group (SequenceGroup): The sequence group to swap in.
+            seq_group (SequenceGroup): The sequence group to swap in.
             num_lookahead_slots (int): Number of lookahead slots used in 
                 speculative decoding, default to 0.
 
@@ -405,8 +405,6 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         Args:
             seq_group (SequenceGroup): The sequence group to swap out.
-            num_lookahead_slots (int): Number of lookahead slots used in 
-                speculative decoding, default to 0.
 
         Returns:
             bool: Whether it's possible to swap out current sequence group.
@@ -420,7 +418,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         swapping out the given sequence_group with num_lookahead_slots.
 
         Args:
-            sequence_group (SequenceGroup): The sequence group to swap out.
+            seq_group (SequenceGroup): The sequence group to swap out.
 
         Returns:
             List[Tuple[int, int]]: The mapping of swapping block from 
@@ -473,7 +471,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         on to the 'device'.
 
         Args:
-            sequence_group (SequenceGroup): The sequence group to swap in/out.
+            seq_group (SequenceGroup): The sequence group to swap in/out.
             device (Device): device to swap the 'seq_group' on.
             status (SequenceStatus): The status of sequence which is needed
                 for action. RUNNING for swap out and SWAPPED for swap in

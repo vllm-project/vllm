@@ -200,7 +200,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     # Note: init_prepare_finalize should only be called by
     # prepare_communication_buffer_for_model.
-    def init_prepare_finalize(self):
+    def init_prepare_finalize(self, layer: torch.nn.Module):
         assert self.moe is not None
         prepare_finalize = self.maybe_make_prepare_finalize(self.moe)
 
@@ -211,7 +211,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             assert self.fused_experts is None, \
                 f"Attempt to override experts for {id(self)}!"
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
-            experts = self.select_gemm_impl(prepare_finalize, self.moe)
+            experts = self.select_gemm_impl(prepare_finalize, self.moe, layer)
             self.fused_experts = FusedMoEModularKernel(
                 prepare_finalize,
                 experts,
@@ -221,6 +221,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         # based on the all2all implementation, select the appropriate
         # gemm implementation
@@ -273,6 +274,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         prepare_finalize: FusedMoEPrepareAndFinalize,
         # TODO(bnell): Remove. Every layer should have an moe config object.
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
@@ -358,8 +360,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 use_prepack=True,
             )
         elif current_platform.is_cpu():
+            from vllm.model_executor.layers.fused_moe import cpu_fused_moe
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                from vllm.model_executor.layers.fused_moe import cpu_fused_moe
                 from vllm.model_executor.layers.utils import (
                     check_cpu_sgl_kernel)
                 dtype_w13 = layer.w13_weight.dtype
@@ -382,7 +384,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 else:
                     layer.cpu_fused_moe = cpu_fused_moe.IPEXFusedMOE(layer)
             else:
-                raise NotImplementedError("CPU MOE only supports x86 arch.")
+                layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
 
     def apply(
         self,
@@ -918,7 +920,7 @@ class FusedMoE(CustomOp):
         self.batched_router_logits: Optional[torch.Tensor] = None
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
-                or self.moe_parallel_config.use_flashinfer_cutlass_kernels):
+                or self.moe_config.use_flashinfer_cutlass_kernels):
             self.batched_hidden_states = torch.zeros(
                 (moe.max_num_tokens, self.hidden_size),
                 dtype=moe.in_dtype,
@@ -972,7 +974,7 @@ class FusedMoE(CustomOp):
 
     @property
     def use_flashinfer_cutlass_kernels(self):
-        return self.moe_parallel_config.use_flashinfer_cutlass_kernels
+        return self.moe_config.use_flashinfer_cutlass_kernels
 
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated
@@ -1663,7 +1665,7 @@ class FusedMoE(CustomOp):
         # only when data parallelism (DP) is enabled.
         use_flashinfer_cutlass_kernels = (
             self.dp_size > 1
-            and self.moe_parallel_config.use_flashinfer_cutlass_kernels)
+            and self.moe_config.use_flashinfer_cutlass_kernels)
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
                 or use_flashinfer_cutlass_kernels):
@@ -1672,7 +1674,7 @@ class FusedMoE(CustomOp):
         do_naive_dispatch_combine: bool = (
             self.dp_size > 1
             and not self.moe_parallel_config.use_deepep_ht_kernels
-            and not self.moe_parallel_config.use_flashinfer_cutlass_kernels)
+            and not self.moe_config.use_flashinfer_cutlass_kernels)
         if do_naive_dispatch_combine:
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)

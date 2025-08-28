@@ -96,7 +96,6 @@ def run_vllm(
         end = time.perf_counter()
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
-        prompts = [request.prompt for request in requests]
         # output_len should be the same for all requests.
         output_len = requests[0].expected_output_len
         for request in requests:

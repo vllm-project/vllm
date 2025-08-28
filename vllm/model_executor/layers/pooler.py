@@ -5,7 +5,7 @@ from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from enum import IntEnum
 from itertools import groupby
-from typing import Callable, Optional, TypeVar, Union
+from typing import Callable, Optional, TypeVar, Union, cast
 
 import torch
 import torch.nn as nn
@@ -435,8 +435,30 @@ class EmbeddingPoolerHead(PoolerHead):
     def __init__(self) -> None:
         super().__init__(activation=PoolerNormalize())
 
+        # Load ST projector if available
+        from vllm.config import get_current_vllm_config
+        from vllm.model_executor.models.adapters import _load_st_projector
+
+        vllm_config = get_current_vllm_config()
+        self.projector = _load_st_projector(
+            vllm_config.model_config) if vllm_config else None
+
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
+
+        # Apply ST projector
+        if self.projector is not None:
+            projector = cast(nn.Module, self.projector)
+
+            def _proj(x: torch.Tensor) -> torch.Tensor:
+                orig_dtype = x.dtype
+                y = projector(x.to(torch.float32))
+                return y.to(orig_dtype)
+
+            if isinstance(pooled_data, torch.Tensor):
+                pooled_data = _proj(pooled_data)
+            else:
+                pooled_data = [_proj(t) for t in pooled_data]
 
         pooling_params = get_pooling_params(pooling_metadata)
 
