@@ -165,7 +165,7 @@ class EngineClient(ABC):
                     for token_id, logprob_obj in logprobs.items():
                         if (token_id in stop_token_ids) or \
                             (stop is not None and
-                             tokenizer.decode([token_id]) in stop) \
+                             tokenizer.decode([token_id]).strip() in stop) \
                                 and not ignore_eos:
                             completed.append(
                                 BeamSearchSequence(

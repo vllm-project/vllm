@@ -75,8 +75,8 @@ def get_beam_search_score(
     https://github.com/huggingface/transformers/blob/ccb92be23def445f2afdea94c31286f84b89eb5b/src/transformers/generation/beam_search.py#L938
     """
     seq_len = len(tokens)
-    if tokens[-1] in stop_token_ids or tokenizer.decode([tokens[-1]
-                                                         ]) in stop_tokens:
+    if tokens[-1] in stop_token_ids or tokenizer.decode(
+        [tokens[-1]]).strip() in stop_tokens:
         seq_len -= 1
 
     return cumulative_logprob / (seq_len**length_penalty)
