@@ -363,7 +363,6 @@ async def benchmark(
         timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
     )
 
-    print("Starting initial test run for all URLs...")
     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
         input_requests[0].prompt,
         input_requests[0].prompt_len,
@@ -373,11 +372,8 @@ async def benchmark(
     
     assert test_mm_content is None or isinstance(test_mm_content, dict)
     
-    # Test all URLs to ensure they're working
-    failed_urls = []
-    for i, test_api_url in enumerate(api_urls, 1):
-        print(f"Testing URL {i}/{len(api_urls)}: {test_api_url}")
-        
+    # Test all URLs in parallel to ensure they're working
+    async def test_url(test_api_url, url_pbar):
         test_input = RequestFuncInput(
             model=model_id,
             model_name=model_name,
@@ -390,27 +386,27 @@ async def benchmark(
             ignore_eos=ignore_eos,
             extra_body=extra_body,
         )
-
+        
         test_output = await wait_for_endpoint(
             request_func,
             test_input,
             session,
             timeout_seconds=ready_check_timeout_sec,
+            pbar=url_pbar,
         )
-        if not test_output.success:
-            print(f"  ❌ FAILED: {test_output.error}")
-            failed_urls.append(test_api_url)
-        else:
-            print(f"  ✅ SUCCESS")
+        return test_api_url, test_output.success, test_output.error
+    
+    # Test all URLs in parallel with progress bar
+    with tqdm(total=len(api_urls), desc="Testing URLs", unit="url") as url_pbar:
+        test_results = await asyncio.gather(*[test_url(url, url_pbar) for url in api_urls])
+    
+    failed_urls = [(url, error) for url, success, error in test_results if not success]
     
     if failed_urls:
-        raise ValueError(
-            f"Initial test run failed for {len(failed_urls)} URL(s): {failed_urls}. "
-            "Please make sure all URLs are accessible and benchmark arguments "
-            "are correctly specified."
-        )
-    else:
-        print(f"All {len(api_urls)} URL(s) passed initial test. Starting main benchmark run...")
+        failed_url_list = [f"{url}: {error}" for url, error in failed_urls]
+        raise ValueError(f"URL test failed: {failed_url_list}")
+    
+    print(f"All {len(api_urls)} URL(s) ready. Starting benchmark...")
 
     if lora_modules:
         # For each input request, choose a LoRA module at random.
