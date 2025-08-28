@@ -36,6 +36,7 @@ from vllm.logits_process import get_bad_words_logits_processors
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
@@ -250,9 +251,13 @@ class LLMEngine:
         self.generation_config_fields = (
             self.model_config.try_get_generation_config())
 
-        self.input_preprocessor = InputPreprocessor(self.model_config,
-                                                    self.tokenizer,
-                                                    mm_registry)
+        self.input_preprocessor = InputPreprocessor(
+            self.model_config,
+            self.tokenizer,
+            mm_registry,
+            mm_processor_cache=processor_only_cache_from_config(
+                self.model_config, mm_registry),
+        )
 
         self.model_executor = executor_class(vllm_config=vllm_config)
 
@@ -644,10 +649,10 @@ class LLMEngine:
         Details:
             - Set arrival_time to the current time if it is None.
             - Set prompt_token_ids to the encoded prompt if it is None.
-            - Create `n` number of [Sequence][vllm.Sequence] objects.
-            - Create a [SequenceGroup][vllm.SequenceGroup] object
-              from the list of [Sequence][vllm.Sequence].
-            - Add the [SequenceGroup][vllm.SequenceGroup] object to the
+            - Create `n` number of [Sequence][vllm.sequence.Sequence] objects.
+            - Create a [SequenceGroup][vllm.sequence.SequenceGroup] object
+              from the list of [Sequence][vllm.sequence.Sequence].
+            - Add the [SequenceGroup][vllm.sequence.SequenceGroup] object to the
               scheduler.
 
         Example:
@@ -840,8 +845,8 @@ class LLMEngine:
 
     def reset_mm_cache(self) -> bool:
         """Reset the multi-modal cache."""
-        return self.input_preprocessor.mm_registry.reset_processor_cache(
-            self.model_config)
+        self.input_preprocessor.clear_cache()
+        return True
 
     def reset_prefix_cache(self, device: Optional[Device] = None) -> bool:
         """Reset prefix cache for all devices."""

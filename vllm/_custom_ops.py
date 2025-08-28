@@ -1502,6 +1502,17 @@ def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
                                   gating_output)
 
 
+def grouped_topk(scores: torch.Tensor, scores_with_bias: torch.Tensor,
+                 num_expert_group: int, topk_group: int, topk: int,
+                 renormalize: bool, routed_scaling_factor: float):
+    if not current_platform.is_cuda():
+        raise NotImplementedError("The fused grouped_topk kernel is only "
+                                  "available on CUDA platforms")
+    return torch.ops._moe_C.grouped_topk(scores, scores_with_bias,
+                                         num_expert_group, topk_group, topk,
+                                         renormalize, routed_scaling_factor)
+
+
 def moe_wna16_marlin_gemm(input: torch.Tensor, output: Optional[torch.Tensor],
                           b_qweight: torch.Tensor,
                           b_bias: Optional[torch.Tensor],
@@ -1614,6 +1625,20 @@ def concat_and_cache_mla(
                                                 scale)
 
 
+def cp_fused_concat_and_cache_mla(
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    cp_local_token_select_indices: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+    scale: torch.Tensor,
+) -> None:
+    torch.ops._C_cache_ops.cp_fused_concat_and_cache_mla(
+        kv_c, k_pe, cp_local_token_select_indices, kv_cache, slot_mapping,
+        kv_cache_dtype, scale)
+
+
 def copy_blocks(key_caches: list[torch.Tensor],
                 value_caches: list[torch.Tensor],
                 block_mapping: torch.Tensor) -> None:
@@ -1649,6 +1674,16 @@ def gather_and_maybe_dequant_cache(
     torch.ops._C_cache_ops.gather_and_maybe_dequant_cache(
         src_cache, dst, block_table, cu_seq_lens, batch_size, kv_cache_dtype,
         scale, seq_starts)
+
+
+def cp_gather_cache(src_cache: torch.Tensor,
+                    dst: torch.Tensor,
+                    block_table: torch.Tensor,
+                    cu_seq_lens: torch.Tensor,
+                    batch_size: int,
+                    seq_starts: Optional[torch.Tensor] = None) -> None:
+    torch.ops._C_cache_ops.cp_gather_cache(src_cache, dst, block_table,
+                                           cu_seq_lens, batch_size, seq_starts)
 
 
 def get_device_attribute(attribute: int, device: int) -> int:

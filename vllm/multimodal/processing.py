@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import (Callable, Generator, ItemsView, Iterable, Mapping,
                              Sequence)
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache
 from typing import (TYPE_CHECKING, Generic, NamedTuple, Optional, Protocol,
@@ -20,12 +20,11 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, decode_tokens,
                                                encode_tokens)
 from vllm.utils import flatten_2d_lists, full_groupby
 
-from .cache import MultiModalCache
 from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                      MultiModalFieldConfig, MultiModalInputs,
                      MultiModalKwargsItem, MultiModalKwargsItems,
-                     PlaceholderRange)
+                     MultiModalKwargsOptionalItems, PlaceholderRange)
 from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
                     MultiModalDataParser)
 
@@ -34,6 +33,7 @@ if TYPE_CHECKING:
     from transformers.feature_extraction_utils import BatchFeature
     from transformers.processing_utils import ProcessorMixin
 
+    from .cache import BaseMultiModalProcessorCache
     from .profiling import BaseDummyInputsBuilder
 
 logger = init_logger(__name__)
@@ -42,6 +42,44 @@ _S = TypeVar("_S", str, list[int])
 
 PromptSeq = Union[str, list[int]]
 """A token sequence (list of token IDs) or text."""
+
+
+@lru_cache(maxsize=2048)
+def _cached_encode(
+    tokenizer: AnyTokenizer,
+    text: str,
+    *,
+    add_special_tokens: Optional[bool] = None,
+) -> list[int]:
+    return encode_tokens(tokenizer,
+                         text,
+                         add_special_tokens=add_special_tokens)
+
+
+@lru_cache(maxsize=2048)
+def _cached_decode(
+    tokenizer: AnyTokenizer,
+    token_ids: tuple[int, ...],
+    *,
+    skip_special_tokens: Optional[bool] = None,
+) -> str:
+    return decode_tokens(tokenizer,
+                         list(token_ids),
+                         skip_special_tokens=skip_special_tokens)
+
+
+def _seq2text(tokenizer: AnyTokenizer, seq: PromptSeq) -> str:
+    if isinstance(seq, str):
+        return seq
+
+    return _cached_decode(tokenizer, tuple(seq))
+
+
+def _seq2tokens(tokenizer: AnyTokenizer, seq: PromptSeq) -> list[int]:
+    if isinstance(seq, str):
+        return _cached_encode(tokenizer, seq, add_special_tokens=False)
+
+    return seq
 
 
 class _GetMatchIndex(Protocol):
@@ -137,7 +175,8 @@ class PromptUpdateDetails(Generic[_S]):
     full: _S
     """The full content."""
 
-    is_embed: Optional[Callable[["_BoundPromptSequence"], torch.Tensor]] = None
+    is_embed: Optional[Callable[[AnyTokenizer, PromptSeq],
+                                torch.Tensor]] = None
     """
     Given [`full`][vllm.multimodal.processing.PromptUpdateDetails.full],
     return a boolean mask of shape `(len(full),)` indicating which positions
@@ -159,11 +198,12 @@ class PromptUpdateDetails(Generic[_S]):
         embed_text: str,
     ) -> "PromptUpdateDetails[_S]":
 
-        def is_embed(full: "_BoundPromptSequence") -> torch.Tensor:
-            embed_token_ids = encode_tokens(full.tokenizer, embed_text)
+        def is_embed(tokenizer: AnyTokenizer, full: PromptSeq) -> torch.Tensor:
+            embed_token_ids = encode_tokens(tokenizer, embed_text)
+            token_ids = _seq2tokens(tokenizer, full)
 
             return torch.isin(
-                torch.tensor(full.token_ids),
+                torch.tensor(token_ids),
                 torch.tensor(embed_token_ids),
             )
 
@@ -174,10 +214,13 @@ class PromptUpdateDetails(Generic[_S]):
         seq: _S,
         embed_token_id: int,
     ) -> "PromptUpdateDetails[_S]":
-        return PromptUpdateDetails(
-            full=seq,
-            is_embed=lambda f: torch.tensor(f.token_ids) == embed_token_id,
-        )
+
+        def is_embed(tokenizer: AnyTokenizer, full: PromptSeq) -> torch.Tensor:
+            token_ids = _seq2tokens(tokenizer, full)
+
+            return torch.tensor(token_ids) == embed_token_id
+
+        return PromptUpdateDetails(full=seq, is_embed=is_embed)
 
 
 PromptUpdateInfo = Union[PromptSeq, PromptUpdateDetails]
@@ -230,25 +273,14 @@ class PromptUpdate(ABC):
         """Defines how to update the prompt."""
         raise NotImplementedError
 
-    def _resolve_target(
-        self,
-        tokenizer: AnyTokenizer,
-        item_idx: int,
-    ) -> Union["_BoundPromptSequence", PromptIndex]:
+    def _resolve_target(self, item_idx: int) -> UpdateTarget:
         target = self.target
         if callable(target):
             target = target(item_idx)
 
-        if isinstance(target, PromptIndex):
-            return target
+        return target
 
-        return _BoundPromptSequence.from_seq(tokenizer, target)
-
-    def _resolve_content(
-        self,
-        tokenizer: AnyTokenizer,
-        item_idx: int,
-    ) -> "_BoundPromptContent":
+    def _resolve_content(self, item_idx: int) -> PromptUpdateDetails:
         content = self.content
         if callable(content):
             content = content(item_idx)
@@ -256,17 +288,9 @@ class PromptUpdate(ABC):
         if not isinstance(content, PromptUpdateDetails):
             content = PromptUpdateDetails.from_seq(content)
 
-        bound_full = _BoundPromptSequence.from_seq(tokenizer, content.full)
-        bound_content = _BoundPromptContent(full=bound_full,
-                                            is_embed=content.is_embed)
+        return content
 
-        return bound_content
-
-    def resolve(
-        self,
-        tokenizer: AnyTokenizer,
-        item_idx: int,
-    ) -> "ResolvedPromptUpdate":
+    def resolve(self, item_idx: int) -> "ResolvedPromptUpdate":
         """
         Given the index of the processed item within
         [`modality`][vllm.multimodal.processing.PromptUpdate.modality],
@@ -276,8 +300,8 @@ class PromptUpdate(ABC):
             modality=self.modality,
             item_idx=item_idx,
             mode=self.mode,
-            target=self._resolve_target(tokenizer, item_idx),
-            content=self._resolve_content(tokenizer, item_idx),
+            target=self._resolve_target(item_idx),
+            content=self._resolve_content(item_idx),
         )
 
 
@@ -424,30 +448,6 @@ class PromptReplacement(PromptUpdate):
         return UpdateMode.REPLACE
 
 
-@lru_cache(maxsize=2048)
-def _cached_encode(
-    tokenizer: AnyTokenizer,
-    text: str,
-    *,
-    add_special_tokens: Optional[bool] = None,
-) -> list[int]:
-    return encode_tokens(tokenizer,
-                         text,
-                         add_special_tokens=add_special_tokens)
-
-
-@lru_cache(maxsize=2048)
-def _cached_decode(
-    tokenizer: AnyTokenizer,
-    token_ids: tuple[int, ...],
-    *,
-    skip_special_tokens: Optional[bool] = None,
-) -> str:
-    return decode_tokens(tokenizer,
-                         list(token_ids),
-                         skip_special_tokens=skip_special_tokens)
-
-
 class _HasModalityAttr(Protocol):
     modality: str
 
@@ -466,59 +466,6 @@ def full_groupby_modality(values: Iterable[_M]) -> ItemsView[str, list[_M]]:
     """Convenience function to apply [`full_groupby`][vllm.utils.full_groupby]
     based on modality."""
     return full_groupby(values, key=lambda x: x.modality)
-
-
-@dataclass
-class _BoundPromptSequence:
-    """
-    A [`_PromptSeq`][vllm.multimodal.processing.PromptSeq] bound
-    to a tokenizer to automatically
-    convert between token sequence and text representations.
-    """
-    tokenizer: AnyTokenizer = field(repr=False)
-
-    _text: Optional[str]
-    _token_ids: Optional[list[int]]
-
-    @staticmethod
-    def from_seq(
-        tokenizer: AnyTokenizer,
-        seq: PromptSeq,
-    ) -> "_BoundPromptSequence":
-        return _BoundPromptSequence(
-            tokenizer=tokenizer,
-            _text=seq if isinstance(seq, str) else None,
-            _token_ids=seq if isinstance(seq, list) else None,
-        )
-
-    def __post_init__(self) -> None:
-        if self._text is None and self._token_ids is None:
-            raise ValueError("At least one of 'text' and 'token_ids' must be "
-                             "specified")
-
-    @property
-    def text(self) -> str:
-        if self._text is None:
-            assert self._token_ids is not None
-            self._text = _cached_decode(self.tokenizer, tuple(self._token_ids))
-
-        return self._text
-
-    @property
-    def token_ids(self) -> list[int]:
-        if self._token_ids is None:
-            assert self._text is not None
-            self._token_ids = _cached_encode(self.tokenizer,
-                                             self._text,
-                                             add_special_tokens=False)
-
-        return self._token_ids
-
-
-@dataclass
-class _BoundPromptContent:
-    full: _BoundPromptSequence
-    is_embed: Optional[Callable[["_BoundPromptSequence"], torch.Tensor]]
 
 
 class PromptTargetMatch(NamedTuple):
@@ -542,10 +489,10 @@ class ResolvedPromptUpdate:
     mode: UpdateMode
     """Defines how to update the prompt."""
 
-    target: Union[_BoundPromptSequence, PromptIndex]
+    target: UpdateTarget
     """The token sequence (or text) to update."""
 
-    content: _BoundPromptContent = field(repr=False)
+    content: PromptUpdateDetails = field(repr=False)
     """The placeholder tokens that are part of the update."""
 
     def iter_token_matches(
@@ -565,8 +512,10 @@ class ResolvedPromptUpdate:
 
             return
 
+        target_token_ids = _seq2tokens(tokenizer, target)
+
         for match in iter_token_matches(prompt,
-                                        target.token_ids,
+                                        target_token_ids,
                                         start_idx=start_idx):
             yield PromptTargetMatch(match.start_idx, match.end_idx)
 
@@ -587,7 +536,9 @@ class ResolvedPromptUpdate:
 
             return
 
-        for match in re.finditer(re.escape(target.text), prompt,
+        target_text = _seq2text(tokenizer, target)
+
+        for match in re.finditer(re.escape(target_text), prompt,
                                  pos=start_idx):
             yield PromptTargetMatch(match.start(), match.end())
 
@@ -605,6 +556,15 @@ class ResolvedPromptUpdate:
                                           start_idx=start_idx)
 
         return self.iter_token_matches(prompt, tokenizer, start_idx=start_idx)
+
+    def with_target(self, target: UpdateTarget):
+        return replace(self, target=target)
+
+    def with_content(self, content: PromptUpdateInfo):
+        if not isinstance(content, PromptUpdateDetails):
+            content = PromptUpdateDetails.from_seq(content)
+
+        return replace(self, content=content)
 
 
 class _TokenMatch(NamedTuple):
@@ -779,7 +739,7 @@ def _apply_matches(
 
                 matched_update = mm_prompt_updates[modality][item_idx][
                     update_idx]
-                matched_content = matched_update.content
+                matched_content = matched_update.content.full
 
                 if mode == UpdateMode.INSERT:
                     end_idx_to_insert = match.end_idx
@@ -789,8 +749,10 @@ def _apply_matches(
                     assert_never(mode)
 
                 out_seqs.append(prompt[prev_end_idx:end_idx_to_insert])
-                out_seqs.append(matched_content.full.text if isinstance(
-                    prompt, str) else matched_content.full.token_ids)
+                out_seqs.append(
+                    _seq2text(tokenizer, matched_content
+                              ) if isinstance(prompt, str) else _seq2tokens(
+                                  tokenizer, matched_content))
                 out_result[modality][item_idx] = update_idx
 
                 # Exclude overlapping matches
@@ -842,6 +804,7 @@ def apply_text_matches(
 def _iter_placeholders(
     prompt: list[int],
     mm_prompt_updates: "MultiModalPromptUpdates",
+    tokenizer: AnyTokenizer,
 ) -> Iterable[PlaceholderFeaturesInfo]:
     """
     Yield each set of placeholder tokens found in `prompt`.
@@ -868,7 +831,7 @@ def _iter_placeholders(
 
             for update in modality_updates[item_idx]:
                 content = update.content
-                content_tokens_full = content.full.token_ids
+                content_tokens_full = _seq2tokens(tokenizer, content.full)
                 content_len_full = len(content_tokens_full)
                 end_idx_full = start_idx + content_len_full
 
@@ -878,7 +841,8 @@ def _iter_placeholders(
                 if prompt[start_idx:end_idx_full] == content_tokens_full:
                     content_is_embed = content.is_embed
                     if content_is_embed is not None:
-                        content_is_embed = content_is_embed(content.full)
+                        content_is_embed = content_is_embed(
+                            tokenizer, content.full)
 
                     yield PlaceholderFeaturesInfo(
                         modality=modality,
@@ -904,24 +868,10 @@ def _iter_placeholders(
 def find_mm_placeholders(
     prompt: list[int],
     mm_prompt_updates: "MultiModalPromptUpdates",
+    tokenizer: AnyTokenizer,
 ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
-    it = _iter_placeholders(prompt, mm_prompt_updates)
+    it = _iter_placeholders(prompt, mm_prompt_updates, tokenizer)
     return dict(full_groupby_modality(it))
-
-
-class ProcessingCache(MultiModalCache):
-
-    def __init__(self, capacity_gb: float) -> None:
-        super().__init__()
-
-        self._cache = self.get_lru_cache(capacity_gb, MultiModalKwargsItem)
-
-        self.get = self._cache.get
-        self.put = self._cache.put
-        self.reset = self._cache.clear
-
-
-_CacheItemOrHash = Union[MultiModalKwargsItem, str]
 
 
 class BaseProcessingInfo:
@@ -1026,7 +976,7 @@ For an item `MultiModalPromptUpdates[k][i]`,
 
 
 class MultiModalProcessingInfo(NamedTuple):
-    kwargs: MultiModalKwargsItems
+    kwargs: MultiModalKwargsOptionalItems
     hashes: MultiModalHashes
     prompt_updates: MultiModalPromptUpdates
 
@@ -1038,11 +988,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     Not to be confused with `transformers.ProcessorMixin`.
     """
 
-    def __init__(self,
-                 info: _I,
-                 dummy_inputs: "BaseDummyInputsBuilder[_I]",
-                 *,
-                 cache: Optional[ProcessingCache] = None) -> None:
+    def __init__(
+        self,
+        info: _I,
+        dummy_inputs: "BaseDummyInputsBuilder[_I]",
+        *,
+        cache: Optional["BaseMultiModalProcessorCache"] = None,
+    ) -> None:
         super().__init__()
 
         self.info = info
@@ -1068,8 +1020,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt: str,
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
+        *,
+        mm_hash_overrides: Optional[MultiModalHashes] = None,
     ) -> MultiModalInputs:
-        return self.apply(prompt, mm_data, hf_processor_mm_kwargs)
+        return self.apply(prompt,
+                          mm_data,
+                          hf_processor_mm_kwargs,
+                          mm_hash_overrides=mm_hash_overrides)
 
     def _get_data_parser(self) -> MultiModalDataParser:
         """
@@ -1160,12 +1117,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         prompt_updates: Sequence[PromptUpdate],
         mm_item_counts: Mapping[str, int],
     ) -> MultiModalPromptUpdates:
-        tokenizer = self.info.get_tokenizer()
-
         return {
-            modality:
-            [[update.resolve(tokenizer, item_idx) for update in updates]
-             for item_idx in range(mm_item_counts.get(modality, 0))]
+            modality: [[update.resolve(item_idx) for update in updates]
+                       for item_idx in range(mm_item_counts.get(modality, 0))]
             for modality, updates in full_groupby_modality(prompt_updates)
         }
 
@@ -1208,7 +1162,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         new_token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
-        return find_mm_placeholders(new_token_ids, mm_prompt_updates)
+        tokenizer = self.info.get_tokenizer()
+
+        return find_mm_placeholders(new_token_ids, mm_prompt_updates,
+                                    tokenizer)
 
     def _get_hf_mm_data(
         self,
@@ -1399,39 +1356,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return prompt_ids, mm_processed_data, False
 
-    def _get_cache_missing_items(
-        self,
-        cache: ProcessingCache,
-        mm_data_items: MultiModalDataItems,
-        mm_hashes: MultiModalHashes,
-    ) -> tuple[dict[str, list[_CacheItemOrHash]], MultiModalDataItems]:
-        mm_cache_items_or_hashes: dict[str, list[_CacheItemOrHash]] = {
-            modality: [(h if (v := cache.get(h)) is None else v)
-                       for h in hashes]
-            for modality, hashes in mm_hashes.items()
-        }
-
-        mm_missing_idxs = {
-            modality: [
-                idx for idx, item_or_hash in enumerate(items_or_hashes)
-                if isinstance(item_or_hash, str)
-            ]
-            for modality, items_or_hashes in mm_cache_items_or_hashes.items()
-        }
-        mm_missing_data = {
-            modality: [mm_data_items[modality][idx] for idx in idxs]
-            for modality, idxs in mm_missing_idxs.items()
-        }
-
-        return mm_cache_items_or_hashes, self._to_mm_items(mm_missing_data)
-
     def _hash_mm_items(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
     ) -> MultiModalHashes:
-        """Create MM hashes to be returned (only used in V1)."""
+        """Create MM hashes to be returned (only used in V1).
+
+        Note: When overrides are provided via callers of `apply`,
+        `_hash_mm_items` will be bypassed and the overrides will be used.
+        """
         model_id = self.info.model_id
 
         return {
@@ -1445,28 +1380,92 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for modality, items in mm_items.items()
         }
 
+    def _get_cache_missing_items(
+        self,
+        cache: "BaseMultiModalProcessorCache",
+        mm_data_items: MultiModalDataItems,
+        mm_hashes: MultiModalHashes,
+    ) -> MultiModalDataItems:
+        mm_is_cached = {
+            modality: cache.is_cached(hashes)
+            for modality, hashes in mm_hashes.items()
+        }
+
+        mm_missing_idxs = {
+            modality: [
+                idx for idx, item_is_cached in enumerate(items_is_cached)
+                if not item_is_cached
+            ]
+            for modality, items_is_cached in mm_is_cached.items()
+        }
+        mm_missing_data = {
+            modality: [mm_data_items[modality][idx] for idx in idxs]
+            for modality, idxs in mm_missing_idxs.items()
+        }
+
+        return self._to_mm_items(mm_missing_data)
+
+    def _recompute_cached_prompt_update(
+        self,
+        cached_update: ResolvedPromptUpdate,
+        new_item_idx: int,
+    ) -> ResolvedPromptUpdate:
+        """
+        Override this if other attributes of `ResolvedPromptUpdate`
+        also need to be recomputed after retrieving from the cache.
+        """
+        return replace(cached_update, item_idx=new_item_idx)
+
     def _merge_mm_kwargs(
         self,
-        cache: ProcessingCache,
-        mm_cache_items_or_hashes: dict[str, list[_CacheItemOrHash]],
+        cache: "BaseMultiModalProcessorCache",
+        mm_hashes: MultiModalHashes,
         mm_missing_kwargs: MultiModalKwargsItems,
-    ) -> MultiModalKwargsItems:
+        mm_missing_prompt_updates: MultiModalPromptUpdates,
+    ) -> tuple[MultiModalKwargsOptionalItems, MultiModalPromptUpdates]:
+        # Need to calculate this at the beginning to avoid skipping cache logic
+        # for subsequently repeated items in the same modality
+        mm_is_cached = {
+            modality: cache.is_cached(hashes)
+            for modality, hashes in mm_hashes.items()
+        }
+
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
-        merged_items = defaultdict[str, list[MultiModalKwargsItem]](list)
-        for modality, items_or_hashes in mm_cache_items_or_hashes.items():
-            for item_or_hash in items_or_hashes:
-                if isinstance(item_or_hash, str):
-                    kw_item = mm_missing_kwargs[modality][
-                        mm_missing_next_idx[modality]]
-                    cache.put(item_or_hash, kw_item)
+        merged_kwargs = defaultdict[str,
+                                    list[Optional[MultiModalKwargsItem]]](list)
+        merged_prompt_updates = defaultdict[
+            str, list[Sequence[ResolvedPromptUpdate]]](list)
+        for modality, hashes in mm_hashes.items():
+            missing_kwargs = mm_missing_kwargs.get(modality, [])
+            missing_prompt_updates = mm_missing_prompt_updates.get(
+                modality, [])
+
+            for item_idx, item_hash in enumerate(hashes):
+                kwargs: Optional[MultiModalKwargsItem]
+                if not mm_is_cached[modality][item_idx]:
+                    missing_next_idx = mm_missing_next_idx[modality]
+                    kwargs = missing_kwargs[missing_next_idx]
+                    updates = missing_prompt_updates[missing_next_idx]
+
                     mm_missing_next_idx[modality] += 1
+
+                    item = kwargs, updates
                 else:
-                    kw_item = item_or_hash
+                    item = None
 
-                merged_items[modality].append(kw_item)
+                kwargs, updates = cache.get_and_update_item(item, item_hash)
 
-        return MultiModalKwargsItems(merged_items)
+                merged_kwargs[modality].append(kwargs)
+                merged_prompt_updates[modality].append([
+                    self._recompute_cached_prompt_update(update, item_idx)
+                    for update in updates
+                ])
+
+        mm_kwargs = MultiModalKwargsItems(merged_kwargs)
+        mm_prompt_updates = dict(merged_prompt_updates)
+
+        return mm_kwargs, mm_prompt_updates
 
     def _apply_hf_processor(
         self,
@@ -1474,6 +1473,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
+        *,
+        mm_hash_overrides: Optional[MultiModalHashes] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         (
             prompt_ids,
@@ -1493,8 +1494,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                                        hf_processor_mm_kwargs),
         )
 
-        mm_hashes = self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
-                                        tokenization_kwargs)
+        # Use overrides if provided; fallback to data-dependent hashing.
+        mm_hashes = (mm_hash_overrides if mm_hash_overrides is not None else
+                     self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
+                                         tokenization_kwargs))
 
         mm_prompt_updates = self._get_mm_prompt_updates(
             mm_data_items,
@@ -1516,6 +1519,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
+        *,
+        mm_hash_overrides: Optional[MultiModalHashes] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         """
         Apply the HF processor on the full prompt text,
@@ -1530,14 +1535,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
                 tokenization_kwargs=tokenization_kwargs,
+                mm_hash_overrides=mm_hash_overrides,
             )
 
-        mm_hashes = self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
-                                        tokenization_kwargs)
-        (
-            mm_cache_items_or_hashes,
-            mm_missing_data_items,
-        ) = self._get_cache_missing_items(
+        # Use overrides if provided; fallback to data-dependent hashing.
+        mm_hashes = (mm_hash_overrides if mm_hash_overrides is not None else
+                     self._hash_mm_items(mm_data_items, hf_processor_mm_kwargs,
+                                         tokenization_kwargs))
+
+        mm_missing_data_items = self._get_cache_missing_items(
             cache=cache,
             mm_data_items=mm_data_items,
             mm_hashes=mm_hashes,
@@ -1564,16 +1570,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                                        hf_processor_mm_kwargs),
         )
 
-        mm_kwargs = self._merge_mm_kwargs(
-            cache,
-            mm_cache_items_or_hashes=mm_cache_items_or_hashes,
-            mm_missing_kwargs=mm_missing_kwargs,
+        mm_missing_prompt_updates = self._get_mm_prompt_updates(
+            mm_missing_data_items,
+            hf_processor_mm_kwargs,
+            mm_missing_kwargs,
         )
 
-        mm_prompt_updates = self._get_mm_prompt_updates(
-            mm_data_items,
-            hf_processor_mm_kwargs,
-            mm_kwargs,
+        mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
+            cache,
+            mm_hashes=mm_hashes,
+            mm_missing_kwargs=mm_missing_kwargs,
+            mm_missing_prompt_updates=mm_missing_prompt_updates,
         )
 
         mm_info = MultiModalProcessingInfo(
@@ -1658,7 +1665,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
     def _validate_mm_kwargs(
         self,
-        mm_kwargs: MultiModalKwargsItems,
+        mm_kwargs: MultiModalKwargsOptionalItems,
         mm_item_counts: Mapping[str, int],
     ) -> None:
         for modality, item_count in mm_item_counts.items():
@@ -1699,7 +1706,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_items: MultiModalDataItems,
         prompt_ids: list[int],
-        mm_kwargs: MultiModalKwargsItems,
+        mm_kwargs: MultiModalKwargsOptionalItems,
         mm_prompt_updates: MultiModalPromptUpdates,
         is_update_applied: bool,
     ) -> tuple[list[int], str, Mapping[str, list[PlaceholderFeaturesInfo]]]:
@@ -1734,6 +1741,8 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
+        *,
+        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1762,6 +1771,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_items,
             hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
+            mm_hash_overrides=mm_hash_overrides,
         )
 
         # NOTE: tokenization_kwargs are not required to init processor
@@ -1846,6 +1856,8 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
+        *,
+        mm_hash_overrides: Optional[MultiModalHashes] = None,
     ) -> MultiModalEncDecInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1860,6 +1872,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             mm_data,
             hf_processor_mm_kwargs,
             tokenization_kwargs,
+            mm_hash_overrides=mm_hash_overrides,
         )
 
         return self._get_enc_dec_inputs(
