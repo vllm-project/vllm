@@ -1270,4 +1270,3 @@ def compute_hash() -> str:
             # Skip values we cannot canonicalize deterministically.
             continue
     return hash_items_sha256(items)
-    
