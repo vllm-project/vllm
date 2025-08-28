@@ -1491,6 +1491,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                and not envs.VLLM_DISABLE_PAD_FOR_CUDAGRAPH
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use CUDA graphs.
             # Add padding to the batch size.

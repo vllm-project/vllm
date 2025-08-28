@@ -1463,11 +1463,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # V1 mamba models are unoptimized.
-        if model_config.has_inner_state and _warn_or_fallback(
-                feature_name="Mamba"):
-            return False
-
         # No Concurrent Partial Prefills so far.
         if (self.max_num_partial_prefills
                 != SchedulerConfig.max_num_partial_prefills
