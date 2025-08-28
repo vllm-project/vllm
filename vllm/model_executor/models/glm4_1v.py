@@ -157,7 +157,7 @@ class Glm4vVideoEmbeddingInputs(TensorSchema):
 
 Glm4vVideoInputs = Union[Glm4vVideoPixelInputs, Glm4vVideoEmbeddingInputs]
 
-# === Vision Encoder === #
+# ==== Vision Encoder ==== #
 
 
 class Glm4vVisionMLP(nn.Module):
