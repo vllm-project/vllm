@@ -241,6 +241,7 @@ class AiterFlashAttentionMetadata:
     k_buffer: torch.Tensor
     v_buffer: torch.Tensor
     workspace_buffer: torch.Tensor
+    cu_seq_lens: torch.Tensor
 
 
 class AiterFlashAttentionMetadataBuilder(
@@ -264,10 +265,6 @@ class AiterFlashAttentionMetadataBuilder(
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
 
-        self.k_buffer = None
-        self.v_buffer = None
-        self.workspace_buffer = None
-
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
@@ -288,19 +285,40 @@ class AiterFlashAttentionMetadataBuilder(
         nbytes_per_qo_elem = torch.finfo(self.model_config.dtype).bits // 8
         max_num_partitions = (max_seq_len + _PARTITION_SIZE_ROCM -
                               1) // _PARTITION_SIZE_ROCM
+        empty_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        k_buffer = None
+        v_buffer = None
+        workspace_buffer = None
+        cu_seq_lens = None
         if max_query_len > 1:
-            self.k_buffer = torch.empty(
-                (num_actual_kv_tokens, self.num_heads_kv, self.headdim),
-                dtype=self.model_config.dtype,
-                device=self.device,
-            )
-            self.v_buffer = torch.empty(
-                (num_actual_kv_tokens, self.num_heads_kv, self.headdim),
-                dtype=self.model_config.dtype,
-                device=self.device,
-            )
+            required_memory = num_actual_kv_tokens * \
+                self.num_heads_kv * self.headdim * 2 * 2
+            if required_memory >= empty_gpu_memory:
+                raise ValueError(
+                    f"Not enough GPU memory to allocate k_buffer and v_buffer. "
+                    f"Required: {required_memory} bytes, "
+                    f"Available: {empty_gpu_memory} bytes, please reduce the "
+                    f"max_num_seqs or max_model_len.")
+            if not torch.cuda.graphs.is_current_stream_capturing():
+                k_buffer = torch.empty(
+                    (num_actual_kv_tokens, self.num_heads_kv, self.headdim),
+                    dtype=self.model_config.dtype,
+                    device=self.device,
+                )
+                v_buffer = torch.empty(
+                    (num_actual_kv_tokens, self.num_heads_kv, self.headdim),
+                    dtype=self.model_config.dtype,
+                    device=self.device,
+                )
+                cu_seq_lens = torch.zeros(seq_lens.shape[0] + 1,
+                                          dtype=torch.int32,
+                                          device=self.device)
+                torch.cumsum(seq_lens,
+                             dim=0,
+                             dtype=cu_seq_lens.dtype,
+                             out=cu_seq_lens[1:])
 
-        self.workspace_buffer = torch.empty(
+        workspace_buffer = torch.empty(
             (num_seqs * self.num_heads_q * max_num_partitions * self.headdim) *
             nbytes_per_qo_elem + 2 *
             (num_seqs * self.num_heads_q * max_num_partitions) * 4,
@@ -319,9 +337,10 @@ class AiterFlashAttentionMetadataBuilder(
             slot_mapping=slot_mapping,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
-            k_buffer=self.k_buffer,
-            v_buffer=self.v_buffer,
-            workspace_buffer=self.workspace_buffer,
+            k_buffer=k_buffer,
+            v_buffer=v_buffer,
+            workspace_buffer=workspace_buffer,
+            cu_seq_lens=cu_seq_lens,
         )
         return attn_metadata
 
@@ -507,13 +526,16 @@ class AiterFlashAttentionImpl(AttentionImpl):
             block_table = attn_metadata.block_table
 
             if max_seqlen_q > 1:
-                cu_seq_lens = torch.zeros(seqused_k.shape[0] + 1,
-                                          dtype=torch.int32,
-                                          device=query.device)
-                torch.cumsum(seqused_k,
-                             dim=0,
-                             dtype=cu_seq_lens.dtype,
-                             out=cu_seq_lens[1:])
+                if attn_metadata.cu_seq_lens is None:
+                    cu_seq_lens = torch.zeros(seqused_k.shape[0] + 1,
+                                              dtype=torch.int32,
+                                              device=query.device)
+                    torch.cumsum(seqused_k,
+                                 dim=0,
+                                 dtype=cu_seq_lens.dtype,
+                                 out=cu_seq_lens[1:])
+                else:
+                    cu_seq_lens = attn_metadata.cu_seq_lens
 
                 torch.ops.vllm.flash_attn_varlen_func(
                     query[:num_actual_tokens],
