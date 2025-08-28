@@ -116,7 +116,7 @@ The built-in modalities are defined by
 [`MultiModalDataBuiltins`][vllm.multimodal.inputs.MultiModalDataBuiltins].
 """
 
-MultiModalUUIDs: TypeAlias = dict[str, Union[list[Optional[str]], str]]
+MultiModalUUIDs: TypeAlias = Mapping[str, Union[list[Optional[str]], str]]
 """
 A dictionary containing user-provided UUIDs for items in each modality.
 If a UUID for an item is not provided, its entry will be `None` and
