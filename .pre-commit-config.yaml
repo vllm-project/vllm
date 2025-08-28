@@ -53,25 +53,6 @@ repos:
       files: ^requirements/test\.(in|txt)$
 - repo: local
   hooks:
-  - id: generate-cached-model-info
-    name: Generates python file with dict of _ModelInfo arguments
-    language: system
-    types: [python]
-    verbose: true
-    pass_filenames: true # run just for files passed
-    entry: python tools/enforce_cached_model_info.py -b
-    files: ^vllm/model_executor/models/.*\.py$
-    require_serial: true # try to prevent running multiple times
-    stages: [pre-commit] # Don't run in CI
-  - id: check-cached-model-info
-    name: Verifies that _cached_model_info.py contains latest models
-    language: python
-    types: [python]
-    verbose: true
-    pass_filenames: false # run in CI for all model files
-    always_run: true
-    entry: python tools/enforce_cached_model_info.py
-    stages: [manual] # Only run in CI
   - id: format-torch-nightly-test
     name: reformat nightly_torch_test.txt to be in sync with test.in
     language: python
