@@ -97,7 +97,6 @@ __device__ __forceinline__ float silu(float x) {
 }
 
 __device__ __forceinline__ float2 silu2(float2 x) {
-  // TODO: Vectorize?
   return make_float2(silu(x.x), silu(x.y));
 }
 
@@ -149,7 +148,6 @@ template <>
 __device__ __forceinline__ void cp_async_wait<0>() {
   asm volatile("cp.async.wait_all;\n" ::);
 }
-
 template <typename scalar_t, uint32_t NUM_WARPS, typename Idx_t, bool USE_UE8M0,
           int GROUP_SIZE = 128, int NUM_STAGES = 2>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
@@ -159,7 +157,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const uint32_t* __restrict__ counts,  // (E)
 
     // sizes
-    Idx_t E, Idx_t T, Idx_t H, Idx_t G,
+    Idx_t H, Idx_t G,
 
     // strides (in elements)
     Idx_t stride_i_e, Idx_t stride_i_t, Idx_t stride_i_h, Idx_t stride_yq_e,
@@ -168,27 +166,16 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
     // quant params
     float eps, float fp8_min, float fp8_max) {
-  // The 32-bit(s_buffer_128) is organized as follows:
-  // [          (128 / 2) * NUM_STAGES * NUM_WARPS   x BF16x2           ]  [
-  // (128 / 2) * NUM_STAGES * NUM_WARPS   x BF16x2                      ]
-  //              stage0              ,              stage1 stage 0 stage1
-  // [ warp0_gate, ..., warp3_gate,       warp0_gate, ..., warp3_gate, warp0_up,
-  // warp1_up, warp2_up, warp3_up,     warp0_up, warp1_up, warp2_up, warp3_up ]
-  //        ↑
-  //        |
-  // [ (128 / 2) x BF16x2 ]
-  __shared__ __int128_t __align__(16)
-      s_buff_128[2                           // gate + up
-                 * GROUP_SIZE                // group size
-                 * NUM_WARPS * NUM_STAGES];  // num warps
+  static constexpr uint32_t S_NUM_128 =
+      2 * (GROUP_SIZE / 4) * NUM_WARPS * NUM_STAGES;
+  static constexpr uint32_t S_NUM_64 = S_NUM_128 * 2;
+  static constexpr uint32_t S_NUM_32 = S_NUM_64 * 2;
+  __shared__ __int128_t __align__(16) s_buff_128[S_NUM_128];
   __shared__ Idx_t s_counts[1];
 
   const Idx_t tid = threadIdx.x;
   const Idx_t warp_id = tid / WARP_SIZE;
   const Idx_t lane_id = tid % WARP_SIZE;
-
-  auto s_buff_gate_load_128 = s_buff_128 + tid;
-  auto s_buff_up_load_128 = s_buff_128 + tid + blockDim.x;
 
   auto s_buff_compute_32 = reinterpret_cast<__nv_bfloat162*>(s_buff_128);
 
@@ -196,9 +183,6 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   Idx_t pid = blockIdx.x;
   Idx_t e = pid / G;
   Idx_t g = pid % G;
-  if (e >= E) return;
-
-  // how many tokens for this expert
 
   if (!tid) {
     s_counts[0] = counts[e * stride_counts_e];
@@ -207,41 +191,46 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   const Idx_t stride_i_t_128 = stride_i_t / 8u;
 
   // base offsets (element-based)
-  const Idx_t base_i = e * stride_i_e + g * GROUP_SIZE * stride_i_h;
-
-  const Idx_t base_yq = e * stride_yq_e + g * GROUP_SIZE * stride_yq_h;
-  const Idx_t base_ys = e * stride_ys_e + g * stride_ys_g;
+  const Idx_t base_i = e * stride_i_e + NUM_WARPS * g * GROUP_SIZE * stride_i_h;
+  const Idx_t base_yq =
+      e * stride_yq_e + NUM_WARPS * g * GROUP_SIZE * stride_yq_h;
+  const Idx_t base_ys = e * stride_ys_e + NUM_WARPS * g * stride_ys_g;
 
   Idx_t gate_off_128 = (base_i / 8u);
-  Idx_t up_off_128 = ((base_i + H * stride_i_h) / 8u);
-  Idx_t yq_off = base_yq + warp_id * GROUP_SIZE + lane_id * stride_yq_h;
 
   auto input_128_ptr = reinterpret_cast<const __int128_t*>(_input);
 
-  auto gate_128_ptr = input_128_ptr + gate_off_128 + tid;
-  auto up_128_ptr = input_128_ptr + up_off_128 + tid;
-  auto y_q_ptr = _y_q + yq_off;
-  auto y_s_ptr = _y_s + base_ys;
+  static constexpr auto THREAD_COUNT = NUM_WARPS * WARP_SIZE;
+  auto gate_128_ptr = input_128_ptr + gate_off_128 + (tid % 64);
+  auto up_128_ptr = gate_128_ptr + (H * stride_i_h) / 8u;
+
+  auto y_s_ptr = _y_s + base_ys + warp_id;
+
+  auto y_q_ptr = _y_q + base_yq + 2 * lane_id;
 
   __syncthreads();
   const Idx_t n_tokens = s_counts[0];
 
   Idx_t t_load = 0, stage = 0;
+  auto s_buff_gate_load_128 = s_buff_128 + (tid % 64u);
+  auto s_buff_up_load_128 = s_buff_gate_load_128 + S_NUM_128 / 2u;
   auto load_and_advance_y_pred = [&] {
     if (t_load < n_tokens) {
-      // We do 2 * ... here to account for up + gate.
-      auto stage_offset = (stage % NUM_STAGES) * (NUM_WARPS * WARP_SIZE);
+      auto stage_offset = (stage % NUM_STAGES) * (NUM_WARPS * WARP_SIZE / 2);
+
       auto s_gate_stage_128_staged_ptr = s_buff_gate_load_128 + stage_offset;
       auto s_up_stage_128_staged_ptr = s_buff_up_load_128 + stage_offset;
-      cp_async4(s_gate_stage_128_staged_ptr, gate_128_ptr);
-      cp_async4(s_up_stage_128_staged_ptr, up_128_ptr);
-    }
-    gate_128_ptr += stride_i_t_128;
-    up_128_ptr += stride_i_t_128;
-    t_load++;
-    stage++;
 
-    // Always fence, even if there's nothing to do.
+      if (tid < THREAD_COUNT / 2) {
+        cp_async4(s_gate_stage_128_staged_ptr, gate_128_ptr);
+        gate_128_ptr += stride_i_t_128;
+      } else {
+        cp_async4(s_up_stage_128_staged_ptr, up_128_ptr);
+        up_128_ptr += stride_i_t_128;
+      }
+      ++t_load;
+      ++stage;
+    }
     cp_async_fence();
   };
 
@@ -251,7 +240,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   }
 
   auto s_gate_ptr = s_buff_compute_32 + warp_id * (GROUP_SIZE / 2) + lane_id;
-  auto s_up_ptr = s_gate_ptr + NUM_STAGES * NUM_WARPS * (GROUP_SIZE / 2);
+  auto s_up_ptr = s_gate_ptr + S_NUM_32 / 2;
 
   for (Idx_t t = 0; t < n_tokens; ++t) {
     float2 gate, upv;
@@ -270,37 +259,39 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     for (int i = 0; i < 2; i++) {
       gate = silu2(__bfloat1622float2(*s_gate_compute));
       upv = __bfloat1622float2(*s_up_compute);
+      auto gate_f32 = __bfloat1622float2(*s_gate_compute);
       results[i] = make_float2(gate.x * upv.x, gate.y * upv.y);
-      y_max = fmaxf(y_max, fmaxf(results[i].x, results[i].y));
+      y_max = fmaxf(y_max, fmaxf(fabsf(results[i].x), fabsf(results[i].y)));
       s_gate_compute += WARP_SIZE;
       s_up_compute += WARP_SIZE;
     }
 
-    // TODO: Get rid of this...
     __syncthreads();
-
     load_and_advance_y_pred();
 
-    float absmax = warp_max(y_max) / fp8_max;
+    float y_s = warp_max(y_max) / fp8_max;
 
     if constexpr (USE_UE8M0) {
-      absmax = exp2f(ceilf(log2f(absmax)));
+      y_s = exp2f(ceilf(log2f(y_s)));
     }
 
+    auto local_y_q_ptr = y_q_ptr;
     float q;
-// TODO: Extract index calculation here.
 #pragma unroll
-    for (Idx_t i = 0; i < 2; i++) {
-      q = fminf(fmaxf(results[i].x / absmax, fp8_min), fp8_max);
-      *(y_q_ptr + (2u * i) * WARP_SIZE) = __nv_fp8_e4m3(q);
+    for (Idx_t i = 0; i < 2; ++i) {
+      q = fminf(fmaxf(results[i].x / y_s, fp8_min), fp8_max);
+      local_y_q_ptr[0] = __nv_fp8_e4m3(q);
 
-      q = fminf(fmaxf(results[i].y / absmax, fp8_min), fp8_max);
-      *(y_q_ptr + (2u * i + 1u) * WARP_SIZE) = __nv_fp8_e4m3(q);
+      q = fminf(fmaxf(results[i].y / y_s, fp8_min), fp8_max);
+      local_y_q_ptr[1] = __nv_fp8_e4m3(q);
+
+      local_y_q_ptr += 2 * WARP_SIZE;
     }
 
     y_q_ptr += stride_yq_t;
-    if (tid == 0) {
-      *y_s_ptr = absmax;
+
+    if (lane_id == 0) {
+      *y_s_ptr = y_s;
       y_s_ptr += stride_ys_t;
     }
   }
@@ -374,19 +365,21 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
         reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),
         reinterpret_cast<__nv_fp8_e4m3*>(y_q.data_ptr<at::Float8_e4m3fn>()),
         y_s.data_ptr<float>(),
-        reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), E, T, H, G,
-        stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t,
-        stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g, stride_counts_e,
-        eps, fp8_min, fp8_max);
+        reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), H, G, stride_i_e,
+        stride_i_t, stride_i_h, stride_yq_e, stride_yq_t, stride_yq_h,
+        stride_ys_e, stride_ys_t, stride_ys_g, stride_counts_e,
+        static_cast<float>(eps), static_cast<float>(fp8_min),
+        static_cast<float>(fp8_max));
   } else {
     vllm::silu_mul_fp8_quant_deep_gemm_kernel<__nv_bfloat16, NUM_WARPS, Idx_t,
                                               false><<<grid, block>>>(
         reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),
         reinterpret_cast<__nv_fp8_e4m3*>(y_q.data_ptr<at::Float8_e4m3fn>()),
         y_s.data_ptr<float>(),
-        reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), E, T, H, G,
-        stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t,
-        stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g, stride_counts_e,
-        eps, fp8_min, fp8_max);
+        reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), H, G, stride_i_e,
+        stride_i_t, stride_i_h, stride_yq_e, stride_yq_t, stride_yq_h,
+        stride_ys_e, stride_ys_t, stride_ys_g, stride_counts_e,
+        static_cast<float>(eps), static_cast<float>(fp8_min),
+        static_cast<float>(fp8_max));
   }
 }
