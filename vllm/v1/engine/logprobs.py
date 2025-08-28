@@ -5,7 +5,7 @@ import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass
 from collections import deque
-from typing import Optional, List
+from typing import Optional
 
 from vllm.logger import init_logger
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
@@ -34,7 +34,7 @@ class LogprobsProcessor:
     num_prompt_logprobs: Optional[int]
 
     conf_grouped: float
-    conf_list: Optional[List[float]]
+    conf_list: Optional[list[float]]
     conf_group_list: Optional[deque]
     conf_group_size: int
     conf_threshold: Optional[float]
@@ -84,8 +84,9 @@ class LogprobsProcessor:
         if self.conf_group_list is None or len(self.conf_group_list) == 0:
             return False
         # Require a full window; trigger when the moving average is below threshold.
-        return (len(self.conf_group_list) >= self.conf_group_size
-                and self.conf_grouped / len(self.conf_group_list) < self.conf_threshold)
+        return (len(self.conf_group_list) >= self.conf_group_size \
+                and self.conf_grouped / len(self.conf_group_list) \
+                    < self.conf_threshold)
 
     def _update_sample_logprobs(self, logprobs_lists: LogprobsLists) -> None:
         """Update with sample logprobs from EngineCore.
