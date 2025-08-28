@@ -16,7 +16,8 @@ from vllm.distributed import (get_ep_group, get_tensor_model_parallel_rank,
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (QKVParallelLinear,
-                                               RowParallelLinear)
+                                               RowParallelLinear,
+                                               ReplicatedLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -146,9 +147,10 @@ class MLPBlock(torch.nn.Module):
         self.experts_per_token = config.num_experts_per_tok
         self.world_size = dist.get_world_size() if dist.is_initialized() else 1
         self.norm = RMSNorm(config.hidden_size, eps=1e-5)
-        self.router = torch.nn.Linear(config.hidden_size,
+        self.router = ReplicatedLinear(config.hidden_size,
                                       config.num_local_experts,
-                                      dtype=torch.bfloat16)
+                                      bias=False,
+                                      quant_config=quant_config)
         assert config.intermediate_size % self.world_size == 0
         self.experts = FusedMoE(num_experts=config.num_local_experts,
                                 top_k=config.num_experts_per_tok,
@@ -164,7 +166,7 @@ class MLPBlock(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         t = self.norm(x)
-        g = self.router(t)
+        g, _ = self.router(t)
         t = self.experts(hidden_states=t, router_logits=g)
         return x + t
 
