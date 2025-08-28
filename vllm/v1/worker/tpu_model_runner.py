@@ -890,10 +890,13 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        is_mm_embed = self.is_mm_embed_cpu
-        mm_embeds = list[torch.Tensor]()
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
+        is_mm_embed = self.is_mm_embed_cpu
+        is_mm_embed[:total_num_scheduled_tokens] = False
+        mm_embeds = list[torch.Tensor]()
         req_start_idx = 0
+
         for req_id in self.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
@@ -901,6 +904,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_computed_tokens = req_state.num_computed_tokens
             mm_positions = req_state.mm_positions
             mm_hashes = req_state.mm_hashes
+
             # TODO unroll loop and assume/enforce --disable_chunked_mm_input
             # NOTE (NickLucche) here we diverge from logic in other runners, as
             # we assume to only have whole mm items to process. Hence we avoid
@@ -936,7 +940,6 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             req_start_idx += num_scheduled_tokens
 
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         is_mm_embed = is_mm_embed[:total_num_scheduled_tokens].to(self.device)
 
         return is_mm_embed, mm_embeds

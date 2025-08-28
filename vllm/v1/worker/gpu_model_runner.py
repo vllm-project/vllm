@@ -1192,10 +1192,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         shift_computed_tokens: int = 0,
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-        is_mm_embed = self.is_mm_embed.cpu
-        mm_embeds = list[torch.Tensor]()
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
+        is_mm_embed = self.is_mm_embed.cpu
+        is_mm_embed[:total_num_scheduled_tokens] = False
+        mm_embeds = list[torch.Tensor]()
         req_start_idx = 0
+
         for req_id in self.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
@@ -1248,7 +1251,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             req_start_idx += num_scheduled_tokens
 
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         self.is_mm_embed.copy_to_gpu(total_num_scheduled_tokens)
 
         return self.is_mm_embed.gpu[:total_num_scheduled_tokens], mm_embeds
