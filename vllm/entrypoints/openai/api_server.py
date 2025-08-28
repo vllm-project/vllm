@@ -1956,16 +1956,22 @@ async def run_server_worker(listen_address,
         await init_app_state(engine_client, vllm_config, app.state, args)
 
         kv_conn_metadata_server = None
+        # Check for kv_handshake_metadata from client_config (non-V1 path)
         if client_config and "kv_handshake_metadata" in client_config:
             kv_metadata = client_config["kv_handshake_metadata"]
-            if kv_metadata:
-                try:
-                    kv_conn_metadata_server = await \
-                        set_up_kv_handshake_server(vllm_config, kv_metadata)
-                except Exception as e:
-                    logger.error(
-                        "Failed to start NIXL side channel server: %s", e)
-                    raise
+        else:
+            # For V1 path, get metadata from engine_client
+            kv_metadata = None
+            if hasattr(engine_client, 'get_kv_handshake_metadata'):
+                kv_metadata = await engine_client.get_kv_handshake_metadata()
+
+        if kv_metadata:
+            try:
+                kv_conn_metadata_server = await \
+                    set_up_kv_handshake_server(vllm_config, kv_metadata)
+            except Exception as e:
+                logger.error("Failed to start NIXL side channel server: %s", e)
+                raise
 
         logger.info("Starting vLLM API server %d on %s", server_index,
                     listen_address)

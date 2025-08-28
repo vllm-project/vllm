@@ -435,6 +435,7 @@ class MPClient(EngineCoreClient):
             self.engines_running = False
 
             self.stats_update_address: Optional[str] = None
+            self.kv_handshake_metadata: Optional[dict] = None
             if client_addresses is not None:
                 # Engines are managed externally to this client.
                 input_address = client_addresses["input_address"]
@@ -446,9 +447,10 @@ class MPClient(EngineCoreClient):
                 with launch_core_engines(vllm_config, executor_class,
                                          log_stats) as (engine_manager,
                                                         coordinator, addresses,
-                                                        _):
+                                                        kv_metadata):
                     self.resources.coordinator = coordinator
                     self.resources.engine_manager = engine_manager
+                    self.kv_handshake_metadata = kv_metadata
 
                 (input_address, ) = addresses.inputs
                 (output_address, ) = addresses.outputs
@@ -524,6 +526,10 @@ class MPClient(EngineCoreClient):
     def ensure_alive(self):
         if self.resources.engine_dead:
             raise EngineDeadError()
+
+    def get_kv_handshake_metadata(self) -> Optional[dict]:
+        """Get KV connector handshake metadata if available."""
+        return self.kv_handshake_metadata
 
     def add_pending_message(self, tracker: zmq.MessageTracker, msg: Any):
         if not tracker.done:
