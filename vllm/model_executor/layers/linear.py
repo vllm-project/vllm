@@ -4,7 +4,7 @@
 import itertools
 from abc import abstractmethod
 from typing import Any, Literal, Optional, Union
-
+import os
 import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter, UninitializedParameter
@@ -30,6 +30,7 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
 # yapf: enable
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from triton_dist.kernels.nvidia.allreduce import (create_allreduce_ctx, all_reduce, AllReduceMethod)
 
 logger = init_logger(__name__)
 
@@ -1302,6 +1303,8 @@ class RowParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
+        self.ar_option = os.getenv("AR_METHOD", "vllm")
+
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         input_dim = getattr(param, "input_dim", None)
         use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
@@ -1366,11 +1369,24 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(self,
+        if self.ar_option != 'triton_dist':
+            output_parallel = self.quant_method.apply(self,
                                                   input_parallel,
                                                   bias=bias_)
         if self.reduce_results and self.tp_size > 1:
-            output = tensor_model_parallel_all_reduce(output_parallel)
+            if self.ar_option == 'torch':
+                # torch AR
+                output = torch.distributed.all_reduce(output_parallel)
+
+            elif self.ar_option == 'vllm':
+                # vllm AR
+                output = tensor_model_parallel_all_reduce(output_parallel)
+
+            elif self.ar_option == 'triton_dist':
+                # triton dist AR
+                output = self.gemm_ar_op.forward(input_parallel, self._parameters['weight'], None)
+            else:
+                raise ValueError(f"Unknown all-reduce method: {self.ar_option}")
         else:
             output = output_parallel
 
