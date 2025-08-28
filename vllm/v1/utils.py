@@ -97,19 +97,19 @@ class ConstantList(Generic[T], Sequence):
 
 
 class CpuGpuBuffer:
+    """Buffer to easily copy tensors between CPU and GPU."""
 
     def __init__(
         self,
-        *args,
+        *args: int | torch.SymInt,
         dtype: torch.dtype,
         device: torch.device,
         pin_memory: bool,
-    ):
+    ) -> None:
         self.cpu = torch.zeros(*args,
                                dtype=dtype,
                                device="cpu",
                                pin_memory=pin_memory)
-        self.np = self.cpu.numpy()
         self.gpu = self.cpu.to(device)
 
     def copy_to_gpu(self, n: Optional[int] = None) -> torch.Tensor:
@@ -123,6 +123,28 @@ class CpuGpuBuffer:
         if n is None:
             return self.cpu.copy_(self.gpu, non_blocking=True)
         return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
+
+
+class CpuGpuBufferWithNumpy(CpuGpuBuffer):
+    """Buffer to easily copy tensors between CPU and GPU, also maintaining 
+    a numpy array sharing memory on the CPU.
+
+    Note: Bfloat16 torch tensors cannot be directly cast to a numpy array, so 
+    this class is incompatible with bfloat16 buffers.
+    """
+
+    def __init__(
+        self,
+        *args: int | torch.SymInt,
+        dtype: torch.dtype,
+        device: torch.device,
+        pin_memory: bool,
+    ) -> None:
+        super().__init__(*args,
+                         dtype=dtype,
+                         device=device,
+                         pin_memory=pin_memory)
+        self.np = self.cpu.numpy()
 
 
 def get_engine_client_zmq_addr(local_only: bool,

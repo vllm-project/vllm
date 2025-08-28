@@ -9,7 +9,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union, cast, overload
 
 import numpy as np
 import torch
@@ -79,7 +79,7 @@ from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.utils import CpuGpuBuffer, CpuGpuBufferWithNumpy
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
@@ -133,6 +133,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.device = device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
+        assert isinstance(self.dtype, torch.dtype)
         if cache_config.cache_dtype == "auto":
             self.kv_cache_dtype = self.dtype
         else:
@@ -257,8 +258,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.query_start_loc = self._make_buffer(self.max_num_reqs + 1,
                                                  dtype=torch.int32)
         self.seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
-        self.inputs_embeds = self._make_buffer(
-            (self.max_num_tokens, self.hidden_size), dtype=self.dtype)
+        # Because inputs_embeds may be bfloat16 and we don't need a numpy
+        # version of this tensor, avoid a RuntimeError by not creating a
+        # numpy buffer.
+        self.inputs_embeds = self._make_buffer(self.max_num_tokens,
+                                               self.hidden_size,
+                                               dtype=self.dtype,
+                                               numpy=False)
         self.is_inputs_embeds = self._make_buffer(self.max_num_tokens,
                                                   dtype=torch.bool)
 
@@ -328,7 +334,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device="cpu",
             pin_memory=self.pin_memory)
 
-    def _make_buffer(self, *args, dtype: torch.dtype) -> CpuGpuBuffer:
+    @overload
+    def _make_buffer(self,
+                     *args: int | torch.SymInt,
+                     dtype: torch.dtype,
+                     numpy: Literal[True] = ...) -> CpuGpuBufferWithNumpy:
+        ...
+
+    @overload
+    def _make_buffer(self, *args: int | torch.SymInt, dtype: torch.dtype,
+                     numpy: Literal[False]) -> CpuGpuBuffer:
+        ...
+
+    def _make_buffer(
+            self,
+            *args: int | torch.SymInt,
+            dtype: torch.dtype,
+            numpy: bool = True) -> CpuGpuBuffer | CpuGpuBufferWithNumpy:
+        # Bfloat16 torch tensors cannot be directly cast to a numpy array, so
+        # if a bfloat16 buffer is needed without a corresponding numpy array,
+        # don't bother instantiating the numpy array.
+        if numpy:
+            return CpuGpuBufferWithNumpy(*args,
+                                         dtype=dtype,
+                                         device=self.device,
+                                         pin_memory=self.pin_memory)
         return CpuGpuBuffer(*args,
                             dtype=dtype,
                             device=self.device,
