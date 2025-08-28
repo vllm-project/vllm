@@ -579,7 +579,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             format = scheme_dict.get("format")
 
         # Find the sparsity scheme of the layer
-        # assume that fused layers inerhit first component's sparsity scheme
+        # assume that fused layers inherit first component's sparsity scheme
         sparsity_targets = (self.sparsity_scheme_map.keys() -
                             set(self.sparsity_ignore_list))
         sparsity_scheme: Optional[SparsityCompressionConfig] = None

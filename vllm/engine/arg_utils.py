@@ -1053,7 +1053,7 @@ class EngineArgs:
                                    self.trust_remote_code, self.revision,
                                    self.code_revision, self.config_format)
 
-            # if loading a SpeculatorsConfig, load the specualtive_config
+            # if loading a SpeculatorsConfig, load the speculative_config
             # details from the config directly
             # no user input required / expected
             if isinstance(hf_config, SpeculatorsConfig):
