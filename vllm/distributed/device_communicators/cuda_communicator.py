@@ -39,6 +39,7 @@ def is_rocm_aiter_custom_allreduce_enabled() -> bool:
     return current_platform.is_rocm() \
         and on_gfx9() \
         and envs.VLLM_ROCM_USE_AITER \
+        and envs.VLLM_ROCM_USE_AITER_CUSTOM_ALL_REDUCE \
         and find_spec("aiter.dist.custom_all_reduce") is not None \
 
 
