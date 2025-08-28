@@ -127,7 +127,8 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/test_collective_rpc.py # PYTHONPATH is needed to import custom Worker extension
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py
+  # FlexAttention backend OOM on L4 runner after https://github.com/vllm-project/vllm/pull/21416
+  - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Distributed Tests (4 GPUs) # 10min
@@ -498,7 +499,8 @@ steps:
   - vllm/
   - tests/models
   commands:
-    - pytest -v -s models/test_transformers.py
+    # FlexAttention backend OOM on L4 runner after https://github.com/vllm-project/vllm/pull/21416
+    - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s models/test_transformers.py
     - pytest -v -s models/test_registry.py
     - pytest -v -s models/test_utils.py
     - pytest -v -s models/test_vision.py
@@ -512,7 +514,8 @@ steps:
   - tests/models/language
   commands:
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m core_model
+    # FlexAttention backend OOM on L4 runner after https://github.com/vllm-project/vllm/pull/21416
+    - VLLM_ATTENTION_BACKEND=XFORMERS pytest -v -s models/language -m core_model
 
 - label: Language Models Test (Hybrid) # 35 min
   mirror_hardwares: [amdexperimental]
