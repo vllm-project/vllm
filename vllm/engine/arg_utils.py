@@ -1617,8 +1617,13 @@ class EngineArgs:
         # for non-pooling tasks.
         # For pooling tasks the default is False
         if model_config.runner_type != "pooling":
-            self.enable_chunked_prefill = True
+            if self.enable_chunked_prefill is None:
+                logger.info("Chunked prefill enabled by default"
+                            " for non-pooling tasks")
+                self.enable_chunked_prefill = True
             if self.enable_prefix_caching is None:
+                logger.info("Prefix caching enabled by default"
+                            " for non-pooling tasks")
                 self.enable_prefix_caching = True
         else:
 
