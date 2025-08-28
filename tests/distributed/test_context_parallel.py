@@ -209,7 +209,8 @@ def _compare_cp_with_tp(
                              tp_args,
                              cp_env,
                              tp_env,
-                             method=method)
+                             method=method,
+                             max_wait_seconds=720)
     except Exception:
         testing_ray_compiled_graph = cp_env is not None
         if testing_ray_compiled_graph and vllm_major_version == "0":
