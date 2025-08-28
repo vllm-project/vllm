@@ -9,18 +9,21 @@ class NewLineFormatter(logging.Formatter):
     """Adds logging prefix to newlines to align multi-line messages."""
 
     def __init__(self, fmt, datefmt=None, style="%"):
-        logging.Formatter.__init__(self, fmt, datefmt, style)
-        self.root_dir = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "../.."))
+        super().__init__(fmt, datefmt, style)
+        from vllm import envs
+
+        self.use_relpath = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        if self.use_relpath:
+            self.root_dir = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "../.."))
 
     def format(self, record):
-        logger = logging.getLogger(record.name)
-        if logger.getEffectiveLevel() == logging.DEBUG:
+        if self.use_relpath:
             abs_path = getattr(record, "pathname", None)
             if abs_path:
                 try:
                     relpath = os.path.relpath(abs_path, self.root_dir)
-                except Exception:
+                except ValueError:
                     relpath = record.filename
             else:
                 relpath = record.filename
