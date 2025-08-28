@@ -9,6 +9,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
+from vllm import bc_linter_include
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import (
@@ -38,6 +39,7 @@ from vllm.v1.structured_output import StructuredOutputManager
 logger = init_logger(__name__)
 
 
+@bc_linter_include
 class Scheduler(SchedulerInterface):
 
     def __init__(
@@ -775,19 +777,9 @@ class Scheduler(SchedulerInterface):
                 # in the decoder's KV cache.
                 continue
 
-            if not self.is_encoder_decoder:
-                # We are not using the encoder cache for encoder-decoder models,
-                # yet.
-                if request.mm_hashes[i] in mm_hashes_to_schedule:
-                    # The same encoder input has already been scheduled in the
-                    # current step.
-                    continue
-
-                if self.encoder_cache_manager.check_and_update_cache(
-                        request, i):
-                    # The encoder input is already computed and cached from a
-                    # previous step.
-                    continue
+            if self.encoder_cache_manager.has_cache(request, i):
+                # The encoder input is already computed and cached.
+                continue
 
             # If no encoder input chunking is allowed, we do not want to
             # partially schedule a multimodal item. If the scheduled range would
@@ -822,42 +814,7 @@ class Scheduler(SchedulerInterface):
             encoder_compute_budget -= num_encoder_tokens
             mm_hashes_to_schedule.add(request.mm_hashes[i])
             encoder_inputs_to_schedule.append(i)
-
-        return (
-            encoder_inputs_to_schedule,
-            num_new_tokens,
-            encoder_compute_budget,
-        )
-
-    def get_grammar_bitmask(
-        self,
-        requests: list[Request],
-        scheduled_spec_decode_tokens: dict[str, list[int]],
-    ):
-        # NOTE: structured_output_request_ids maps
-        # a request's (request that uses structured output)
-        # request_id to its index in the batch.
-        # This will help us determine to slice the grammar bitmask
-        # and only applies valid mask for requests that
-        # uses structured decoding.
-        structured_output_request_ids: dict[str, int] = {}
-        for i, req in enumerate(requests):
-            if req.use_structured_output:
-                # PERF: in case of chunked prefill,
-                # request might not include any new tokens.
-                # Therefore, we might introduce some additional
-                # cycle to fill in the bitmask, which could be a big no-op.
-                structured_output_request_ids[req.request_id] = i
-
-        if not structured_output_request_ids:
-            bitmask = None
-        else:
-            bitmask = self.structured_output_manager.grammar_bitmask(
-                self.requests,
-                structured_output_request_ids,
-                scheduled_spec_decode_tokens,
-            )
-        return structured_output_request_ids, bitmask
+        return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
 
     def update_from_output(
         self,
