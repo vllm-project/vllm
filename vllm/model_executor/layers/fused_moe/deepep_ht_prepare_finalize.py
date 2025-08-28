@@ -11,8 +11,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous, TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input)
-from vllm.v1.worker.ubatching import (dbo_yield_and_switch_from_comm_to_compute,
-                                      dbo_yield_and_switch_from_compute_to_comm)
+from vllm.v1.worker.ubatching import (
+    dbo_current_ubatch_id, dbo_yield_and_switch_from_comm_to_compute,
+    dbo_yield_and_switch_from_compute_to_comm)
+
 
 class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
@@ -27,9 +29,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.dp_size = dp_size
         self.rank_expert_offset = rank_expert_offset
         # The dispatch function returns a handle that the combine function
-        # requires. We store the handle here so it is available to the
-        # combine function.
-        self.handle = None
+        # requires. Under DBO microbatching we must track one handle per
+        # micro-batch to avoid races between threads.
+        self.handles = [None, None]
 
         # From https://github.com/deepseek-ai/DeepEP/blob/9fe9021f29c9083cd1808ab36b740208524d9f63/deep_ep/buffer.py#L164
         self.available_rank_configs = [2, 4, 8, 16, 24, 32, 64, 128, 144, 160]
@@ -80,7 +82,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         (
             token_data, expert_topk_ids, expert_topk_weights,
-            expert_num_tokens_per_expert_list, self.handle, event
+            expert_num_tokens_per_expert_list, handle, event
         ) = self.buffer.dispatch(
             x=token_data,
             handle=None,
@@ -98,6 +100,10 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             async_finish=False,
             allocate_on_comm_stream=False)
         dbo_yield_and_switch_from_comm_to_compute()
+
+        # record the handle for this ubatch
+        a2a_idx = dbo_current_ubatch_id()
+        self.handles[a2a_idx] = handle
 
         if has_scales:
             expert_x, expert_x_scale = token_data
@@ -204,7 +210,9 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
 
-        assert self.handle is not None
+        a2a_idx = dbo_current_ubatch_id()
+        handle = self.handles[a2a_idx]
+        assert handle is not None
 
         # fused_expert_output can have 0 tokens - This happens when none of the
         # tokens from the all2all reach this EP rank.
@@ -222,7 +230,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         dbo_yield_and_switch_from_compute_to_comm()
         combined_x, _, event = self.buffer.combine(
             x=fused_expert_output,
-            handle=self.handle,
+            handle=handle,
             topk_weights=None,
             config=self._get_combine_config(),
             previous_event=None,
