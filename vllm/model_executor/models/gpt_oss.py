@@ -34,6 +34,7 @@ from .utils import (AutoWeightsLoader, WeightsMapper, extract_layer_index,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
+
 class OAIAttention(nn.Module):
 
     def __init__(
@@ -124,21 +125,7 @@ class OAIAttention(nn.Module):
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
         v = v.contiguous()
-        # if self.layer_idx < 5:
-        #     _slice = q[:, :100].detach().cpu()
-        #     print("q[:, :100]")
-        #     print(_slice)
-        #     _slice = k[:, :100].detach().cpu()
-        #     print("k[:, :100]")
-        #     print(_slice)
-        #     _slice = v[:, :100].detach().cpu()
-        #     print("v[:, :100]")
-        #     print(_slice)
         attn_output = self.attn(q, k, v)
-        # if self.layer_idx < 5:
-        #     _slice = attn_output[:, :100].detach().cpu()
-        #     print("attn_output[:, :100]")
-        #     print(_slice)
         output, _ = self.o_proj(attn_output)
         return output
 

@@ -315,8 +315,6 @@ class EngineCore:
                 except Exception:
                     pass
                 self.scheduler.update_draft_token_ids(draft_token_ids)
-        else:
-            print("normal post step called!!!")
         print(
             "split line II ========================================================"
         )
