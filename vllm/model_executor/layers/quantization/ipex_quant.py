@@ -262,27 +262,13 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
         return out.reshape(x.shape[:-1] + (layer.ipex_output_size, ))
 
 
-class IPEXFp8LinearMethod(Fp8LinearMethod):
+class XPUFp8LinearMethod(Fp8LinearMethod):
 
     def __init__(self, quant_config: Fp8Config):
         self.quant_config = quant_config
         self.out_dtype = torch.get_default_dtype()
         self.use_marlin = False
         self.block_quant = self.quant_config.weight_block_size is not None
-
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        super().create_weights(layer, input_size_per_partition,
-                               output_partition_sizes, input_size, output_size,
-                               params_dtype, **extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # If checkpoint not serialized fp8, quantize the weights.
@@ -299,13 +285,13 @@ class IPEXFp8LinearMethod(Fp8LinearMethod):
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         weight = layer.weight.data
-        scale = layer.weight_scale.data
-        output = torch.ops.torch_ipex.fp8_gemm_w8a16(x, weight, True, scale,
-                                                     bias)
+        weight_scale = layer.weight_scale.data
+        output = torch.ops.torch_ipex.fp8_gemm_w8a16(x, weight, True,
+                                                     weight_scale, bias)
         return output
 
 
-class IPEXFp8MoEMethod(Fp8MoEMethod):
+class XPUFp8MoEMethod(Fp8MoEMethod):
 
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
         self.moe = layer.moe_config

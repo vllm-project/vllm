@@ -141,7 +141,7 @@ class Fp8Config(QuantizationConfig):
                              prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention
         from vllm.model_executor.layers.quantization.ipex_quant import (
-            IPEXFp8LinearMethod, IPEXFp8MoEMethod)
+            XPUFp8LinearMethod, XPUFp8MoEMethod)
         fp8_config = Fp8Config(
             is_checkpoint_fp8_serialized=self.is_checkpoint_fp8_serialized,
             activation_scheme=self.activation_scheme,
@@ -153,9 +153,9 @@ class Fp8Config(QuantizationConfig):
                                 ignored_layers=self.ignored_layers,
                                 fused_mapping=self.packed_modules_mapping):
                 return UnquantizedLinearMethod()
-            return IPEXFp8LinearMethod(fp8_config)
+            return XPUFp8LinearMethod(fp8_config)
         elif isinstance(layer, FusedMoE):
-            return IPEXFp8MoEMethod(fp8_config, layer)
+            return XPUFp8MoEMethod(fp8_config, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
         return None
