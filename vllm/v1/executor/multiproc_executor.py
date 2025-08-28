@@ -242,12 +242,16 @@ class MultiprocExecutor(Executor):
                 dequeue_timeout = None if deadline is None else (
                     deadline - time.monotonic())
 
-                if non_block:
+                if self.io_thread_pool is not None:
                     result = self.io_thread_pool.submit(  # type: ignore
                         get_response, w, dequeue_timeout, self.shutdown_event)
-                else:
+                    if not non_block:
+                        result = result.result()
+                elif not non_block:
                     result = get_response(w, dequeue_timeout)
-
+                else:
+                    raise RuntimeError("non_block can only be used when"
+                                       " max_concurrent_batches > 1")
                 responses.append(result)
 
             return responses
