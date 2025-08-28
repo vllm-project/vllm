@@ -54,6 +54,16 @@ class MambaStateDtypeCalculator:
 
         return (conv_state_dtype, temporal_state_dtype)
 
+    @classmethod
+    def short_conv_state_dtype(
+        cls,
+        model_dtype: Union[ModelDType, torch.dtype],
+        mamba_cache_dtype: MambaDType,
+    ) -> tuple[torch.dtype, ...]:
+        conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype,
+                                                    model_dtype)
+        return (conv_state_dtype, )
+
 
 class MambaStateShapeCalculator:
 
@@ -121,6 +131,20 @@ class MambaStateShapeCalculator:
         temporal_state_shape = (divide(num_heads,
                                        tp_world_size), head_dim, state_size)
         return conv_state_shape, temporal_state_shape
+
+    @classmethod
+    def short_conv_state_shape(
+        cls,
+        tp_world_size: int,
+        intermediate_size: int,
+        conv_kernel: int,
+        use_v1: bool = True,
+    ) -> tuple[tuple[int, int]]:
+        conv_dim = divide(intermediate_size, tp_world_size)
+        conv_state_shape = (conv_kernel - 1, conv_dim)
+        if not use_v1:
+            conv_state_shape = conv_state_shape[1], conv_state_shape[0]
+        return (conv_state_shape, )
 
     @classmethod
     def extra_groups_for_head_shards(cls, ngroups: int, tp_size: int):

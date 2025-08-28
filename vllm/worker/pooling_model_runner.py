@@ -149,9 +149,16 @@ class PoolingModelRunner(
         if not self.is_driver_worker:
             return []
 
+        pooling_metadata = model_input.pooling_metadata
+        assert pooling_metadata is not None
+
+        pooling_metadata.build_pooling_cursor(
+            num_scheduled_tokens=pooling_metadata.prompt_lens,
+            device=hidden_or_intermediate_states.device)
+
         return [
             self.model.pooler(hidden_states=hidden_or_intermediate_states,
-                              pooling_metadata=model_input.pooling_metadata)
+                              pooling_metadata=pooling_metadata)
         ]
 
     def make_model_input_from_broadcasted_tensor_dict(
@@ -192,8 +199,9 @@ class PoolingModelRunner(
 
             pooling_params = seq_group_metadata.pooling_params
             assert pooling_params is not None
-            assert (task := pooling_params.task) is not None, (
-                "You did not set `task` in the API")
+
+            task = pooling_params.task
+            assert task is not None, "You did not set `task` in the API"
 
             model = cast(VllmModelForPooling, self.model)
             to_update = model.pooler.get_pooling_updates(task)

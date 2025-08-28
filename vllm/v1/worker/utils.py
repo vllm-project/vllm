@@ -10,9 +10,10 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import ModelConfig, SchedulerConfig
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
-from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
+from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
 
 if TYPE_CHECKING:
@@ -27,34 +28,35 @@ class MultiModalBudget:
         model_config: ModelConfig,
         scheduler_config: SchedulerConfig,
         mm_registry: MultiModalRegistry,
-        *,
-        max_model_len: int,
-        max_num_reqs: int,
     ) -> None:
         super().__init__()
 
         self.model_config = model_config
         self.scheduler_config = scheduler_config
         self.mm_registry = mm_registry
+        self.cache = cache = processor_only_cache_from_config(
+            model_config, mm_registry)
 
-        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
-            model_config=model_config,
-            scheduler_config=scheduler_config,
-            mm_registry=mm_registry,
+        self.max_model_len = model_config.max_model_len
+        self.max_num_reqs = scheduler_config.max_num_seqs
+
+        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config,
+                                                              cache=cache)
+
+        max_tokens_by_modality = mm_registry \
+            .get_max_tokens_per_item_by_nonzero_modality(model_config,
+                                                         cache=cache)
+
+        encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
+            scheduler_config,
+            max_tokens_by_modality,
         )
 
-        self.max_num_encoder_input_tokens = encoder_compute_budget
+        self.encoder_compute_budget = encoder_compute_budget
         self.encoder_cache_size = encoder_cache_size
-        self.max_model_len = max_model_len
-        self.max_num_reqs = max_num_reqs
-
-        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config)
 
         max_items_per_prompt_by_modality = dict[str, int]()
         max_items_per_batch_by_modality = dict[str, int]()
-
-        max_tokens_by_modality = mm_registry \
-            .get_max_tokens_per_item_by_nonzero_modality(model_config)
 
         for modality, max_tokens in max_tokens_by_modality.items():
             (
@@ -69,15 +71,14 @@ class MultiModalBudget:
         self.max_items_per_prompt_by_modality = max_items_per_prompt_by_modality
         self.max_items_per_batch_by_modality = max_items_per_batch_by_modality
 
-    def get_modality_with_max_tokens(self) -> tuple[str, int]:
+    def get_modality_with_max_tokens(self) -> str:
         max_tokens_by_modality = self.max_tokens_by_modality
-        modality, max_tokens = max(max_tokens_by_modality.items(),
-                                   key=lambda item: item[1])
+        modality, _ = max(max_tokens_by_modality.items(), key=lambda x: x[1])
 
-        return modality, max_tokens
+        return modality
 
     def get_encoder_budget(self) -> int:
-        return min(self.max_num_encoder_input_tokens, self.encoder_cache_size)
+        return min(self.encoder_compute_budget, self.encoder_cache_size)
 
     def get_max_items(
         self,
@@ -171,10 +172,10 @@ def scatter_mm_placeholders(
 
     Args:
         embeds: The multimodal embeddings.
-          Shape: `(num_embeds, embed_dim)`
+            Shape: `(num_embeds, embed_dim)`
         is_embed: A boolean mask indicating which positions in the placeholder
-          tokens need to be filled with multimodal embeddings.
-          Shape: `(num_placeholders, num_embeds)`
+            tokens need to be filled with multimodal embeddings.
+            Shape: `(num_placeholders, num_embeds)`
     """
     if is_embed is None:
         return embeds
@@ -208,6 +209,7 @@ def initialize_kv_cache_for_kv_sharing(
     kv_caches: dict[str, torch.Tensor],
     # Optional for now to avoid breaking TPU
     attn_groups: Optional[list[list[AttentionGroup]]] = None,
+    runner_only_attn_layers: Optional[set[str]] = None,
 ) -> None:
     """
     Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
@@ -254,6 +256,9 @@ def initialize_kv_cache_for_kv_sharing(
             attn_groups[kv_cache_group_idx][attn_group_idx].layer_names.append(
                 layer_name)
 
+        if runner_only_attn_layers is not None:
+            runner_only_attn_layers.add(layer_name)
+
 
 def bind_kv_cache(
     kv_caches: dict[str, torch.Tensor],
@@ -273,7 +278,7 @@ def bind_kv_cache(
     Args:
         kv_caches: The allocated kv_caches with layer names as keys.
         forward_context: The global forward context containing all Attention
-        layers with layer names as keys.
+            layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
     """
     # Bind kv_caches to ModelRunner

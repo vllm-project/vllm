@@ -716,6 +716,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
+    supports_encoder_tp_data = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
@@ -728,8 +730,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        self.use_data_parallel = (vllm_config.parallel_config.
-                                  enable_multimodal_encoder_data_parallel)
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
