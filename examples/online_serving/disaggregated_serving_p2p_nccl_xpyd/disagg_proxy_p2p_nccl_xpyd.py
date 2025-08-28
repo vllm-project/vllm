@@ -69,7 +69,7 @@ def _listen_for_register(poller, router_socket):
                     remote_address,
                     data,
                 )
-
+                return
             if node is None:
                 print(f"🔵Add [HTTP:{data['http_address']}, ZMQ:{data['zmq_address']}]")
 
