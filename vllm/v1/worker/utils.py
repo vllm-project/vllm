@@ -10,6 +10,7 @@ from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import ModelConfig, SchedulerConfig
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
@@ -33,14 +34,18 @@ class MultiModalBudget:
         self.model_config = model_config
         self.scheduler_config = scheduler_config
         self.mm_registry = mm_registry
+        self.cache = cache = processor_only_cache_from_config(
+            model_config, mm_registry)
 
         self.max_model_len = model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
 
-        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config)
+        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config,
+                                                              cache=cache)
 
         max_tokens_by_modality = mm_registry \
-            .get_max_tokens_per_item_by_nonzero_modality(model_config)
+            .get_max_tokens_per_item_by_nonzero_modality(model_config,
+                                                         cache=cache)
 
         encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
             scheduler_config,
@@ -167,10 +172,10 @@ def scatter_mm_placeholders(
 
     Args:
         embeds: The multimodal embeddings.
-          Shape: `(num_embeds, embed_dim)`
+            Shape: `(num_embeds, embed_dim)`
         is_embed: A boolean mask indicating which positions in the placeholder
-          tokens need to be filled with multimodal embeddings.
-          Shape: `(num_placeholders, num_embeds)`
+            tokens need to be filled with multimodal embeddings.
+            Shape: `(num_placeholders, num_embeds)`
     """
     if is_embed is None:
         return embeds
@@ -273,7 +278,7 @@ def bind_kv_cache(
     Args:
         kv_caches: The allocated kv_caches with layer names as keys.
         forward_context: The global forward context containing all Attention
-        layers with layer names as keys.
+            layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
     """
     # Bind kv_caches to ModelRunner
@@ -298,32 +303,3 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         # NOTE: Use list because of v0 PP virtual engine.
         forward_context[layer_name].kv_cache = [kv_cache]
-
-
-class CpuGpuBuffer:
-
-    def __init__(
-        self,
-        *args,
-        dtype: torch.dtype,
-        device: torch.device,
-        pin_memory: bool,
-    ):
-        self.cpu = torch.zeros(*args,
-                               dtype=dtype,
-                               device="cpu",
-                               pin_memory=pin_memory)
-        self.np = self.cpu.numpy()
-        self.gpu = self.cpu.to(device)
-
-    def copy_to_gpu(self, n: Optional[int] = None) -> None:
-        if n is None:
-            return self.gpu.copy_(self.cpu, non_blocking=True)
-        return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
-
-    def copy_to_cpu(self, n: Optional[int] = None) -> None:
-        """NOTE: Because this method is non-blocking, explicit synchronization
-        is needed to ensure the data is copied to CPU."""
-        if n is None:
-            return self.cpu.copy_(self.gpu, non_blocking=True)
-        return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)

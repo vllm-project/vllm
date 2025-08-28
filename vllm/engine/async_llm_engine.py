@@ -486,10 +486,10 @@ class AsyncLLMEngine(EngineClient):
     _engine_class: Type[_AsyncLLMEngine] = _AsyncLLMEngine
 
     def __init__(self,
-                 *args,
+                 *args: Any,
                  log_requests: bool = True,
                  start_engine_loop: bool = True,
-                 **kwargs) -> None:
+                 **kwargs: Any) -> None:
         if envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V0 AsyncLLMEngine, but envs.VLLM_USE_V1=True. "
