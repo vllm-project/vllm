@@ -398,7 +398,7 @@ class Worker(WorkerBase):
         else:
             self.profiler.stop()
             # only print profiler results on rank 0
-            if self.rank == 0:
+            if self.local_rank == 0:
                 print(self.profiler.key_averages().table(
                     sort_by="self_cuda_time_total"))
 
