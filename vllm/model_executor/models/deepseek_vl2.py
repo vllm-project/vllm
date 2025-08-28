@@ -290,6 +290,7 @@ class DeepseekVL2MultiModalProcessor(
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
+        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         # The processor logic is different for len(images) <= 2 vs > 2
         # Since the processing cache assumes that the processor output is
@@ -301,6 +302,7 @@ class DeepseekVL2MultiModalProcessor(
                 mm_data_items=mm_data_items,
                 hf_processor_mm_kwargs=hf_processor_mm_kwargs,
                 tokenization_kwargs=tokenization_kwargs,
+                mm_hash_overrides=mm_hash_overrides,
             )
 
         return super()._cached_apply_hf_processor(
@@ -308,6 +310,7 @@ class DeepseekVL2MultiModalProcessor(
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
+            mm_hash_overrides=mm_hash_overrides,
         )
 
 
@@ -405,13 +408,17 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             if isinstance(module, nn.Linear):
                 parent, attr_name = self._get_parent_and_attr(vit, name)
                 if isinstance(parent, timm.layers.Mlp) and attr_name == "fc1":
-                    new_linear = replace_linear_class(module, "colwise",
-                                                      quant_config)
+                    new_linear = replace_linear_class(module,
+                                                      "colwise",
+                                                      quant_config,
+                                                      prefix=name)
                     setattr(parent, attr_name, new_linear)
                 elif isinstance(parent,
                                 timm.layers.Mlp) and attr_name == "fc2":
-                    new_linear = replace_linear_class(module, "rowwise",
-                                                      quant_config)
+                    new_linear = replace_linear_class(module,
+                                                      "rowwise",
+                                                      quant_config,
+                                                      prefix=name)
                     setattr(parent, attr_name, new_linear)
 
         return vit
