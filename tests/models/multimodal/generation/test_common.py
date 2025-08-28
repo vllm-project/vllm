@@ -189,23 +189,21 @@ VLM_TEST_SETTINGS = {
         },
         marks=[pytest.mark.core_model],
     ),
-    # FIXME(Isotr0py): Enable this test after
-    # https://github.com/huggingface/transformers/pull/39470 released
-    # "idefics3-transformers": VLMTestInfo(
-    #     models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
-    #     test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-    #     prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
-    #     img_idx_to_prompt=lambda idx: "<image>",
-    #     max_model_len=8192,
-    #     max_num_seqs=2,
-    #     auto_cls=AutoModelForImageTextToText,
-    #     hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
-    #     image_size_factors=[(0.25, 0.5, 1.0)],
-    #     vllm_runner_kwargs={
-    #         "model_impl": "transformers",
-    #     },
-    #     marks=[pytest.mark.core_model],
-    # ),
+    "idefics3-transformers": VLMTestInfo(
+        models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>",
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        hf_output_post_proc=model_utils.idefics3_trunc_hf_output,
+        image_size_factors=[(0.25, 0.5, 1.0)],
+        vllm_runner_kwargs={
+            "model_impl": "transformers",
+        },
+        marks=[pytest.mark.core_model],
+    ),
     # Pixel values from processor are not 4D or 5D arrays
     "qwen2_5_vl-transformers": VLMTestInfo(
         models=["Qwen/Qwen2.5-VL-3B-Instruct"],
