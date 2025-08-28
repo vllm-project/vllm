@@ -1771,6 +1771,26 @@ class ModelConfig:
         logger.info("Using max model len %s", max_model_len)
         return max_model_len
 
+    @property
+    def head_dtype(self) -> torch.dtype:
+        if envs.VLLM_USING_FP32_HEAD:
+            return torch.float32
+
+        if envs.VLLM_USING_FP32_HEAD is False:
+            return self.dtype
+
+        if getattr(self.hf_config, "fp32_head", False):
+            return torch.float32
+
+        # The pooling model defaults to using fp32 head,
+        # you can use VLLM_USING_FP32_HEAD = 0 to disable it.
+        if self.runner_type == "pooling":
+            return torch.float32
+
+        # The generate model defaults to not using fp32 head,
+        # you can use  VLLM_USING_FP32_HEAD = 1 to enable it.
+        return self.dtype
+
 
 @config
 @dataclass

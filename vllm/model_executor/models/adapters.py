@@ -61,13 +61,13 @@ def _load_st_projector(model_config: "ModelConfig") -> Optional[nn.Module]:
         linear = nn.Linear(layer_config.get("in_features", 768),
                            layer_config.get("out_features", 768),
                            bias=layer_config.get("bias", True),
-                           dtype=torch.float32)
+                           dtype=model_config.head_dtype)
 
         if _load_dense_weights(linear, folder, model_config):
             layers = [linear]
             if act_name := layer_config.get("activation_function"):
                 layers.append(get_act_fn(act_name))
-            return nn.Sequential(*layers).to(dtype=torch.float32)
+            return nn.Sequential(*layers).to(dtype=model_config.head_dtype)
 
     except Exception:
         logger.exception("ST projector loading failed")
@@ -103,15 +103,13 @@ def _load_dense_weights(linear: nn.Linear, folder: str,
                 if weight_key in state_dict:
                     weight_loader = getattr(linear.weight, "weight_loader",
                                             default_weight_loader)
-                    weight_loader(linear.weight,
-                                  state_dict[weight_key].to(torch.float32))
+                    weight_loader(linear.weight, state_dict[weight_key])
 
                     bias_key = weight_key.replace("weight", "bias")
                     if linear.bias is not None and bias_key in state_dict:
                         bias_loader = getattr(linear.bias, "weight_loader",
                                               default_weight_loader)
-                        bias_loader(linear.bias,
-                                    state_dict[bias_key].to(torch.float32))
+                        bias_loader(linear.bias, state_dict[bias_key])
                     return True
         except Exception:
             logger.exception("Failed to load %s", filename)
@@ -269,10 +267,10 @@ def as_seq_cls_model(cls: _T) -> _T:
                 config.num_labels,
                 input_is_parallel=False,
                 bias=False,
-                params_dtype=torch.float32,
+                params_dtype=vllm_config.model_config.head_dtype,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "score"),
-            )
+                return_bias=False)
 
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
@@ -287,22 +285,18 @@ def as_seq_cls_model(cls: _T) -> _T:
                 "classify":
                 ClassifierPooler(
                     pooling=PoolingMethod.from_pooling_type(pooling_type),
-                    classifier=self._classifier,
+                    classifier=self.score,
                     act_fn=ClassifierPooler.act_fn_for_seq_cls(
                         vllm_config.model_config),
                 ),
                 "score":
                 ClassifierPooler(
                     pooling=PoolingMethod.from_pooling_type(pooling_type),
-                    classifier=self._classifier,
+                    classifier=self.score,
                     act_fn=ClassifierPooler.act_fn_for_cross_encoder(
                         vllm_config.model_config),
                 ),
             })
-
-        def _classifier(self, x: torch.Tensor):
-            x, _ = self.score(x.float())
-            return x
 
         def forward(
             self,

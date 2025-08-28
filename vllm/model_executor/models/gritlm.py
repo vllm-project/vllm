@@ -140,17 +140,6 @@ class GritLMMeanPool(nn.Module):
     def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
         return PoolingParamsUpdate(requires_token_ids=True)
 
-    def forward_one(
-        self,
-        hidden_states: torch.Tensor,
-        prompt_len: Optional[torch.Tensor] = None,
-        instr_len: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        assert prompt_len is None or prompt_len == hidden_states.shape[0], \
-            "partial prefill not supported with MEAN pooling"
-
-        return hidden_states[instr_len:].mean(dim=0, dtype=torch.float32)
-
     def forward_all(
         self,
         hidden_states: torch.Tensor,
@@ -179,7 +168,7 @@ class GritLMMeanPool(nn.Module):
                 self._get_instruction_len(token_ids.cpu().numpy())
                 for token_ids in get_prompt_token_ids(pooling_metadata)
             ],
-            device=prompt_lens.device,
+            device="cpu",
         )
 
         if isinstance(hidden_states, list):

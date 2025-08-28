@@ -5,7 +5,7 @@ from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from enum import IntEnum
 from itertools import groupby
-from typing import Callable, Optional, TypeVar, Union, cast
+from typing import Callable, Optional, TypeVar, Union
 
 import torch
 import torch.nn as nn
@@ -377,14 +377,14 @@ class PoolerIdentity(PoolerActivation):
 class PoolerNormalize(PoolerActivation):
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        x = F.normalize(pooled_data.float(), p=2, dim=-1)
-        return x.to(pooled_data.dtype)
+        x = F.normalize(pooled_data, p=2, dim=-1)
+        return x
 
 
 class PoolerMultiLabelClassify(PoolerActivation):
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
+        return F.sigmoid(pooled_data)
 
 
 class PoolerClassify(PoolerActivation):
@@ -392,9 +392,9 @@ class PoolerClassify(PoolerActivation):
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         num_labels = pooled_data.shape[-1]
         if num_labels < 2:
-            return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
+            return F.sigmoid(pooled_data)
 
-        return F.softmax(pooled_data.float(), dim=-1).to(pooled_data.dtype)
+        return F.softmax(pooled_data, dim=-1)
 
 
 class PoolerScore(PoolerActivation):
@@ -402,7 +402,7 @@ class PoolerScore(PoolerActivation):
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
         num_labels = pooled_data.shape[-1]
         if num_labels < 2:
-            return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
+            return F.sigmoid(pooled_data)
 
         return pooled_data
 
@@ -440,31 +440,25 @@ class EmbeddingPoolerHead(PoolerHead):
         from vllm.model_executor.models.adapters import _load_st_projector
 
         vllm_config = get_current_vllm_config()
-        self.projector = _load_st_projector(
+        self.projector: Optional[nn.Module] = _load_st_projector(
             vllm_config.model_config) if vllm_config else None
+        self.head_dtype = vllm_config.model_config.head_dtype
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
 
-        # Apply ST projector
-        if self.projector is not None:
-            projector = cast(nn.Module, self.projector)
-
-            def _proj(x: torch.Tensor) -> torch.Tensor:
-                orig_dtype = x.dtype
-                y = projector(x.to(torch.float32))
-                return y.to(orig_dtype)
-
-            if isinstance(pooled_data, torch.Tensor):
-                pooled_data = _proj(pooled_data)
-            else:
-                pooled_data = [_proj(t) for t in pooled_data]
-
-        pooling_params = get_pooling_params(pooling_metadata)
-
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
+        # pooled_data shape: [batchsize, hidden_dimension]
+
+        pooled_data = pooled_data.to(self.head_dtype)
+
+        # Apply ST projector
+        if self.projector is not None:
+            pooled_data = self.projector(pooled_data)
         # pooled_data shape: [batchsize, embedding_dimension]
+
+        pooling_params = get_pooling_params(pooling_metadata)
 
         # for matryoshka representation
         dimensions_list = [
@@ -502,9 +496,18 @@ class RewardPoolerHead(PoolerHead):
 
     def __init__(self) -> None:
         super().__init__(activation=PoolerClassify())
+        from vllm.config import get_current_vllm_config
+        vllm_config = get_current_vllm_config()
+        self.head_dtype = vllm_config.model_config.head_dtype
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
+
+        if isinstance(pooled_data, list):
+            pooled_data = [p.to(self.head_dtype) for p in pooled_data]
+        else:
+            pooled_data = pooled_data.to(self.head_dtype)
+
         pooling_params = get_pooling_params(pooling_metadata)
 
         # for softmax
@@ -646,6 +649,10 @@ class ClassifierPooler(Pooler):
         self.classifier = classifier
         self.act_fn = act_fn or PoolerClassify()
 
+        from vllm.config import get_current_vllm_config
+        vllm_config = get_current_vllm_config()
+        self.head_dtype = vllm_config.model_config.head_dtype
+
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"classify", "score"}
 
@@ -655,19 +662,15 @@ class ClassifierPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
-
         if isinstance(pooled_data, list):
             pooled_data = torch.stack(pooled_data)
         # pooled_data shape: [batchsize, hidden_size]
 
+        pooled_data = pooled_data.to(self.head_dtype)
+
         if self.classifier is not None:
-            # apply classifier once on the full batch if possible
-            if isinstance(pooled_data, torch.Tensor):
-                pooled_data = self.classifier(pooled_data)
-            elif len({data.shape for data in pooled_data}) <= 1:
-                pooled_data = self.classifier(torch.stack(pooled_data))
-            else:
-                pooled_data = [self.classifier(data) for data in pooled_data]
+            pooled_data = self.classifier(pooled_data)
+        # pooled_data shape: [batchsize, num_labels]
 
         pooling_params = get_pooling_params(pooling_metadata)
         flags = [p.activation for p in pooling_params]
@@ -680,6 +683,7 @@ class ClassifierPooler(Pooler):
                 for vecs, f in zip(pooled_data, flags)
             ]
 
+        # scores shape: [batchsize, num_labels]
         return build_output(scores)
 
 

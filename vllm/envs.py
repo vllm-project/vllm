@@ -167,6 +167,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
+    VLLM_USING_FP32_HEAD: Optional[bool] = None
 
 
 def get_default_cache_root():
@@ -1192,6 +1193,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TUNED_CONFIG_FOLDER":
     lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
 
+    # Whether to use fp32 head
+    "VLLM_USING_FP32_HEAD":
+        lambda: None if os.getenv("VLLM_USING_FP32_HEAD", "") == "" else
+        bool(int(os.getenv("VLLM_USING_FP32_HEAD", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
