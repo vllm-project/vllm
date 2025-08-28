@@ -1186,8 +1186,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         shift_computed_tokens: int = 0,
-    ) -> list[torch.Tensor]:
-        mm_embeds: list[torch.Tensor] = []
+    ) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        is_mm_embed = torch.zeros(
+            scheduler_output.total_num_scheduled_tokens,
+            dtype=torch.bool,
+            pin_memory=self.pin_memory,
+        )
+        mm_embeds = list[torch.Tensor]()
+
+        req_start_idx = 0
         for req_id in self.input_batch.req_ids:
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
                 req_id]
@@ -1196,6 +1203,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 req_state.num_computed_tokens + shift_computed_tokens
             mm_positions = req_state.mm_positions
             mm_hashes = req_state.mm_hashes
+
             for i, pos_info in enumerate(mm_positions):
                 start_pos = pos_info.offset
                 num_encoder_tokens = pos_info.length
@@ -1211,6 +1219,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # The encoder output is already processed and stored
                     # in the decoder's KV cache.
                     continue
+
+                req_start_pos = req_start_idx + start_pos
+                is_mm_embed[req_start_pos:req_start_pos + num_encoder_tokens] \
+                    = True if pos_info.is_embed is None else pos_info.is_embed
 
                 start_idx = max(num_computed_tokens - start_pos, 0)
                 end_idx = min(
@@ -1232,7 +1244,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     is_embed=is_embed,
                 )
                 mm_embeds.append(mm_embeds_item)
-        return mm_embeds
+
+            req_start_idx += num_scheduled_tokens
+
+        return is_mm_embed, mm_embeds
 
     def get_model(self) -> nn.Module:
         # get raw model out of the cudagraph wrapper.
@@ -1515,9 +1530,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.supports_mm_inputs:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
-            mm_embeds = self._gather_mm_embeddings(scheduler_output)
+            is_mm_embed, mm_embeds = self._gather_mm_embeddings(
+                scheduler_output)
         else:
-            mm_embeds = []
+            is_mm_embed, mm_embeds = torch.tensor(False), []
 
         if self.supports_mm_inputs and get_pp_group().is_first_rank:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
@@ -1527,8 +1543,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_ids.gpu[:num_scheduled_tokens])
 
             if mm_embeds:
-                is_mm_embed = ...  # TODO
-
                 inputs_embeds_scheduled = _merge_multimodal_embeddings(
                     inputs_embeds_scheduled,
                     is_mm_embed,
@@ -1868,10 +1882,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         [h[token_indices] for h in aux_hidden_states], dim=-1)
                 else:
                     target_hidden_states = hidden_states[token_indices]
-            mm_embeds = None
+
             if self.supports_mm_inputs:
-                mm_embeds = self._gather_mm_embeddings(scheduler_output,
-                                                       shift_computed_tokens=1)
+                is_mm_embed, mm_embeds = self._gather_mm_embeddings(
+                    scheduler_output,
+                    shift_computed_tokens=1,
+                )
+            else:
+                is_mm_embed, mm_embeds = torch.tensor(False), []
 
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
@@ -1880,6 +1898,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 next_token_ids=next_token_ids,
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
+                is_mm_embed=is_mm_embed,
                 mm_embeds=mm_embeds,
             )
         return draft_token_ids

@@ -18,6 +18,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
+from vllm.model_executor.models.utils import _merge_multimodal_embeddings
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
@@ -157,6 +158,7 @@ class EagleProposer:
         next_token_ids: torch.Tensor,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
+        is_mm_embed: Optional[torch.Tensor] = None,
         mm_embeds: Optional[list[torch.Tensor]] = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
@@ -196,18 +198,22 @@ class EagleProposer:
         # copy inputs to buffer for cudagraph
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
-        if self.is_multimodal_model:
-            input_ids = self.input_ids[:num_tokens]
-            inputs_embeds = self.model.get_input_embeddings(
-                input_ids,
-                multimodal_embeddings=mm_embeds or None,
+
+        if mm_embeds:
+            assert is_mm_embed is not None
+
+            inputs_embeds_scheduled = _merge_multimodal_embeddings(
+                self.input_ids[:num_tokens],
+                is_mm_embed,
+                multimodal_embeddings=mm_embeds,
             )
-            self.inputs_embeds[:num_tokens] = inputs_embeds
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            self.inputs_embeds[:num_tokens] = inputs_embeds_scheduled
+
             input_ids = None
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
         else:
-            inputs_embeds = None
             input_ids = self.input_ids[:num_input_tokens]
+            inputs_embeds = None
 
         with set_forward_context(per_layer_attn_metadata,
                                  self.vllm_config,
