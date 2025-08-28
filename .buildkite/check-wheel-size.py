@@ -8,6 +8,7 @@ import zipfile
 # Read the VLLM_MAX_SIZE_MB environment variable, defaulting to 450 MiB
 # Note that we have 800 MiB quota, please use it wisely.
 # See https://github.com/pypi/support/issues/6326 .
+# Please also sync the value with the one in Dockerfile.
 VLLM_MAX_SIZE_MB = int(os.environ.get("VLLM_MAX_SIZE_MB", 450))
 
 
