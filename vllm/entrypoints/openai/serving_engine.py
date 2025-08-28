@@ -12,6 +12,7 @@ from http import HTTPStatus
 from typing import (Annotated, Any, Callable, ClassVar, Generic, Optional,
                     TypeVar, Union, cast, overload)
 
+import aiohttp
 import pybase64
 import torch
 from fastapi import Request
@@ -909,7 +910,10 @@ class OpenAIServing:
                 **_chat_template_kwargs,
             )
 
-        mm_data = await mm_data_future
+        try:
+            mm_data = await mm_data_future
+        except aiohttp.ClientError as e:
+            raise ValueError(f"{e.__class__.__name__} - {e}") from None
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
