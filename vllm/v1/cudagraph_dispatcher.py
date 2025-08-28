@@ -11,7 +11,7 @@ logger = init_logger(__name__)
 
 class CudagraphDispatcher:
     """
-    Runtime cudagraph dispatcher to dispach keys for multiple set of cudagraphs.
+    Runtime cudagraph dispatcher to dispatch keys for multiple set of cudagraphs.
 
     The dispatcher stores two sets of dispatch keys, one for PIECEWISE and one
     for FULL cudagraph runtime mode. The keys are initialized depending on 
@@ -21,7 +21,7 @@ class CudagraphDispatcher:
 
     At runtime, the dispatch method generates the runtime cudagraph mode (FULL, 
     PIECEWISE, or NONE for no cudagraph) and the valid key (batch descriptor)
-    based on the input key. After dispatching (commuicate via forward context), 
+    based on the input key. After dispatching (communicate via forward context),
     the cudagraph wrappers will trust the dispatch key to do either capturing
     or replaying (if mode matched), or pass through to the underlying runnable 
     without cudagraph (if mode no match or mode is NONE).
