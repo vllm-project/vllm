@@ -29,7 +29,7 @@ class FlashInferMLABackend(MLACommonBackend):
         return FlashInferMLAImpl
 
 
-g_fi_workspace = torch.empty(
+g_fi_workspace = torch.zeros(
     FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE,
     dtype=torch.uint8,
     device="cuda",

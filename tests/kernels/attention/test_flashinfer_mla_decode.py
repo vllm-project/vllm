@@ -97,7 +97,7 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int, block_size: int):
     out_ref = q.new_zeros(bs, num_heads, kv_lora_rank)
     ref_mla(out_ref, q, kv_cache, scale, block_tables, seq_lens_tensor)
 
-    workspace_buffer = torch.empty(
+    workspace_buffer = torch.zeros(
         FLASHINFER_WORKSPACE_BUFFER_SIZE,
         dtype=torch.uint8,
         device=q.device,
