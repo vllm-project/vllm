@@ -27,7 +27,7 @@ class FlashAttnMLABackend(MLACommonBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "FLASH_ATTN_MLA_VLLM_V1"
+        return "FLASH_ATTN_MLA"
 
     @staticmethod
     def get_metadata_cls() -> type["FlashAttnMLAMetadata"]:

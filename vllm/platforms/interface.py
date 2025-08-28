@@ -56,7 +56,6 @@ class _Backend(enum.Enum):
     FLASHMLA = enum.auto()  # Supported by V1
     FLASHMLA_VLLM_V1 = enum.auto()
     FLASH_ATTN_MLA = enum.auto()  # Supported by V1
-    FLASH_ATTN_MLA_VLLM_V1 = enum.auto()
     PALLAS = enum.auto()
     PALLAS_VLLM_V1 = enum.auto()
     IPEX = enum.auto()

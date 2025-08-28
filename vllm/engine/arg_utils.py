@@ -1503,7 +1503,6 @@ class EngineArgs:
             "FLASHMLA",
             "FLASHMLA_VLLM_V1",
             "FLASH_ATTN_MLA",
-            "FLASH_ATTN_MLA_VLLM_V1",
             "FLASHINFER",
             "FLASHINFER_VLLM_V1",
             "ROCM_AITER_MLA",

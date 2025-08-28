@@ -230,12 +230,11 @@ class CudaPlatformBase(Platform):
             use_cutlassmla = selected_backend == _Backend.CUTLASS_MLA or (
                 selected_backend is None and cls.is_device_capability(100)
                 and block_size == 128)
-            use_flashattn = selected_backend in [
-                _Backend.FLASH_ATTN_MLA, _Backend.FLASH_ATTN_MLA_VLLM_V1
-            ] or (selected_backend is None and flash_attn_supports_mla())
             use_flashmla = selected_backend in [
                 _Backend.FLASHMLA, _Backend.FLASHMLA_VLLM_V1
             ] or (selected_backend is None and is_flashmla_supported()[0])
+            use_flashattn = selected_backend == _Backend.FLASH_ATTN_MLA or (
+                selected_backend is None and flash_attn_supports_mla())
             use_triton = selected_backend == _Backend.TRITON_MLA or (
                 selected_backend is None)
 
@@ -245,7 +244,7 @@ class CudaPlatformBase(Platform):
                     return f"vllm.v1.attention.backends.mla.{import_suffix}"
                 else:
                     logger.info_once(f"Using {name} backend.")
-                    return f"vllm.attention.backends.mla.{import_suffix}"
+                    return f"vllm.attention.backends.{import_suffix}"
 
             if use_cutlassmla:
                 if use_v1:
@@ -264,8 +263,15 @@ class CudaPlatformBase(Platform):
                 else:
                     return _get_version("FlashMLA", "flashmla.FlashMLABackend")
             if use_flashattn:
-                return _get_version("FlashAttention MLA",
-                                    "flashattn_mla.FlashAttnMLABackend")
+                if use_v1:
+                    logger.info_once(
+                        "Using FlashAttention MLA backend on V1 engine.")
+                    return ("vllm.v1.attention.backends.mla."
+                            "flashattn_mla.FlashAttnMLABackend")
+                else:
+                    logger.warning(
+                        "FlashAttention MLA backend is only supported on V1 "
+                        "engine.")
             if use_triton:
                 return _get_version("Triton MLA",
                                     "triton_mla.TritonMLABackend")
