@@ -8,7 +8,6 @@ from typing import Any, Union
 
 import numpy as np
 import pytest
-import torch
 import torch.nn as nn
 from mistral_common.protocol.instruct.messages import (ImageChunk, TextChunk,
                                                        UserMessage)
@@ -20,6 +19,7 @@ from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
 from vllm.inputs import InputProcessingContext
+from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
@@ -146,7 +146,8 @@ def initialize_dummy_model(model_cls: nn.Module, model_config: ModelConfig):
     initialize_model_parallel(tensor_model_parallel_size=1)
     vllm_config = VllmConfig(model_config=model_config)
     with set_current_vllm_config(vllm_config=vllm_config):
-        model = model_cls(vllm_config=vllm_config)
+        with set_default_torch_dtype(model_config.dtype):
+            model = model_cls(vllm_config=vllm_config)
         yield model
 
     del model
@@ -221,7 +222,6 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
     model_config.get_multimodal_config().limit_per_prompt = limit_mm_per_prompt
     processor = factories.build_processor(ctx, cache=None)
 
-    torch.set_default_dtype(torch.bfloat16)
     with initialize_dummy_model(model_cls, model_config) as model:
         for modality, _, mm_kwargs in create_batched_mm_kwargs(
                 model_config, processor):
