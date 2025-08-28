@@ -33,6 +33,7 @@ class CachedRequestState:
     prompt_token_ids: list[int]
     mm_kwargs: list[MultiModalKwargsItem]
     mm_positions: list[PlaceholderRange]
+    mm_hashes: list[str]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
     generator: Optional[torch.Generator]
@@ -523,9 +524,6 @@ class InputBatch:
 
         Any consecutive empty indices at the very end of the list are not
         filled.
-
-        Args:
-          empty_req_indices: empty indices which may be filled.
 
         Returns:
           swaps: list of (from,to) swap tuples for moved requests

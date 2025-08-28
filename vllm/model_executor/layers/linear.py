@@ -35,6 +35,7 @@ logger = init_logger(__name__)
 
 WEIGHT_LOADER_V2_SUPPORTED = [
     "CompressedTensorsLinearMethod",
+    "CompressedTensorsLinearTransformMethod",
     "BitBLASLinearMethod",
     "GPTQBitBLASLinearMethod",
     "AWQMarlinLinearMethod",
@@ -199,6 +200,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
         set_weight_attrs(weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # special postprocessing for CPU SGL
         if current_platform.is_cpu() and envs.VLLM_CPU_SGL_KERNEL:
             from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
             N, K = layer.weight.size()
@@ -233,10 +235,10 @@ class LinearBase(CustomOp):
     Args:
         input_size: input dimension of the linear layer.
         output_size: output dimension of the linear layer.
-        bias: If true, add bias.
         skip_bias_add: If true, skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
         quant_config: Quantization configure.
+        prefix: Prefix for parameter names.
         return_bias: If true, return bias together with outputs in forward pass.
     """
 
@@ -378,13 +380,14 @@ class MergedReplicatedLinear(ReplicatedLinear):
 
     Args:
         input_size: input dimension of the linear layer.
-        output_size: output dimension of the linear layer.
+        output_sizes: list of output dimensions of the linear layer.
         bias: If true, add bias.
         skip_bias_add: If true, skip adding bias but instead return it.
         params_dtype: Data type for the parameters.
         quant_config: Quantization configure.
         prefix: The name of the layer in the state dict, including all parents
                         (e.g. model.layers.0.qkv_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
     """
 
     def __init__(
@@ -1378,7 +1381,7 @@ class RowParallelLinear(LinearBase):
         return output, output_bias
 
     def extra_repr(self) -> str:
-        s = f"input_features={self.input_size_per_partition}"
+        s = f"in_features={self.input_size_per_partition}"
         s += f", output_features={self.output_size}"
         s += f", bias={self.bias is not None}"
         s += f", tp_size={self.tp_size}"
@@ -1469,7 +1472,7 @@ class QKVCrossParallelLinear(LinearBase):
             self.bias = torch.nn.Parameter()
             set_weight_attrs(self.bias, {
                 "output_dim": 0,
-                "weight_loader": self.weight_loader,
+                "weight_loader": self.weight_loader_v1,
             })
         else:
             self.bias = None
@@ -1578,6 +1581,18 @@ class QKVCrossParallelLinear(LinearBase):
             # Split kv in half
             k, v = kv_enc.split(self.kv_size, dim=-1)
         return q, k, v
+
+    def weight_loader_v1(self,
+                         param: torch.nn.Parameter,
+                         loaded_weight: torch.Tensor,
+                         loaded_shard_id: Optional[str] = None):
+        # just like all other parameters, does not yet
+        # support loading bias with weight_loader_v2
+        layer = (self.q_proj_decoder
+                 if loaded_shard_id == "q" else self.kv_proj_encoder)
+        target_param = self.select_proj_params(layer, param)
+        shard_id_args = (loaded_shard_id, ) if loaded_shard_id != "q" else ()
+        layer.weight_loader(target_param, loaded_weight, *shard_id_args)
 
     def weight_loader(self,
                       param: torch.nn.Parameter,

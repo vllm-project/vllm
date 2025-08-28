@@ -409,7 +409,7 @@ class EmbeddingOutput:
 
     Args:
         embedding: The embedding vector, which is a list of floats.
-        Its length depends on the hidden dimension of the model.
+            Its length depends on the hidden dimension of the model.
     """
     embedding: list[float]
 
@@ -447,7 +447,7 @@ class ClassificationOutput:
 
     Args:
         probs: The probability vector, which is a list of floats.
-        Its length depends on the number of classes.
+            Its length depends on the number of classes.
     """
     probs: list[float]
 
