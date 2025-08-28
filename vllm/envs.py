@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
-    VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
+    VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = True
     VLLM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
@@ -351,7 +351,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # the unified triton kernel.
     "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
     lambda:
-    (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
+    (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "True").lower() in
      ("true", "1")),
 
     # Use AITER triton unified attention for V1 attention

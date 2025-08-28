@@ -75,11 +75,11 @@ class PassConfig:
     don't all have access to full configuration - that would create a cycle as
     the `PassManager` is set as a property of config."""
 
-    enable_fusion: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
+    enable_fusion: bool = field(default_factory=lambda: envs.VLLM_USE_V1)
     """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
     enable_attn_fusion: bool = False
     """Whether to enable the custom attention+quant fusion pass."""
-    enable_noop: bool = field(default_factory=lambda: not envs.VLLM_USE_V1)
+    enable_noop: bool = field(default_factory=lambda: envs.VLLM_USE_V1)
     """Whether to enable the custom no-op elimination pass."""
     enable_sequence_parallelism: bool = False
     """Whether to enable sequence parallelism."""
@@ -223,7 +223,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: Optional[CUDAGraphMode] = None
+    cudagraph_mode: Optional[CUDAGraphMode] = CUDAGraphMode.FULL
     """
     The mode of the cudagraph:
 
@@ -407,6 +407,16 @@ class CompilationConfig:
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
+
+        if "+rms_norm" not in self.custom_ops and \
+            "-rms_norm" not in self.custom_ops:
+            self.custom_ops.append("+rms_norm")
+        if "+silu_and_mul" not in self.custom_ops and \
+            "-silu_and_mul" not in self.custom_ops:
+            self.custom_ops.append("+silu_and_mul")
+        if "+quant_fp8" not in self.custom_ops and \
+            "-quant_fp8" not in self.custom_ops:
+            self.custom_ops.append("+quant_fp8")
 
         # TODO(zou3519/luka): There are 2 issues with auto-functionalization V2:
         # 1. A bug in PyTorch, fixed in 2.7:
