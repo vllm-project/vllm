@@ -200,7 +200,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
     # Note: init_prepare_finalize should only be called by
     # prepare_communication_buffer_for_model.
-    def init_prepare_finalize(self):
+    def init_prepare_finalize(self, layer: torch.nn.Module):
         assert self.moe is not None
         prepare_finalize = self.maybe_make_prepare_finalize(self.moe)
 
@@ -211,7 +211,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             assert self.fused_experts is None, \
                 f"Attempt to override experts for {id(self)}!"
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
-            experts = self.select_gemm_impl(prepare_finalize, self.moe)
+            experts = self.select_gemm_impl(prepare_finalize, self.moe, layer)
             self.fused_experts = FusedMoEModularKernel(
                 prepare_finalize,
                 experts,
@@ -221,6 +221,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         # based on the all2all implementation, select the appropriate
         # gemm implementation
@@ -273,6 +274,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         prepare_finalize: FusedMoEPrepareAndFinalize,
         # TODO(bnell): Remove. Every layer should have an moe config object.
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):

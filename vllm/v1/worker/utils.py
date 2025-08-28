@@ -172,10 +172,10 @@ def scatter_mm_placeholders(
 
     Args:
         embeds: The multimodal embeddings.
-          Shape: `(num_embeds, embed_dim)`
+            Shape: `(num_embeds, embed_dim)`
         is_embed: A boolean mask indicating which positions in the placeholder
-          tokens need to be filled with multimodal embeddings.
-          Shape: `(num_placeholders, num_embeds)`
+            tokens need to be filled with multimodal embeddings.
+            Shape: `(num_placeholders, num_embeds)`
     """
     if is_embed is None:
         return embeds
@@ -278,7 +278,7 @@ def bind_kv_cache(
     Args:
         kv_caches: The allocated kv_caches with layer names as keys.
         forward_context: The global forward context containing all Attention
-        layers with layer names as keys.
+            layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
     """
     # Bind kv_caches to ModelRunner

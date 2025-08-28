@@ -501,6 +501,24 @@ def get_config(
 
     if quantization_config is not None:
         config.quantization_config = quantization_config
+        # auto-enable DeepGEMM UE8M0 on Hopper if model config requests it
+        scale_fmt = quantization_config.get("scale_fmt", None)
+        if scale_fmt in ("ue8m0", ):
+            if not envs.is_set("VLLM_USE_DEEP_GEMM_E8M0_HOPPER"):
+                os.environ["VLLM_USE_DEEP_GEMM_E8M0_HOPPER"] = "1"
+                logger.info_once(
+                    ("Detected quantization_config.scale_fmt=%s; "
+                     "enabling Hopper UE8M0."),
+                    scale_fmt,
+                )
+            elif not envs.VLLM_USE_DEEP_GEMM_E8M0_HOPPER:
+                logger.warning_once(
+                    ("Model config requests UE8M0 "
+                     "(quantization_config.scale_fmt=%s), but "
+                     "VLLM_USE_DEEP_GEMM_E8M0_HOPPER=0 is set; "
+                     "Hopper UE8M0 disabled."),
+                    scale_fmt,
+                )
 
     if hf_overrides_kw:
         logger.debug("Overriding HF config with %s", hf_overrides_kw)

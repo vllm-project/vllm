@@ -255,9 +255,9 @@ def compute_encoder_budget(
 
     Returns:
         - Compute budget for encoder execution, measured in number of tokens
-          from the input sequence.
+            from the input sequence.
         - Space budget for encoder cache size, measured in number of tokens
-          from the input sequence.
+            from the input sequence.
     """
     if mm_registry.supports_multimodal_inputs(model_config):
         max_tokens_by_modality = mm_registry \
@@ -303,9 +303,9 @@ def compute_mm_encoder_budget(
 
     Returns:
         - Compute budget for encoder execution, measured in number of tokens
-          from the input sequence.
+            from the input sequence.
         - Space budget for encoder cache size, measured in number of tokens
-          from the input sequence.
+            from the input sequence.
     """
 
     if not max_tokens_by_modality:
