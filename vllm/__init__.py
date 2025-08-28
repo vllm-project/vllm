@@ -12,6 +12,8 @@ import typing
 # modules to ensure that the environment variables are set before any
 # other modules are imported.
 import vllm.env_override  # noqa: F401
+# Import vllm-kernels' modules
+import vllm.kernels  # noqa: F401
 
 MODULE_ATTRS = {
     "AsyncEngineArgs": ".engine.arg_utils:AsyncEngineArgs",
