@@ -563,7 +563,8 @@ def run_dp_sharded_mrope_vision_model(
         pixel_values.shape = (1350, channel)
         grid_thw_list = [[1, 10, 100], [1, 10, 10], [1, 10, 20], [1, 50]]
         # or 
-        grid_thw_list = torch.tensor([[1, 10, 100], [1, 10, 10], [1, 10, 20], [1, 50]])
+        grid_thw_list = torch.tensor([[1, 10, 100], [1, 10, 10],
+        [1, 10, 20], [1, 50]])
         tp_size=2
         ```
 
