@@ -287,7 +287,11 @@ def download_weights_from_hf(
             file_list = fs.ls(model_name_or_path,
                               detail=False,
                               revision=revision)
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "Failed to get file list for '%s'. Trying each pattern in "
+                "allow_patterns individually until weights have been "
+                "downloaded. Error: %s", model_name_or_path, e)
             file_list = []
 
         # Use the first pattern found in the HF repo's files.
