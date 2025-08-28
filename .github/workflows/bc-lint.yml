@@ -6,16 +6,10 @@ on:
       - opened
       - synchronize
       - reopened
-    # branches-ignore:
-    #   - <branches to ignore bc-linter>
-    paths:
-      - vllm/attetion/**
-      - vllm/core/**
-      - vllm/v1/attetion/**
-      - vllm/v1/core/**
 
 jobs:
   bc_lint:
+    if: github.repository_owner == 'vllm-project'
     runs-on: ubuntu-latest
     steps:
       - name: Run BC Lint Action
@@ -26,3 +20,7 @@ jobs:
           head_sha: ${{ github.event.pull_request.head.sha }}
           suppression: ${{ contains(github.event.pull_request.labels.*.name, 'suppress-bc-linter') }}
           docs_link: 'https://github.com/pytorch/test-infra/wiki/BC-Linter'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
