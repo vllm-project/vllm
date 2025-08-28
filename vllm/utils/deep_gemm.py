@@ -36,7 +36,7 @@ def is_deep_gemm_e8m0_used() -> bool:
     "E8M0 scale on a Hopper or Blackwell-class GPU.
     """
     if not is_deep_gemm_supported():
-        logger.info_once(
+        logger.debug_once(
             "DeepGEMM E8M0 disabled: DeepGEMM not supported on this system.")
         return False
 
