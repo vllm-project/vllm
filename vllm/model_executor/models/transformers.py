@@ -848,7 +848,7 @@ class TransformersForCausalLM(TransformersBase):
         return logits
 
 
-@support_torch_compile
+@support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersMoEForCausalLM(TransformersMoEBase, TransformersForCausalLM):
     pass
 
@@ -996,10 +996,15 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
         return inputs_embeds
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    MultiModalProcessor,
-    info=MultiModalProcessingInfo,
-    dummy_inputs=MultiModalDummyInputsBuilder)
+@support_torch_compile(
+    # set `positions` to last dim to support Qwen-mrope
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    },
+    enable_if=can_enable_torch_compile)
 class TransformersMoEForMultimodalLM(TransformersMoEForCausalLM,
                                      TransformersForMultimodalLM):
     pass
