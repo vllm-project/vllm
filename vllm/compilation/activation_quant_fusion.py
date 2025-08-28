@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 from .fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
+from .inductor_pass import enable_fake_mode
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
@@ -160,6 +161,7 @@ class ActivationQuantFusionPass(VllmInductorPass):
     https://github.com/pytorch/pytorch/pull/139321#issuecomment-2452354980
     """
 
+    @enable_fake_mode
     def __init__(self, config: VllmConfig):
         super().__init__(config)
 
