@@ -143,7 +143,7 @@ OpenAI Python client library does not officially support `reasoning_content` att
             print(content, end="", flush=True)
     ```
 
-Remember to check whether the `reasoning_content` exists in the response before accessing it. You could checkout the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
+Remember to check whether the `reasoning_content` exists in the response before accessing it. You could check out the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
 
 ## Tool Calling
 
