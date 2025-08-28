@@ -872,6 +872,13 @@ class ModelConfig:
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self._model_info.supports_multimodal:
+            if (self.mm_encoder_tp_mode == "data" and
+                    not self._model_info.supports_multimodal_encoder_tp_data):
+                logger.warning_once(
+                    "This model does not support `--mm-encoder-tp-mode data`. "
+                    "Falling back to `--mm-encoder-tp-mode weights`.")
+                self.mm_encoder_tp_mode = "weights"
+
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
@@ -1692,6 +1699,10 @@ class ModelConfig:
         return self.multimodal_config is not None
 
     @property
+    def is_multimodal_raw_input_only_model(self) -> bool:
+        return self._model_info.supports_multimodal_raw_input_only
+
+    @property
     def is_cross_encoder(self) -> bool:
         return (self._model_info.supports_cross_encoding
                 or self.convert_type == "classify")
@@ -1699,10 +1710,6 @@ class ModelConfig:
     @property
     def is_pp_supported(self) -> bool:
         return self._model_info.supports_pp
-
-    @property
-    def is_multimodal_raw_input_supported(self) -> bool:
-        return self._model_info.supports_multimodal_raw_input
 
     @property
     def is_attention_free(self) -> bool:
