@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib
+import sys
+
 import pytest
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.activation import (GeluAndMul,
@@ -11,8 +15,6 @@ from vllm.model_executor.layers.activation import (GeluAndMul,
                                                    SiluAndMul)
 from vllm.model_executor.layers.fused_moe.fused_moe import (dispatch_topk_func,
                                                             vllm_topk_softmax)
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    is_rocm_aiter_moe_enabled)
 from vllm.model_executor.layers.layernorm import (
     RMSNorm, dispatch_cuda_rmsnorm_func, fused_add_rms_norm, rms_norm,
     rocm_aiter_fused_add_rms_norm, rocm_aiter_rms_norm)
@@ -139,11 +141,13 @@ def test_w8a8_blockscale_dispatch(use_cutlass: bool, use_rocm_aiter: str,
 def test_topk_dispatch(use_rocm_aiter: str, monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER", use_rocm_aiter)
     topk_func = dispatch_topk_func()
-    is_rocm_aiter_moe_enabled.cache_clear()
+    # Force reload aiter_ops to pick up the new environment variables.
+    if 'rocm_aiter_ops' in sys.modules:
+        importlib.reload(rocm_aiter_ops)
+
     if current_platform.is_rocm() and int(use_rocm_aiter):
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            rocm_aiter_topk_softmax)
-        assert topk_func == rocm_aiter_topk_softmax
+
+        assert topk_func == rocm_aiter_ops.rocm_aiter_topk_softmax
     else:
         assert topk_func == vllm_topk_softmax
 

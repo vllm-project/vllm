@@ -6,9 +6,8 @@ from typing import ClassVar, Optional
 
 import torch
 
-import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import AttentionLayer
-from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
 from vllm.config import VllmConfig
 from vllm.utils import cdiv
 # yapf conflicts with isort for this docstring
@@ -22,11 +21,6 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 # yapf: enable
-
-
-def is_aiter_mla_enabled() -> bool:
-    return envs.VLLM_ROCM_USE_AITER \
-        and envs.VLLM_ROCM_USE_AITER_MLA
 
 
 class AiterMLABackend(MLACommonBackend):
@@ -241,10 +235,10 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         # max_seqlen_qo must be 1 except for MTP
         # TODO: Find the best value for MTP
         max_seqlen_qo = 1
-        aiter_mla_decode_fwd(q, kv_buffer, o, self.scale,
-                             attn_metadata.decode.qo_indptr, max_seqlen_qo,
-                             attn_metadata.decode.paged_kv_indptr,
-                             attn_metadata.decode.paged_kv_indices,
-                             attn_metadata.decode.paged_kv_last_page_len)
+        rocm_aiter_ops.mla_decode_fwd(
+            q, kv_buffer, o, self.scale, attn_metadata.decode.qo_indptr,
+            max_seqlen_qo, attn_metadata.decode.paged_kv_indptr,
+            attn_metadata.decode.paged_kv_indices,
+            attn_metadata.decode.paged_kv_last_page_len)
 
         return self._v_up_proj(o)

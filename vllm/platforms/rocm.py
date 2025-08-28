@@ -191,13 +191,12 @@ class RocmPlatform(Platform):
                              kv_cache_dtype, block_size, use_v1, use_mla,
                              has_sink) -> str:
         if use_mla:
-            from vllm.attention.backends.rocm_aiter_mla import (
-                is_aiter_mla_enabled)
+            from vllm._aiter_ops import rocm_aiter_ops
 
             if selected_backend is None:
-                selected_backend = (_Backend.ROCM_AITER_MLA if
-                                    is_aiter_mla_enabled() or block_size == 1
-                                    else _Backend.TRITON_MLA)
+                selected_backend = (
+                    _Backend.ROCM_AITER_MLA if rocm_aiter_ops.is_mla_enabled()
+                    or block_size == 1 else _Backend.TRITON_MLA)
 
             if selected_backend == _Backend.TRITON_MLA:
                 if block_size != 1:

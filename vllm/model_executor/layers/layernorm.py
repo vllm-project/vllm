@@ -6,15 +6,8 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 
-import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
-from vllm.platforms import current_platform
-
-
-def is_rocm_aiter_rmsnorm_enabled() -> bool:
-    return current_platform.is_rocm() \
-        and envs.VLLM_ROCM_USE_AITER_RMSNORM \
-        and envs.VLLM_ROCM_USE_AITER
 
 
 def rms_norm(x: torch.Tensor, weight: torch.Tensor,
@@ -76,11 +69,11 @@ def rocm_aiter_fused_add_rms_norm(
 
 def dispatch_cuda_rmsnorm_func(add_residual: bool):
     if add_residual:
-        if is_rocm_aiter_rmsnorm_enabled():
+        if rocm_aiter_ops.is_rmsnorm_enabled():
             return rocm_aiter_fused_add_rms_norm
         return fused_add_rms_norm
 
-    if is_rocm_aiter_rmsnorm_enabled():
+    if rocm_aiter_ops.is_rmsnorm_enabled():
         return rocm_aiter_rms_norm
     return rms_norm
 
