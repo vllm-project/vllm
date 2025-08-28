@@ -83,8 +83,10 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("num_tokens", [7, 256, 533, 2048, 2049])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("static", [True, False])
+# cuda_force_torch used to test torch code path on platforms that
+# cutlass_fp8_supported() == True.
 @pytest.mark.parametrize("cuda_force_torch",
-                         [True, False] if cutlass_fp8_supported() else [False])
+                         [True, False] if cutlass_fp8_supported() else [True])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"],
                     reason="Only test on CUDA and ROCm")
 def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
