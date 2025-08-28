@@ -185,6 +185,9 @@ class NixlConnector(KVConnectorBase_V1):
         blocks: "KVCacheBlocks",
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         assert self.connector_scheduler is not None
+        logger.warning_once(
+            "Converting blocks to list of ints in `request_finished`. "
+            "This won't work for hybrid allocator.")
         block_ids = blocks.get_block_ids()[0]
         return self.connector_scheduler.request_finished(request, block_ids)
 
@@ -401,6 +404,9 @@ class NixlConnectorScheduler:
 
         # TODO: check whether block_ids actually ever be 0. If not we could
         # remove the conditional below
+        logger.warning_once(
+            "Converting blocks to list of ints in `request_finished`. "
+            "This won't work for hybrid allocator.")
         block_ids = blocks.get_block_ids()[0]
         delay_free_blocks = len(block_ids) > 0
 
