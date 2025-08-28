@@ -1380,7 +1380,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         for modality, items in mm_items.items():
             if modality in mm_hash_overrides:
-                mm_hash_list = mm_hash_overrides[modality]
+                if isinstance(mm_hash_list := mm_hash_overrides[modality],
+                              str):
+                    mm_hash_list = [mm_hash_list]
                 # For None entries, compute a hash; otherwise, use provided ID.
                 computed: list[str] = []
                 for i, item in enumerate(items):

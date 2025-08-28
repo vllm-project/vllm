@@ -168,15 +168,15 @@ class Processor:
 
             for modality, items in mm_data.items():
                 if modality in mm_uuids:
-                    expected = len(items) if isinstance(items, list) else 1
-                    if isinstance(mm_uuids[modality], str):
-                        mm_uuids[modality] = [mm_uuids[modality]]
-                    if len(mm_uuids[modality]) != expected:
+                    data_len = len(items) if isinstance(items, list) else 1
+                    uuid_len = len(mm_uuids[modality]) if isinstance(
+                        mm_uuids[modality], list) else 1
+                    if uuid_len != data_len:
                         raise ValueError(
                             f"multi_modal_uuids for modality '{modality}' "
                             "must have same length as data: got "
-                            f"{len(mm_uuids[modality])} uuids vs "
-                            f"{expected} items.")
+                            f"{uuid_len} uuids vs "
+                            f"{data_len} items.")
                 else:
                     raise ValueError(
                         f"multi_modal_uuids for modality '{modality}' must "
