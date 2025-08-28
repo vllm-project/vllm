@@ -419,8 +419,10 @@ class BenchmarkWorker:
         )
         # NOTE(woosuk): The current naming convention uses w2.shape[2], which
         # is the intermediate size after silu_and_mul.
+        block_n = block_quant_shape[0] if block_quant_shape else None
+        block_k = block_quant_shape[1] if block_quant_shape else None
         op_config = get_moe_configs(
-            num_experts, shard_intermediate_size // 2, dtype_str
+            num_experts, shard_intermediate_size // 2, dtype_str, block_n, block_k
         )
         if op_config is None:
             config = get_default_config(
@@ -430,6 +432,7 @@ class BenchmarkWorker:
                 hidden_size,
                 topk,
                 dtype_str,
+                block_quant_shape,
             )
         else:
             config = op_config[min(op_config.keys(), key=lambda x: abs(x - num_tokens))]
