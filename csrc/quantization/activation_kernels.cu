@@ -149,7 +149,7 @@ __device__ __forceinline__ void cp_async_wait<0>() {
   asm volatile("cp.async.wait_all;\n" ::);
 }
 template <typename scalar_t, uint32_t NUM_WARPS, typename Idx_t, bool USE_UE8M0,
-          int GROUP_SIZE = 128, int NUM_STAGES = 2>
+          int GROUP_SIZE = 128, int NUM_STAGES = 3>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const scalar_t* __restrict__ _input,  // (E, T, 2*H), element strides
     __nv_fp8_e4m3* __restrict__ _y_q,     // (E, T, H)
