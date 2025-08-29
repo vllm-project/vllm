@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""This example demonstrates instantiating vLLM with a custom logits processor
-class object.
-
-For a basic example of implementing a custom logits processor, see
-the `DummyLogitsProcessor` implementation in `vllm/test_utils.py`.
+"""This example demonstrates wrapping a request-level logits processor to be
+compatible with vLLM's batch-level logits processing
 
 For testing purposes, a dummy logits processor is employed which, if
 `target_token` is passed as a keyword argument to `SamplingParams.extra_args`,
-will mask out all tokens except `target_token`.
+will mask out all tokens except `target_token`. This logits processor can be
+applied to a vector of logits associated with a single decode step for a single
+request. The logits processor cannot be applied to a request which does not
+pass in a `target_token` custom argument.
+
+The request-level dummy logits processor is wrapped to create a batch-level
+logits processor, which can apply the logits processor to output logits from
+all requests in the persistent batch in a given decode step.
 
 A batch is constructed with `temperature=0.0` and 50% of requests specifying
 `target_token`, and for these requests - and *only* these requests - we
@@ -40,55 +44,65 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.config import VllmConfig
 from vllm.v1.sample.logits_processor import (
-    BatchUpdate,
-    LogitsProcessor,
+    AdapterLogitsProcessor,
+    RequestLogitsProcessor,
 )
-from vllm.v1.sample.logits_processor.builtin import process_dict_updates
 
 
-# Hypothetical custom logits processor
-class DummyLogitsProcessor(LogitsProcessor):
-    """Fake logit processor to support unit testing and examples"""
+def get_req_dummy_logits_processor(
+    params: SamplingParams,
+) -> Optional[RequestLogitsProcessor]:
+    """Fake example of a request-level logits processor implementation.
+
+    This function returns a new request-level logits processor, customized
+    to the sampling params associated with a particular request.
+
+    Returns None if the logits processor should not be applied to the
+    particular request. To use the logits processor the request must have
+    a "target_token" custom argument with an integer value.
+
+    Args:
+      params: per-request sampling params
+
+    Returns:
+      `Callable` request logits processor, or None
+    """
+    if not params.extra_args or "target_token" not in params.extra_args:
+        return None
+    target_token = params.extra_args["target_token"]
+
+    def req_dummy_logits_processor(
+        output_ids: list[int],
+        logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """The request-level logits processor masks out all logits except the
+        token id identified by target_token"""
+        val_to_keep = logits[target_token]
+        logits[:] = float("-inf")
+        logits[target_token] = val_to_keep
+        return logits
+
+    return req_dummy_logits_processor
+
+
+class DummyLogitsProcessor(AdapterLogitsProcessor):
+    """Example of wrapping a fake request-level logit processor to create a
+    batch-level logits processor"""
 
     def __init__(
         self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
     ):
-        self.req_info: dict[int, int] = {}
+        super().__init__(vllm_config, device, is_pin_memory)
 
     def is_argmax_invariant(self) -> bool:
-        """Never impacts greedy sampling"""
         return False
 
-    def update_state(self, batch_update: Optional[BatchUpdate]):
-        process_dict_updates(
-            self.req_info,
-            batch_update,
-            # This function returns the LP's per-request state based on the
-            # request details, or None if this LP does not apply to the
-            # request.
-            lambda params, _, __: params.extra_args
-            and (params.extra_args.get("target_token")),
-        )
-
-    def apply(self, logits: torch.Tensor) -> torch.Tensor:
-        if not self.req_info:
-            return logits
-
-        # Save target values before modification
-        rows_list = list(self.req_info.keys())
-        cols = torch.tensor(
-            [self.req_info[i] for i in rows_list],
-            dtype=torch.long,
-            device=logits.device,
-        )
-        rows = torch.tensor(rows_list, dtype=torch.long, device=logits.device)
-        values_to_keep = logits[rows, cols].clone()
-
-        # Mask all but target tokens
-        logits[rows] = float("-inf")
-        logits[rows, cols] = values_to_keep
-
-        return logits
+    def req_logits_processor(
+        self,
+        params: SamplingParams,
+    ) -> Optional[RequestLogitsProcessor]:
+        """Model the scenario where a request-level lo"""
+        return get_req_dummy_logits_processor(params)
 
 
 # Sample prompts.
