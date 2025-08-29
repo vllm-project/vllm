@@ -50,7 +50,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.rotary_embedding.common import yarn_get_mscale
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -211,6 +210,13 @@ class DeepseekV2MoE(nn.Module):
                     final_hidden_states))
 
         return final_hidden_states.view(num_tokens, hidden_dim)
+
+
+def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
+    import math
+    if scale <= 1:
+        return 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0
 
 
 class DeepseekV2Attention(nn.Module):
