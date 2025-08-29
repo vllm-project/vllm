@@ -214,20 +214,6 @@ def flashinfer_alltoall_dispatch(
         ep_size,
     )
 
-    def pad_scaling_factors(x_sf: torch.Tensor) -> tuple[torch.Tensor, int]:
-
-        def pad_up(x: int, y: int) -> int:
-            return ((x + y - 1) // y) * y
-
-        sf_per_16bytes = 16 // x_sf.element_size()
-        x_sf_col_orig = x_sf.shape[1]
-        x_sf_col = pad_up(x_sf_col_orig, sf_per_16bytes)
-        if x_sf_col > x_sf_col_orig:
-            x_sf = torch.nn.functional.pad(x_sf, (0, x_sf_col - x_sf_col_orig))
-        return x_sf, x_sf_col_orig
-
-    x_sf, x_sf_col_orig = pad_scaling_factors(x_sf)
-
     x_sf = MnnvlMoe.mnnvl_moe_alltoallv(
         x_sf,
         alltoall_info,
@@ -235,8 +221,6 @@ def flashinfer_alltoall_dispatch(
         ep_rank,
         ep_size,
     )
-    # Undo padding
-    x_sf = x_sf[:, :x_sf_col_orig].contiguous()
     x_sf = nvfp4_block_scale_interleave(x_sf)
     return alltoall_info, topk_ids, topk_weights, x, x_sf
 

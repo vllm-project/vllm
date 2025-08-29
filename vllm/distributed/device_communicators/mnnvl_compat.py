@@ -16,10 +16,10 @@ class CustomCommunicator(CommBackend):
         self._group = group
 
     def Get_rank(self) -> int:
-        return self._group.rank_in_group
+        return self._group.rank()
 
     def Get_size(self) -> int:
-        return self._group.world_size
+        return self._group.size()
 
     def allgather(self, data: int):
         gathered = [None] * self.Get_size()
