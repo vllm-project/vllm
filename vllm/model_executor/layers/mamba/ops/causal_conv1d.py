@@ -415,7 +415,9 @@ def causal_conv1d_fn(
         activation = "silu"
 
     args = None
-    out = torch.empty_like(x)
+    #out = torch.empty_like(x)
+    #TODO: Noticed strange behavior, maybe due to use of uninitialzed values?
+    out = torch.zeros_like(x)
     if metadata is not None:
         cu_seqlen = metadata.cu_seqlen
         nums_dict = metadata.nums_dict
