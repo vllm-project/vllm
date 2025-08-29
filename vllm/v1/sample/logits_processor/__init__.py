@@ -194,7 +194,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
     `__init__()` must call `super().__init__()`
     """
 
-    def __init__(self, vllm_config: VllmConfig, device: torch.device,
+    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
                  is_pin_memory: bool):
         """Subclass must invoke `super().__init__()`.
 
