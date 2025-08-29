@@ -108,7 +108,7 @@ class Idefics2VisionEmbeddings(nn.Module):
                        bucket_coords_w).flatten()
             position_ids[batch_idx][p_attn_mask.view(-1).cpu()] = pos_ids
         position_ids = position_ids.to(self.position_embedding.weight.device)
-        embeddings = embeddings + self.position_embedding(position_ids)
+        embeddings += self.position_embedding(position_ids)
         return embeddings
 
 
@@ -262,11 +262,11 @@ class Idefics2EncoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.layer_norm1(hidden_states)
         hidden_states = self.self_attn(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         residual = hidden_states
         hidden_states = self.layer_norm2(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         return hidden_states
 
 
