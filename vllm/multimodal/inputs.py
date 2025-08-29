@@ -199,6 +199,29 @@ A dictionary containing nested tensors which have been batched via
 
 
 @dataclass
+class MultiModalFeatureSpec:
+    """
+    Represents a single multimodal input with its processed data and metadata.
+    
+    Used by the V1 engine to track multimodal data through processing and
+    caching. A request containing multiple multimodal items will have one
+    MultiModalFeatureSpec per item.
+    """
+
+    data: Optional["MultiModalKwargsItem"]
+    """Multimodal data for this feature"""
+
+    modality: str
+    """Based on the input, e.g., "image", "audio", "video"."""
+
+    identifier: str
+    """mm_hash or uuid for caching encoder outputs."""
+
+    mm_position: PlaceholderRange
+    """e.g., PlaceholderRange(offset=2, length=336)"""
+
+
+@dataclass
 class MultiModalFieldElem:
     """
     Represents a keyword argument corresponding to a multi-modal item
