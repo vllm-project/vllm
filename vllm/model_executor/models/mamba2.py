@@ -164,9 +164,7 @@ class Mamba2Model(nn.Module):
             # v1 get mamba2_metadata from forward_context
             mamba2_metadata = None
 
-        for i in range(len(self.layers)):
-            layer = self.layers[i]
-
+        for i, layer in enumerate(self.layers):
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,

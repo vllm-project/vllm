@@ -5,6 +5,7 @@
 """Inference-only ChatGLM model compatible with THUDM weights."""
 import json
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional, Union
 
 import torch
@@ -281,7 +282,7 @@ class GLMTransformer(nn.Module):
         hidden_states: torch.Tensor,
         position_ids: torch.Tensor,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states = layer(hidden_states=hidden_states,
                                   position_ids=position_ids)
 

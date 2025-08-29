@@ -345,8 +345,7 @@ class BambaModel(nn.Module):
 
         residual = None
         num_attn = 0
-        for i in range(len(self.layers)):
-            layer = self.layers[i]
+        for i, layer in enumerate(self.layers):
             if isinstance(layer, BambaAttentionDecoderLayer):
                 num_attn += 1
 
