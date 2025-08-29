@@ -241,10 +241,10 @@ def fused_moe_kernel_gptq_awq(
 
         # We accumulate along the K dimension.
         if has_zp:
-            b = ((b.to(tl.float32) - b_zp) * b_scale).to(compute_type)
+            b = ((b.to(tl.float32) - b_zp) * b_scale)
         else:
-            b = ((b.to(tl.float32) - b_zp_num) * b_scale).to(compute_type)
-        accumulator = tl.dot(a, b, acc=accumulator)
+            b = ((b.to(tl.float32) - b_zp_num) * b_scale)
+        accumulator = tl.dot(a.to(tl.float32), b.to(tl.float32), acc=accumulator)
 
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak

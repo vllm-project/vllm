@@ -90,17 +90,18 @@ class AWQConfig(QuantizationConfig):
             from .awq_marlin import AWQMarlinConfig, AWQMoEMethod
             from .moe_wna16 import MoeWNA16Config
             from .utils.marlin_utils import check_moe_marlin_supports_layer
-            if not check_moe_marlin_supports_layer(layer, self.group_size):
+            
+            config = {
+                "quant_method": "awq",
+                "bits": self.weight_bits,
+                "group_size": self.group_size,
+                "zero_point": self.zero_point,
+                "lm_head": False,
+            }
+            if not (check_moe_marlin_supports_layer(layer, self.group_size) and AWQMarlinConfig.is_awq_marlin_compatible(config)):
                 logger.warning_once(
                     f"Layer '{prefix}' is not supported by AWQMoeMarlin. "
                     "Falling back to Moe WNA16 kernels.")
-                config = {
-                    "quant_method": "awq",
-                    "bits": self.weight_bits,
-                    "group_size": self.group_size,
-                    "zero_point": self.zero_point,
-                    "lm_head": False,
-                }
                 return MoeWNA16Config.from_config(config).get_quant_method(
                     layer, prefix)
             marlin_compatible_config_dict = {
