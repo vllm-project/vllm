@@ -1226,7 +1226,7 @@ class NixlConnectorWorker:
         Otherwise, we use all regions.
         """
         if layer_idx is None:
-            region_ids = range(self.num_regions)
+            region_ids = np.arange(self.num_regions)
         else:
             assert layer_idx < self.num_layers
             if self.num_layers < self.num_regions:
@@ -1234,20 +1234,19 @@ class NixlConnectorWorker:
                 # the regions are organized as [K0, V0, K1, V1, ...]
                 # and we select K_i and V_i
                 assert 2 * self.num_layers == self.num_regions
-                region_ids = range(2 * layer_idx, 2 * layer_idx + 2)
+                region_ids = np.arange(2 * layer_idx, 2 * layer_idx + 2)
             else:
                 # Otherwise, we assume we have MLA and select i-th layer
                 assert self.num_layers == self.num_regions
-                region_ids = range(layer_idx, layer_idx + 1)
+                region_ids = np.arange(layer_idx, layer_idx + 1)
 
         num_blocks = self.dst_num_blocks[engine_id]
 
         # Compute the desc ids for each block.
-        descs_ids: list[int] = []
-        for reg_id in region_ids:
-            for block_id in block_ids:
-                descs_ids.append(reg_id * num_blocks + block_id)
-        return descs_ids
+        region_ids = region_ids[:, None]
+        block_ids = np.array(block_ids)[None, :]
+        descs_ids = region_ids * num_blocks + block_ids
+        return descs_ids.flatten().tolist()
 
 
 @contextlib.contextmanager
