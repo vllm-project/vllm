@@ -113,11 +113,11 @@ class ModelRunnerOutput:
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
 
-    # EPD transfered mm data
+    # EPD transfered mm data: (req_id, input_id)
     transfered_mm_data: Optional[list[tuple[str, int]]] = None
 
-    # EPD Injected mm data
-    injected_mm_data: Optional[list[tuple[str, int]]] = None
+    # EPD Injected mm data: (req_id, input_id, mm_hash)
+    injected_mm_data: Optional[list[tuple[str, int, str]]] = None
 
 
 @dataclass

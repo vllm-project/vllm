@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from typing import TYPE_CHECKING, Literal, Optional, Union
 
 import torch
@@ -59,11 +60,12 @@ class DisaggPrefillDecodeGPURunnerWrapper(GPUModelRunner):
         self.instance_type = vllm_config.epd_disagg_config.instance_type
         self.ec_connector = RedisECConnector(
             vllm_config=vllm_config,
+            device=device,
             intra_instance_type="model-runner",
             preallocate_callback=None,
             injection_callback=self.receive_encoder_cache,
-            redis_host="localhost", # replace with ec_transfer_config later
-            redis_port=6379,        # replace with ec_transfer_config later
+            redis_host=os.getenv("REDIS_HOST"),
+            redis_port=os.getenv("REDIS_PORT"),
         )
         self.injected_encoder_cache_ids = []
 
@@ -90,23 +92,23 @@ class DisaggPrefillDecodeGPURunnerWrapper(GPUModelRunner):
         model_runner_output.injected_mm_data = injected_encoder_cache_ids
         return model_runner_output
 
-    def receive_encoder_cache(self, request_id, input_id, encoder_cache):
+    def receive_encoder_cache(
+        self, 
+        request_id: str, 
+        input_id: int, 
+        encoder_cache: torch.Tensor, 
+        mm_hash: str
+    ):
         """
         Callback function for receiving encoder cache from remote instances.
         
         This method is invoked by the encoder cache connector when encoder
-        cache data is received from remote encoder instances. It processes
-        the received numpy array by converting it to a PyTorch tensor with
-        the correct device placement and data type, then stores it in the
-        local encoder cache dictionary.
+        cache data is received from remote encoder instances, then It stores 
+        received tensor in the local encoder_cache dictionary.
         
         The method updates the injected encoder cache IDs list to inform the
         scheduler about successful cache injections.
         """
         with self.encoder_cache_lock:
-            if request_id not in self.encoder_cache:
-                self.encoder_cache[request_id] = {}
-            encoder_cache = torch.from_numpy(encoder_cache)
-            self.encoder_cache[request_id][input_id] = encoder_cache.to(
-                device=self.device, dtype=self.dtype)
-            self.injected_encoder_cache_ids.append((request_id, input_id))
+            self.encoder_cache[mm_hash] = encoder_cache
+            self.injected_encoder_cache_ids.append((request_id, input_id, mm_hash))

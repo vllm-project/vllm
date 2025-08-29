@@ -66,6 +66,9 @@ class EncoderCacheManager:
 
         # mm_hash of mm_data => ids of requests that reference the mm_data
         self.cached: dict[str, set[str]] = {}
+        
+        # Blocking 
+        self.preallocated: dict[str, dict[str, dict[int, int]]] = {}
 
         # mm_hash of mm_data => num_encoder_tokens of the mm_data
         self.freeable: OrderedDict[str, int] = OrderedDict()
@@ -92,56 +95,35 @@ class EncoderCacheManager:
             return False
 
         # Cached but currently not referenced by any request
-        if not self.cached[mm_hash]:
+        # If mm_hash is in preallocated then it will not be in freeable 
+        if not self.cached[mm_hash] and mm_hash not in self.preallocated:
             num_tokens = self.freeable.pop(mm_hash)
             self.num_freeable_slots -= num_tokens
 
         self.cached[mm_hash].add(request.request_id)
         return True
 
-    def can_allocate(self, request: Request, input_id: int,
-                     encoder_compute_budget: int,
-                     num_tokens_to_schedule: int) -> bool:
-        """Check if there's sufficient cache space for a multimodal input. 
-        If there is, return True and update EncoderCacheManager state.
+    def can_allocate_tokens(self, num_tokens):
+        """Check if the specified number of tokens can be allocated in the cache.
 
-        If there is not enough free space in `num_free_slots` but there is
-        enough reclaimable space in `num_freeable_slots`, entries will be
-        evicted from `freeable` (their mm_hash appended to `freed`) until
-        enough space is available, and then this method returns True. 
-        Older entries are evicted first.
-        
-        Returns False only if the requested number of tokens exceeds both 
-        the free and reclaimable capacities combined.
+        This method determines whether there is sufficient cache capacity to store
+        the requested number of encoder tokens. If there isn't enough free space
+        but there is enough reclaimable space, it will evict entries from the
+        freeable list to make room.
 
         Args:
-            request: The request containing the multimodal input.
-            input_id: Index of the multimodal input within the request.
-            encoder_compute_budget: Number of encoder tokens allowed to be 
-                computed when this method is invoked.
-            num_tokens_to_schedule: Number of tokens already scheduled to be 
-                allocated with cache space when this method is invoked.
+            num_tokens: The number of encoder tokens to allocate.
 
         Returns:
-            True if there's enough capacity to hold the encoder output for this
-            input (possibly after reclaiming `freeable` entries); otherwise
-            False.
-
-        Note: This method does not allocate physical memory for the encoder 
-        output but only the state of EncoderCacheManager.
+            True if the tokens can be allocated (either immediately or after
+            eviction); False if there isn't enough total capacity even after
+            reclaiming all freeable entries.
         """
-        num_tokens = request.get_num_encoder_tokens(input_id)
-
-        # Not enough compute budget
-        if num_tokens > encoder_compute_budget:
-            return False
-
-        num_tokens += num_tokens_to_schedule
 
         # Enough free slots
         if num_tokens <= self.num_free_slots:
             return True
-
+        
         # Not enough reclaimable slots
         if num_tokens > self.num_freeable_slots:
             return False
@@ -155,6 +137,48 @@ class EncoderCacheManager:
             self.freed.append(mm_hash)
             self.num_free_slots += num_free_token
         return True
+
+
+    def can_allocate(self, request: Request, input_id: int,
+                     encoder_compute_budget: int,
+                     num_tokens_to_schedule: int) -> bool:
+        """Check if there's sufficient cache space for a multimodal input.
+
+        This method verifies if the encoder output for the specified input
+        can be allocated given the current compute budget and cache capacity
+        constraints. It does not modify the cache state.
+
+        The method checks two constraints:
+        1. Compute budget: Whether the input's encoder tokens fit within the
+        available encoder compute budget.
+        2. Cache capacity: Whether there's enough space (free or reclaimable)
+        to store the encoder output, accounting for tokens already scheduled.
+
+        Args:
+            request: The request containing the multimodal input.
+            input_id: Index of the multimodal input within the request.
+            encoder_compute_budget: Number of encoder tokens allowed to be 
+                computed when this method is invoked.
+            num_tokens_to_schedule: Number of tokens already scheduled to be 
+                allocated with cache space when this method is invoked.
+
+        Returns:
+            True if both compute budget and cache capacity constraints are
+            satisfied; False otherwise.
+
+        Note: 
+            - This method only checks feasibility without modifying cache state.
+            - Actual eviction (if needed) happens in can_allocate_tokens().
+            - The allocate() method should be called to reserve the space after
+            this check passes.
+        """
+        num_tokens = request.get_num_encoder_tokens(input_id)
+        
+        # Not enough compute budget
+        if num_tokens > encoder_compute_budget:
+            return False
+        
+        return self.can_allocate_tokens(num_tokens + num_tokens_to_schedule)
 
     def allocate(self, request: Request, input_id: int) -> None:
         """Allocate cache space for a multimodal input's encoder output.
@@ -196,7 +220,7 @@ class EncoderCacheManager:
             for input_id in range(len(request.mm_hashes))
             if request.mm_hashes[input_id] in self.cached
         }
-
+    
     def free_encoder_input(self, request: Request, input_id: int) -> None:
         """Free the request's reference to the encoder input (`mm_data`)
 
@@ -213,7 +237,7 @@ class EncoderCacheManager:
         if not self.cached.get(mm_hash, None):
             return
         self.cached[mm_hash].discard(req_id)
-        if not self.cached[mm_hash]:
+        if not self.cached[mm_hash] and mm_hash not in self.preallocated:
             num_tokens = request.get_num_encoder_tokens(input_id)
             self.freeable[mm_hash] = num_tokens
             self.num_freeable_slots += num_tokens
@@ -247,68 +271,121 @@ class EncoderCacheManager:
     ########################################################################
     # Encode-Prefill-Decode Disaggregation Related Methods
     ########################################################################
-    def can_preallocate(self, encoder_cache_size: int) -> bool:
-        """
-        Checks if sufficient space exists for preallocation using only the 
-        request's encoder cache size data.
+
+    def free_encoder_input_after_finish(
+        self, req_id: str, num_tokens: int, mm_hash: str
+    ) -> None:
+        """Free a request's reference in cached dictionary for mm input after
+        request is finished long time ago.
+
+        Removes the request ID from the cached mm input's reference set. When
+        the  reference set becomes empty AND the entry is not preallocated by
+        any  pending requests, the entry is marked as freeable.
+
+        This method is used in disaggregated settings where the request object 
+        may not be available, requiring explicit parameters for the multimodal 
+        input metadata.
 
         Args:
-            encoder_cache_size (int): The size of the encoder cache to be 
-                used for preallocation.
+            req_id: ID of the request releasing the reference.
+            num_tokens: Number of encoder tokens associated with this input.
+            mm_hash: Hash identifier of the multimodal input data.
 
-        Returns:
-            bool: True if there is enough space for preallocation, 
-                False otherwise.
+        Note: 
+            The entry is NOT physically freed until capacity is needed (e.g., by
+            `can_allocate_tokens`). Entries that are preallocated remain 
+            unfreeable even with zero references to prevent premature eviction.
         """
-        return encoder_cache_size <= self.num_free_slots
+        # The mm_hash not in cache or the req_id set is empty
+        if not self.cached.get(mm_hash, None):
+            return
+        self.cached[mm_hash].discard(req_id)
+        if not self.cached[mm_hash] and mm_hash not in self.preallocated:
+            self.freeable[mm_hash] = num_tokens
+            self.num_freeable_slots += num_tokens
 
     def preallocate(self, req_id: str, input_id: int, 
-                    encoder_cache_size: int) -> None:
-        if req_id not in self.preallocated:
-            self.preallocated[req_id] = {}
-        self.preallocated[req_id][input_id] = encoder_cache_size
-        self.num_free_slots -= encoder_cache_size
-
-    def depreallocate(self, req_id: str, input_id: int) -> None:
-        self.num_free_slots += self.preallocated[req_id][input_id]
-        self.preallocated[req_id].pop(input_id)
-        if not self.preallocated[req_id]:
-            self.preallocated.pop(req_id)
-
-    def deallocate(self, req_id: str, input_id: int, encoder_cache_size: int):
-        self.num_free_slots += encoder_cache_size
-        self.cached[req_id].discard(input_id)
-        self.freed.append((req_id, input_id))
-        if len(self.cached[req_id]) == 0:
-            del self.cached[req_id]
-
-    def finalize_allocation(self, req_id: str, input_id: int) -> None:
-        """
-        Completes the two-step allocation by creating the actual cache entry.
+                    num_tokens: int, mm_hash: str) -> bool:
+        """Reserve cache space for an encoder input before actual allocation.
         
-        This method finalizes the allocation process by adding the request-
-        input pair to the cached mapping. It should be called after successful
-        encoder cache injection to complete the allocation that was started
-        with preallocate().
+        Used in disaggregated settings to coordinate cache allocation across
+        different processing stage instances. Helps in prevention of premature
+        eviction of entries that will be needed and tracks which requests will
+        use which inputs.
         
         Args:
-            req_id (str): Unique identifier for the request that was 
-                preallocated
-            input_id (int): Index of the multimodal input within the request
-                that was preallocated
-                
-        Note:
-            This method assumes preallocate() was previously called for the 
-            same request_id and input_id pair. It only creates the cache 
-            mapping entry without affecting num_free_slots since space was 
-            already reserved during preallocation.
+            req_id: ID of the request making the preallocation.
+            input_id: Index of the multimodal input within the request.
+            num_tokens: Number of encoder tokens to preallocate.
+            mm_hash: Hash identifier of the multimodal input data.
+            
+        Returns:
+            True if encoder cache needs to be received (entry not cached),
+            False if entry is already cached or will be provided by another
+                request.
         """
-        self.preallocated[req_id].pop(input_id)
-        if not self.preallocated[req_id]:
-            self.preallocated.pop(req_id)
-        if req_id not in self.cached:
-            self.cached[req_id] = set()
-        self.cached[req_id].add(input_id)
+        
+        is_mm_hash_preallocated = (mm_hash in self.preallocated)
+        is_cached = (mm_hash in self.cached)
+        is_referenced = (bool(self.cached[mm_hash]) if is_cached else False)
+
+        # Add mm_input preallocation fact to self.preallocated
+        if not is_mm_hash_preallocated:
+            self.preallocated[mm_hash] = {}
+
+        preallocated_reqs = self.preallocated[mm_hash]
+        if req_id not in preallocated_reqs:
+            preallocated_reqs[req_id] = {}
+        preallocated_reqs[req_id][input_id] = num_tokens
+        
+        if is_cached:
+            # Block freeableness of the targeted mm_hash if it's freeable
+            if not (is_referenced or is_mm_hash_preallocated):
+                num_tokens = self.freeable.pop(mm_hash)
+                self.num_freeable_slots -= num_tokens
+            return False
+        elif not is_mm_hash_preallocated:
+            self.num_free_slots -= num_tokens
+            self.num_freeable_slots -= num_tokens
+            return True
+        
+        # Already preallocated in past, not cached, that means that encoder
+        # cache will be injected by some other (req_id, input_id) pair
+        return False
+
+    def finalize_allocation(
+        self, req_id: str, input_id: int, mm_hash: str, skipped: bool
+    ) -> None:
+        """Complete the allocation process for a preallocated encoder input.
+        
+        Converts a preallocation into an actual allocation or releases the
+        preallocation if it was skipped. This method is called after the
+        encoder cache is injected.
+        
+        Args:
+            req_id: ID of the request finalizing allocation.
+            input_id: Index of the multimodal input within the request.
+            mm_hash: Hash identifier of the multimodal input data.
+            skipped: True if this request skipped encoding (e.g., another
+                    request provided the cached data), False otherwise.
+        """
+        preallocated_reqs = self.preallocated[mm_hash]
+        num_tokens = preallocated_reqs[req_id].pop(input_id)        
+        is_preallocated = True
+        
+        if not preallocated_reqs[req_id]:
+            preallocated_reqs.pop(req_id)        
+        if not self.preallocated[mm_hash]:
+            self.preallocated.pop(mm_hash)
+            is_preallocated = False
+        
+        if mm_hash not in self.cached:
+            self.cached[mm_hash] = set()
+        if not skipped:
+            self.cached[mm_hash].add(req_id)
+        elif not self.cached[mm_hash] and not is_preallocated:
+            self.freeable[mm_hash] = num_tokens
+            self.num_freeable_slots += num_tokens
 
 
 def compute_encoder_budget(

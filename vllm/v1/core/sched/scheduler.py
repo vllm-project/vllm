@@ -62,11 +62,8 @@ class Scheduler(SchedulerInterface):
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
-<<<<<<< HEAD
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
-=======
         self.epd_disagg_config = vllm_config.epd_disagg_config
->>>>>>> bf5fdf11a ([Core] Encoder separation for Encode-Prefill-Decode Disaggregation)
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -244,7 +241,6 @@ class Scheduler(SchedulerInterface):
                  ) = self._try_schedule_encoder_inputs(
                      request, request.num_computed_tokens, num_new_tokens,
                      encoder_compute_budget)
-
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
                 # reasons:
@@ -817,7 +813,6 @@ class Scheduler(SchedulerInterface):
             encoder_compute_budget -= num_encoder_tokens
             mm_hashes_to_schedule.add(request.mm_hashes[i])
             encoder_inputs_to_schedule.append(i)
-
         return (
             encoder_inputs_to_schedule,
             num_new_tokens,
@@ -868,14 +863,11 @@ class Scheduler(SchedulerInterface):
         injected_mm_data = model_runner_output.injected_mm_data
         
         if self.separated_encode:
-            for (req_id, input_id) in injected_mm_data:
-                if self.ec_preallocator.mm_inputs_done[req_id] <= input_id:
-                    self.encoder_cache_manager.finalize_allocation(
-                        req_id, input_id)
-                else:
-                    self.encoder_cache_manager.depreallocate(req_id, input_id)
-                    # Temporary solution to get stable runnable version v
-                    self.encoder_cache_manager.freed.append((req_id, input_id))
+            for (req_id, input_id, mm_hash) in injected_mm_data:
+                is_skipped = not (self.ec_preallocator.mm_inputs_done[req_id] <= input_id) 
+                self.encoder_cache_manager.finalize_allocation(
+                    req_id, input_id, mm_hash, is_skipped 
+                )
             # Finalize allocations or get rid of them
             self._perform_preallocations()
 
@@ -1303,10 +1295,28 @@ class Scheduler(SchedulerInterface):
                 if not prealloc: # can't preallocate
                     return
                 if candidate is not None:
-                    self.encoder_cache_manager.preallocate(*candidate)
+                    self.encoder_cache_manager.can_allocate_tokens(candidate[2])
+                    is_receiving_required = self.encoder_cache_manager.preallocate(
+                        *candidate
+                    )
+                    self.ec_preallocator.send_prealloc_notification(
+                        candidate[0],
+                        candidate[1],
+                        is_receiving_required,
+                        candidate[3],
+                    )
             # last element
             
             prealloc, candidate = self.ec_preallocator.get_prealloc_candidate(
                 self.encoder_cache_manager.num_free_slots, fill_next = False)
             if (candidate is not None):
-                self.encoder_cache_manager.preallocate(*candidate)
+                self.encoder_cache_manager.can_allocate_tokens(candidate[2])                
+                is_receiving_required = self.encoder_cache_manager.preallocate(
+                    *candidate
+                )
+                self.ec_preallocator.send_prealloc_notification(
+                    candidate[0],
+                    candidate[1],
+                    is_receiving_required,
+                    candidate[3],
+                )

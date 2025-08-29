@@ -3,9 +3,7 @@
 
 from __future__ import annotations
 
-import itertools
-import queue
-import threading
+import os
 import time
 from collections import defaultdict
 from collections.abc import Iterable
@@ -31,7 +29,7 @@ from vllm.v1.engine import (EngineCoreEventType, EngineCoreOutput,
                             EngineCoreOutputs)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
@@ -98,11 +96,15 @@ class EncoderScheduler(SchedulerInterface):
         
         self.ec_connector = RedisECConnector(
             vllm_config = self.vllm_config,
+            device=None,
+            # no need to pass device if intra_instance_type scheduler
             intra_instance_type = "scheduler",
             preallocate_callback = None,
-            injection_callback = None
+            injection_callback = None,
+            redis_host=os.getenv("REDIS_HOST"),
+            redis_port=os.getenv("REDIS_PORT"),
         )
-        self._allocated: dict[tuple[str, int], int] = {}
+        self._allocated: dict[str, dict[int, tuple[int, str]]] = {}
 
     def schedule(self) -> SchedulerOutput:
         scheduled_new_reqs: list[Request] = []
@@ -111,45 +113,63 @@ class EncoderScheduler(SchedulerInterface):
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
-        encoder_budget = self.max_num_encoder_input_tokens
+        encoder_compute_budget = self.max_num_encoder_input_tokens
         
         # For logging.
         scheduled_timestamp = time.monotonic()
-
-
+        # mm input is processed in 1 step.
         while self.waiting and token_budget > 0:
             if len(self.running) == self.max_num_running_reqs:
                 break
 
-            request = self.waiting.peek_request()
-            encoder_inputs_to_schedule = None
-            new_encoder_budget = encoder_budget
+            request = self.waiting.peek_request()        
             if not request.has_encoder_inputs:
                 raise RuntimeError("Request without encoder input")
    
+            new_encoder_compute_budget = encoder_compute_budget
             #Schedule all mm inputs at once:
+            mm_hashes_to_schedule = set()
             mm_positions = request.mm_positions
-            total_size, required_budget = 0, 0
-            for i, pos_info in enumerate(mm_positions):
-                if self.encoder_cache_manager.has_cache(request, i):
-                    continue
-                total_size += request.get_num_encoder_tokens(i)
-                required_budget += pos_info.length
-
-            if ((not self.encoder_cache_manager.can_preallocate(total_size)) 
-                or required_budget > new_encoder_budget):
-                break
-            encoder_inputs_to_schedule = []
-            for i, pos_info in enumerate(mm_positions):
-                num_encoder_tokens = pos_info.length
-                new_encoder_budget -= num_encoder_tokens
-                encoder_inputs_to_schedule.append(i)
             
-            # Sanity check:
-            assert (new_encoder_budget + required_budget == encoder_budget)
+            num_tokens_to_schedule = 0
+            can_allocate_all = True
+            encoder_inputs_to_schedule = []
+            is_cached = []
+            
+            for input_id, pos_info in enumerate(mm_positions):
+                num_encoder_tokens = pos_info.length
+                if (
+                    request.mm_hashes[input_id] in mm_hashes_to_schedule
+                    or self.encoder_cache_manager.check_and_update_cache(
+                        request, input_id
+                    )
+                ):
+                    # On Encoder instance we need to send all inputs to model runner
+                    # because we need to pass (req_id, input_id) to model runner's
+                    # ec connector, to send the cache to PD instance, so we will add
+                    # it to the scheduled encoder inputs without changing budget
+                    # and in model runner we will just skip all calculated values
+                    encoder_inputs_to_schedule.append(input_id)
+                    is_cached.append(True)
+                    continue
+                if not self.encoder_cache_manager.can_allocate(
+                    request=request, 
+                    input_id=input_id,
+                    encoder_compute_budget=new_encoder_compute_budget,
+                    num_tokens_to_schedule=num_tokens_to_schedule,
+                ):
+                    can_allocate_all = False
+                    break
+                num_tokens_to_schedule += num_encoder_tokens
+                new_encoder_compute_budget -= num_encoder_tokens
+                encoder_inputs_to_schedule.append(input_id)
+                is_cached.append(False)
+            
+            # NOTE: Note that all updates from loop above are not applied 
+            # if we can't allocate all mm_inputs    
+            if not can_allocate_all:
+                break        
 
-            # Request was already popped from self.waiting
-            # unless it was re-added above due to new_blocks being None.
             request = self.waiting.pop_request()
             self.running.append(request)
 
@@ -163,20 +183,25 @@ class EncoderScheduler(SchedulerInterface):
                     f"Invalid request status: {request.status}")
 
             request.status = RequestStatus.RUNNING
-            # Encoder-related.
-            scheduled_encoder_inputs[request.request_id] = (
-                encoder_inputs_to_schedule)
+            req_id = request.request_id
+            scheduled_encoder_inputs[req_id] = encoder_inputs_to_schedule
+            
             # Allocate the encoder cache.
-            for i in encoder_inputs_to_schedule:
-                self.encoder_cache_manager.allocate(request, i)
+            for input_id, is_cached_input in zip(encoder_inputs_to_schedule, is_cached):
+                mm_hash = request.mm_hashes[input_id]
+                num_encoder_tokens = request.get_num_encoder_tokens(input_id)
+                if not is_cached_input:
+                    self.encoder_cache_manager.allocate(request, input_id)               
                 self.ec_connector.schedule_send_encoder_cache_metadata(
-                    request.request_id,
-                    i,
-                    request.get_num_encoder_tokens(i)
+                    req_id,
+                    input_id,
+                    num_encoder_tokens,
+                    mm_hash 
                 )
-                self._allocated[(request.request_id, i)] = request.get_num_encoder_tokens(i)
-            encoder_budget = new_encoder_budget
-
+                if not req_id in self._allocated:
+                    self._allocated[req_id] = {} 
+                self._allocated[req_id][input_id] = (num_encoder_tokens, mm_hash)
+            encoder_compute_budget = new_encoder_compute_budget
 
 
         assert len(self.running) <= self.max_num_running_reqs
@@ -195,7 +220,8 @@ class EncoderScheduler(SchedulerInterface):
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=0,
             finished_req_ids=self.finished_req_ids,
-            free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
+            free_encoder_mm_hashes=self.encoder_cache_manager.\
+                get_freed_mm_hashes(),
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
@@ -208,16 +234,24 @@ class EncoderScheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:            
+        
+        # clean up the logic space of mm_data that was transfered
         transfered_mm_data = model_runner_output.transfered_mm_data
 
         for (req_id, input_id) in transfered_mm_data:
-            assert (req_id, input_id) in self._allocated
-            cache_size = self._allocated[(req_id, input_id)]
-            self._allocated.pop((req_id, input_id))
-            self.encoder_cache_manager.deallocate(req_id, input_id, cache_size)
+            assert req_id in self._allocated
+            assert input_id in self._allocated[req_id]
+            cache_size, mm_hash = self._allocated[req_id][input_id]
+            self._allocated[req_id].pop(input_id)
+            if not self._allocated[req_id]:
+                self._allocated.pop(req_id)
+            self.encoder_cache_manager.free_encoder_input_after_finish(
+                req_id, cache_size, mm_hash
+            )
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
 
+        # stop all requests from the current batch
         model_finished = []
         for request in self.running:
             req_id = request.request_id
@@ -346,4 +380,10 @@ class EncoderScheduler(SchedulerInterface):
         return None
 
     def reset_prefix_cache(self) -> bool:
+        pass
+
+    def update_draft_token_ids(
+        self,
+        draft_token_ids: "DraftTokenIds",
+    ) -> None:
         pass

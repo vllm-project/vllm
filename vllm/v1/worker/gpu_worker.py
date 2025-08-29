@@ -210,12 +210,14 @@ class Worker(WorkerBase):
         self.model_runner: Union[DisaggEncodeGPURunnerWrapper, GPUModelRunner,
                                  DisaggPrefillDecodeGPURunnerWrapper]
         model_runner_class = GPUModelRunner
+        # When EPD disaggregation is enabled, the system uses wrapper classes of GPUModelRunner
         if self.separated_encode:
             if self.instance_type == "encode":
                 model_runner_class = DisaggEncodeGPURunnerWrapper
             elif (self.instance_type == "prefill+decode"
                   or self.instance_type == "prefill"):
                 model_runner_class = DisaggPrefillDecodeGPURunnerWrapper
+        
         self.model_runner = model_runner_class(self.vllm_config, self.device)
 
         if self.rank == 0:

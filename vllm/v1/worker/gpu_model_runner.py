@@ -183,6 +183,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
+        # EPD: encoder cache lock for safety during encoder cache injections
         self.encoder_cache_lock: threading.Lock = threading.Lock()
 
         self.use_aux_hidden_state_outputs = False
