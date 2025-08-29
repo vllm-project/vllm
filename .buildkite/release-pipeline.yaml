@@ -44,18 +44,16 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
-  # Note(simon): We can always build CUDA 11.8 wheel to ensure the build is working.
-  # However, this block can be uncommented to save some compute hours.
-  # - block: "Build CUDA 11.8 wheel"
-  #   key: block-build-cu118-wheel
+  - block: "Build CUDA 12.9 wheel"
+    key: block-build-cu129-wheel
 
-  - label: "Build wheel - CUDA 11.8"
-    # depends_on: block-build-cu118-wheel
-    id: build-wheel-cuda-11-8
+  - label: "Build wheel - CUDA 12.9"
+    depends_on: block-build-cu129-wheel
+    id: build-wheel-cuda-12-9
     agents:
       queue: cpu_queue_postmerge
     commands:
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=11.8.0 --build-arg torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0+PTX' --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.9.1 --build-arg torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0+PTX' --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
       - "bash .buildkite/scripts/upload-wheels.sh"
@@ -103,7 +101,7 @@ steps:
       - create-multi-arch-manifest
       - build-wheel-cuda-12-8
       - build-wheel-cuda-12-6
-      - build-wheel-cuda-11-8
+      - build-wheel-cuda-12-9
     id: annotate-release-workflow
     agents:
       queue: cpu_queue_postmerge
