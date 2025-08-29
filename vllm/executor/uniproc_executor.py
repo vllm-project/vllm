@@ -3,6 +3,8 @@
 
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from threading import Thread
+from queue import Queue
 
 import torch
 import torch.distributed as dist
@@ -14,6 +16,7 @@ from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         run_method)
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.worker.worker_base import WorkerWrapperBase
+from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
 
@@ -37,6 +40,8 @@ class UniProcExecutor(ExecutorBase):
             local_rank = int(device_info[1])
         rank = 0
         is_driver_worker = True
+        self._input_queue = Queue()
+        self._output_queue = Queue()
         kwargs = dict(
             vllm_config=self.vllm_config,
             local_rank=local_rank,
@@ -44,6 +49,14 @@ class UniProcExecutor(ExecutorBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+        if self.vllm_config.scheduler_config.async_scheduling:
+            self._execute_model_thread = Thread(
+                target=self._execute_model_loop,
+                daemon=True,
+                name="execute_model_loop",
+            )
+            self._execute_model_thread.start()
+            kwargs["output_queue"] = self._output_queue
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
@@ -70,6 +83,18 @@ class UniProcExecutor(ExecutorBase):
         ReconfigureRankType.SHUTDOWN_CURRENT_RANK:
             self.shutdown()
         return
+
+    def _execute_model_loop(self):
+        while True:
+            sheduler_output = self._input_queue.get()
+            super().execute_model(sheduler_output)
+
+    def execute_model(self, scheduler_output: SchedulerOutput):
+        if self.vllm_config.scheduler_config.async_scheduling:
+            self._input_queue.put(scheduler_output)
+            output = self._output_queue.get()
+            return output
+        return super().execute_model(scheduler_output)
 
 
 UniProcExecutorAsync = UniProcExecutor

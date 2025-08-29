@@ -9,6 +9,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
+from queue import Queue
 
 import numpy as np
 import torch
@@ -105,6 +106,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         vllm_config: VllmConfig,
         device: torch.device,
+        output_queue: Optional[Queue] = None,
     ):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -319,6 +321,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             dtype=torch.int64,
             device="cpu",
             pin_memory=self.pin_memory)
+        # when enbale aysnc_scheduling in single process mode,
+        # we use a queue to transfer the model outputs and
+        # notify the main thread to make scheduling of next step.
+        self.output_queue = output_queue
 
     def _make_buffer(self, *args, dtype: torch.dtype) -> CpuGpuBuffer:
         return CpuGpuBuffer(*args,
@@ -1739,8 +1745,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         self.eplb_step()
-
-        return ModelRunnerOutput(
+        output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=valid_sampled_token_ids,
@@ -1750,6 +1755,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
         )
+        if self.output_queue is None:
+            return output
+        self.output_queue.put(output)
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         if self._draft_token_ids is None:
@@ -3268,5 +3276,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         pinned = self.sampled_token_ids_pinned_cpu[:sampled_token_ids.shape[0]]
         pinned.copy_(sampled_token_ids, non_blocking=True)
         self.transfer_event.record()
+        if self.output_queue is not None:
+            # just send a flag to notify the main thread to make
+            # scheduling of next step during the synchronizing time.
+            self.output_queue.put(True)
         self.transfer_event.synchronize()
         return pinned.tolist()

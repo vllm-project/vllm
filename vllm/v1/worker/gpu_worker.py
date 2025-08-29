@@ -6,6 +6,7 @@ import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any, Optional
+from queue import Queue
 
 import torch
 import torch.distributed
@@ -50,6 +51,7 @@ class Worker(WorkerBase):
         rank: int,
         distributed_init_method: str,
         is_driver_worker: bool = False,
+        output_queue: Optional[Queue] = None,
     ):
 
         super().__init__(vllm_config=vllm_config,
@@ -93,6 +95,7 @@ class Worker(WorkerBase):
                     torch_profiler_trace_dir, use_gzip=True))
         else:
             self.profiler = None
+        self.output_queue = output_queue
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
@@ -199,7 +202,7 @@ class Worker(WorkerBase):
 
         # Construct the model runner
         self.model_runner: GPUModelRunner = GPUModelRunner(
-            self.vllm_config, self.device)
+            self.vllm_config, self.device, self.output_queue)
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.

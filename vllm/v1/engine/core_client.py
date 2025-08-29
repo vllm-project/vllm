@@ -243,9 +243,13 @@ class InprocClient(EngineCoreClient):
 
     def __init__(self, *args, **kwargs):
         self.engine_core = EngineCore(*args, **kwargs)
+        self.async_scehduling = self.engine_core.vllm_config.scheduler_config.async_scheduling
 
     def get_output(self) -> EngineCoreOutputs:
-        outputs, _ = self.engine_core.step()
+        if self.async_scehduling:
+            outputs, _ = self.engine_core.step_async_in_process()
+        else:
+            outputs, _ = self.engine_core.step()
         return outputs.get(0) or EngineCoreOutputs()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
