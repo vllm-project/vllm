@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Helper functions to work with nested JSON structures."""
+
 from collections.abc import Iterable
 from functools import reduce
 from typing import Callable, TypeVar, Union, overload
@@ -8,8 +9,12 @@ from typing import Callable, TypeVar, Union, overload
 _T = TypeVar("_T")
 _U = TypeVar("_U")
 
-JSONTree = Union[dict[str, "JSONTree[_T]"], list["JSONTree[_T]"],
-                 tuple["JSONTree[_T]", ...], _T]
+JSONTree = Union[
+    dict[str, "JSONTree[_T]"],
+    list["JSONTree[_T]"],
+    tuple["JSONTree[_T]", ...],
+    _T,
+]
 """A nested JSON structure where the leaves need not be JSON-serializable."""
 
 
@@ -45,8 +50,7 @@ def json_reduce_leaves(
     func: Callable[[_T, _T], _T],
     value: JSONTree[_T],
     /,
-) -> _T:
-    ...
+) -> _T: ...
 
 
 @overload
@@ -55,8 +59,7 @@ def json_reduce_leaves(
     value: JSONTree[_T],
     initial: _U,
     /,
-) -> _U:
-    ...
+) -> _U: ...
 
 
 def json_reduce_leaves(
@@ -78,3 +81,8 @@ def json_reduce_leaves(
         json_iter_leaves(value),
         initial,
     )
+
+
+def json_count_leaves(value: JSONTree[_T]) -> int:
+    """Count the number of leaves in a nested JSON structure."""
+    return sum(1 for _ in json_iter_leaves(value))
