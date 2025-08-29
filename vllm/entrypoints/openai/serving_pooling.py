@@ -4,7 +4,7 @@
 import asyncio
 import base64
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from typing import Final, Literal, Optional, Union, cast
 
 import jinja2
@@ -22,10 +22,11 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
                                               IOProcessorRequest,
                                               IOProcessorResponse,
                                               PoolingChatRequest,
+                                              PoolingCompletionRequest,
                                               PoolingRequest, PoolingResponse,
                                               PoolingResponseData, UsageInfo)
 # yapf: enable
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import OpenAIServing, RequestPrompt
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
@@ -125,7 +126,9 @@ class OpenAIServingPooling(OpenAIServing):
 
                 engine_prompts = await self.io_processor.pre_process_async(
                     prompt=validated_prompt, request_id=request_id)
-                request_prompts = [""] * len(engine_prompts)
+                request_prompts: Sequence[RequestPrompt] = [
+                    ""
+                ] * len(engine_prompts)
 
             elif isinstance(request, PoolingChatRequest):
                 (
@@ -146,7 +149,7 @@ class OpenAIServingPooling(OpenAIServing):
                     truncate_prompt_tokens=truncate_prompt_tokens,
                     add_special_tokens=request.add_special_tokens,
                 )
-            else:
+            elif isinstance(request, PoolingCompletionRequest):
                 (request_prompts,
                  engine_prompts) = await self._preprocess_completion(
                      request,
@@ -155,6 +158,9 @@ class OpenAIServingPooling(OpenAIServing):
                      truncate_prompt_tokens=truncate_prompt_tokens,
                      add_special_tokens=request.add_special_tokens,
                  )
+            else:
+                raise ValueError(
+                    f"Unsupported request of type {type(request)}")
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
@@ -203,6 +209,8 @@ class OpenAIServingPooling(OpenAIServing):
             )
             return self.io_processor.output_to_response(output)
 
+        assert isinstance(request,
+                          (PoolingCompletionRequest, PoolingChatRequest))
         num_prompts = len(engine_prompts)
 
         # Non-streaming response

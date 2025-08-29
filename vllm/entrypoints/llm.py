@@ -966,6 +966,7 @@ class LLM:
 
         if io_processor_prompt:
             # get the post-processed model outputs
+            assert self.io_processor is not None
             processed_outputs = self.io_processor.post_process(
                 model_output=model_outputs)
 
