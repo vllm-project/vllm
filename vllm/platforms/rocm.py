@@ -17,7 +17,6 @@ from vllm.utils import cuda_device_count_stateless
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
-    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
@@ -130,6 +129,7 @@ def use_rocm_custom_paged_attention(
         kv_cache_dtype: str,
         alibi_slopes: Optional[torch.Tensor] = None,
         sinks: Optional[torch.Tensor] = None) -> bool:
+    from vllm._aiter_ops import rocm_aiter_ops
 
     GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
     ON_GFX9 = any(arch in GPU_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
@@ -177,6 +177,8 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
+        from vllm._aiter_ops import rocm_aiter_ops
+
         if support_fa:
             if rocm_aiter_ops.is_mha_enabled():
                 # Note: AITER FA is only supported for Qwen-VL models.
@@ -190,6 +192,8 @@ class RocmPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla,
                              has_sink) -> str:
+        from vllm._aiter_ops import rocm_aiter_ops
+
         if use_mla:
             if selected_backend is None:
                 selected_backend = (
