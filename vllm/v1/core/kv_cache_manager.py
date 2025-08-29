@@ -302,6 +302,10 @@ class KVCacheManager:
         chunk_size: int = 1024,
     ) -> Optional["KVCacheBlocks"]:
         """
+        Allocate slots, and then remove unnecessary blocks immediately.
+
+        Why we need this function:
+
         `allocate_slots` will NOT immediately evict allocated blocks,
         it will evict them in future allocations.
 
@@ -314,9 +318,10 @@ class KVCacheManager:
         the sliding window.
         
         This function provides a workaround:
-        It allocates the blocks chunk-by-chunk. As a result, the
-        allocation of this chunk will evict the blocks outside
-        the sliding window created by previous chunks.
+        It allocates the blocks chunk-by-chunk, and then after each 
+        chunk, it will remove unnecessary blocks immediately.
+        In this way, the number of tokens allocated for this request but
+        outside the sliding window is always less than `chunk_size`.
 
         NOTE(Kuntai):
         - `num_new_computed_tokens` and `new_computed_blocks` are applied 

@@ -468,9 +468,8 @@ class Scheduler(SchedulerInterface):
                         num_external_computed_tokens > 0,
                         num_encoder_tokens == 0,
                 ]):
-                    # FIXME(Kuntai): need to handle rollback when allocation
-                    # fails.
-                    # Allocate for prefix-cached tokens
+                    # Allocate for prefix-cached tokens (and remove tokens
+                    # outside the sliding window)
                     manager = self.kv_cache_manager
                     ret = (
                         manager.allocate_slots_and_remove_unnecessary_blocks(
@@ -479,14 +478,35 @@ class Scheduler(SchedulerInterface):
                             num_new_local_computed_tokens,
                             new_computed_blocks,
                             delay_cache_blocks=load_kv_async,
+                            # see the docstring of
+                            # `allocate_slots_and_remove_unnecessary_blocks`
+                            # for the meaning of `chunk_size`.
                             chunk_size=self.max_num_scheduled_tokens,
                         ))
+
+                    # FIXME(Kuntai): need to handle rollback when allocation
+                    # fails.
                     if ret is None:
                         # The request cannot be scheduled.
                         break
-                    # Then allocate for new tokens
+
+                    # Then allocate for new tokens.
+                    # NOTE(Kuntai): in this allocation, we cannot remove
+                    # tokens outside the sliding window, because the generation
+                    # of new tokens depends on these tokens,
+                    # so we need to use the old `allocate_slots` api.
                     ret = self.kv_cache_manager.allocate_slots(
                         request,
+                        # NOTE(Kuntai): `allocate_slots(request, x)` means
+                        # that we allocate x more tokens besides the
+                        # already-computed tokens.
+                        # As a result, even if we already allocated for
+                        # num_external_computed_tokens and we only want to
+                        # allocate for num_new_tokens, we still have to
+                        # pass `num_new_tokens + num_external_computed_tokens`
+                        # to `allocate_slots` since
+                        # `num_external_computed_tokens` is not treated as
+                        # computed tokens yet.
                         num_new_tokens + num_external_computed_tokens,
                         num_lookahead_tokens=effective_lookahead_tokens,
                         delay_cache_blocks=load_kv_async,
