@@ -434,15 +434,13 @@ class EngineCore:
         This function could be directly used in input processing thread to allow
         request initialization running in parallel with Model forward
         """
-        if request.mm_hashes is not None:
-            assert request.mm_kwargs is not None
-
-            # Note on thread safety: no race condition.
-            # `mm_receiver_cache` is reset at the end of LLMEngine init,
-            # and will only accessed in the input processing thread afterwards.
-            if self.mm_receiver_cache is not None:
-                request.mm_kwargs = self.mm_receiver_cache.get_and_update(
-                    request.mm_kwargs, request.mm_hashes)
+        # Note on thread safety: no race condition.
+        # `mm_receiver_cache` is reset at the end of LLMEngine init,
+        # and will only accessed in the input processing thread afterwards.
+        if self.mm_receiver_cache is not None and request.mm_features:
+            request.mm_features = (
+                self.mm_receiver_cache.get_and_update_features(
+                    request.mm_features))
 
         req = Request.from_engine_core_request(request,
                                                self.request_block_hasher)
