@@ -82,6 +82,7 @@ class FinishedRequestStats:
     prefill_time: float = 0.0
     inference_time: float = 0.0
     decode_time: float = 0.0
+    time_per_output_token: float = 0.0
 
 
 class IterationStats:
@@ -96,7 +97,7 @@ class IterationStats:
         self.max_num_generation_tokens_iter: list[int] = []
         self.n_params_iter: list[int] = []
         self.time_to_first_tokens_iter: list[float] = []
-        self.time_per_output_tokens_iter: list[float] = []
+        self.inter_token_latency_iter: list[float] = []
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
 
@@ -128,8 +129,8 @@ class IterationStats:
         if is_prefilling:
             req_stats.first_token_ts = engine_core_timestamp
         else:
-            tpot = engine_core_timestamp - req_stats.last_token_ts
-            self.time_per_output_tokens_iter.append(tpot)
+            itl = engine_core_timestamp - req_stats.last_token_ts
+            self.inter_token_latency.append(itl)
 
         req_stats.last_token_ts = engine_core_timestamp
 
@@ -154,7 +155,8 @@ class IterationStats:
     def update_from_finished_request(self, finish_reason: "FinishReason",
                                      num_prompt_tokens: int,
                                      max_tokens_param: Optional[int],
-                                     req_stats: RequestStateStats):
+                                     req_stats: RequestStateStats,
+                                     consumer_role: Optional[bool] = False):
         e2e_latency = self._time_since(req_stats.arrival_time)
 
         # Queued interval is from first QUEUED event to first SCHEDULED
@@ -172,6 +174,11 @@ class IterationStats:
         # Any preemptions during prefill or decode are included
         inference_time = req_stats.last_token_ts - req_stats.scheduled_ts
 
+        # time_per_output_token is calculated as 
+        # decode_time / decode_token_nums
+        time_per_output_token = (decode_time / (num_prompt_tokens - 1)
+                                 if num_prompt_tokens - 1 > 0 else 0)
+
         finished_req = \
             FinishedRequestStats(finish_reason=finish_reason,
                                  e2e_latency=e2e_latency,
@@ -181,7 +188,8 @@ class IterationStats:
                                  queued_time=queued_time,
                                  prefill_time=prefill_time,
                                  inference_time=inference_time,
-                                 decode_time=decode_time)
+                                 decode_time=decode_time,
+                                 time_per_output_token=time_per_output_token)
         self.finished_requests.append(finished_req)
 
 
