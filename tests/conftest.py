@@ -1299,7 +1299,7 @@ def _find_free_port() -> int:
 
 
 @pytest.fixture(scope="session")
-def local_asset_server_base_url() -> str:
+def local_asset_server_base_url() -> Generator[str, None, None]:
     """
     Starts a thread based HTTP server bound to 127.0.0.1 on a random free port. 
     The server currently servers images at:
@@ -1318,8 +1318,7 @@ def local_asset_server_base_url() -> str:
 
 
 @pytest.fixture
-def image_url(request,
-              local_asset_server_base_url) -> Generator[str, None, None]:
+def image_url(request, local_asset_server_base_url) -> str:
     # request.param is one of the IMAGE_URLS filenames
     name = request.param
     return f"{local_asset_server_base_url}/{name}"
