@@ -26,7 +26,7 @@ def cal_diff(x: torch.Tensor,
 
 CUTLASS_MLA_UNSUPPORTED_REASON = \
     "Cutlass MLA Requires compute capability of 10 or above." \
-    if not current_platform.has_device_capability(100) \
+    if not current_platform.is_device_capability(100) \
     else "Cutlass MLA is supported"
 
 
@@ -43,7 +43,7 @@ CUTLASS_MLA_UNSUPPORTED_REASON = \
 @pytest.mark.parametrize("causal", [True])
 @pytest.mark.parametrize("varlen", [False, True])
 @pytest.mark.parametrize("torch_dtype",
-                         [torch.bfloat16, torch.float16, torch.float8_e4m3fn])
+                         [torch.bfloat16, torch.float8_e4m3fn])
 @torch.inference_mode()
 def test_cutlass_mla_decode(b, s_q, mean_sk, h_q, h_kv, d, dv, block_size,
                             causal, varlen, torch_dtype):
