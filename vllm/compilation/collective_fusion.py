@@ -20,7 +20,8 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils import (_FI_ALLREDUCE_ONE_SHOT_MAX_SIZES,
+                        direct_register_custom_op, flashinfer_max_size)
 from .inductor_pass import enable_fake_mode
 from .vllm_inductor_pass import VllmInductorPass
 
@@ -439,6 +440,23 @@ if flashinfer_comm is not None:
         scale_out: Optional[torch.Tensor] = None,
         scale_factor: Optional[torch.Tensor] = None,
     ) -> None:
+        num_tokens, hidden_size = allreduce_in.shape
+        element_size = allreduce_in.element_size()
+        current_tensor_size = num_tokens * hidden_size * element_size
+        max_tensor_size = max_token_num * hidden_size * element_size
+        assert current_tensor_size <= max_tensor_size, \
+            f"Current tensor size {current_tensor_size} is larger than " \
+            f"max token num {max_token_num} * hidden size {hidden_size} * " \
+            f"element size {element_size}"
+        device_capability = current_platform.get_device_capability(
+        ).as_version_str()
+        max_sizes = _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES.get(device_capability, {})
+        # Get one shot input size limit for the current world size
+        max_one_shot_size = max_sizes.get(world_size, None)
+        # Use one shot if no max size is specified
+        use_oneshot = max_one_shot_size is None or \
+            current_tensor_size <= max_one_shot_size
+
         assert (
             _FI_WORKSPACE_TENSOR
             is not None), "Flashinfer must be enabled when using flashinfer"
@@ -465,7 +483,7 @@ if flashinfer_comm is not None:
             hidden_dim=allreduce_in.shape[-1],
             workspace_ptrs=_FI_WORKSPACE_TENSOR,
             launch_with_pdl=launch_with_pdl,
-            use_oneshot=True,
+            use_oneshot=use_oneshot,
             trigger_completion_at_end=trigger_completion_at_end,
             fp32_acc=fp32_acc,
             pattern_code=pattern_code,
@@ -1458,24 +1476,28 @@ class AllReduceFusionPass(VllmInductorPass):
                 "Flashinfer is not installed or comm module not found, "
                 "skipping allreduce fusion pass")
             return
-        # Check if the world size is supported
-        if self.tp_size not in _FI_MAX_SIZES:
+        max_size = flashinfer_max_size(self.tp_size, config)
+        if max_size is None:
+            # Flashinfer doesn't support current world size
             logger.warning(
                 "Flashinfer allreduce fusion is not "
                 "supported for world size %s",
                 self.tp_size,
             )
             return
-        max_num_token = min(
-            _FI_MAX_SIZES.get(self.tp_size, _DEFAULT_FI_MAX_SIZE) //
-            (self.hidden_dim * self.tp_size * (4 if use_fp32_lamport else 2)),
-            config.compilation_config.pass_config.
-            fi_allreduce_fusion_max_token_num)
+        element_size = 4 if use_fp32_lamport else 2
+        max_token_num = (max_size //
+                         (self.hidden_dim * element_size))
+        # take the min to save workspace size and we'll never use more
+        # than max_num_batched_tokens anyways
+        max_token_num = min(max_token_num,
+                            config.scheduler_config.max_num_batched_tokens)
+
         self.ipc_handles, workspace_tensor = (
             flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
                 tp_rank=rank,
                 tp_size=self.tp_size,
-                max_token_num=max_num_token,
+                max_token_num=max_token_num,
                 hidden_dim=self.hidden_dim,
                 group=self.group,
                 use_fp32_lamport=use_fp32_lamport,
@@ -1487,7 +1509,7 @@ class AllReduceFusionPass(VllmInductorPass):
             rank=rank,
             world_size=self.tp_size,
             use_fp32_lamport=use_fp32_lamport,
-            max_token_num=max_num_token,
+            max_token_num=max_token_num,
         )
         is_custom_ops = ("+rms_norm"  in config.compilation_config.custom_ops, 
                          "+quant_fp8" in config.compilation_config.custom_ops)
