@@ -525,9 +525,6 @@ class InputBatch:
         Any consecutive empty indices at the very end of the list are not
         filled.
 
-        Args:
-          empty_req_indices: empty indices which may be filled.
-
         Returns:
           swaps: list of (from,to) swap tuples for moved requests
           empty_req_indices: indices not filled by condensation

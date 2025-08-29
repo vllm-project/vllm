@@ -115,7 +115,7 @@ class CacheConfig:
 
     In some KV sharing setups, e.g. YOCO (https://arxiv.org/abs/2405.05254),
     some layers can skip tokens corresponding to prefill. This flag enables
-    attention metadata for eligible layers to be overriden with metadata
+    attention metadata for eligible layers to be overridden with metadata
     necessary for implementing this optimization in some models (e.g. Gemma3n)
     """
 
@@ -145,11 +145,18 @@ class CacheConfig:
 
         self._verify_cache_dtype()
         self._verify_prefix_caching()
+        self._verify_kv_sharing_fast_prefill()
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
+
+    def _verify_kv_sharing_fast_prefill(self) -> None:
+        if self.kv_sharing_fast_prefill and not envs.VLLM_USE_V1:
+            raise NotImplementedError(
+                "Fast prefill optimization for KV sharing is not supported "
+                "in V0 currently.")
 
     @model_validator(mode='after')
     def _verify_args(self) -> Self:
@@ -161,11 +168,6 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
-
-        if self.kv_sharing_fast_prefill:
-            logger.warning_once(
-                "--kv-sharing-fast-prefill is currently work in progress "
-                "and not functional yet (i.e. no prefill savings)")
 
         return self
 
