@@ -26,6 +26,7 @@ from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QuantizationConfig,
                                                      get_quantization_config)
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.platforms import current_platform
 from vllm.utils import PlaceholderModule
 
@@ -60,6 +61,92 @@ logger = init_logger(__name__)
 # system reboots, so users will not complain about annoying lock files
 temp_dir = tempfile.gettempdir()
 
+def support_quantized_model_reload(func):
+    """decorator for `load_weights` flashrl patch
+    """
+    def patched_load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        if self.quant_config is None or not hasattr(self, original_weights_rebuild_keys):
+            # after parameter loading, additionall process weights is needed 
+            setattr(model, 'process_weights_after_loading_already_called', False)
+            
+            return func(self, weights)
+        else:
+                        
+            for _, module in self.named_modules():
+                if torch.is_tensor(getattr(module, 'workspace', None)):
+                    setattr(module, f'preserved_workspace', getattr(module, 'workspace'))
+            
+            existing_params = dict(self.named_parameters())
+            
+            # preserve original data, so that after parameter loading, we can put the parameter
+            # in the original tensor
+            original_param_dict = {}
+            for name, p in existing_params.items():
+                original_param_dict[name] = p.data
+                
+            # recover the parameter to the state before first loading
+            for name, (shape, stride, dtype, nbytes) in self.original_weights_rebuild_keys.items():
+                if name in existing_params:
+                    existing_params[name].data = torch.empty(shape, dtype=dtype) 
+            
+            for k, loader_k in self.recorded_loader.items():
+                for n, loader in loader_k.items():
+                    if not hasattr(existing_params[n], k):
+                        setattr(existing_params[n], k, bond_method_to_cls(loader, existing_params[n]))
+
+            updated_params = func(self, weights)
+            
+            # manually conducting process weights after loading
+            process_weights_after_loading(self, None, None)
+            setattr(self, 'process_weights_after_loading_already_called', True)
+            
+            # if quantization is the naive `fp8`, the updated_params will only include `weight` while
+            # `weight_scale` is also updated but not included in the updated_params. 
+            if self.quant_config.get_name() == 'fp8' and (not self.quant_config.is_checkpoint_fp8_serialized):
+                
+                # put the value of the newly created tensor to the original tensor 
+                for name, p in self.named_parameters():
+                    
+                    if name in updated_params 
+                            or (name.endswith('_scale') and name[:-6] in updated_params):
+                        trided_data = torch.as_strided(
+                            p.data, 
+                            original_param_dict[name].shape, 
+                            original_param_dict[name].stride()
+                        )
+                        original_param_dict[name].copy_(trided_data)
+
+                    del p.data
+                    p.data = original_param_dict[name]
+                
+            else:
+                # put the value of the newly created tensor to the original tensor 
+                for name, p in self.named_parameters():
+                    
+                    if name in updated_params:
+                        trided_data = torch.as_strided(
+                            p.data, 
+                            original_param_dict[name].shape, 
+                            original_param_dict[name].stride()
+                        )
+                        original_param_dict[name].copy_(trided_data)
+
+                    del p.data
+                    p.data = original_param_dict[name]
+            
+            del original_param_dict
+            del existing_params
+            
+            for _, module in self.named_modules():
+                if torch.is_tensor(getattr(module, 'workspace', None)):
+                    setattr(module, 'workspace', getattr(module, 'preserved_workspace'))
+                    delattr(module, 'preserved_workspace')
+
+            return updated_params
+
+    return patched_load_weights
+    
 
 def enable_hf_transfer():
     """automatically activates hf_transfer

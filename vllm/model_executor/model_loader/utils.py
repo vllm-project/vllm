@@ -103,9 +103,9 @@ recorded_loader_keys = [
     '_assert_and_load',
 ]
 
-def process_weights_after_loading_core(model: nn.Module, model_config: ModelConfig,
+def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
                                   target_device: torch.device) -> None:
-    
+
     if model_config is None and target_device is None:
         model_config = getattr(model, 'last_model_config', None)
         target_device = getattr(model, 'last_target_device', None)
@@ -168,84 +168,6 @@ def process_weights_after_loading_core(model: nn.Module, model_config: ModelConf
             # TODO(lucas): see if there is a way to unify the signatures
             # of process_weights_after_loading
             module.process_weights_after_loading(model_config.dtype)
-
-def rebinding_and_load_weights(
-    first_time_load_weights,
-    weights,
-):
-    # after parameter loading, additionall process weights is needed 
-    setattr(model, 'process_weights_after_loading_already_called', False)
-    
-    for _, module in model.named_modules():
-        if torch.is_tensor(getattr(module, 'workspace', None)):
-            setattr(module, f'preserved_workspace', getattr(module, 'workspace'))
-    
-    existing_params = dict(model.named_parameters())
-    
-    # preserve original data, so that after parameter loading, we can put the parameter
-    # in the original tensor
-    original_param_dict = {}
-    for name, p in existing_params.items():
-        original_param_dict[name] = p.data
-    
-    # recover the parameter to the state before first loading
-    for name, (shape, stride, dtype, nbytes) in model.original_weights_rebuild_keys.items():
-        if name in existing_params:
-            existing_params[name].data = torch.empty(shape, dtype=dtype) 
-    
-    for k, loader_k in model.recorded_loader.items():
-        for n, loader in loader_k.items():
-            if not hasattr(existing_params[n], k):
-                setattr(existing_params[n], k, bond_method_to_cls(loader, existing_params[n]))
-
-    # after recovering, the weight loading can be called as usual
-    updated_params = first_time_load_weights(weights)
-    
-    # manually conducting process weights after loading
-    process_weights_after_loading_core(model, None, None)
-    setattr(model, 'process_weights_after_loading_already_called', True)
-    
-    # put the value of the newly created tensor to the original tensor 
-    for name, p in model.named_parameters():
-        assert name in original_param_dict, f'param {name} is not in original_param_dict'
-        assert original_param_dict[name].dtype == p.data.dtype, f'param {name} dtype mismatch: {original_param_dict[name].dtype} vs {p.data.dtype}'
-        assert original_param_dict[name].numel() == p.data.numel(), f'param {name} numel() mismatch: {original_param_dict[name].numel()} vs {p.data.numel()}'
-        
-        if name in updated_params:
-            trided_data = torch.as_strided(
-                p.data, 
-                original_param_dict[name].shape, 
-                original_param_dict[name].stride()
-            )
-            original_param_dict[name].copy_(trided_data)
-
-        del p.data
-        p.data = original_param_dict[name]
-    
-    del original_param_dict
-    del existing_params
-    gc.collect()
-    
-    for _, module in model.named_modules():
-        if torch.is_tensor(getattr(module, 'workspace', None)):
-            setattr(module, 'workspace', getattr(module, 'preserved_workspace'))
-            delattr(module, 'preserved_workspace')
-
-    return updated_params
-
-def process_weights_after_loading(model: nn.Module, model_config: ModelConfig,
-                                  target_device: torch.device) -> None:
-
-    process_weights_after_loading_core(model, model_config, target_device)
-    
-    if not hasattr(model, 'first_time_load_weights'):
-        from functools import partial
-        first_time_load_weights = model.load_weights
-        model.first_time_load_weights = first_time_load_weights
-        model.load_weights = partial(
-            first_time_load_weights, 
-            first_time_load_weights=first_time_load_weights,
-        )
 
 
 @contextmanager
