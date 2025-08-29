@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import http.server
 import json
 import math
+import mimetypes
 import os
+import socket
 import tempfile
+import threading
 from enum import Enum
 from typing import Any, Callable, Optional, TypedDict, TypeVar, Union, cast
 
@@ -1250,3 +1254,63 @@ def cli_config_file():
 def cli_config_file_with_model():
     """Return the path to the CLI config file with model."""
     return os.path.join(_TEST_DIR, "config", "test_config_with_model.yaml")
+
+
+class AssetHandler(http.server.BaseHTTPRequestHandler):
+    # _IMAGE_CACHE : Dict[str, bytes] = {}
+
+    def log_message(self, *args, **kwargs):
+        pass
+
+    def do_GET(self):
+        # Accepts paths like:/1280px-Venn_diagram_rgb.jpg
+        filename = self.path.lstrip("/")
+        if not filename or "." not in filename:
+            self.send_error(404, "Missing filename (expected /<name>.<ext>)")
+
+        base, ext = filename.rsplit(".", 1)
+        ext = ext.lower()
+
+        if ext not in ["jpg", "png"]:
+            self.send_error(404, f"Unsupported extension: .{ext}")
+            return
+
+        try:
+            data = ImageAsset(base).pil_image(ext=ext)
+        except Exception as e:
+            self.send_error(500, f"Failed to load asset: {e}")
+            return
+
+        ctype, _ = mimetypes.guess_type(filename)
+        if ctype is None:
+            ctype = {"jpg": "image/jpg", "png": "image/png"}[ext]
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def _find_free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture(scope="session")
+def local_asset_server_base_url() -> str:
+    """
+    Starts a thread based HTTP server bound to 127.0.0.1 on a random free port. 
+    The server currently servers images at:
+    http://127.0.0.1:<port>/<name>.<ext>
+    """
+    port = _find_free_port()
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), AssetHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.shutdown()
+        thread.join()
