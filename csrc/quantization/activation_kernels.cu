@@ -101,12 +101,12 @@ __device__ __forceinline__ float2 silu2(float2 x) {
 }
 
 // warp-wide max reduction
-template <int PARTICIPATING_WARPS = WARP_SIZE>
-__device__ __forceinline__ __nv_bfloat16 warp_max(__nv_bfloat16 v) {
+template <typename T, int PARTICIPATING_WARPS = WARP_SIZE>
+__device__ __forceinline__ T warp_max(T v) {
   unsigned mask = 0xffffffffu;
   // shuffle-down tree
   for (int offset = PARTICIPATING_WARPS / 2; offset > 0; offset >>= 1) {
-    __nv_bfloat16 other = __shfl_down_sync(mask, v, offset);
+    T other = __shfl_down_sync(mask, v, offset);
     v = __hmax(v, other);
   }
   return v;
