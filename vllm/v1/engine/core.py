@@ -138,12 +138,12 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
-        self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
-                                                     SchedulerOutput]]] = None
+        self.batch_queue: Optional[deque[tuple[Future[ModelRunnerOutput],
+                                               SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
-            self.batch_queue = queue.Queue(self.batch_queue_size)
+            self.batch_queue = deque(maxlen=self.batch_queue_size)
 
         self.request_block_hasher: Optional[Callable[[Request],
                                                      list[BlockHash]]] = None
@@ -319,41 +319,43 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
-        assert self.batch_queue is not None
+        batch_queue = self.batch_queue
+        assert batch_queue is not None
 
-        engine_core_outputs = None
-        scheduler_output = None
         # Try to schedule a new batch if the batch queue is not full, but
         # the scheduler may return an empty batch if all requests are scheduled.
         # Note that this is not blocking.
-        if not self.batch_queue.full():
+        assert len(batch_queue) < self.batch_queue_size
+
+        model_executed = False
+        if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
-            if scheduler_output.total_num_scheduled_tokens > 0:
-                future = self.model_executor.execute_model(scheduler_output)
-                self.batch_queue.put_nowait(
-                    (future, scheduler_output))  # type: ignore
+            future = self.model_executor.execute_model(scheduler_output)
+            batch_queue.appendleft(
+                (future, scheduler_output))  # type: ignore[arg-type]
 
-        scheduled_batch = (scheduler_output is not None
-                           and scheduler_output.total_num_scheduled_tokens > 0)
+            model_executed = scheduler_output.total_num_scheduled_tokens > 0
+            if model_executed and len(batch_queue) < self.batch_queue_size \
+                and not batch_queue[-1][0].done():
+                # Don't block on next worker response unless the queue is full
+                # or there are no more requests to schedule.
+                return None, True
 
-        # If no more requests can be scheduled and the job queue is not empty,
-        # block until the first batch in the job queue is finished.
-        # TODO(comaniac): Ideally we should peek the first batch in the
-        # job queue to check if it's finished before scheduling a new batch,
-        # but peeking the first element in a queue is not thread-safe,
-        # so we need more work.
-        if not scheduled_batch and not self.batch_queue.empty():
-            future, scheduler_output = self.batch_queue.get_nowait()
+        elif not batch_queue:
+            # Queue is empty. We should not reach here since this method should
+            # only be called when the scheduler contains requests or the queue
+            # is non-empty.
+            return None, False
 
-            # Blocking until the first result is available.
-            model_output = self.execute_model_with_error_logging(
-                lambda _: future.result(), scheduler_output)
+        # Block until the next result is available.
+        future, scheduler_output = batch_queue.pop()
+        model_output = self.execute_model_with_error_logging(
+            lambda _: future.result(), scheduler_output)
 
-            self.batch_queue.task_done()
-            engine_core_outputs = (self.scheduler.update_from_output(
-                scheduler_output, model_output))
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output)
 
-        return engine_core_outputs, scheduled_batch
+        return engine_core_outputs, model_executed
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
@@ -388,7 +390,7 @@ class EngineCore:
         return self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
-        self.model_executor.collective_rpc("execute_dummy_batch")
+        self.model_executor.execute_dummy_batch()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)
@@ -733,7 +735,8 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
 
         waited = False
-        while not self.engines_running and not self.scheduler.has_requests():
+        while not self.engines_running and not self.scheduler.has_requests() \
+                and not self.batch_queue:
             if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
                 logger.debug("EngineCore waiting for work.")
                 waited = True
