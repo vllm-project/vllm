@@ -468,6 +468,7 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
     vision_embeddings = vision_embeddings[:num_chunks, ...]
     return vision_embeddings
 
+
 def run_dp_sharded_mrope_vision_model_tensor_Kimi(
     vision_model: torch.nn.Module,
     pixel_values: torch.Tensor,
@@ -511,8 +512,8 @@ def run_dp_sharded_mrope_vision_model_tensor_Kimi(
 
     # Calculate cumulative patches using tensor operations
     cum_patches_tensor = torch.cat([
-        torch.zeros(1, 
-                    device=patches_per_item_tensor.device, 
+        torch.zeros(1,
+                    device=patches_per_item_tensor.device,
                     dtype=patches_per_item_tensor.dtype),
         patches_per_item_tensor.cumsum(dim=0)
     ])
@@ -526,8 +527,8 @@ def run_dp_sharded_mrope_vision_model_tensor_Kimi(
 
     # Get items assigned to this rank
     item_idxs_local = image_to_tp_rank[cum_gpu_sample_counts[tp_rank_local]:
-                                      cum_gpu_sample_counts[tp_rank_local +
-                                                            1]]
+                                       cum_gpu_sample_counts[tp_rank_local +
+                                                             1]]
 
     # Get the pixel values for the local items
     if len(item_idxs_local) > 0:

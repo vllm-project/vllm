@@ -110,14 +110,13 @@ class KimiVLMultiModalProjector(nn.Module):
                                          self.hidden_size,
                                          bias=True,
                                          prefix=maybe_prefix(
-                                            prefix, "linear_1"))
+                                             prefix, "linear_1"))
         self.linear_2 = ReplicatedLinear(self.hidden_size,
                                          config.text_config.hidden_size,
                                          bias=True,
                                          prefix=maybe_prefix(
-                                            prefix, "linear_2"))
+                                             prefix, "linear_2"))
         self.act = GELUActivation()
-        
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.pre_norm(image_features).view(
@@ -308,7 +307,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.vision_tower = MoonVitPretrainedModel(config.vision_config,
                                                    self.use_data_parallel,
                                                    prefix=maybe_prefix(
-                                                    prefix, "vision_tower"))
+                                                       prefix, "vision_tower"))
 
         self.multi_modal_projector = KimiVLMultiModalProjector(
             config=config,
@@ -487,7 +486,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata, **kwargs)
         return logits
-    
+
     def _consolidate_qkv_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[tuple[str, torch.Tensor]]:

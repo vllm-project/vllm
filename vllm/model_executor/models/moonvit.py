@@ -397,13 +397,11 @@ class MLP2(nn.Module):
         self.fc0 = ReplicatedLinear(dims[0],
                                     dims[1],
                                     bias=bias,
-                                    prefix=maybe_prefix(
-                                        prefix, "linear_1"))
+                                    prefix=maybe_prefix(prefix, "linear_1"))
         self.fc1 = ReplicatedLinear(dims[1],
                                     dims[2],
                                     bias=bias,
-                                    prefix=maybe_prefix(
-                                        prefix, "linear_2"))
+                                    prefix=maybe_prefix(prefix, "linear_2"))
         self.activation = activation
         for m in [self.fc0, self.fc1]:
             nn.init.trunc_normal_(m.weight, std=math.sqrt(2 / m.in_features))
