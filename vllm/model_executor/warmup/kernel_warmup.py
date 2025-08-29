@@ -45,8 +45,9 @@ def kernel_warmup(worker: "Worker"):
         except NotImplementedError:
             return False
     
-    if any(_is_flashinfer_backend(group.backend)
-           for groups in worker.model_runner.attn_groups for group in groups):
+    if all(
+            _is_flashinfer_backend(group.backend)
+            for groups in worker.model_runner.attn_groups for group in groups):
         logger.info("Warming up FlashInfer attention.")
         # Warmup with mixed batch containing both prefill and decode tokens
         # This is to warm up both prefill and decode attention kernels
