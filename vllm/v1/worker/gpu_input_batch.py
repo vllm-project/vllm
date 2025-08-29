@@ -118,7 +118,8 @@ class InputBatch:
         )
         self.num_computed_tokens_cpu = \
             self.num_computed_tokens_cpu_tensor.numpy()
-        # Note(hc): cp_num_computed_tokens_cpu_tensor stores the context lengths in the perspective of cp rank0.
+        # Note(hc): cp_num_computed_tokens_cpu_tensor stores the
+        # context lengths in the perspective of cp rank0.
         self.cp_num_computed_tokens_cpu_tensor = torch.zeros(
             (max_num_reqs, ),
             device="cpu",
