@@ -134,7 +134,7 @@ def get_req_dummy_logits_processor(
     ) -> torch.Tensor:
         """The request-level logits processor masks out all logits except the
         token id identified by target_token"""
-        val_to_keep = logits[target_token]
+        val_to_keep = logits[target_token].item()
         logits[:] = float("-inf")
         logits[target_token] = val_to_keep
         return logits

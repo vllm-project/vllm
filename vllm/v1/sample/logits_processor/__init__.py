@@ -276,7 +276,6 @@ class AdapterLogitsProcessor(LogitsProcessor):
                 if new_logits is not req_logits:
                     # Modify logits tensor row in-place if necessary
                     logits[req_idx] = new_logits
-
         return logits
 
 
