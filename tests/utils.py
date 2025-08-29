@@ -846,7 +846,7 @@ def fork_new_process_for_each_test(
                         exc_to_serialize = {'pickled_exception': e}
                         # Test if it can be pickled
                         cloudpickle.dumps(exc_to_serialize)
-                    except Exception:
+                    except (Exception, KeyboardInterrupt):
                         # Fall back to string-based approach.
                         exc_to_serialize = {
                             'exception_type': type(e).__name__,
@@ -858,7 +858,7 @@ def fork_new_process_for_each_test(
                             cloudpickle.dump(exc_to_serialize, f)
                     except Exception:
                         # Fallback: just print the traceback.
-                        traceback.print_exc()
+                        print(tb_string)
                     os._exit(1)
                 else:
                     os._exit(0)
@@ -892,13 +892,14 @@ def fork_new_process_for_each_test(
                         raise AssertionError(
                             f"Test {func.__name__} failed when called with"
                             f" args {args} and kwargs {kwargs}"
-                            f" (exit code: {_exitcode}):\n{original_tb}")
-                    else:
-                        # Fallback to the original generic error
-                        raise AssertionError(
-                            f"function {func.__name__} failed when called with"
-                            f" args {args} and kwargs {kwargs}"
-                            f" (exit code: {_exitcode})")
+                            f" (exit code: {_exitcode}):\n{original_tb}"
+                        ) from None
+
+                    # Fallback to the original generic error
+                    raise AssertionError(
+                        f"function {func.__name__} failed when called with"
+                        f" args {args} and kwargs {kwargs}"
+                        f" (exit code: {_exitcode})") from None
 
     return wrapper
 
