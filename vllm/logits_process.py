@@ -34,12 +34,8 @@ def get_bad_words_logits_processors(
             prompt_token_ids = tokenizer.encode(text=prompt,
                                                 add_special_tokens=False)
 
-            # If no space at the beginning
-            # or if prefix space produces a new word token
-            if (not add_prefix_space) or (
-                    add_prefix_space
-                    and prompt_token_ids[0] != bad_words_ids[-1][0]
-                    and len(prompt_token_ids) == len(bad_words_ids[-1])):
+            # If prefix space produces a new word token
+            if not prompt_token_ids in bad_words_ids:
                 bad_words_ids.append(prompt_token_ids)
 
     return [NoBadWordsLogitsProcessor(bad_words_ids=bad_words_ids)]
