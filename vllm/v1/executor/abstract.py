@@ -81,12 +81,10 @@ class Executor(ExecutorBase):
         pass
 
     def determine_available_memory(self) -> list[int]:  # in bytes
-        output = self.collective_rpc("determine_available_memory")
-        return output
+        return self.collective_rpc("determine_available_memory")
 
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
-        output = self.collective_rpc("get_kv_cache_spec")
-        return output
+        return self.collective_rpc("get_kv_cache_spec")
 
     def execute_model(
         self,
@@ -95,6 +93,9 @@ class Executor(ExecutorBase):
         output = self.collective_rpc("execute_model",
                                      args=(scheduler_output, ))
         return output[0]
+
+    def execute_dummy_batch(self) -> None:
+        self.collective_rpc("execute_dummy_batch")
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         output = self.collective_rpc("take_draft_token_ids")
