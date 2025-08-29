@@ -180,6 +180,7 @@ def mamba_chunk_scan_combined(x,
                               cu_seqlens=None,
                               dt_softplus=False,
                               dt_limit=(0.0, float("inf")),
+                              return_intermediate_states=False,
                               return_final_states=False,
                               return_varlen_states=False):
     """
@@ -222,11 +223,16 @@ def mamba_chunk_scan_combined(x,
         cu_seqlens=cu_seqlens,
         dt_softplus=dt_softplus,
         dt_limit=dt_limit)
-    if not return_varlen_states:
-        return out if not return_final_states else (out, final_states)
-    else:
+    if return_varlen_states:
         varlen_states = rest[0]
-        return (out,
-                varlen_states) if not return_final_states else (out,
-                                                                final_states,
-                                                                varlen_states)
+        if return_final_states:
+            return (out, final_states, varlen_states)
+        elif return_intermediate_states:
+            return (out, states, varlen_states)
+        else:
+            return (out, varlen_states)
+    else:
+        if return_final_states:
+            return (out, final_states)
+        else:
+            return (out, states)

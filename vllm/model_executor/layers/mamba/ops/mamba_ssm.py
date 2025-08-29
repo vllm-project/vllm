@@ -52,6 +52,7 @@ def _selective_scan_update_kernel(
     z_ptr,
     out_ptr,
     state_batch_indices_ptr,
+    dst_state_batch_indices_ptr,
     pad_slot_id,
     # Matrix dimensions
     batch,
@@ -107,11 +108,16 @@ def _selective_scan_update_kernel(
     # is taken from the state_batch_indices_ptr Otherwise, the state coordinate
     # is the same as the batch id.
     if HAS_STATE_BATCH_INDICES:
+        dst_state_batch_indices_ptr += pid_b
+        dst_state_batch_idx = tl.load(dst_state_batch_indices_ptr).to(tl.int64)
+        dst_state_ptr = state_ptr + (dst_state_batch_idx * stride_state_batch +
+                      pid_h * stride_state_head)
         state_batch_indices_ptr += pid_b
         state_batch_idx = tl.load(state_batch_indices_ptr).to(tl.int64)
         state_ptr += (state_batch_idx * stride_state_batch +
                       pid_h * stride_state_head)
     else:
+        dst_state_ptr = state_ptr + pid_b * stride_state_batch + pid_h * stride_state_head
         state_ptr += pid_b * stride_state_batch + pid_h * stride_state_head
 
     x_ptr += pid_b * stride_x_batch + pid_h * stride_x_head
@@ -130,6 +136,8 @@ def _selective_scan_update_kernel(
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = tl.arange(0, BLOCK_SIZE_DSTATE)
     state_ptrs = state_ptr + (offs_m[:, None] * stride_state_dim +
+                              offs_n[None, :] * stride_state_dstate)
+    dst_state_ptrs = dst_state_ptr + (offs_m[:, None] * stride_state_dim +
                               offs_n[None, :] * stride_state_dstate)
     x_ptrs = x_ptr + offs_m * stride_x_dim
     dt_ptrs = dt_ptr + offs_m * stride_dt_dim
@@ -185,7 +193,7 @@ def _selective_scan_update_kernel(
     mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
     if HAS_STATE_BATCH_INDICES:
         mask &= (state_batch_idx != pad_slot_id)
-    tl.store(state_ptrs, state, mask=mask)
+    tl.store(dst_state_ptrs, state, mask=mask)
     out = tl.sum(state * C[None, :], axis=1)
     if HAS_D:
         out += x * D
@@ -205,6 +213,7 @@ def selective_state_update(state,
                            dt_bias=None,
                            dt_softplus=False,
                            state_batch_indices=None,
+                           dst_state_batch_indices=None,
                            pad_slot_id=PAD_SLOT_ID):
     """
     Argument:
@@ -264,6 +273,7 @@ def selective_state_update(state,
         assert dt_bias.shape == (nheads, dim)
     if state_batch_indices is not None:
         assert state_batch_indices.shape == (batch, )
+        assert dst_state_batch_indices.shape == (batch, )
     out = torch.empty_like(x)
     grid = lambda META: (triton.cdiv(dim, META['BLOCK_SIZE_M']), batch, nheads)
     z_strides = ((z.stride(0), z.stride(1), z.stride(2)) if z is not None else
@@ -289,6 +299,7 @@ def selective_state_update(state,
             z,
             out,
             state_batch_indices,
+            dst_state_batch_indices,
             pad_slot_id,
             batch,
             nheads,
