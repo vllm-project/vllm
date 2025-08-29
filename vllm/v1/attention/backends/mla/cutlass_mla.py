@@ -7,7 +7,8 @@ from typing import ClassVar, Optional
 import torch
 
 import vllm._custom_ops as ops
-from vllm.attention.backends.abstract import AttentionLayer, AttentionType
+from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
+                                              is_quantized_kv_cache)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
@@ -189,7 +190,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             page_table.dtype == torch.int32
         ), f"page_table.dtype needs to be int32 but got {page_table.dtype}."
 
-        dtype = (torch.bfloat16 if self.kv_cache_dtype.startswith("fp8")
+        dtype = (torch.bfloat16 if is_quantized_kv_cache(self.kv_cache_dtype)
                  else q_nope.dtype)
         out = q_nope.new_empty((B_q, MAX_HEADS, D_latent), dtype=dtype)
 
@@ -245,7 +246,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "FP8 Cutlass MLA not supported with FORCE_OLD_CUTLASS_MLA")
 
