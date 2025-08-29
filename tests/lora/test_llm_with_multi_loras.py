@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Script to test multi loras service with tp >= 2
+This script contains:
+1. test multi loras service with tp >= 2
+2. test multi loras request
 """
 import pytest
 
