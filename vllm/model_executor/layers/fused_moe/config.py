@@ -190,6 +190,20 @@ class FusedMoEParallelConfig:
         return (self.use_all2all_kernels
                 and envs.VLLM_ALL2ALL_BACKEND == "deepep_low_latency")
 
+    @property
+    def use_flashinfer_cutlass_kernels(self):
+        return (envs.VLLM_USE_FLASHINFER_MOE_FP4
+                and has_flashinfer_cutlass_fused_moe()
+                and envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput")
+
+    @property
+    def use_forward_impl_chunked(self):
+        # Route to the chunked forward path using the FlashInfer Cutlass kernel
+        # only when data parallelism (DP) is enabled.
+        return (self.dp_size > 1
+                and (self.use_pplx_kernels or self.use_deepep_ll_kernels
+                     or self.use_flashinfer_cutlass_kernels))
+
     @staticmethod
     def make(tp_size_: int, dp_size_: int,
              vllm_parallel_config: ParallelConfig) -> "FusedMoEParallelConfig":

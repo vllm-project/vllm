@@ -13,7 +13,6 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
-import os
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -25,9 +24,7 @@ last_logging_time: float = 0
 forward_start_time: float = 0
 batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
 batchsize_forward_time: defaultdict = defaultdict(list)
-
-# PATCH
-disable_gloo_all = bool(os.environ.get("DISABLE_GLOO_ALLREDUCE", False))
+moe_dp_chunk_size: int = envs.VLLM_MOE_DP_CHUNK_SIZE
 
 
 class BatchDescriptor(NamedTuple):
@@ -73,8 +70,8 @@ class DPMetadata:
     local_sizes: Optional[list[int]] = None
 
     @staticmethod
-    def num_tokens_across_dp(num_tokens: int, dp_size: int,
-                             dp_rank: int) -> torch.Tensor:
+    def num_tokens_across_dp(num_tokens: int, dp_size: int, dp_rank: int,
+                             parallel_config: ParallelConfig) -> torch.Tensor:
         """
         Gather the num_tokens across all DP ranks and return results in a
         CPU tensor of size dp_size.
@@ -85,7 +82,17 @@ class DPMetadata:
                                          device="cpu",
                                          dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
-        if not disable_gloo_all:
+        from vllm.model_executor.layers.fused_moe.config import (  # noqa: E501
+            FusedMoEParallelConfig)
+
+        # If chunked moe is to be executed, only all_reduce when n_chunks>1
+        moe_parallel_config: FusedMoEParallelConfig = (
+            FusedMoEParallelConfig.make(
+                tp_size_=parallel_config.tensor_model_parallel_size,
+                dp_size_=parallel_config.data_parallel_size,
+                vllm_parallel_config=parallel_config))
+        if (moe_parallel_config.use_forward_impl_chunked
+                and num_tokens > moe_dp_chunk_size):
             dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
         return num_tokens_tensor
 
@@ -113,9 +120,15 @@ class DPMetadata:
         # Otherwise, num_tokens_across_dp[dp_rank] should be equal to batchsize
         assert (num_tokens_across_dp is None
                 or num_tokens_across_dp[dp_rank] == batchsize)
+        # SKIP NO CHUNKING
+        # When not to skip: on a2a, when chunking with chunk>1,
+        # self.moe_parallel_config.use_pplx_kernels
+        #         or self.moe_parallel_config.use_deepep_ll_kernels
+        #         or use_flashinfer_cutlass_kernels
+        # if batchsize < VLLM_MOE_DP_CHUNK_SIZE
         if num_tokens_across_dp is None:
             num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
-                batchsize, dp_size, dp_rank)
+                batchsize, dp_size, dp_rank, parallel_config)
         max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp)
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_across_dp, dim=0)
         return DPMetadata(max_tokens_across_dp_cpu, cu_tokens_across_dp_cpu)

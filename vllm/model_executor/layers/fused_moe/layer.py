@@ -1663,14 +1663,8 @@ class FusedMoE(CustomOp):
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
         assert self.quant_method is not None
-        # Route to the chunked forward path using the FlashInfer Cutlass kernel
-        # only when data parallelism (DP) is enabled.
-        use_flashinfer_cutlass_kernels = (
-            self.dp_size > 1
-            and self.moe_config.use_flashinfer_cutlass_kernels)
-        if (self.moe_parallel_config.use_pplx_kernels
-                or self.moe_parallel_config.use_deepep_ll_kernels
-                or use_flashinfer_cutlass_kernels):
+
+        if self.moe_parallel_config.use_forward_impl_chunked:
             return self.forward_impl_chunked(hidden_states, router_logits)
 
         do_naive_dispatch_combine: bool = (
