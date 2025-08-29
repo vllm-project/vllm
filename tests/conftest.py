@@ -8,6 +8,7 @@ import os
 import socket
 import tempfile
 import threading
+from collections.abc import Iterator
 from enum import Enum
 from typing import Any, Callable, Optional, TypedDict, TypeVar, Union, cast
 
@@ -1317,7 +1318,7 @@ def local_asset_server_base_url() -> str:
 
 
 @pytest.fixture
-def image_url(request, local_asset_server_base_url) -> str:
+def image_url(request, local_asset_server_base_url) -> Iterator[str]:
     # request.param is one of the IMAGE_URLS filenames
     name = request.param
     return f"{local_asset_server_base_url}/{name}"
