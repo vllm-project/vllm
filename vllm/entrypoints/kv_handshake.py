@@ -105,20 +105,30 @@ class KVConnHandshakeServer:
 
 
 def should_start_kv_handshake_server(vllm_config: VllmConfig) -> bool:
+    logger.debug("DEBUG: Checking if KV handshake server should start")
+
     if vllm_config.kv_transfer_config is None:
+        logger.debug("DEBUG: kv_transfer_config is None, not starting server")
         return False
 
     connector_name = vllm_config.kv_transfer_config.kv_connector
+    logger.debug("DEBUG: connector_name = %s", connector_name)
     if connector_name is None:
+        logger.debug("DEBUG: connector_name is None, not starting server")
         return False
 
     # check connector-specific handshake method
     if connector_name == "NixlConnector":
         handshake_method = envs.VLLM_NIXL_HANDSHAKE_METHOD.lower()
-        return handshake_method == "http"
+        logger.debug("DEBUG: handshake_method = '%s'", handshake_method)
+        should_start = handshake_method == "http"
+        logger.debug("DEBUG: should start handshake server = %s", should_start)
+        return should_start
 
     # other connectors can be added here with their own logic
     # for now, only nixl supports http handshake
+    logger.debug("DEBUG: Unknown connector %s, not starting server",
+                 connector_name)
     return False
 
 
@@ -141,6 +151,8 @@ async def set_up_kv_handshake_server(
         vllm_config: VllmConfig,
         kv_metadata: dict) -> Optional[KVConnHandshakeServer]:
     if not should_start_kv_handshake_server(vllm_config):
+        logger.debug(
+            "DEBUG: should_start_kv_handshake_server returned False, no start")
         return None
 
     side_channel_host, side_channel_port = _get_handshake_server_config(
