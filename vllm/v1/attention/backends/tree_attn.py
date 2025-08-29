@@ -184,7 +184,7 @@ class TreeAttentionMetadataBuilder(
         )
 
     def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
+                      scheduler_output: "SchedulerOutput") -> tuple[bool, int]:
         return reorder_batch_to_split_decodes_and_prefills(
             input_batch,
             scheduler_output,

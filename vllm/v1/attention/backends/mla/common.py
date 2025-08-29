@@ -204,7 +204,7 @@ from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import is_global_first_rank, get_cp_group
+from vllm.distributed.parallel_state import get_cp_group, is_global_first_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase,
@@ -399,7 +399,8 @@ class MLACommonMetadata(Generic[D]):
                             FlashInferPrefillMetadata,
                             CudnnPrefillMetadata]] = None
 
-    # Note(hc): cp_local_token_select_indices specifies which indices of kv should be stored on the current cp rank.
+    # Note(hc): cp_local_token_select_indices specifies which
+    # indices of kv should be stored on the current cp rank.
     cp_local_token_select_indices: Optional[torch.Tensor] = None
 
     def __post_init__(self):
@@ -477,8 +478,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         assert self.chunked_prefill_workspace_size >= \
             scheduler_config.max_num_seqs * cache_config.block_size
         if self.cp_world_size > 1:
-            # Note(hc): The local kvcache is incomplete when CP is triggered, an additional kvcache allgather across the CP group
-            # is therefore required, so the workspace has to be enlarged by 1/CP relative to the original TP allocation.
+            # Note(hc): The local kvcache is incomplete when CP is triggered,
+            # an additional kvcache allgather across the CP group is therefore
+            # required, so the workspace has to be enlarged by 1/CP relative
+            # to the original TP allocation.
             assert self.chunked_prefill_workspace_size % self.cp_world_size == 0
             self.chunked_prefill_workspace = torch.empty(
                 (self.chunked_prefill_workspace_size +
@@ -641,8 +644,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         slot_mapping = common_attn_metadata.slot_mapping
 
         if common_attn_metadata.cp_local_token_cnt is not None:
-            # TODO(hc): CP need support mla fullgraph in the future, which is not difficult.
-            cp_local_token_select_indices = common_attn_metadata.cp_local_token_select_indices_cpu[:common_attn_metadata.cp_local_token_cnt].to(
+            # TODO(hc): CP need support mla fullgraph in
+            # the future, which is not difficult.
+            cp_local_token_select_indices = \
+                common_attn_metadata.cp_local_token_select_indices_cpu[
+                    :common_attn_metadata.cp_local_token_cnt].to(
                 device, non_blocking=True).long()
 
         query_start_loc = common_attn_metadata.query_start_loc
@@ -724,11 +730,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                              dtype=torch.int32)
 
                 if self.cp_world_size > 1:
-                    # Note(hc): The above max_context_chunk already enforces block_size alignment, CP just
-                    # need the block_size can be divisible by cp_world_size, because CP use cp_gather_cache
-                    # which not require `cp_chunk_starts` aligned to page_size.
+                    # Note(hc): The above max_context_chunk already enforces
+                    # block_size alignment, CP just need the block_size can
+                    # be divisible by cp_world_size, because CP use
+                    # cp_gather_cache which not require `cp_chunk_starts`
+                    # aligned to page_size.
                     assert max_context_chunk % self.cp_world_size == 0
-                    cp_max_context_chunk = max_context_chunk // self.cp_world_size
+                    cp_max_context_chunk = max_context_chunk // \
+                        self.cp_world_size
                     cp_chunk_starts = \
                         torch.arange(num_chunks, dtype=torch.int32) \
                         .unsqueeze(1).expand(-1, num_prefills) \
@@ -755,7 +764,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 if self.cp_world_size > 1:
                     chunked_context_metadata = \
                         chunked_context_metadata_cls(
-                        cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
+                        cu_seq_lens=cu_seq_lens_cpu \
+                            .to(device, non_blocking=True),
                         starts=cp_chunk_starts.to(device, non_blocking=True),
                         seq_tot=cp_chunk_seq_lens.sum(dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
@@ -763,14 +773,16 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                         workspace=self.chunked_prefill_workspace,
                         cp_chunk_seq_lens=cp_chunk_seq_lens.tolist(),
                         origin_context_lens=origin_context_lens,
-                        cp_cu_seq_lens=cp_cu_seq_lens_cpu.to(device, non_blocking=True),
+                        cp_cu_seq_lens=cp_cu_seq_lens_cpu \
+                            .to(device, non_blocking=True),
                         chunk_size=max_context_chunk,
                         cu_seq_lens_lst=cu_seq_lens_cpu.tolist(),
                     )
                 else:
                     chunked_context_metadata = \
                         chunked_context_metadata_cls(
-                        cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
+                        cu_seq_lens=cu_seq_lens_cpu \
+                            .to(device, non_blocking=True),
                         starts=chunk_starts.to(device, non_blocking=True),
                         seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
@@ -852,7 +864,8 @@ def reorg_kvcache(
         cp_world_size: CP size.
         sum_seq_len: the sum of cp_chunk_seq_lens_lst.
         max_seq_len: the max value of cp_chunk_seq_lens_lst.
-        chunk_size: equals to max_context_chunk from chunked_context_metadata building.
+        chunk_size: equals to max_context_chunk from
+            chunked_context_metadata building.
         chunk_idx: chunk idx of chunked_prefill.
         toks: the number of tokens for local gather cache.
     """
@@ -1302,6 +1315,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.chunked_context is not None
+        assert prefill_metadata.chunked_context.cp_chunk_seq_lens is not None
+        assert prefill_metadata.chunked_context.origin_context_lens is not None
+        assert prefill_metadata.chunked_context.cp_cu_seq_lens is not None
+        assert prefill_metadata.chunked_context.chunk_size is not None
+        assert prefill_metadata.chunked_context.cu_seq_lens_lst is not None
 
         output = None
         iters = len(prefill_metadata.chunked_context.seq_tot)
@@ -1333,7 +1351,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 local_gathered_kvcache, dim=0))
             assert cur_allgather_kvcache.shape[
                 -1] == self.kv_lora_rank + self.qk_rope_head_dim
-            allgatered_kv_c_normed, allgatered_k_pe = cur_allgather_kvcache.unsqueeze(
+            allgatered_kv_c_normed, allgatered_k_pe = \
+                cur_allgather_kvcache.unsqueeze(
                 1).split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
 
             kv_c_normed, k_pe = reorg_kvcache(
@@ -1415,10 +1434,13 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         if has_context:
             suffix_output, suffix_lse = output
             if get_cp_group().world_size > 1:
-                context_output, context_lse = self._context_parallel_compute_prefill_context( \
-                    q, kv_c_and_k_pe_cache, attn_metadata, k_scale=None, cp_world_size=get_cp_group().world_size)
+                context_output, context_lse = \
+                    self._context_parallel_compute_prefill_context(
+                    q, kv_c_and_k_pe_cache, attn_metadata,
+                    k_scale=None, cp_world_size=get_cp_group().world_size)
             else:
-                context_output, context_lse = self._compute_prefill_context( \
+                context_output, context_lse = \
+                    self._compute_prefill_context(
                     q, kv_c_and_k_pe_cache, attn_metadata, k_scale)
 
             output = torch.empty_like(suffix_output)
@@ -1500,10 +1522,12 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         # write the latent and rope to kv cache for CP.
         assert attn_metadata.cp_local_token_select_indices is not None
-        cp_local_token_select_indices = attn_metadata.cp_local_token_select_indices
+        cp_local_token_select_indices = \
+            attn_metadata.cp_local_token_select_indices
         # Note(hc): need revisit when we support mla fullgraph for CP.
         if kv_cache.numel() > 0 and cp_local_token_select_indices.numel() > 0:
-            # Note(hc): cp_fused_concat_and_cache_mla fuses the following three kernel calls into one:
+            # Note(hc): cp_fused_concat_and_cache_mla fuses the following
+            # three kernel calls into one:
             # k_c_normed.index_select(0, cp_local_token_select_indices) + \
             # k_pe.squeeze(1).index_select(0, cp_local_token_select_indices) + \
             # concat_and_cache_mla.

@@ -21,8 +21,9 @@ def _correct_attn_cp_out_kernel(outputs_ptr, new_output_ptr, lses_ptr,
                                 lses_stride_H, lse_idx, HEAD_DIM: tl.constexpr,
                                 N_ROUNDED: tl.constexpr):
     """
-    Apply the all-gathered lses to correct each local rank's attention output. we still need perform a cross-rank
-    reduction to obtain the final attention output.
+    Apply the all-gathered lses to correct each local rank's attention
+    output. we still need perform a cross-rank reduction to obtain the
+    final attention output.
 
     Args:
         output: [ B, H, D ]
@@ -38,7 +39,8 @@ def _correct_attn_cp_out_kernel(outputs_ptr, new_output_ptr, lses_ptr,
     num_n_offsets = tl.arange(0, N_ROUNDED)
 
     # shape = [N]
-    lse_offsets = num_n_offsets * lses_stride_N + batch_idx * lses_stride_B + head_idx * lses_stride_H
+    lse_offsets = num_n_offsets * lses_stride_N + batch_idx * \
+        lses_stride_B + head_idx * lses_stride_H
 
     # calc final lse
     lse = tl.load(lses_ptr + lse_offsets)
@@ -59,7 +61,8 @@ def _correct_attn_cp_out_kernel(outputs_ptr, new_output_ptr, lses_ptr,
                     d_offsets * outputs_stride_D
 
     # correct output
-    lse_offset = lse_idx * lses_stride_N + batch_idx * lses_stride_B + head_idx * lses_stride_H
+    lse_offset = lse_idx * lses_stride_N + batch_idx * \
+        lses_stride_B + head_idx * lses_stride_H
     lse_tmp = tl.load(lses_ptr + lse_offset)
     lse_finally = lse_tmp - lse
     lse_finally = tl.where(
@@ -91,8 +94,9 @@ def correct_attn_out(out: torch.Tensor,
                      cp_rank,
                      ctx: CPTritonContext = None):
     """
-    Apply the all-gathered lses to correct each local rank's attention output. we still need perform a cross-rank
-    reduction to obtain the final attention output.
+    Apply the all-gathered lses to correct each local rank's attention
+    output. we still need perform a cross-rank reduction to obtain the
+    final attention output.
 
     Args:
         output: [ B, H, D ]
@@ -271,7 +275,8 @@ def flash_mla_with_kvcache_for_cp(
         out: (batch_size, seq_len_q, num_heads_q, head_dim_v).
         softmax_lse: (batch_size, num_heads_q, seq_len_q), torch.float32.
     """
-    assert descale_q is None and descale_k is None, "cp not support scaled kv now."
+    assert descale_q is None and descale_k is None, \
+        "cp not support scaled kv now."
     assert q.shape[1] == 1, "cp not support seq_len_q gt 1 now."
     if softmax_scale is None:
         softmax_scale = q.shape[-1]**(-0.5)

@@ -386,7 +386,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if self.reorder_batch_threshold is not None:
             if self.cp_world_size > 1:
-                assert self.reorder_batch_threshold == 1, "CP not support reorder_batch_threshold > 1 now."
+                assert self.reorder_batch_threshold == 1, \
+                    "CP not support reorder_batch_threshold > 1 now."
             _, self.num_decodes = reorder_batch_to_split_decodes_and_prefills(
                 self.input_batch,
                 scheduler_output,
@@ -743,7 +744,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.cp_world_size > 1:
             assert self.attn_groups[0][
                 0].backend is FlashMLABackend, "CP only support flashmla now."
-        # Note(hc): cp_local_token_cnt records the number of KV entries will be stored on the current CP rank.
+        # Note(hc): cp_local_token_cnt records the number of KV entries will
+        # be stored on the current CP rank.
         cp_local_token_cnt = self.input_batch.block_table.compute_slot_mapping(
             req_indices,
             positions_np,

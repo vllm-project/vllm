@@ -133,8 +133,10 @@ class MultiGroupBlockTable:
                  device: torch.device, block_sizes: list[int]) -> None:
         self.cp_world_size = get_cp_group().world_size
         self.cp_rank = get_cp_group().rank_in_group
-        # Note(hc): each cp rank only store (max_model_len//cp_world_size) tokens in kvcache,
-        # so the block_size which used for calc max_num_blocks_per_req must be multiplied by cp_world_size.
+        # Note(hc): each cp rank only store
+        # (max_model_len//cp_world_size) tokens in kvcache,
+        # so the block_size which used for calc max_num_blocks_per_req
+        # must be multiplied by cp_world_size.
         self.block_tables = [
             BlockTable(block_size, max_num_reqs,
                        cdiv(max_model_len, block_size * self.cp_world_size),
@@ -165,7 +167,8 @@ class MultiGroupBlockTable:
             num_computed_tokens_cpu: np.ndarray, seq_lens_np: np.ndarray,
             cp_num_computed_tokens_cpu: np.ndarray,
             cp_local_token_select_indices_np: np.ndarray) -> Optional[int]:
-        # Note(hc): cp_local_token_cnt records the number of KV entries will be stored on the current CP rank.
+        # Note(hc): cp_local_token_cnt records the number of KV entries
+        # will be stored on the current CP rank.
         cp_local_token_cnt: Optional[int] = None
         if self.cp_world_size > 1:
             assert len(self.block_tables) == 1
@@ -196,13 +199,16 @@ class MultiGroupBlockTable:
                     # update slot_mapping for both prefill & decode reqs
                     if self.cp_rank == target_cp_rank:
                         position = cp_context_len - 1
-                        block_table_indice = req_idx * max_num_blocks_per_req + position // block_size
+                        block_table_indice = req_idx * max_num_blocks_per_req \
+                            + position // block_size
                         block_number = block_table_array[block_table_indice]
                         block_offset = position % block_size
                         slot_mapping_np[
-                            cp_local_token_cnt] = block_number * block_size + block_offset
+                            cp_local_token_cnt] = block_number * block_size \
+                                + block_offset
                         cp_local_token_select_indices_np[
-                            cp_local_token_cnt] = cu_token_idx + token_idx - context_len
+                            cp_local_token_cnt] = cu_token_idx + token_idx \
+                                - context_len
                         cp_local_token_cnt += 1
                 cu_token_idx += seq_len - context_len
         else:

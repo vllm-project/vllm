@@ -1159,11 +1159,13 @@ class EngineArgs:
             # global layers in interleaved sliding window models.
             sliding_window = model_config.get_sliding_window()
 
-        # Note(hc): In the current implementation of decode context parallel, tp_size
-        # needs to be divisible by tp_size, because the world size does not change by
-        # cp, it simply reuse the GPUs of TP group, and split one TP group into tp_size//cp_size
-        # CP groups.
-        assert self.tensor_parallel_size % self.context_parallel_size == 0, "cp_size must not exceed tp_size now."
+        # Note(hc): In the current implementation of decode context
+        # parallel, tp_size needs to be divisible by tp_size,
+        # because the world size does not change by cp, it simply
+        # reuse the GPUs of TP group, and split one TP group into
+        # tp_size//cp_size CP groups.
+        assert self.tensor_parallel_size % self.context_parallel_size == 0, \
+            "cp_size must not exceed tp_size now."
 
         cache_config = CacheConfig(
             block_size=self.block_size,

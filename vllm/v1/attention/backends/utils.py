@@ -6,7 +6,7 @@ import functools
 from abc import abstractmethod
 from dataclasses import dataclass, fields, make_dataclass
 from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Optional, Protocol,
-                    TypeVar, Union)
+                    TypeVar)
 
 import numpy as np
 import torch
@@ -76,7 +76,8 @@ class CommonAttentionMetadata:
     cp_local_token_cnt: Optional[int] = None
     """The number of kv should be stored on the current cp rank."""
     cp_local_token_select_indices_cpu: torch.Tensor = None
-    """The selected indices used for masking the KV-cache should be stored on the current CP rank."""
+    """The selected indices used for masking the KV-cache should
+    be stored on the current CP rank."""
     cp_num_computed_tokens_cpu_tensor: torch.Tensor = None
     """The context lengths in the perspective of cp rank0."""
 
@@ -696,7 +697,7 @@ def reorder_batch_to_split_decodes_and_prefills(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
     decode_threshold: int = 1,
-) -> Union[bool, tuple[bool, int]]:
+) -> tuple[bool, int]:
     """
     Reorders the batch to split into prefill and decode requests; places all
     requests with <= decode_threshold tokens at the front of the batch.

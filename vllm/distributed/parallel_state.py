@@ -1102,7 +1102,6 @@ def initialize_model_parallel(
     assert _TP is None, ("tensor model parallel group is already initialized")
     group_ranks = all_ranks.view(-1, tensor_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
-    tp_group_ranks = group_ranks
 
     # message queue broadcaster is only used in tensor model parallel group
     _TP = init_model_parallel_group(group_ranks,
@@ -1114,8 +1113,9 @@ def initialize_model_parallel(
     # Build the context model-parallel groups.
     global _CP
     assert _CP is None, ("context model parallel group is already initialized")
-    # Note(hc): In the current implementation of decode context parallel, cp_size must not exceed tp_size,
-    # because the world size does not change by cp, it simply reuse the GPUs of TP group.
+    # Note(hc): In the current implementation of decode context parallel,
+    # cp_size must not exceed tp_size, because the world size does not
+    # change by cp, it simply reuse the GPUs of TP group.
     group_ranks = all_ranks.reshape(-1, context_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _CP = init_model_parallel_group(group_ranks,
