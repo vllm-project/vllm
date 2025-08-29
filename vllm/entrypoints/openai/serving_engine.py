@@ -757,7 +757,7 @@ class OpenAIServing:
         request: Union[DetokenizeRequest, EmbeddingCompletionRequest,
                        RerankRequest, ClassificationRequest, ScoreRequest,
                        TokenizeCompletionRequest],
-        tokenizer: AnyTokenizer,
+        tokenizer: Optional[AnyTokenizer],
         input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = ...,
         add_special_tokens: bool = ...,
@@ -768,7 +768,7 @@ class OpenAIServing:
     async def _preprocess_completion(
         self,
         request: CompletionRequest,
-        tokenizer: AnyTokenizer,
+        tokenizer: Optional[AnyTokenizer],
         input_or_inputs: Optional[Union[str, list[str], list[int],
                                         list[list[int]]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = ...,
@@ -780,7 +780,7 @@ class OpenAIServing:
     async def _preprocess_completion(
         self,
         request: CompletionLikeRequest,
-        tokenizer: AnyTokenizer,
+        tokenizer: Optional[AnyTokenizer],
         input_or_inputs: Optional[Union[str, list[str], list[int],
                                         list[list[int]]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
