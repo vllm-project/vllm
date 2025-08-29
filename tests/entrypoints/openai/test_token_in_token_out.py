@@ -15,9 +15,12 @@ MODEL_PATH = "/tmp/qwen3_06b"
 
 @pytest.fixture(scope="module")
 def server():
-    download_weights_from_hf(MODEL_NAME,
-                             cache_dir=MODEL_PATH,
-                             ignore_patterns=["tokenizer*", "vocab*"])
+    global MODEL_PATH
+    MODEL_PATH = download_weights_from_hf(
+        MODEL_NAME,
+        allow_patterns=["*"],
+        cache_dir="/tmp/qwen3_06b",
+        ignore_patterns=["tokenizer*", "vocab*"])
     args = [
         "--max-model-len", "2048", "--max-num-seqs", "128", "--enforce-eager",
         "--skip-tokenizer-init"
