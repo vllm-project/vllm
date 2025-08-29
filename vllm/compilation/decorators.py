@@ -219,6 +219,11 @@ def _support_torch_compile(
     """
     A decorator to add support for compiling the forward method of a class.
     """
+    setattr(cls, IGNORE_COMPILE_KEY, False)
+
+    # setting as attribute on cls ensures child class will override parent class
+    setattr(cls, LAST_PIECEWISE_GRAPH_WEAKREF_KEY, no_weak_ref_output)
+
     if TorchCompileWrapperWithCustomDispatcher in cls.__bases__:
         # support decorating multiple times
         return cls
@@ -229,11 +234,6 @@ def _support_torch_compile(
     cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher, )
 
     old_init = cls.__init__
-
-    setattr(cls, IGNORE_COMPILE_KEY, False)
-
-    # setting as attribute on cls ensures child class will override parent class
-    setattr(cls, LAST_PIECEWISE_GRAPH_WEAKREF_KEY, no_weak_ref_output)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
