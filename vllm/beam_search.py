@@ -65,7 +65,7 @@ def get_beam_search_score(
     cumulative_logprob: float,
     stop_token_ids: list[int],
     stop_tokens: list[str],
-    tokenizer: AnyTokenizer = None,
+    tokenizer: Optional[AnyTokenizer] = None,
     length_penalty: float = 1.0,
 ) -> float:
     """Calculate the beam search score with length penalty.
@@ -85,8 +85,8 @@ def get_beam_search_score(
 
 def create_sort_beams_key_function(stop_token_ids: Union[int, list[int]],
                                    length_penalty: float,
-                                   stop_tokens: list[str] = None,
-                                   tokenizer: AnyTokenizer = None):
+                                   stop_tokens: Optional[list[str]] = None,
+                                   tokenizer: Optional[AnyTokenizer] = None):
     stop_token_ids = [stop_token_ids] if isinstance(stop_token_ids,
                                                     int) else stop_token_ids
     stop_tokens = stop_tokens or []
