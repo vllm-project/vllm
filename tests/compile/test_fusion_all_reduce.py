@@ -27,7 +27,7 @@ from ..utils import has_module_attribute, multi_gpu_test
 from .backend import TestBackend
 
 
-def finisher(hidden_states):
+def maybe_dummy_quant(hidden_states):
     custom_ops = get_current_vllm_config().compilation_config.custom_ops
     if not custom_ops or "+quant_fp8" not in custom_ops:
         # Hack: use dynamic fp8 quantization to
@@ -53,7 +53,7 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
 
         hidden_states = self.norm(all_reduce)
 
-        hidden_states = finisher(hidden_states)
+        hidden_states = maybe_dummy_quant(hidden_states)
 
         return hidden_states
 
@@ -80,7 +80,7 @@ class TestAllReduceFusedAddRMSNormModel(torch.nn.Module):
         # Hack: use dynamic fp8 quantization to
         # suppress torch.compile optimizations
         # that prevent pattern matching
-        hidden_states = finisher(hidden_states)
+        hidden_states = maybe_dummy_quant(hidden_states)
         return hidden_states, residual
 
     def ops_in_model_after(self):
@@ -122,7 +122,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP8Model(torch.nn.Module):
         all_reduce = tensor_model_parallel_all_reduce(view)
         norm_output, residual_output = self.norm(all_reduce, residual)
         output, _ = self.quant_fp8(norm_output, self.scale)
-        hidden_states = finisher(output.to(hidden_states.dtype))
+        hidden_states = maybe_dummy_quant(output.to(hidden_states.dtype))
         return hidden_states, residual_output
 
     def ops_in_model_after(self):

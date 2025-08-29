@@ -72,7 +72,6 @@ from typing_extensions import Never, ParamSpec, TypeIs, assert_never
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
-from vllm.platforms import current_platform
 from vllm.ray.lazy_utils import is_in_ray_actor
 
 if TYPE_CHECKING:
@@ -128,6 +127,10 @@ def flashinfer_max_size(world_size: int, config: VllmConfig) -> Optional[int]:
     allreduce fusion for the given world size. Falls back to
     conservative defaults if the world size is not specified in config.
     """
+
+    # import here to avoid circular dependencies
+    from vllm.platforms import current_platform
+
     device_capability = current_platform.get_device_capability(
     ).as_version_str()
     max_sizes = _FI_ALLREDUCE_MAX_INPUT_SIZES.get(device_capability, {})
