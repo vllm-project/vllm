@@ -178,7 +178,7 @@ Known supported models:
 - MiniCPM-V-2.5 or above (<gh-pr:23327>, <gh-pr:23948>)
 - Qwen2.5-VL (<gh-pr:22742>)
 - Step3 (<gh-pr:22697>)
-- InternVL
+- InternVL (<gh-pr:23909>)
 
 ## Input Processing
 
