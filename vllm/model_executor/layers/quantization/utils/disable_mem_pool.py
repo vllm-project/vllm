@@ -1,5 +1,3 @@
-he memory usage after wakeup weights is close to expectation (fp8 * 7B).
-
 from vllm.device_allocator.cumem import CuMemAllocator
 from contextlib import contextmanager
 from torch.cuda.memory import MemPoolContext
