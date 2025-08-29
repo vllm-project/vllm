@@ -1272,7 +1272,7 @@ class AssetHandler(http.server.BaseHTTPRequestHandler):
         base, ext = filename.rsplit(".", 1)
         ext = ext.lower()
 
-        if ext not in ["jpg", "png"]:
+        if ext not in ["jpg", "png", "svg"]:
             self.send_error(404, f"Unsupported extension: .{ext}")
             return
 
