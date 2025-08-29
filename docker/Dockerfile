@@ -432,7 +432,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
 # Install DeepGEMM from source
-ARG DEEPGEMM_GIT_REF="7b6b5563b9d4c1ae07ffbce7f78ad3ac9204827c"
+ARG DEEPGEMM_GIT_REF="ea9c5d9270226c5dd7a577c212e9ea385f6ef048"
 COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_DOCKER_BUILD_CONTEXT=1 /tmp/install_deepgemm.sh --cuda-version "${CUDA_VERSION}" --ref "${DEEPGEMM_GIT_REF}" \
