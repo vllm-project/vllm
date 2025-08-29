@@ -29,10 +29,10 @@ MISTRAL_SMALL_3_1_ID = "mistralai/Mistral-Small-3.1-24B-Instruct-2503"
 MODELS = [PIXTRAL_ID, MISTRAL_SMALL_3_1_ID]
 
 IMG_URLS = [
-    "237-400x300",
-    "231-200x300",
-    "27-500x500",
-    "17-150x600",
+    "237-400x300.jpg",
+    "231-200x300.jpg",
+    "27-500x500.jpg",
+    "17-150x600.jpg",
 ]
 PROMPT = "Describe each image in one short sentence."
 
