@@ -15,7 +15,7 @@ from ....utils import RemoteOpenAIServer
 # Use a small embeddings model for faster startup and smaller memory footprint.
 # Since we are not testing any chat functionality,
 # using a chat capable model is overkill.
-MODEL_NAME = "intfloat/multilingual-e5-small"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
 @pytest.fixture(scope="module")
@@ -27,12 +27,7 @@ def server(request: pytest.FixtureRequest, embedding_server):
         passed_params = [passed_params]
 
     if passed_params:
-        args = [
-            "--runner", "pooling", "--dtype", "bfloat16", "--enforce-eager",
-            "--max-model-len", "512", "--max-num-seqs", "4",
-            "--gpu-memory-utilization", "0.7", "--disable-log-stats",
-            "--disable-log-requests", *passed_params
-        ]
+        args = ["--enforce-eager", *passed_params]
         with RemoteOpenAIServer(MODEL_NAME, args) as custom_server:
             yield custom_server
     else:

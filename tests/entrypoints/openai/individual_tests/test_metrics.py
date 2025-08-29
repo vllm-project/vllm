@@ -39,7 +39,6 @@ def default_server_args():
 @pytest.fixture(scope="module",
                 params=[
                     "",
-                    "--disable-frontend-multiprocessing",
                     f"--show-hidden-metrics-for-version={PREV_MINOR_VERSION}",
                 ])
 def server(default_server_args, request):
