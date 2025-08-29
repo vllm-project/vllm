@@ -58,12 +58,12 @@ python3 .buildkite/generate_index.py --wheel "$normal_wheel"
 aws s3 cp "$wheel" "s3://vllm-wheels/$BUILDKITE_COMMIT/"
 aws s3 cp "$normal_wheel" "s3://vllm-wheels/$BUILDKITE_COMMIT/"
 
-if [[ $normal_wheel == *"cu118"* ]]; then
-    # if $normal_wheel matches cu118, do not upload the index.html
-    echo "Skipping index files for cu118 wheels"
-elif [[ $normal_wheel == *"cu126"* ]]; then
+if [[ $normal_wheel == *"cu126"* ]]; then
     # if $normal_wheel matches cu126, do not upload the index.html
     echo "Skipping index files for cu126 wheels"
+elif [[ $normal_wheel == *"cu129"* ]]; then
+    # if $normal_wheel matches cu129, do not upload the index.html
+    echo "Skipping index files for cu129 wheels"
 else
     # only upload index.html for cu128 wheels (default wheels)
     aws s3 cp index.html "s3://vllm-wheels/$BUILDKITE_COMMIT/vllm/index.html"
@@ -74,12 +74,12 @@ fi
 aws s3 cp "$wheel" "s3://vllm-wheels/nightly/"
 aws s3 cp "$normal_wheel" "s3://vllm-wheels/nightly/"
 
-if [[ $normal_wheel == *"cu118"* ]]; then
-    # if $normal_wheel matches cu118, do not upload the index.html
-    echo "Skipping index files for cu118 wheels"
-elif [[ $normal_wheel == *"cu126"* ]]; then
+if [[ $normal_wheel == *"cu126"* ]]; then
     # if $normal_wheel matches cu126, do not upload the index.html
     echo "Skipping index files for cu126 wheels"
+elif [[ $normal_wheel == *"cu129"* ]]; then
+    # if $normal_wheel matches cu129, do not upload the index.html
+    echo "Skipping index files for cu129 wheels"
 else
     # only upload index.html for cu128 wheels (default wheels)
     aws s3 cp index.html "s3://vllm-wheels/nightly/vllm/index.html"
