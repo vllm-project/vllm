@@ -3,20 +3,26 @@
 
 import pytest
 
+from vllm.model_executor.model_loader.weight_utils import (
+    download_weights_from_hf)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_PATH = "/tmp/qwen3_06b"
 
 
 @pytest.fixture(scope="module")
 def server():
+    download_weights_from_hf(MODEL_NAME,
+                             cache_dir=MODEL_PATH,
+                             ignore_patterns=["tokenizer*", "vocab*"])
     args = [
         "--max-model-len", "2048", "--max-num-seqs", "128", "--enforce-eager",
         "--skip-tokenizer-init"
     ]
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(MODEL_PATH, args) as remote_server:
         yield remote_server
 
 
@@ -32,7 +38,7 @@ async def test_token_in_token_out_and_logprobs(server):
     async with server.get_async_client() as client:
         # Test with both return_token_ids and return_tokens_as_token_ids enabled
         completion = await client.completions.create(
-            model=MODEL_NAME,
+            model=MODEL_PATH,
             prompt=token_ids,
             max_tokens=20,
             temperature=0,
