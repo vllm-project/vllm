@@ -130,7 +130,7 @@ class IterationStats:
             req_stats.first_token_ts = engine_core_timestamp
         else:
             itl = engine_core_timestamp - req_stats.last_token_ts
-            self.inter_token_latency.append(itl)
+            self.inter_token_latency_iter.append(itl)
 
         req_stats.last_token_ts = engine_core_timestamp
 
@@ -176,8 +176,8 @@ class IterationStats:
 
         # time_per_output_token is calculated as 
         # decode_time / decode_token_nums
-        time_per_output_token = (decode_time / (num_prompt_tokens - 1)
-                                 if num_prompt_tokens - 1 > 0 else 0)
+        time_per_output_token = (decode_time / (req_stats.num_generation_tokens - 1)
+                                 if req_stats.num_generation_tokens - 1 > 0 else 0)
 
         finished_req = \
             FinishedRequestStats(finish_reason=finish_reason,
