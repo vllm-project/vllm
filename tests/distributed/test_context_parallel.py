@@ -75,10 +75,10 @@ class CPTestSettings:
                     for chunked_prefill_val in [False, True]:
                         parallel_setups.append(
                             ParallelSetup(tp_size=tp_base,
-                                        pp_size=pp_multiplier * pp_base,
-                                        cp_size=cp_multiplier * cp_base,
-                                        eager_mode=eager_mode_val,
-                                        chunked_prefill=chunked_prefill_val))
+                                          pp_size=pp_multiplier * pp_base,
+                                          cp_size=cp_multiplier * cp_base,
+                                          eager_mode=eager_mode_val,
+                                          chunked_prefill=chunked_prefill_val))
         return CPTestSettings(
             parallel_setups=parallel_setups,
             distributed_backends=["mp", "ray"],
