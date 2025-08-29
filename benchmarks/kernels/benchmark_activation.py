@@ -6,16 +6,7 @@ import random
 
 import torch
 
-from vllm.model_executor.layers.activation import (
-    FastGELU,
-    FatreluAndMul,
-    GeluAndMul,
-    MulAndSilu,
-    NewGELU,
-    QuickGELU,
-    SiluAndMul,
-    SwigluOAIAndMul,
-)
+from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser
@@ -35,25 +26,19 @@ def bench(
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
 
-    if func_name == "silu_and_mul":
-        layer = SiluAndMul()
-    elif func_name == "mul_and_silu":
-        layer = MulAndSilu()
-    elif func_name == "gelu":
-        layer = GeluAndMul(approximate="none")
-    elif func_name == "gelu_tanh":
-        layer = GeluAndMul(approximate="tanh")
-    elif func_name == "fatrelu":
+    # if func_name == "silu_and_mul":
+    #     layer = SiluAndMul()
+    # elif func_name == "mul_and_silu":
+    #     layer = MulAndSilu()
+    if func_name == "gelu_and_mul":
+        layer = CustomOp.op_registry[func_name](approximate="none")
+    elif func_name == "gelu_and_mul_tanh":
+        layer = CustomOp.op_registry["gelu_and_mul"](approximate="tanh")
+    elif func_name == "fatrelu_and_mul":
         threshold = random.uniform(0, 1)
-        layer = FatreluAndMul(threshold)
-    elif func_name == "swigluoai_and_mul":
-        layer = SwigluOAIAndMul()
-    elif func_name == "new_gelu":
-        layer = NewGELU()
-    elif func_name == "fast_gelu":
-        layer = FastGELU()
-    elif func_name == "quick_gelu":
-        layer = QuickGELU()
+        layer = CustomOp.op_registry[func_name](threshold)
+    else:
+        layer = CustomOp.op_registry[func_name]()
 
     x = torch.randn(num_tokens, dim, dtype=dtype)
     compiled_layer = torch.compile(layer.forward_native)
@@ -84,12 +69,12 @@ if __name__ == "__main__":
         choices=[
             "mul_and_silu",
             "silu_and_mul",
-            "gelu",
-            "gelu_tanh",
-            "fatrelu",
+            "gelu_and_mul",
+            "gelu_and_mul_tanh",
+            "fatrelu_and_mul",
             "swigluoai_and_mul",
-            "new_gelu",
-            "fast_gelu",
+            "gelu_new",
+            "gelu_fast",
             "quick_gelu",
         ],
         default="mul_and_silu",
