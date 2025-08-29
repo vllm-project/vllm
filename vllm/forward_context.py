@@ -91,7 +91,8 @@ class DPMetadata:
                 tp_size_=parallel_config.tensor_model_parallel_size,
                 dp_size_=parallel_config.data_parallel_size,
                 vllm_parallel_config=parallel_config))
-        if (moe_parallel_config.use_forward_impl_chunked
+
+        if not (moe_parallel_config.use_forward_impl_chunked
                 and num_tokens > moe_dp_chunk_size):
             dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
         return num_tokens_tensor
