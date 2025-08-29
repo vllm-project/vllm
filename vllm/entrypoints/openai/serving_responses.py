@@ -55,7 +55,7 @@ from vllm.entrypoints.openai.protocol import (ErrorResponse,
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.tool_server import MCPToolServer, ToolServer
+from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput
@@ -168,6 +168,11 @@ class OpenAIServingResponses(OpenAIServing):
         # never remove messages from the store.
         self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
 
+        # HACK(wuhang): This is a hack. We should use a better store.
+        # FIXME: If enable_store=True, this may cause a memory leak since we
+        # never remove events from the store.
+        self.event_store: dict[str, list[str]] = {}
+
         self.background_tasks: dict[str, asyncio.Task] = {}
 
         self.tool_server = tool_server
@@ -249,15 +254,6 @@ class OpenAIServingResponses(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        if self.tool_server is not None and isinstance(
-                self.tool_server,
-                MCPToolServer) and request.stream and request.tools and any(
-                    tool.type in ["web_search_preview", "code_interpreter"]
-                    for tool in request.tools):
-            return self.create_error_response(
-                "MCP tool server is not supported in background mode and "
-                "streaming mode")
-
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[ConversationContext, None]] = []
 
@@ -329,19 +325,36 @@ class OpenAIServingResponses(OpenAIServing):
                 self.response_store[response.id] = response
 
             # Run the request in the background.
-            task = asyncio.create_task(
-                self._run_background_request(
-                    request,
-                    sampling_params,
-                    result_generator,
-                    context,
-                    model_name,
-                    tokenizer,
-                    request_metadata,
-                    created_time,
-                ),
-                name=f"create_{response.id}",
-            )
+            if request.stream:
+                task = asyncio.create_task(
+                    self._run_background_request_stream(
+                        request,
+                        sampling_params,
+                        result_generator,
+                        context,
+                        model_name,
+                        tokenizer,
+                        request_metadata,
+                        created_time,
+                    ),
+                    name=f"create_{request.request_id}",
+                )
+                yield response
+                return await task
+            else:
+                task = asyncio.create_task(
+                    self._run_background_request(
+                        request,
+                        sampling_params,
+                        result_generator,
+                        context,
+                        model_name,
+                        tokenizer,
+                        request_metadata,
+                        created_time,
+                    ),
+                    name=f"create_{response.id}",
+                )
 
             # For cleanup.
             response_id = response.id
@@ -735,6 +748,18 @@ class OpenAIServingResponses(OpenAIServing):
                 if isinstance(response_msg, ResponseFunctionToolCall):
                     prev_outputs.append(response_msg)
         return messages
+
+    async def _run_background_request_stream(
+        self,
+        request: ResponsesRequest,
+        *args,
+        **kwargs,
+    ):
+        self.event_store.setdefault(request.request_id, [])
+        response = self.responses_stream_generator(request, *args, **kwargs)
+        async for event in response:
+            self.event_store[request.request_id].append(event)
+            yield event
 
     async def _run_background_request(
         self,
