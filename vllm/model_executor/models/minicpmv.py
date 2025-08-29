@@ -990,6 +990,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
         quant_config = vllm_config.quant_config
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         super().__init__()
         # All MiniCPM-V models disable `tie_word_embeddings` but
         # `PretrainedConfig.tie_word_embeddings` defaults to True; we cannot
@@ -1351,9 +1352,12 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
         quant_config: Optional[QuantizationConfig],
         prefix: str = "",
     ) -> nn.Module:
-        model = Idefics2VisionTransformer(config.vision_config,
-                                          quant_config=quant_config,
-                                          prefix=prefix)
+        model = Idefics2VisionTransformer(
+            config.vision_config,
+            quant_config=quant_config,
+            prefix=prefix,
+            use_data_parallel=self.use_data_parallel,
+        )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
         return model
@@ -1441,9 +1445,12 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> nn.Module:
-        model = Idefics2VisionTransformer(config.vision_config,
-                                          quant_config=quant_config,
-                                          prefix=prefix)
+        model = Idefics2VisionTransformer(
+            config.vision_config,
+            quant_config=quant_config,
+            prefix=prefix,
+            use_data_parallel=self.use_data_parallel,
+        )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
         return model
@@ -1546,9 +1553,12 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         prefix: str = "",
     ) -> nn.Module:
         quant_config = self._maybe_ignore_quant_config(quant_config)
-        model = Idefics2VisionTransformer(config.vision_config,
-                                          quant_config=quant_config,
-                                          prefix=prefix)
+        model = Idefics2VisionTransformer(
+            config.vision_config,
+            quant_config=quant_config,
+            prefix=prefix,
+            use_data_parallel=self.use_data_parallel,
+        )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
         return model
@@ -1652,9 +1662,12 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         prefix: str = "",
     ) -> nn.Module:
         quant_config = self._maybe_ignore_quant_config(quant_config)
-        model = Idefics2VisionTransformer(config.vision_config,
-                                          quant_config=quant_config,
-                                          prefix=prefix)
+        model = Idefics2VisionTransformer(
+            config.vision_config,
+            quant_config=quant_config,
+            prefix=prefix,
+            use_data_parallel=self.use_data_parallel,
+        )
         if self.config.drop_vision_last_layer:
             model.encoder.layers = model.encoder.layers[:-1]
         return model
