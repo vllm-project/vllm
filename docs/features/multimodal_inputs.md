@@ -45,7 +45,8 @@ When using multi-modal inputs, vLLM normally hashes each media item by content t
         print(o.outputs[0].text)
     ```
 
-If both multimodal processor caching and prefix caching are disabled, user-provided `multi_modal_uuids` are ignored.
+!!! warning
+    If both multimodal processor caching and prefix caching are disabled, user-provided `multi_modal_uuids` are ignored.
 
 ### Image Inputs
 
