@@ -410,8 +410,9 @@ class SamplingParams(
                 f"logprobs must be non-negative or -1, got {self.logprobs}.")
         if (self.prompt_logprobs is not None and self.prompt_logprobs != -1
                 and self.prompt_logprobs < 0):
-            raise ValueError(f"prompt_logprobs must be non-negative, got "
-                             f"{self.prompt_logprobs}.")
+            raise ValueError(
+                f"prompt_logprobs must be non-negative or -1, got "
+                f"{self.prompt_logprobs}.")
         if (self.truncate_prompt_tokens is not None
                 and self.truncate_prompt_tokens < 1):
             raise ValueError(f"truncate_prompt_tokens must be >= 1, "
