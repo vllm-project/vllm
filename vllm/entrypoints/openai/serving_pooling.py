@@ -203,6 +203,7 @@ class OpenAIServingPooling(OpenAIServing):
         result_generator = merge_async_iterators(*generators)
 
         if is_io_processor_request:
+            assert self.io_processor is not None
             output = await self.io_processor.post_process_async(
                 model_output=result_generator,
                 request_id=request_id,
