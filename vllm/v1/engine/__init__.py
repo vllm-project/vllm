@@ -3,7 +3,7 @@
 
 import enum
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Union
 
 import msgspec
@@ -69,6 +69,8 @@ class EngineCoreRequest(
     current_wave: int = 0
     priority: int = 0
 
+    trace_headers: Optional[Mapping[str, str]] = None
+
 
 class EngineCoreEventType(enum.IntEnum):
     """The type of engine core request event."""
@@ -114,6 +116,7 @@ class EngineCoreOutput(
     events: Optional[list[EngineCoreEvent]] = None
     kv_transfer_params: Optional[dict[str, Any]] = None
 
+    trace_headers: Optional[Mapping[str, str]] = None
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
 
@@ -147,7 +150,7 @@ class EngineCoreOutputs(
         omit_defaults=True,  # type: ignore[call-arg]
         gc=False):  # type: ignore[call-arg]
 
-    #NOTE(Nick): We could consider ways to make this more compact,
+    # NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout
 
     engine_index: int = 0
