@@ -10,11 +10,8 @@ from typing_extensions import TypeAlias, override
 
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, LRUCache
-from vllm.utils.jsontree import (
-    json_count_leaves,
-    json_map_leaves,
-    json_reduce_leaves,
-)
+from vllm.utils.jsontree import (json_count_leaves, json_map_leaves,
+                                 json_reduce_leaves)
 
 from .inputs import (MultiModalFieldElem, MultiModalKwargs,
                      MultiModalKwargsItem, MultiModalKwargsItems,
@@ -209,7 +206,7 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
         """
         Possibly update a multi-modal item based on whether it is
         in the underlying cache.
-        
+
         This update is done out-of-place and updates the cache eviction order.
 
         Args:
@@ -287,7 +284,7 @@ class BaseMultiModalProcessorCache(
         in the underlying cache.
 
         This **DOES NOT** update the cache eviction order.
-    
+
         Args:
             mm_hashes: The hash of each item to check.
 

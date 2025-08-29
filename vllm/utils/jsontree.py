@@ -50,7 +50,8 @@ def json_reduce_leaves(
     func: Callable[[_T, _T], _T],
     value: JSONTree[_T],
     /,
-) -> _T: ...
+) -> _T:
+    ...
 
 
 @overload
@@ -59,7 +60,8 @@ def json_reduce_leaves(
     value: JSONTree[_T],
     initial: _U,
     /,
-) -> _U: ...
+) -> _U:
+    ...
 
 
 def json_reduce_leaves(
