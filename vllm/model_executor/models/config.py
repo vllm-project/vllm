@@ -406,6 +406,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
+    "GteNewForSequenceClassification": GteNewModelConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,

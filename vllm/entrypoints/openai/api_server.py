@@ -1096,7 +1096,7 @@ if envs.VLLM_SERVER_DEV_MODE:
             raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
                                 detail="Missing 'method' in request body")
         # For security reason, only serialized string args/kwargs are passed.
-        # User-defined `method` is responsible for deseralization if needed.
+        # User-defined `method` is responsible for deserialization if needed.
         args: list[str] = body.get("args", [])
         kwargs: dict[str, str] = body.get("kwargs", {})
         timeout: Optional[float] = body.get("timeout")
