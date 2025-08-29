@@ -16,6 +16,7 @@ from PIL.Image import Image
 
 from vllm import LLM, EngineArgs
 from vllm.entrypoints.score_utils import ScoreMultiModalParam
+from vllm.inputs import TextPrompt
 from vllm.multimodal.utils import fetch_image
 from vllm.utils import FlexibleArgumentParser
 
@@ -52,6 +53,7 @@ class ModelRequestData(NamedTuple):
     image: Optional[Image] = None
     query: Optional[str] = None
     documents: Optional[ScoreMultiModalParam] = None
+    pooling_task: Optional[str] = None
 
 
 def run_e5_v(query: Query) -> ModelRequestData:
@@ -79,6 +81,7 @@ def run_e5_v(query: Query) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         image=image,
+        pooling_task="embed",
     )
 
 
@@ -113,6 +116,7 @@ def run_vlm2vec(query: Query) -> ModelRequestData:
         engine_args=engine_args,
         prompt=prompt,
         image=image,
+        pooling_task="embed",
     )
 
 
@@ -136,6 +140,39 @@ def run_jinavl_reranker(query: Query) -> ModelRequestData:
         engine_args=engine_args,
         query=query["text"],
         documents=query["image"],
+    )
+
+
+def run_siglip_so400m(query: Query) -> ModelRequestData:
+    if query["modality"] == "text":
+        prompt = query["text"]
+        image = None
+    elif query["modality"] == "image":
+        prompt = ""
+        image = query["image"]
+    elif query["modality"] == "text+image":
+        prompt = query["text"]
+        image = query["image"]
+    else:
+        raise ValueError(f"Unsupported modality for siglip: {query['modality']}")
+
+    req_query = None
+    req_docs = None
+
+    engine_args = EngineArgs(
+        model="HuggingFaceM4/siglip-so400m-14-980-flash-attn2-navit",
+        tokenizer="google/siglip-base-patch16-224",
+        trust_remote_code=True,
+        runner="pooling",
+        limit_mm_per_prompt={"image": 1},
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image=image,
+        query=req_query,
+        documents=req_docs,
+        pooling_task="encode",
     )
 
 
@@ -203,17 +240,23 @@ def run_encode(model: str, modality: QueryModality, seed: Optional[int]):
     if req_data.image is not None:
         mm_data["image"] = req_data.image
 
-    outputs = llm.embed(
-        {
-            "prompt": req_data.prompt,
-            "multi_modal_data": mm_data,
-        }
+    prompt_text = req_data.prompt if req_data.prompt is not None else ""
+    outputs = llm.encode(
+        [
+            TextPrompt(
+                prompt=prompt_text,
+                multi_modal_data=mm_data or None,
+            )
+        ],
+        pooling_task=req_data.pooling_task,
     )
 
     print("-" * 50)
     for output in outputs:
-        print(output.outputs.embedding)
-        print("-" * 50)
+        embedding_vector = output.outputs.data
+        print("Embedding vector (first 5 dimensions):", embedding_vector[:5])
+        print(f"Embedding dimension: {len(embedding_vector)}")
+    print("-" * 50)
 
 
 def run_score(model: str, modality: QueryModality, seed: Optional[int]):
@@ -234,6 +277,7 @@ model_example_map = {
     "e5_v": run_e5_v,
     "vlm2vec": run_vlm2vec,
     "jinavl_reranker": run_jinavl_reranker,
+    "siglip_so400m": run_siglip_so400m,
 }
 
 
