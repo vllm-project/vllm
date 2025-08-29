@@ -286,10 +286,7 @@ class UBatchWrapper:
             return cudagraph_metadata.outputs
         else:
             if is_global_first_rank():
-                have_graph = False
-                if num_tokens in self.cudagraphs:
-                    have_graph = True
-                logger.debug(f"RUNNING UBATCHED {num_tokens} CUDAGRAPH MODE {cudagraph_runtime_mode} GRAPH EXISTS {have_graph}")
+                logger.debug(f"RUNNING UBATCHED {num_tokens} CUDAGRAPH MODE {cudagraph_runtime_mode}")
             ubatch_metadata = self._make_ubatch_metadata(
                     ubatch_slices=ubatch_slices,
                     attn_metadata=attn_metadata,
