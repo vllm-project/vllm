@@ -596,7 +596,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError(
                 "Mxfp4 does not support batched experts format for EP")
         else:
-            if should_use_flashinfer_mxfp4():
+            if (self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+                or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
                 # B200 code-path
                 kwargs = {
                     "gemm1_alpha": layer.gemm1_alpha,
@@ -772,8 +773,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 x_quant, x_scale = mxfp8_quantize(x, False)  # to mxfp8
                 x_scale = x_scale.view(torch.float8_e4m3fn).reshape(
                     *x.shape[:-1], -1)
-            else:
-                raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
 
             trtllm_gen_output = trtllm_fp4_block_scale_moe(
                 router_logits.to(torch.bfloat16),
