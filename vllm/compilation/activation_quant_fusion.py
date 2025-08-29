@@ -171,8 +171,10 @@ class ActivationQuantFusionPass(VllmInductorPass):
         pattern_silu_mul_fp8 = SiluMulFp8StaticQuantPattern()
         pattern_silu_mul_fp8.register(self.patterns)
 
-        pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
-        pattern_silu_mul_nvfp4.register(self.patterns)
+        if current_platform.is_cuda() and hasattr(torch.ops._C,
+                                                  "silu_and_mul_nvfp4_quant"):
+            pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
+            pattern_silu_mul_nvfp4.register(self.patterns)
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
