@@ -45,8 +45,8 @@ def cutlass_scaled_mm(
         B.T,
         out_dtype=output_dtype,
         scale_a=As,
-        # SM90 block FP8 requires contiguous scale_b
-        scale_b=Bs.T.contiguous() if block_size is not None
+        # SM90 block FP8 requires row-major scale_b, which we do ahead of time
+        scale_b=Bs if block_size is not None
         and current_platform.is_device_capability(90) else Bs.T)
 
 

@@ -162,7 +162,7 @@ void cutlass_gemm_blockwise_sm90_fp8_dispatch(torch::Tensor& out,
   // TODO: better heuristics
   cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
       OutType, 1, 128, 128, Shape<_128, _128, _128>,
-      Shape<_1, _1, _1>, cutlass::epilogue::TmaWarpSpecializedCooperative,
+      Shape<_1, _2, _1>, cutlass::epilogue::TmaWarpSpecializedCooperative,
       cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8BlockScaledAccum>>(
       out, a, b, a_scales, b_scales);
 }
