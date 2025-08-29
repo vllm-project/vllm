@@ -762,14 +762,13 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         if (self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
                 or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
-            from flashinfer import mxfp8_quantize, trtllm_fp4_block_scale_moe
-            assert not self.moe.use_ep, (
-                "EP is not supported for flashinfer mxfp4 moe backend yet.")
+            from flashinfer import trtllm_fp4_block_scale_moe
             if self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16:
                 assert x.dtype == torch.bfloat16
                 x_quant = x
                 x_scale = None
             elif self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM:
+                from flashinfer import mxfp8_quantize
                 x_quant, x_scale = mxfp8_quantize(x, False)  # to mxfp8
                 x_scale = x_scale.view(torch.float8_e4m3fn).reshape(
                     *x.shape[:-1], -1)
@@ -791,12 +790,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 None,  # output1_scale_scalar
                 None,  # output1_scale_gate_scalar
                 None,  # output2_scale_scalar
-                self.num_experts,
+                global_num_experts,
                 top_k,
                 None,  # n_group
                 None,  # topk_group
                 self.intermediate_size,  # padded to multiple of 256
-                0,  # local_expert_offset
+                layer.ep_rank * layer.local_num_experts,  # local_expert_offset
                 self.num_experts,  # local num experts
                 None,
                 self._get_tile_tokens_dim(x, top_k),

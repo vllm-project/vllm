@@ -655,6 +655,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         forward_native = forward_tpu
     elif current_platform.is_cpu():
         forward_native = forward_cpu
+    elif current_platform.is_xpu():
+        forward_native = forward_xpu
     else:
         forward_native = forward_cuda
 
@@ -927,7 +929,7 @@ class FusedMoE(CustomOp):
         self.batched_router_logits: Optional[torch.Tensor] = None
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
-                or self.moe_parallel_config.use_flashinfer_cutlass_kernels):
+                or self.moe_config.use_flashinfer_cutlass_kernels):
             self.batched_hidden_states = torch.zeros(
                 (moe.max_num_tokens, self.hidden_size),
                 dtype=moe.in_dtype,
@@ -981,7 +983,7 @@ class FusedMoE(CustomOp):
 
     @property
     def use_flashinfer_cutlass_kernels(self):
-        return self.moe_parallel_config.use_flashinfer_cutlass_kernels
+        return self.moe_config.use_flashinfer_cutlass_kernels
 
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated
@@ -1672,7 +1674,7 @@ class FusedMoE(CustomOp):
         # only when data parallelism (DP) is enabled.
         use_flashinfer_cutlass_kernels = (
             self.dp_size > 1
-            and self.moe_parallel_config.use_flashinfer_cutlass_kernels)
+            and self.moe_config.use_flashinfer_cutlass_kernels)
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
                 or use_flashinfer_cutlass_kernels):
@@ -1681,7 +1683,7 @@ class FusedMoE(CustomOp):
         do_naive_dispatch_combine: bool = (
             self.dp_size > 1
             and not self.moe_parallel_config.use_deepep_ht_kernels
-            and not self.moe_parallel_config.use_flashinfer_cutlass_kernels)
+            and not self.moe_config.use_flashinfer_cutlass_kernels)
         if do_naive_dispatch_combine:
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
