@@ -862,6 +862,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logits_indices_padded=logits_indices_padded,
                 num_logits_indices=logits_indices.size(0),
                 causal=True,
+                cp_local_token_cnt=cp_local_token_cnt,
                 cp_local_token_select_indices_cpu=self.
                 cp_local_token_select_indices.cpu,
                 cp_num_computed_tokens_cpu_tensor=self.input_batch.
@@ -887,7 +888,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 attn_metadata_i = (builder.build(
                     common_prefix_len=common_prefix_len,
                     common_attn_metadata=common_attn_metadata,
-                    cp_local_token_cnt=cp_local_token_cnt,
                 ))
 
                 for layer_name in attn_group.layer_names:

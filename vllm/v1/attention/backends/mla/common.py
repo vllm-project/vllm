@@ -628,12 +628,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     def build(self,
               common_prefix_len: int,
               common_attn_metadata: CommonAttentionMetadata,
-              fast_build: bool = False,
-              cp_local_token_cnt: Optional[int] = None) -> M:
-        """
-        Args:
-            cp_local_token_cnt (Optional[int], optional): The number of kv should be stored on the current cp rank.
-        """
+              fast_build: bool = False) -> M:
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
@@ -645,9 +640,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
-        if cp_local_token_cnt is not None:
+        if common_attn_metadata.cp_local_token_cnt is not None:
             # TODO(hc): CP need support mla fullgraph in the future, which is not difficult.
-            cp_local_token_select_indices = common_attn_metadata.cp_local_token_select_indices_cpu[:cp_local_token_cnt].to(
+            cp_local_token_select_indices = common_attn_metadata.cp_local_token_select_indices_cpu[:common_attn_metadata.cp_local_token_cnt].to(
                 device, non_blocking=True).long()
 
         query_start_loc = common_attn_metadata.query_start_loc
@@ -826,7 +821,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             prefill=prefill_metadata,
             decode=decode_metadata,
             cp_local_token_select_indices=cp_local_token_select_indices
-            if cp_local_token_cnt is not None else None,
+            if common_attn_metadata.cp_local_token_cnt is not None else None,
         )
 
         if self._use_fi_prefill and num_prefills > 0:
