@@ -171,7 +171,8 @@ class ParallelConfig:
     """
 
     context_parallel_size: int = 1
-    """Number of context parallel groups, and tensor_parallel_size needs to be divisible by context_parallel_size."""
+    """Number of context parallel groups, and tensor_parallel_size
+    needs to be divisible by context_parallel_size."""
 
     @property
     def world_size_across_dp(self) -> int:

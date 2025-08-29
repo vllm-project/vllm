@@ -535,8 +535,8 @@ class FlexAttentionMetadataBuilder(
             "2.9.0.dev0") else 128
 
     def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        return False
+                      scheduler_output: "SchedulerOutput") -> tuple[bool, int]:
+        return False, 0
 
     def build(self,
               common_prefix_len: int,
