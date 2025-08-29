@@ -120,12 +120,7 @@ class DPMetadata:
         # Otherwise, num_tokens_across_dp[dp_rank] should be equal to batchsize
         assert (num_tokens_across_dp is None
                 or num_tokens_across_dp[dp_rank] == batchsize)
-        # SKIP NO CHUNKING
-        # When not to skip: on a2a, when chunking with chunk>1,
-        # self.moe_parallel_config.use_pplx_kernels
-        #         or self.moe_parallel_config.use_deepep_ll_kernels
-        #         or use_flashinfer_cutlass_kernels
-        # if batchsize < VLLM_MOE_DP_CHUNK_SIZE
+
         if num_tokens_across_dp is None:
             num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
                 batchsize, dp_size, dp_rank, parallel_config)
