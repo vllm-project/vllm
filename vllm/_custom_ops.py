@@ -13,11 +13,25 @@ from vllm.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
+def _get_import_fix(module_name: str, error: Exception) -> str:
+    """Get practical fix for common import failures."""
+    fixes = {
+        "vllm._C": "pip uninstall vllm && pip install vllm  # Reinstall with compiled extensions",
+        "flash_attn": "pip install flash-attn --no-build-isolation  # Requires CUDA 11.6+",
+        "transformers": "pip install transformers --upgrade  # Update to latest version"
+    }
+    
+    base_msg = f"Failed to import {module_name}: {error}"
+    if module_name in fixes:
+        return f"{base_msg}. Fix: {fixes[module_name]}"
+    return f"{base_msg}. Try: pip install {module_name}"
+
+
 if not current_platform.is_tpu() and not current_platform.is_xpu():
     try:
         import vllm._C
     except ImportError as e:
-        logger.warning("Failed to import from vllm._C with %r", e)
+        logger.error(_get_import_fix("vllm._C", e))
 
 supports_moe_ops = False
 with contextlib.suppress(ImportError):

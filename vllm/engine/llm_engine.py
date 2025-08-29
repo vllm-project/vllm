@@ -671,12 +671,13 @@ class LLMEngine:
                 f"request_id must be a string, got {type(request_id)}")
 
         if lora_request is not None and not self.lora_config:
-            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
-                             "not enabled!")
+            lora_id = getattr(lora_request, 'lora_id', 'unknown')
+            msg = f"LoRA request '{lora_id}' provided but LoRA not enabled in engine"
+            raise ValueError(f"{msg}. Add flag: --enable-lora")
 
         if priority != 0 and not self.scheduler_config.policy == "priority":
-            raise ValueError(f"Got priority {priority} but "
-                             "Priority scheduling is not enabled.")
+            msg = f"Priority {priority} provided but priority scheduling disabled"
+            raise ValueError(f"{msg}. Add flag: --scheduler-policy priority")
 
         if isinstance(params, SamplingParams) \
             and params.logits_processors:

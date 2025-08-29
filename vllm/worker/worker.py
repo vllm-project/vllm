@@ -567,21 +567,38 @@ def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):
                 "`dtype` flag in CLI, for example: --dtype=half.")
 
 
+def _add_memory_suggestions(msg: str, **kwargs) -> str:
+    """Add practical GPU memory solutions to error messages."""
+    import torch
+    gpu_count = torch.cuda.device_count() if torch.cuda.is_available() else 1
+    suggestions = []
+    
+    if gpu_count > 1:
+        suggestions.append(f"--tensor-parallel-size {gpu_count}")
+    suggestions.append("--gpu-memory-utilization 0.9") 
+    suggestions.append("--quantization awq")
+    
+    return f"{msg}. Quick fixes: {', '.join(suggestions)}"
+
+
 def raise_if_cache_size_invalid(num_gpu_blocks, block_size, is_attention_free,
                                 max_model_len, pipeline_parallel_size) -> None:
     if is_attention_free and num_gpu_blocks != 0:
-        raise ValueError("No memory should be allocated for the cache blocks "
-                         f"for an attention-free model, but {num_gpu_blocks} "
-                         "blocks are allocated.")
+        raise ValueError(
+            f"Attention-free model shouldn't allocate {num_gpu_blocks} cache blocks. "
+            f"Set num_gpu_blocks=0 for attention-free models")
+        
     if not is_attention_free and num_gpu_blocks <= 0:
-        raise ValueError("No available memory for the cache blocks. "
-                         "Try increasing `gpu_memory_utilization` when "
-                         "initializing the engine.")
+        estimated_mb = (block_size * 100) // 1024  # Rough estimate
+        msg = (f"Insufficient GPU memory for KV cache (0 blocks allocated). "
+               f"Need ~{estimated_mb}MB+ free GPU memory")
+        raise ValueError(_add_memory_suggestions(msg))
+    
     max_seq_len = block_size * (num_gpu_blocks // pipeline_parallel_size)
     if not is_attention_free and max_model_len > max_seq_len:
-        raise ValueError(
-            f"The model's max seq len ({max_model_len}) "
-            "is larger than the maximum number of tokens that can be "
-            f"stored in KV cache ({max_seq_len}). Try increasing "
-            "`gpu_memory_utilization` or decreasing `max_model_len` when "
-            "initializing the engine.")
+        deficit_tokens = max_model_len - max_seq_len
+        deficit_gb = (deficit_tokens * 4) / (1024**3)  # Rough FP32 estimate
+        msg = (f"Model max length ({max_model_len:,} tokens) exceeds "
+               f"KV cache capacity ({max_seq_len:,} tokens). "
+               f"Need ~{deficit_gb:.1f}GB more GPU memory")
+        raise ValueError(_add_memory_suggestions(msg))
