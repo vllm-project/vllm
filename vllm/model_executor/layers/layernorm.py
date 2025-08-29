@@ -104,16 +104,16 @@ if current_platform.is_rocm():
     )
 
 
-def dispatch_rmsnorm_func(add_residual: bool, dtype: torch.dtype):
+def dispatch_rmsnorm_func(with_fused_add: bool, dtype: torch.dtype):
     use_aiter = is_rocm_aiter_rmsnorm_enabled() and dtype in [
         torch.float16, torch.bfloat16
     ]
 
-    if use_aiter and add_residual:
+    if use_aiter and with_fused_add:
         return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add
     if use_aiter:
         return torch.ops.vllm.rocm_aiter_rms_norm
-    if add_residual:
+    if with_fused_add:
         return fused_add_rms_norm
     return rms_norm
 
@@ -147,7 +147,12 @@ class RMSNorm(CustomOp):
             self.weight = torch.ones(hidden_size)
         if self.has_weight:
             self.weight = nn.Parameter(self.weight)
-        self.dtype = self.weight.data.dtype
+        weight_dtype = self.weight.data.dtype
+
+        self.norm_func = dispatch_rmsnorm_func(with_fused_add=False,
+                                               dtype=weight_dtype)
+        self.norm_func_with_add = dispatch_rmsnorm_func(with_fused_add=True,
+                                                        dtype=weight_dtype)
 
     def forward_native(
         self,
@@ -196,13 +201,11 @@ class RMSNorm(CustomOp):
             return self.forward_native(x, residual)
 
         add_residual = residual is not None
-        norm_func = dispatch_rmsnorm_func(add_residual, self.dtype)
-
         if add_residual:
-            return norm_func(x, residual, self.weight.data,
-                             self.variance_epsilon)
+            return self.norm_func_with_add(x, residual, self.weight.data,
+                                           self.variance_epsilon)
         else:
-            return norm_func(x, self.weight.data, self.variance_epsilon)
+            return self.norm_func(x, self.weight.data, self.variance_epsilon)
 
     def forward_xpu(
         self,
