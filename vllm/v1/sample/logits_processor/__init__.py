@@ -186,14 +186,24 @@ def build_logitsprocs(
 class AdapterLogitsProcessor(LogitsProcessor):
     """Wrapper for per-request logits processors
     
-    To wrap a specific per-request logits processor, 
+    To wrap a specific per-request logits processor,
+    * Subclass `AdapterLogitsProcessor`
     * Implement `self.is_argmax_invariant()` base-class method
     * Implement `self.req_logits_processor()`
-    * `__init__()` must call `super().__init__()`
+    
+    `__init__()` must call `super().__init__()`
     """
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device,
                  is_pin_memory: bool):
+        """Subclass must invoke `super().__init__()`.
+
+        Subclass constructor may find it useful to utilize the `vllm_config`,
+        `device` and `is_pin_memory` argument. However regardless of whether
+        these arguments are used, the vLLM logits processor interface requires
+        all three arguments to be present.
+        """
+
         # Map req index -> logits processor state
         #
         # State representation is a partial[Tensor] comprising a request-level
@@ -243,10 +253,10 @@ class AdapterLogitsProcessor(LogitsProcessor):
           logits processor partial[Tensor] or None
         
         """
-        if (v0_lp := self.req_logits_processor(params)):
+        if req_lp := self.req_logits_processor(params):
             args = [prompt_ids, output_ids] if (len(
-                inspect.signature(v0_lp).parameters) == 3) else [output_ids]
-            return partial(v0_lp, *args)
+                inspect.signature(req_lp).parameters) == 3) else [output_ids]
+            return partial(req_lp, *args)
         return None
 
     def update_state(self, batch_update: Optional[BatchUpdate]):
@@ -260,9 +270,9 @@ class AdapterLogitsProcessor(LogitsProcessor):
         if self.req_info:
             # Apply per-request logits processors to corresponding rows of
             # logits tensor
-            for req_idx, v0_lp in self.req_info.items():
+            for req_idx, req_lp in self.req_info.items():
                 req_logits = logits[req_idx]
-                new_logits = v0_lp(req_logits)
+                new_logits = req_lp(req_logits)
                 if new_logits is not req_logits:
                     # Modify logits tensor row in-place if necessary
                     logits[req_idx] = new_logits
