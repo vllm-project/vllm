@@ -1321,3 +1321,10 @@ def image_url(request, local_asset_server_base_url) -> str:
     # request.param is one of the IMAGE_URLS filenames
     name = request.param
     return f"{local_asset_server_base_url}/{name}"
+
+
+@pytest.fixture
+def image_urls(request, local_asset_server_base_url):
+    """Indirect fixture: takes a list of names, returns list of full URLs."""
+    names: list[str] = request.param
+    return [f"{local_asset_server_base_url}/{name}" for name in names]
