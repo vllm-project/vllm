@@ -62,6 +62,8 @@ class KVConnHandshakeServer:
             return {dp_rank: {tp_rank: tp_data}}
 
     async def start_async(self):
+        logger.debug("DEBUG: KVConnHandshakeServer.start_async() called")
+
         if self.server is not None:
             logger.warning("Side channel server is already running")
             return
@@ -69,6 +71,8 @@ class KVConnHandshakeServer:
         listen_address = f"http://{self.host}:{self.port}"
         logger.info("Starting %s handshake server on %s",
                     self._get_connector_name(), listen_address)
+        logger.debug("DEBUG: Preparing uvicorn configuration for %s",
+                     listen_address)
 
         # prepare uvicorn configuration
         config_kwargs: dict[str, Any] = {
@@ -79,15 +83,35 @@ class KVConnHandshakeServer:
             "access_log": True,
         }
 
-        config = uvicorn.Config(**config_kwargs)
-        config.load()  # need to load config to get SSL context
-        self.server = uvicorn.Server(config)
+        logger.debug("DEBUG: Creating uvicorn.Config with kwargs: %s",
+                     config_kwargs)
+        try:
+            config = uvicorn.Config(**config_kwargs)
+            logger.debug("DEBUG: uvicorn.Config created successfully")
 
-        # start the server in a background task
-        if self.server is not None:
-            asyncio.create_task(self.server.serve())
-        logger.info("%s handshake server started successfully",
-                    self._get_connector_name())
+            config.load()  # need to load config to get SSL context
+            logger.debug("DEBUG: uvicorn.Config loaded successfully")
+
+            self.server = uvicorn.Server(config)
+            logger.debug("DEBUG: uvicorn.Server created successfully")
+
+            # start the server in a background task
+            if self.server is not None:
+                logger.debug(
+                    "DEBUG: Creating background task for server.serve()")
+                task = asyncio.create_task(self.server.serve())
+                logger.debug("DEBUG: Background task created: %s", task)
+
+            logger.info("%s handshake server started successfully",
+                        self._get_connector_name())
+            logger.debug(
+                "DEBUG: KVConnHandshakeServer.start_async() completed")
+
+        except Exception as e:
+            logger.error(
+                "DEBUG: Exception in KVConnHandshakeServer.start_async(): %s",
+                e)
+            raise
 
     async def stop_async(self):
         if self.server is not None:
@@ -150,13 +174,22 @@ def _get_handshake_server_config(vllm_config: VllmConfig) -> tuple[str, int]:
 async def set_up_kv_handshake_server(
         vllm_config: VllmConfig,
         kv_metadata: dict) -> Optional[KVConnHandshakeServer]:
+    logger.debug(
+        "DEBUG: set_up_kv_handshake_server called with kv_metadata keys: %s",
+        list(kv_metadata.keys()) if kv_metadata else "None")
+
     if not should_start_kv_handshake_server(vllm_config):
         logger.debug(
             "DEBUG: should_start_kv_handshake_server returned False, no start")
         return None
 
+    logger.debug(
+        "DEBUG: should_start_kv_handshake_server returned True, proceeding")
+
     side_channel_host, side_channel_port = _get_handshake_server_config(
         vllm_config)
+    logger.debug("DEBUG: Got handshake server config: host=%s, port=%d",
+                 side_channel_host, side_channel_port)
 
     assert vllm_config.kv_transfer_config is not None
     connector_name = vllm_config.kv_transfer_config.kv_connector
@@ -167,5 +200,15 @@ async def set_up_kv_handshake_server(
 
     server = KVConnHandshakeServer(side_channel_host, side_channel_port,
                                    kv_metadata, connector_name)
-    await server.start_async()
+    logger.debug("DEBUG: Created KVConnHandshakeServer instance")
+
+    try:
+        await server.start_async()
+        logger.debug(
+            "DEBUG: KVConnHandshakeServer.start_async() completed successfully"
+        )
+    except Exception as e:
+        logger.error("DEBUG: Failed to start KVConnHandshakeServer: %s", e)
+        raise
+
     return server
