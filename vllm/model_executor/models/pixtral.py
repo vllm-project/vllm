@@ -32,7 +32,9 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import _Backend
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors)
@@ -1077,6 +1079,17 @@ class PixtralHFAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        
+        # Detect attention backend at initialization time
+        self.attn_backend = get_vit_attn_backend(support_fa=True)
+        
+        # Validate supported backends
+        if self.attn_backend not in {
+            _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.ROCM_AITER_FA
+        }:
+            raise RuntimeError(
+                f"Vision attention does not support {self.attn_backend} backend now."
+            )
 
     def forward(
         self,
@@ -1096,15 +1109,31 @@ class PixtralHFAttention(nn.Module):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=0)
 
-        if USE_XFORMERS_OPS:
-            # Transpose q and k back for attention
+        # Apply attention using the pre-selected backend
+        if self.attn_backend == _Backend.FLASH_ATTN:
+            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_func
+            # Flash Attention expects (batch, seq, heads, head_dim)
+            q = q.transpose(1, 2).contiguous()
+            k = k.transpose(1, 2).contiguous()
+            # Note: attention_mask is not supported in flash attention
+            out = flash_attn_func(q, k, v, softmax_scale=1.0 / math.sqrt(self.head_dim))
+        elif self.attn_backend == _Backend.XFORMERS:
+            from xformers import ops as xops
+            # xFormers expects (batch, seq, heads, head_dim)
             q = q.transpose(1, 2).contiguous()
             k = k.transpose(1, 2).contiguous()
             out = xops.memory_efficient_attention(q,
                                                   k,
                                                   v,
                                                   attn_bias=attention_mask)
+        elif self.attn_backend == _Backend.ROCM_AITER_FA:
+            from aiter import flash_attn_varlen_func
+            # ROCm Flash Attention expects (batch, seq, heads, head_dim)
+            q = q.transpose(1, 2).contiguous()
+            k = k.transpose(1, 2).contiguous()
+            out = flash_attn_varlen_func(q, k, v, softmax_scale=1.0 / math.sqrt(self.head_dim))
         else:
+            # PyTorch SDPA (default and fallback)
             v = v.transpose(1, 2)
             out = nn.functional.scaled_dot_product_attention(
                 q, k, v, attn_mask=attention_mask)

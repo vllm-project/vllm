@@ -27,6 +27,8 @@ from transformers.models.idefics2.configuration_idefics2 import (
     Idefics2Config, Idefics2VisionConfig)
 
 from vllm.attention.layer import MultiHeadAttention
+from vllm.model_executor.models.vision import get_vit_attn_backend
+from vllm.platforms import _Backend
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -172,6 +174,17 @@ class Idefics2VisionAttention(nn.Module):
             )
         self.attn = MultiHeadAttention(self.num_heads_per_partition,
                                        self.head_dim, self.scale)
+        
+        # Detect attention backend at initialization time
+        self.attn_backend = get_vit_attn_backend(support_fa=True)
+        
+        # Validate supported backends
+        if self.attn_backend not in {
+            _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.ROCM_AITER_FA
+        }:
+            raise RuntimeError(
+                f"Vision attention does not support {self.attn_backend} backend now."
+            )
 
     def forward(
         self,
@@ -181,8 +194,39 @@ class Idefics2VisionAttention(nn.Module):
             hidden_states
         )  # batch_size, q_len, 3 * num_heads_per_partition * head_dim
         query_states, key_states, value_states = qkv.chunk(3, dim=-1)
-        out = self.attn(query_states, key_states, value_states)
-        attn_output, _ = self.out_proj(out)
+        
+        batch_size, seq_len, _ = query_states.shape
+        
+        # Reshape for attention computation
+        q = query_states.view(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
+        k = key_states.view(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
+        v = value_states.view(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
+        
+        # Apply attention using the pre-selected backend
+        if self.attn_backend == _Backend.FLASH_ATTN:
+            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_func
+            # Flash Attention expects (batch, seq, heads, head_dim)
+            attn_output = flash_attn_func(q, k, v, softmax_scale=self.scale)
+            attn_output = attn_output.reshape(batch_size, seq_len, -1)
+        elif self.attn_backend == _Backend.XFORMERS:
+            from xformers import ops as xops
+            # xFormers expects (batch, seq, heads, head_dim)
+            attn_output = xops.memory_efficient_attention_forward(q, k, v, scale=self.scale)
+            attn_output = attn_output.reshape(batch_size, seq_len, -1)
+        elif self.attn_backend == _Backend.ROCM_AITER_FA:
+            from aiter import flash_attn_varlen_func
+            # ROCm Flash Attention expects (batch, seq, heads, head_dim)
+            attn_output = flash_attn_varlen_func(q, k, v, softmax_scale=self.scale)
+            attn_output = attn_output.reshape(batch_size, seq_len, -1)
+        else:
+            # PyTorch SDPA (default and fallback)
+            q = q.transpose(1, 2)  # (batch, heads, seq, head_dim)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            attn_output = torch.nn.functional.scaled_dot_product_attention(q, k, v, scale=self.scale)
+            attn_output = attn_output.transpose(1, 2).reshape(batch_size, seq_len, -1)
+        
+        attn_output, _ = self.out_proj(attn_output)
         return attn_output
 
 
