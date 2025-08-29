@@ -10,6 +10,7 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType)
@@ -28,12 +29,6 @@ _PARTITION_SIZE_ROCM = 256
 
 
 @cache
-def is_rocm_aiter_paged_attn_enabled() -> bool:
-    return envs.VLLM_ROCM_USE_AITER_PAGED_ATTN \
-        and envs.VLLM_ROCM_USE_AITER \
-
-
-@cache
 def _get_paged_attn_module() -> PagedAttention:
     """
     Initializes the appropriate PagedAttention module from `attention/ops`,
@@ -45,7 +40,7 @@ def _get_paged_attn_module() -> PagedAttention:
     - If enabled, `ROCmFlashAttentionImpl` uses `AITERPagedAttention`.
     - Otherwise, it defaults to using the original `PagedAttention`.
     """
-    if is_rocm_aiter_paged_attn_enabled():
+    if rocm_aiter_ops.is_pa_attn_enabled():
         # Import AITERPagedAttention only when the flag is enabled
         from vllm.attention.ops.rocm_aiter_paged_attn import (
             AITERPagedAttention)
@@ -626,7 +621,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         # when the size of one element is one byte (int8/fp8 dtypes).
         # This reshaping is only required on the first forward call
         # and the kv cache must not be empty.
-        if (is_rocm_aiter_paged_attn_enabled() and kv_cache.dtype.itemsize == 1
+        if (rocm_aiter_ops.is_pa_attn_enabled()
+                and kv_cache.dtype.itemsize == 1
                 and not self.aiter_kv_scales_initialized
                 and kv_cache.shape != torch.Size([0])):
             num_blocks = kv_cache.shape[1]

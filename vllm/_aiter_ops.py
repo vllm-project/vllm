@@ -249,6 +249,39 @@ def _rocm_aiter_mla_decode_fwd_fake(
     pass
 
 
+def _rocm_aiter_gemm_w8a8_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+
+    from aiter import gemm_a8w8_CK
+
+    # gemm_a8w8_CK(a, b, scale_a, scale_b, bias) expects
+    # a to be [M, K]
+    # b to be [N, K]
+    # CutlassScaledMMLinearKernel prepare weight `w_q` in [K, N] format
+    return gemm_a8w8_CK(A, B, As, Bs, bias, output_dtype)
+
+
+def _rocm_aiter_gemm_w8a8_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+
+    m = A.shape[0]
+    n = B.shape[0]
+    Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
+    return Y
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -260,12 +293,21 @@ class rocm_aiter_ops:
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
     _PG_ATTN_ENABLED = envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
+    _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
+    _TRITON_UNIFIED_ATTN_ENABLED = envs.VLLM_USE_AITER_UNIFIED_ATTENTION
+    _FP8BMM_ENABLED = envs.VLLM_ROCM_USE_AITER_FP8BMM
 
     @classmethod
     @is_aiter_supported
     def is_linear_enabled(cls) -> bool:
         """"Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._LINEAR_ENABLED
+
+    @classmethod
+    @is_aiter_supported
+    def is_linear_fp8_enaled(cls) -> bool:
+        """"Verifies device specs and availability of env variable."""
+        return cls.is_linear_enabled() and current_platform.is_fp8_fnuz()
 
     @classmethod
     @is_aiter_supported
@@ -287,9 +329,26 @@ class rocm_aiter_ops:
 
     @classmethod
     @is_aiter_supported
+    def is_mha_enabled(cls) -> bool:
+        """"Verifies device specs and availability of env variable."""
+        return cls._AITER_ENABLED and cls._MHA_ENABLED
+
+    @classmethod
+    @is_aiter_supported
     def is_pa_attn_enabled(cls) -> bool:
         """"Verifies device specs and availability of env variable."""
         return cls._AITER_ENABLED and cls._PG_ATTN_ENABLED
+
+    @classmethod
+    @is_aiter_supported
+    def is_triton_unified_attn_enabled(cls) -> bool:
+        """"Verifies device specs and availability of env variable."""
+        return cls._AITER_ENABLED and cls._TRITON_UNIFIED_ATTN_ENABLED
+
+    @classmethod
+    @is_aiter_supported
+    def is_fp8bmm_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._FP8BMM_ENABLED
 
     @staticmethod
     @is_aiter_supported
@@ -351,7 +410,27 @@ class rocm_aiter_ops:
                 fake_impl=_rocm_aiter_mla_decode_fwd_fake,
                 tags=tags)
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_gemm_w8a8",
+                op_func=_rocm_aiter_gemm_w8a8_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_gemm_w8a8_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
             _OPS_REGISTERED = True
+
+    @staticmethod
+    def gemm_w8a8(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        output_dtype: torch.dtype = torch.float16,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_gemm_w8a8(A, B, As, Bs, bias,
+                                                   output_dtype)
 
     @staticmethod
     def fused_moe(
@@ -453,6 +532,43 @@ class rocm_aiter_ops:
                                                  kv_last_page_lens,
                                                  sm_scale=sm_scale,
                                                  logit_cap=logit_cap)
+
+    @staticmethod
+    def triton_fp8_bmm(
+        X: torch.Tensor,
+        WQ: torch.Tensor,
+        w_scale: torch.Tensor,
+        group_size: int = 128,
+        bias: Optional[torch.Tensor] = None,
+        dtype: Optional[torch.dtype] = torch.bfloat16,
+        splitK: Optional[int] = None,
+        YQ: Optional[torch.Tensor] = None,
+        transpose_bm: Optional[bool] = False,
+        config: Optional[dict] = None,
+    ) -> torch.Tensor:
+        from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501 # isort: skip
+            batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant
+            as aiter_triton_fp8_bmm)
+
+        return aiter_triton_fp8_bmm(X,
+                                    WQ,
+                                    w_scale,
+                                    group_size=group_size,
+                                    bias=bias,
+                                    dtype=dtype,
+                                    splitK=splitK,
+                                    YQ=YQ,
+                                    transpose_bm=transpose_bm,
+                                    config=config)
+
+    @staticmethod
+    def per_1x128_fp8_quant(
+        input_2d: torch.Tensor, ) -> tuple[torch.Tensor, ...]:
+        """ Only applies quantization method for fp8 data type."""
+        from aiter import QuantType, dtypes, get_hip_quant
+
+        aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
+        return aiter_per1x128_quant(input_2d, quant_dtype=dtypes.fp8)
 
 
 rocm_aiter_ops.register_ops_once()

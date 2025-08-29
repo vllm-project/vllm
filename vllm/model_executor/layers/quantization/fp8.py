@@ -208,10 +208,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         # AITER is only supported on ROCm and only for FP8_FNUZ
         # and at the moment are MI300 series
-        self.use_aiter_and_is_supported = (current_platform.is_rocm()
-                                           and envs.VLLM_ROCM_USE_AITER
-                                           and envs.VLLM_ROCM_USE_AITER_LINEAR
-                                           and current_platform.is_fp8_fnuz())
+        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enaled()
 
         self.block_quant = self.quant_config.weight_block_size is not None
         self.act_q_static = self.quant_config.activation_scheme == "static"

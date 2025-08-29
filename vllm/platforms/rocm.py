@@ -11,6 +11,7 @@ from torch.distributed import PrefixStore, ProcessGroup
 from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless
 
@@ -145,8 +146,8 @@ def use_rocm_custom_paged_attention(
                 and (gqa_ratio >= 1 and gqa_ratio <= 16)
                 and max_seq_len <= 128 * 1024
                 and (envs.VLLM_ROCM_CUSTOM_PAGED_ATTN)
-                and not (envs.VLLM_ROCM_USE_AITER_PAGED_ATTN
-                         and envs.VLLM_ROCM_USE_AITER) and sinks is None)
+                and not (rocm_aiter_ops.is_pa_attn_enabled())
+                and sinks is None)
 
     else:
         return (ON_GFX11_GFX12 and (not envs.VLLM_USE_V1 or sliding_window == 0
@@ -177,8 +178,7 @@ class RocmPlatform(Platform):
     @classmethod
     def get_vit_attn_backend(cls, support_fa: bool = False) -> _Backend:
         if support_fa:
-            if (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA
-                    and on_gfx9()):
+            if rocm_aiter_ops.is_mha_enabled():
                 # Note: AITER FA is only supported for Qwen-VL models.
                 # TODO: Add support for other VL models in their model class.
                 return _Backend.ROCM_AITER_FA
@@ -191,8 +191,6 @@ class RocmPlatform(Platform):
                              kv_cache_dtype, block_size, use_v1, use_mla,
                              has_sink) -> str:
         if use_mla:
-            from vllm._aiter_ops import rocm_aiter_ops
-
             if selected_backend is None:
                 selected_backend = (
                     _Backend.ROCM_AITER_MLA if rocm_aiter_ops.is_mla_enabled()
@@ -235,8 +233,7 @@ class RocmPlatform(Platform):
             selected_backend = _Backend.ROCM_FLASH
 
         if envs.VLLM_USE_V1:
-            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA \
-                and on_gfx9():
+            if rocm_aiter_ops.is_mha_enabled():
                 logger.info("Using Flash Attention backend on V1 engine.")
                 return ("vllm.v1.attention.backends."
                         "rocm_aiter_fa.AiterFlashAttentionBackend")
