@@ -17,7 +17,7 @@ from mistral_common.protocol.instruct.messages import (AudioChunk, RawAudio,
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.protocol.transcription.request import TranscriptionRequest
 from mistral_common.tokens.tokenizers.audio import Audio, AudioEncoder
-from transformers import TensorType, WhisperConfig
+from transformers import BatchFeature, TensorType, WhisperConfig
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
@@ -156,10 +156,12 @@ class VoxtralProcessorAdapter:
             audios_tokens.append(torch.tensor(audio_tokens))
             audios_processed.append(torch.tensor(audio))
 
-        return {
-            "input_ids": torch.cat(audios_tokens)[None].expand(len(text), -1),
-            "audio_arrays": audios_processed,
-        }
+        return BatchFeature({
+            "input_ids":
+            torch.cat(audios_tokens)[None].expand(len(text), -1),
+            "audio_arrays":
+            audios_processed,
+        })
 
 
 class VoxtralProcessingInfo(BaseProcessingInfo):
