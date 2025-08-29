@@ -384,8 +384,8 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
-                None,
-                None,
+                getattr(layer, "w13_bias", None),
+                getattr(layer, "w2_bias", None),
                 layer.w13_weight_scale,
                 layer.w2_weight_scale,
                 router_logits,
@@ -926,8 +926,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
-                None,
-                None,
+                getattr(layer, "w13_bias", None),
+                getattr(layer, "w2_bias", None),
                 layer.w13_weight_scale,
                 layer.w2_weight_scale,
                 router_logits,
@@ -1345,6 +1345,12 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         )
         replace_parameter(layer, "w2_weight_scale", marlin_w2_scales)
 
+        if hasattr(layer, "w13_bias") and layer.w13_bias is not None:
+            layer.w13_bias.data = marlin_permute_bias(layer.w13_bias)
+
+        if hasattr(layer, "w2_bias") and layer.w2_bias is not None:
+            layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
+
         layer.workspace = marlin_make_workspace_new(device, 4)
 
     def apply(
@@ -1396,8 +1402,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             x,
             layer.w13_weight_packed,
             layer.w2_weight_packed,
-            None,
-            None,
+            getattr(layer, "w13_bias", None),
+            getattr(layer, "w2_bias", None),
             layer.w13_weight_scale,
             layer.w2_weight_scale,
             router_logits,
