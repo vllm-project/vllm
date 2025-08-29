@@ -359,6 +359,40 @@ class Fp8LinearMethod(LinearMethodBase):
                 weight = layer.weight.data
                 weight_scale_inv = layer.weight_scale_inv.data
 
+            if current_platform.is_device_capability(
+                    90) and layer.weight.shape[0] == 576:
+                from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa: E501
+                    group_broadcast)
+
+                def scaled_dequantize(
+                    t: torch.Tensor,
+                    scale: Optional[torch.Tensor],
+                    block_shape: Optional[list[int]],
+                    per_act_token_quant: bool,
+                    out_dtype: Optional[torch.dtype] = torch.float32,
+                ) -> torch.Tensor:
+                    if scale is not None:
+                        f32 = torch.float32
+                        if per_act_token_quant or block_shape is None:
+                            return (t.to(f32) * scale).to(out_dtype)
+                        else:
+                            return (
+                                t.to(f32) *
+                                group_broadcast(scale, t.shape)).to(out_dtype)
+                    else:
+                        return t.to(out_dtype)
+
+                print("Dequantizing block fp8 weight", weight.shape)
+                weight_dequant = scaled_dequantize(
+                    weight, weight_scale_inv,
+                    self.quant_config.weight_block_size)
+                del layer.weight
+                del layer.weight_scale_inv
+                del layer.input_scale
+                layer.weight_dequant = Parameter(weight_dequant,
+                                                 requires_grad=False)
+                return
+
             weight = self._maybe_pad_weight(weight)
 
             # Torch.compile cannot use Parameter subclasses.
@@ -440,6 +474,10 @@ class Fp8LinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+
+        if hasattr(layer, "weight_dequant"):
+            # print("DEQUANT MATMUL", x.shape, layer.weight_dequant.shape)
+            return torch.nn.functional.linear(x, layer.weight_dequant, bias)
 
         if self.use_marlin:
             return apply_fp8_marlin_linear(
