@@ -4,6 +4,7 @@
 import asyncio
 import json
 import time
+from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
@@ -171,7 +172,7 @@ class OpenAIServingResponses(OpenAIServing):
         # HACK(wuhang): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove events from the store.
-        self.event_store: dict[str, asyncio.Queue[str]] = {}
+        self.event_store: dict[str, tuple[deque[str], asyncio.Event]] = {}
 
         self.background_tasks: dict[str, asyncio.Task] = {}
 
@@ -755,15 +756,20 @@ class OpenAIServingResponses(OpenAIServing):
         *args,
         **kwargs,
     ):
-        queue = self.event_store.setdefault(request.request_id,
-                                            asyncio.Queue())
+        event_deque = deque()
+        new_event_signal = asyncio.Event()
+        self.event_store[request.request_id] = (event_deque, new_event_signal)
+
         response = self.responses_stream_generator(request, *args, **kwargs)
         try:
             async for event in response:
-                await queue.put(event)
+                event_deque.append(event)
+                new_event_signal.set()  # Signal new event available
+                new_event_signal.clear()  # Reset for next event
         finally:
-            # Signal completion with a sentinel value
-            await queue.put(None)  # or use a special "END" marker
+            # Mark as finished with a special marker
+            event_deque.append("__STREAM_END__")
+            new_event_signal.set()
 
     async def _run_background_request(
         self,
@@ -793,29 +799,24 @@ class OpenAIServingResponses(OpenAIServing):
         response_id: str,
         starting_after: Optional[int] = None,
     ):
-        queue = self.event_store.get(response_id)
-        if not queue:
+        if response_id not in self.event_store:
             return
 
-        events_seen = 0
-        start_sequence_number = -1 if starting_after is None else starting_after
+        event_deque, new_event_signal = self.event_store[response_id]
+        start_index = 0 if starting_after is None else starting_after + 1
+        current_index = start_index
 
         while True:
-            try:
-                event = await asyncio.wait_for(queue.get(),
-                                               timeout=30.0)  # 30s timeout
-                if event is None:  # Sentinel value indicating completion
-                    break
+            # Yield existing events from start_index
+            while current_index < len(event_deque):
+                event = event_deque[current_index]
+                if event == "__STREAM_END__":
+                    return
+                yield event
+                current_index += 1
 
-                if events_seen > start_sequence_number:
-                    yield event
-                events_seen += 1
-
-            except asyncio.TimeoutError:
-                # Handle timeout - maybe the stream is slow
-                continue
-            except Exception:
-                break
+            # Wait for new events
+            await new_event_signal.wait()
 
     async def retrieve_responses(
         self,
@@ -833,7 +834,7 @@ class OpenAIServingResponses(OpenAIServing):
             return self._make_not_found_error(response_id)
 
         if stream:
-            return await self.responses_background_stream_generator(
+            return self.responses_background_stream_generator(
                 response_id,
                 starting_after,
             )
