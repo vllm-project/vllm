@@ -32,6 +32,19 @@
     using AddOp = cub::Sum; 
 #endif
 
+#if !defined(USE_ROCM) && defined(CCCL_MAJOR_VERSION) && (CCCL_MAJOR_VERSION >= 3)
+  #include <cuda/std/functional>
+  #include <cuda/functional>
+  using Sum_fix = cuda::std::plus<>;
+  using Max_fix = cuda::maximum<>;
+  using Min_fix = cuda::minimum<>;
+#else
+  #include <cub/cub.cuh>
+  using Sum_fix = cub::Sum;
+  using Max_fix = cub::Max;
+  using Min_fix = cub::Min;
+#endif
+
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
@@ -79,7 +92,7 @@ __launch_bounds__(TPB) __global__
         threadData = max(static_cast<float>(input[idx]), threadData);
     }
 
-    const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, cub::Max());
+    const float maxElem = BlockReduce(tmpStorage).Reduce(threadData, Max_fix{});
     if (threadIdx.x == 0)
     {
         float_max = maxElem;
