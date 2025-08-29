@@ -119,7 +119,7 @@ def different_patch_input_cases_internvl():
 
 def windows_attention_image_qwen2_5_vl():
     # image from regression issue: https://github.com/vllm-project/vllm/issues/15122
-    image_url = "https://aomediacodec.github.io/av1-avif/testFiles/Link-U/hato.jpg"
+    image_url = "https://github.com/AOMediaCodec/av1-avif/blob/main/testFiles/Link-U/hato.jpg?raw=true"
     image = Image.open(BytesIO(requests.get(image_url).content))
 
     question = "Describe the image."
