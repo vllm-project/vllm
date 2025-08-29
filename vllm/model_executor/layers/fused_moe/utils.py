@@ -8,12 +8,6 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig
-from vllm.model_executor.layers.fused_moe.config import (  # noqa: E501
-    FusedMoEParallelConfig)
-from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
-    is_flashinfer_fp4_cutlass_moe_available)
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend, get_flashinfer_moe_backend)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
@@ -22,8 +16,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_quantize)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    cutlass_fp4_supported)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
@@ -284,6 +276,15 @@ def needs_gloo_all_reduce(vllm_config: VllmConfig, num_local_tokens: int):
     """
     Checks whether a Gloo AllReduce is needed for the current MoE setup.
     """
+    # Avoid circular imports.
+    from vllm.model_executor.layers.fused_moe.config import (  # noqa: E501
+        FusedMoEParallelConfig)
+    from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (  # noqa: E501
+        is_flashinfer_fp4_cutlass_moe_available)
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (  # noqa: E501
+        FlashinferMoeBackend, get_flashinfer_moe_backend)
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        cutlass_fp4_supported)
     moe_dp_chunk_size: int = envs.VLLM_MOE_DP_CHUNK_SIZE
     naive_a2a_backend: bool = envs.VLLM_ALL2ALL_BACKEND == "naive"
 
