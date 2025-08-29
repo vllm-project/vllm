@@ -242,7 +242,7 @@ class VisualAttentionBlock(nn.Module):
         x: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        x += self.attention(self.ln_1(x), attn_mask=attn_mask)
+        x = x + self.attention(self.ln_1(x), attn_mask=attn_mask)
         x += self.mlp(self.ln_2(x))
         return x
 
