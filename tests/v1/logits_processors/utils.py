@@ -8,8 +8,11 @@ from typing import Optional
 import torch
 
 from vllm.config import VllmConfig
-from vllm.v1.sample.logits_processor import (LOGITSPROCS_GROUP, BatchUpdate,
-                                             LogitsProcessor)
+from vllm.sampling_params import SamplingParams
+from vllm.v1.sample.logits_processor import (LOGITSPROCS_GROUP,
+                                             AdapterLogitsProcessor,
+                                             BatchUpdate, LogitsProcessor,
+                                             RequestLogitsProcessor)
 from vllm.v1.sample.logits_processor.builtin import process_dict_updates
 
 MODEL_NAME = "facebook/opt-125m"
@@ -102,6 +105,59 @@ class EntryPoints(list):
         super().__init__(eps)
         # Extra attributes
         self.names = [ep.name for ep in eps]
+
+
+def get_req_dummy_logits_processor(
+    params: SamplingParams, ) -> Optional[RequestLogitsProcessor]:
+    """Fake example of a request-level logits processor implementation.
+
+    This function returns a new request-level logits processor, customized
+    to the sampling params associated with a particular request.
+
+    Returns None if the logits processor should not be applied to the
+    particular request. To use the logits processor the request must have
+    a "target_token" custom argument with an integer value.
+
+    Args:
+      params: per-request sampling params
+
+    Returns:
+      `Callable` request logits processor, or None
+    """
+    if not params.extra_args or "target_token" not in params.extra_args:
+        return None
+    target_token = params.extra_args["target_token"]
+
+    def req_dummy_logits_processor(
+        output_ids: list[int],
+        logits: torch.Tensor,
+    ) -> torch.Tensor:
+        """The request-level logits processor masks out all logits except the
+        token id identified by target_token"""
+        val_to_keep = logits[target_token]
+        logits[:] = float("-inf")
+        logits[target_token] = val_to_keep
+        return logits
+
+    return req_dummy_logits_processor
+
+
+class DummyLogitsProcessorWrapped(AdapterLogitsProcessor):
+    """Example of wrapping a fake request-level logit processor to create a
+    batch-level logits processor"""
+
+    def __init__(self, vllm_config: VllmConfig, device: torch.device,
+                 is_pin_memory: bool):
+        super().__init__(vllm_config, device, is_pin_memory)
+
+    def is_argmax_invariant(self) -> bool:
+        return False
+
+    def req_logits_processor(
+        self,
+        params: SamplingParams,
+    ) -> Optional[RequestLogitsProcessor]:
+        return get_req_dummy_logits_processor(params)
 
 
 """Fake version of importlib.metadata.entry_points"""

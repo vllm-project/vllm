@@ -101,7 +101,6 @@ class DummyLogitsProcessor(AdapterLogitsProcessor):
         self,
         params: SamplingParams,
     ) -> Optional[RequestLogitsProcessor]:
-        """Model the scenario where a request-level lo"""
         return get_req_dummy_logits_processor(params)
 
 
