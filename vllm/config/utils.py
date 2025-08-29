@@ -44,6 +44,7 @@ def canon_value(x):
     import enum
     import pathlib
     from collections.abc import Mapping, Sequence, Set
+    from contextlib import suppress
 
     # Fast path
     if x is None or isinstance(x, (bool, int, float, str)):
@@ -83,16 +84,8 @@ def canon_value(x):
         return tuple(canon_value(v) for v in x)
 
     # Unsupported type
-    try:
+    with suppress(Exception):
         logger.debug("canon_value: unsupported type '%s'", type(x).__name__)
-    except Exception:
-        try:
-            import logging
-            logging.getLogger(__name__).debug(
-                "canon_value: unsupported type '%s'",
-                type(x).__name__)
-        except Exception:
-            pass
     raise TypeError
 
 
@@ -121,10 +114,8 @@ def build_opt_out_items(cfg, exclude: set[str]) -> list[tuple[str, object]]:
     - Includes declared fields not in `exclude`.
     - Skips non-canonicalizable values.
     """
-    import logging
     from contextlib import suppress
 
-    logger = logging.getLogger(__name__)
     items: list[tuple[str, object]] = []
     for key in sorted(get_declared_field_names(cfg)):
         if key in exclude:
@@ -159,10 +150,8 @@ def build_opt_items_override(
     - For keys in `overrides`, call the override to produce a stable value.
     - Skips values that cannot be canonicalized.
     """
-    import logging
     from contextlib import suppress
 
-    logger = logging.getLogger(__name__)
     items: list[tuple[str, object]] = []
     for key in sorted(get_declared_field_names(cfg)):
         if key in exclude:
