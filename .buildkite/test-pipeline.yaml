@@ -90,6 +90,7 @@ steps:
   - pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
+  - echo "This command will fail on purpose to test cancel_on_build_failing" && exit 1
 
 - label: Core Test # 10min
   mirror_hardwares: [amdexperimental]
