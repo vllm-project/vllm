@@ -408,7 +408,7 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
-            raise EngineGenerateError() from e
+            raise EngineGenerateError(str(e)) from e
 
     def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
@@ -571,7 +571,7 @@ class AsyncLLM(EngineClient):
             await self.abort(request_id)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
-            raise EngineGenerateError() from e
+            raise EngineGenerateError(str(e)) from e
 
     async def get_vllm_config(self) -> VllmConfig:
         return self.vllm_config
