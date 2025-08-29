@@ -291,9 +291,9 @@ class Fp8LinearMethod(LinearMethodBase):
                 output_size_per_partition,
                 input_size_per_partition,
                 dtype=weight_dtype),
-                                            input_dim=1,
-                                            output_dim=0,
-                                            weight_loader=weight_loader)
+                                          input_dim=1,
+                                          output_dim=0,
+                                          weight_loader=weight_loader)
             layer.register_parameter("weight", weight)
 
         # If checkpoint is serialized fp8, load them.
@@ -598,7 +598,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 2 * intermediate_size_per_partition,
                 hidden_size,
                 dtype=params_dtype),
-                                                requires_grad=False)
+                                            requires_grad=False)
             layer.register_parameter("w13_weight", w13_weight)
             set_weight_attrs(w13_weight, extra_weight_attrs)
 
@@ -607,7 +607,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 hidden_size,
                 intermediate_size_per_partition,
                 dtype=params_dtype),
-                                        requires_grad=False)
+                                          requires_grad=False)
             layer.register_parameter("w2_weight", w2_weight)
             set_weight_attrs(w2_weight, extra_weight_attrs)
 
