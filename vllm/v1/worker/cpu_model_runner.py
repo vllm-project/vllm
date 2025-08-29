@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.nn as nn
@@ -112,6 +112,11 @@ class CPUModelRunner(GPUModelRunner):
 
     def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
         return sampled_token_ids.tolist()
+
+    def get_dp_padding(self,
+                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+        # Note: For CPU backend, dp padding is not required for now.
+        return 0, None
 
 
 @contextmanager
