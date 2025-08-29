@@ -203,12 +203,9 @@ def gather_mm_placeholders(
     return placeholders[is_embed]
 
 
-def initialize_kv_cache_for_kv_sharing(
+def add_kv_sharing_layers_to_kv_cache_groups(
     shared_kv_cache_layers: dict[str, str],
     kv_cache_groups: list[KVCacheGroupSpec],
-    kv_caches: dict[str, torch.Tensor],
-    # Optional for now to avoid breaking TPU
-    attn_groups: Optional[list[list[AttentionGroup]]] = None,
     runner_only_attn_layers: Optional[set[str]] = None,
 ) -> None:
     """
@@ -223,38 +220,15 @@ def initialize_kv_cache_for_kv_sharing(
             means this layer will perform attention using the keys and values
             from the KV cache of `shared_kv_cache_layers[layer_name]`.
         kv_cache_groups: The KV cache groups of the model.
-        kv_caches: The allocated kv_caches with layer names as keys.
-            Note that layers in shared_kv_cache_layers.keys() are not
-            originally included as it only contains layers which have its own
-            KV cache allocation.
-        attn_groups: Optional list of attention groups. Layers in the same KV
-            cache group may be placed in different attention groups if they
-            have different attention backends.  Currently only provided by 
-            GPU model runner.
     """
-    # mapping from layer name to tuple of (kv_cache_group_idx, attn_group_idx)
-    layer_to_attn_group_idx: dict[str, tuple[int, int]] = {}
-    if attn_groups:
-        for kv_cache_group_idx, kv_attn_groups in enumerate(attn_groups):
-            for attn_group_idx, attn_group in enumerate(kv_attn_groups):
-                for layer_name in attn_group.layer_names:
-                    layer_to_attn_group_idx[layer_name] = (kv_cache_group_idx,
-                                                           attn_group_idx)
-    else:
-        for kv_cache_group_idx, kv_cache_group in enumerate(kv_cache_groups):
-            for layer_name in kv_cache_group.layer_names:
-                # attn group idx default to 0 if not provided
-                layer_to_attn_group_idx[layer_name] = (kv_cache_group_idx, 0)
+    layer_to_kv_cache_group: dict[str, KVCacheGroupSpec] = {}
+    for kv_cache_group in kv_cache_groups:
+        for layer_name in kv_cache_group.layer_names:
+            layer_to_kv_cache_group[layer_name] = kv_cache_group
 
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
-        kv_caches[layer_name] = kv_caches[target_layer_name]
-        kv_cache_group_idx = layer_to_attn_group_idx[target_layer_name][0]
-        kv_cache_groups[kv_cache_group_idx].layer_names.append(layer_name)
-
-        if attn_groups:
-            attn_group_idx = layer_to_attn_group_idx[target_layer_name][1]
-            attn_groups[kv_cache_group_idx][attn_group_idx].layer_names.append(
-                layer_name)
+        tgt_kv_cache_group = layer_to_kv_cache_group[target_layer_name]
+        tgt_kv_cache_group.layer_names.append(layer_name)
 
         if runner_only_attn_layers is not None:
             runner_only_attn_layers.add(layer_name)
