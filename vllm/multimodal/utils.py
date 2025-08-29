@@ -444,7 +444,6 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
     Args:
         image_input (torch.Tensor): Image input tensor.
         vision_model (torch.nn.Module): Vision model.
-        
     Returns:
         torch.Tensor: Output image embeddings
     """
