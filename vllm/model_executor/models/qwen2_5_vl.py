@@ -1115,17 +1115,37 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
                  (merge_size * merge_size)).tolist()
 
-        image_embeds_split = image_embeds.split(sizes)
+        return image_embeds.split(sizes)
 
-        if self.is_multimodal_pruning_enabled():
-            image_embeds_out = []
-            for emb, size in zip(image_embeds_split, grid_thw):
-                positions = compute_mrope_for_media(size,
-                                                    merge_size).to(emb.device)
-                emb = torch.cat([emb, positions], dim=1)
-                image_embeds_out.append(emb)
-            image_embeds_split = image_embeds_out
+    def _postrocess_image_embeds_evs(
+            self, image_embeds_split: tuple[torch.FloatTensor, ...],
+            image_input: Qwen2_5_VLImageInputs
+    ) -> tuple[torch.FloatTensor, ...]:
+        """
+        Append mrope positions for each for images.
+        This is necessary to recover correct mrope 
+        positions after video pruning
 
+        Args:
+            image_embeds_split: Tuple of image embeddings for 
+                each image item.
+            image_input: Image input data.
+
+        Returns:
+            Tuple of image embeddings for each image item.
+            Resulting embeddings will have extra 4 channels for 
+            computed mrope positions.
+        """
+        merge_size = self.visual.spatial_merge_size
+        grid_thw = image_input["image_grid_thw"]
+        grid_thw_list = grid_thw.tolist()
+        image_embeds_out = []
+        for emb, size in zip(image_embeds_split, grid_thw_list):
+            positions = compute_mrope_for_media(size,
+                                                merge_size).to(emb.device)
+            emb = torch.cat([emb, positions], dim=1)
+            image_embeds_out.append(emb)
+        image_embeds_split = image_embeds_out
         return tuple(image_embeds_split)
 
     def _process_video_input(
@@ -1152,40 +1172,58 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         sizes = (torch.tensor(grid_thw_list, dtype=torch.long).prod(-1) //
                  (merge_size * merge_size)).tolist()
 
-        video_embeds_split = video_embeds.split(sizes)
+        return video_embeds.split(sizes)
 
-        # EVS-specific code
-        if self.is_multimodal_pruning_enabled():
-            # Cast to long to match the original code
-            # https://github.com/huggingface/transformers/blob/41980ce93e775f6c88500c51c8db7946fc6a2add/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py#L491 # noqa
-            second_per_grid_ts = video_input["second_per_grid_ts"].long()
-            tokens_per_second = self.config.vision_config.tokens_per_second
+    def _postrocess_video_embeds_evs(
+            self, video_embeds_split: tuple[torch.FloatTensor, ...],
+            video_input: Qwen2_5_VLVideoInputs
+    ) -> tuple[torch.FloatTensor, ...]:
+        """
+        Prunes video embeddings via Efficient Video Sampling (EVS)
+        and then appends mrope positions for each retained embeddings
 
-            video_embeds_out = []
-            for emb, size, video_second_per_grid_t in zip(
-                    video_embeds_split, grid_thw, second_per_grid_ts):
-                # For each video, we compute retention mask using EVS
-                retention_mask = compute_retention_mask(
-                    emb,
-                    size,
-                    spatial_merge_size=self.visual.spatial_merge_size,
-                    q=self.video_pruning_rate,
-                )
-                positions = compute_mrope_for_media(
-                    size,
-                    merge_size,
-                    tokens_per_second=tokens_per_second,
-                    video_second_per_grid=video_second_per_grid_t.item(),
-                ).to(emb.device)
+        Args:
+            video_embeds_split: Tuple of video embeddings for each video item.
+            video_input: Video input data.
 
-                emb = emb[retention_mask]
-                positions = positions[retention_mask]
-                emb = torch.cat([emb, positions], dim=1)
-                video_embeds_out.append(emb)
-            video_embeds_split = video_embeds_out
-        # End of EVS-specific code
+        Returns:
+            Tuple of video embeddings for each video item.
+            Resulting embeddings will have extra 4 channels for 
+            computed mrope positions.
+        """
+        grid_thw = video_input["video_grid_thw"]
+        assert grid_thw.ndim == 2
+        grid_thw_list = grid_thw.tolist()
+        merge_size = self.visual.spatial_merge_size
 
-        return tuple(video_embeds_split)
+        # Cast to long to match the original code
+        # https://github.com/huggingface/transformers/blob/41980ce93e775f6c88500c51c8db7946fc6a2add/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py#L491 # noqa
+        second_per_grid_ts = video_input["second_per_grid_ts"].long()
+        tokens_per_second = self.config.vision_config.tokens_per_second
+
+        video_embeds_out = []
+        for emb, size, video_second_per_grid_t in zip(video_embeds_split,
+                                                      grid_thw_list,
+                                                      second_per_grid_ts):
+            # For each video, we compute retention mask using EVS
+            retention_mask = compute_retention_mask(
+                emb,
+                size,
+                spatial_merge_size=self.visual.spatial_merge_size,
+                q=self.video_pruning_rate,
+            )
+            positions = compute_mrope_for_media(
+                size,
+                merge_size,
+                tokens_per_second=tokens_per_second,
+                video_second_per_grid=video_second_per_grid_t.item(),
+            ).to(emb.device)
+
+            emb = emb[retention_mask]
+            positions = positions[retention_mask]
+            emb = torch.cat([emb, positions], dim=1)
+            video_embeds_out.append(emb)
+        return tuple(video_embeds_out)
 
     def recompute_mrope_positions(
         self,
@@ -1283,9 +1321,17 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
                 vision_embeddings = self._process_image_input(multimodal_input)
+                if self.is_multimodal_pruning_enabled():
+                    vision_embeddings = self._postrocess_image_embeds_evs(
+                        vision_embeddings, multimodal_input
+                    )
                 multimodal_embeddings += vision_embeddings
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
+                if self.is_multimodal_pruning_enabled():
+                    video_embeddings = self._postrocess_video_embeds_evs(
+                        video_embeddings, multimodal_input
+                    )
                 multimodal_embeddings += video_embeddings
         return multimodal_embeddings
 
@@ -1311,6 +1357,10 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.get_input_embeddings(input_ids)
         if image_input is not None:
             image_embeds = self._process_image_input(image_input)
+            if self.is_multimodal_pruning_enabled():
+                image_embeds = self._postrocess_image_embeds_evs(
+                    image_embeds, image_input
+                )
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
@@ -1320,6 +1370,10 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         if video_input is not None:
             video_embeds = self._process_video_input(video_input)
+            if self.is_multimodal_pruning_enabled():
+                video_embeds = self._postrocess_video_embeds_evs(
+                    video_embeds, video_input
+                )
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
