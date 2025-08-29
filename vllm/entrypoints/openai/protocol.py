@@ -1402,7 +1402,46 @@ EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
 
 PoolingCompletionRequest = EmbeddingCompletionRequest
 PoolingChatRequest = EmbeddingChatRequest
-PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest]
+
+T = TypeVar("T")
+
+
+class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
+    model: Optional[str] = None
+
+    priority: int = Field(default=0)
+    """
+    The priority of the request (lower means earlier handling;
+    default: 0). Any priority other than 0 will raise an error
+    if the served model does not use priority scheduling.
+    """
+    data: T
+    """
+    When using plugins IOProcessor plugins, the actual input is processed
+    by the plugin itself. Hence, we use a generic type for the request data
+    """
+
+    def to_pooling_params(self):
+        return PoolingParams(task="encode")
+
+
+class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
+
+    request_id: Optional[str] = None
+    """
+    The request_id associated with this response
+    """
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+
+    data: T
+    """
+    When using plugins IOProcessor plugins, the actual output is generated
+    by the plugin itself. Hence, we use a generic type for the response data
+    """
+
+
+PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest,
+                       IOProcessorRequest]
 
 
 class ScoreRequest(OpenAIBaseModel):
@@ -2499,40 +2538,3 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 
     words: Optional[list[TranslationWord]] = None
     """Extracted words and their corresponding timestamps."""
-
-
-T = TypeVar("T")
-
-
-class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
-    model: Optional[str] = None
-
-    priority: int = Field(default=0)
-    """
-    The priority of the request (lower means earlier handling;
-    default: 0). Any priority other than 0 will raise an error
-    if the served model does not use priority scheduling.
-    """
-    data: T
-    """
-    When using plugins IOProcessor plugins, the actual input is processed
-    by the plugin itself. Hence, we use a generic type for the request data
-    """
-
-    def to_pooling_params(self):
-        return PoolingParams(task="encode")
-
-
-class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
-
-    request_id: Optional[str] = None
-    """
-    The request_id associated with this response
-    """
-    created_at: int = Field(default_factory=lambda: int(time.time()))
-
-    data: T
-    """
-    When using plugins IOProcessor plugins, the actual output is generated
-    by the plugin itself. Hence, we use a generic type for the response data
-    """

@@ -8,7 +8,7 @@ import datetime
 import os
 import tempfile
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import AsyncGenerator, Sequence
 from typing import Any, Optional, Union
 
 import albumentations
@@ -366,7 +366,7 @@ class PrithviMultimodalDataProcessor(IOProcessor):
 
     def post_process(
         self,
-        model_output: Sequence[Optional[PoolingRequestOutput]],
+        model_output: Sequence[PoolingRequestOutput],
         request_id: Optional[str] = None,
         **kwargs,
     ) -> IOProcessorOutput:
@@ -379,8 +379,6 @@ class PrithviMultimodalDataProcessor(IOProcessor):
             out_format = "b64_json"
 
         for output in model_output:
-            if not output:
-                continue
             y_hat = output.outputs.data.argmax(dim=1)
             pred = torch.nn.functional.interpolate(
                 y_hat.unsqueeze(1).float(),
@@ -422,11 +420,12 @@ class PrithviMultimodalDataProcessor(IOProcessor):
 
     async def post_process_async(
         self,
-        model_output: Sequence[Optional[PoolingRequestOutput]],
+        model_output: AsyncGenerator[tuple[int, PoolingRequestOutput]],
         request_id: Optional[str] = None,
         **kwargs,
     ) -> IOProcessorOutput:
-        return self.post_process(model_output, request_id, **kwargs)
+        collected_output = [item async for i, item in model_output]
+        return self.post_process(collected_output, request_id, **kwargs)
 
 
 class PrithviMultimodalDataProcessorIndia(PrithviMultimodalDataProcessor):

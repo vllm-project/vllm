@@ -4,7 +4,7 @@ import asyncio
 import os
 import socket
 import time
-from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, Optional, Union
 
@@ -23,8 +23,6 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
-from vllm.plugins.io_processors import get_io_processor
-from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
@@ -34,7 +32,7 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (Device, as_list, cancel_task_threadsafe, cdiv,
-                        deprecate_kwargs, merge_async_iterators)
+                        deprecate_kwargs)
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -169,9 +167,6 @@ class AsyncLLM(EngineClient):
                 "Torch profiler disabled. AsyncLLM CPU traces will not be collected."  # noqa: E501
             )
             self.profiler = None
-        # Load the Input/Ouput processor plugin if any
-        io_processor_plugin = self.model_config.io_processor_plugin
-        self.io_processor = get_io_processor(vllm_config, io_processor_plugin)
 
     @classmethod
     @deprecate_kwargs(
@@ -578,62 +573,6 @@ class AsyncLLM(EngineClient):
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
 
-    async def encode_with_io_processor(
-        self,
-        prompt: PromptType,
-        pooling_params: PoolingParams,
-        request_id: str,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        priority: int = 0,
-    ) -> Any:
-
-        if self.io_processor is None:
-            raise ValueError("No IOProcessor plugin installed. Please refer "
-                             "to the documentation and to the "
-                             "'prithvi_geospatial_mae_io_processor' "
-                             "offline inference example for more details.")
-
-        validated_prompt = self.io_processor.parse_request(prompt)
-
-        # Here I am assuming that the image prediction request might
-        # be split in multiple prompts because of tiling
-        prompts = await self.io_processor.pre_process_async(
-            prompt=validated_prompt, request_id=request_id)
-
-        # Schedule the request and get the result generator.
-        # Note that at the moment, models capable of generating images
-        # are piggybacking on the pooling models support.
-        # See the PrithviMAEGeospatial model
-        generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
-
-        for i, prompt in enumerate(prompts):
-            request_id_item = f"{request_id}-{i}"
-
-            generator = self.encode(
-                prompt,
-                pooling_params,
-                request_id_item,
-                trace_headers=trace_headers,
-                priority=priority,
-            )
-            generators.append(generator)
-
-        result_generator = merge_async_iterators(*generators)
-        num_prompts = len(prompts)
-
-        final_results: Sequence[Optional[PoolingRequestOutput]]
-        final_results = [None] * num_prompts
-
-        async for i, res in result_generator:
-            final_results[i] = res
-
-        post_processed_outputs = (await self.io_processor.post_process_async(
-            model_output=final_results,
-            request_id=request_id,
-        ))
-
-        return post_processed_outputs
-
     async def get_vllm_config(self) -> VllmConfig:
         return self.vllm_config
 
@@ -655,13 +594,6 @@ class AsyncLLM(EngineClient):
                              "skip_tokenizer_init is True")
 
         return self.tokenizer.get_lora_tokenizer(lora_request)
-
-    async def get_io_processor(self) -> IOProcessor:
-        if self.io_processor is None:
-            raise ValueError("Unable to get io_processor because "
-                             "this model does not initialize one")
-
-        return self.io_processor
 
     async def is_tracing_enabled(self) -> bool:
         return False

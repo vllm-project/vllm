@@ -64,7 +64,6 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorInfo,
                                               ErrorResponse,
-                                              IOProcessorRequest,
                                               IOProcessorResponse,
                                               LoadLoRAAdapterRequest,
                                               PoolingRequest, PoolingResponse,
@@ -89,8 +88,6 @@ from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     LoRAModulePath,
                                                     OpenAIServingModels)
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
-from vllm.entrypoints.openai.serving_pooling_with_io_plugin import (
-    ServingPoolingWithIOPlugin)
 from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
@@ -441,10 +438,6 @@ def transcription(request: Request) -> OpenAIServingTranscription:
 
 def translation(request: Request) -> OpenAIServingTranslation:
     return request.app.state.openai_serving_translation
-
-
-def pooling_with_io_plugin(request: Request) -> ServingPoolingWithIOPlugin:
-    return request.app.state.serving_pooling_with_io_plugin
 
 
 def engine_client(request: Request) -> EngineClient:
@@ -803,38 +796,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
-    elif isinstance(generator, PoolingResponse):
-        return JSONResponse(content=generator.model_dump())
-
-    assert_never(generator)
-
-
-#This entrypoint is not available in the OpenAI API, we define it.
-@router.post("/io_processor_pooling",
-             responses={
-                 HTTPStatus.BAD_REQUEST.value: {
-                     "model": ErrorResponse
-                 },
-                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
-                     "model": ErrorResponse
-                 },
-             })
-@with_cancellation
-@load_aware_call
-async def create_pooling_with_io_plugin(request: IOProcessorRequest,
-                                        raw_request: Request):
-    handler = pooling_with_io_plugin(raw_request)
-    if handler is None:
-        return base(raw_request).create_error_response(
-            message="The model does not support pooling"
-            "with IOProcessor plugin")
-
-    generator = await handler.create_pooling_with_io_plugin(
-        request, raw_request)
-    if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.error.code)
-    elif isinstance(generator, IOProcessorResponse):
+    elif isinstance(generator, (PoolingResponse, IOProcessorResponse)):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
@@ -1821,18 +1783,12 @@ async def init_app_state(
     ) if "generate" in supported_tasks else None
     state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
-        model_config,
+        vllm_config,
         state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
         log_error_stack=args.log_error_stack,
-    ) if "encode" in supported_tasks else None
-    state.serving_pooling_with_io_plugin = ServingPoolingWithIOPlugin(
-        engine_client,
-        vllm_config,
-        state.openai_serving_models,
-        request_logger=request_logger,
     ) if "encode" in supported_tasks else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,

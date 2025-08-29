@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import AsyncGenerator, Sequence
 from typing import Any, Generic, Optional, TypeVar, Union
 
 from vllm.config import VllmConfig
@@ -38,14 +38,14 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
 
     @abstractmethod
     def post_process(self,
-                     model_output: Sequence[Optional[PoolingRequestOutput]],
+                     model_output: Sequence[PoolingRequestOutput],
                      request_id: Optional[str] = None,
                      **kwargs) -> IOProcessorOutput:
         raise NotImplementedError
 
     async def post_process_async(
         self,
-        model_output: Sequence[Optional[PoolingRequestOutput]],
+        model_output: AsyncGenerator[tuple[int, PoolingRequestOutput]],
         request_id: Optional[str] = None,
         **kwargs,
     ) -> IOProcessorOutput:

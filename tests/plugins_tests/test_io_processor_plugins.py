@@ -1,19 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
-import os
 
 import pytest
 import requests
 
 from tests.utils import RemoteOpenAIServer
-from vllm import AsyncEngineArgs
 from vllm.config import VllmConfig
 from vllm.entrypoints.llm import LLM
 from vllm.entrypoints.openai.protocol import IOProcessorResponse
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
-from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM"
 
@@ -28,16 +25,17 @@ def test_loading_missing_plugin():
 
 def test_loading_engine_with_wrong_plugin():
 
-    os.environ['VLLM_USE_V1'] = '1'
-
-    engine_args = AsyncEngineArgs(
-        model="christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM",
-        enforce_eager=True,
-        skip_tokenizer_init=True,
-        io_processor_plugin="wrong_plugin")
-
     with pytest.raises(ValueError):
-        AsyncLLM.from_engine_args(engine_args)
+        LLM(
+            model=MODEL_NAME,
+            skip_tokenizer_init=True,
+            trust_remote_code=True,
+            enforce_eager=True,
+            # Limit the maximum number of parallel requests
+            # to avoid the model going OOM in CI.
+            max_num_seqs=32,
+            io_processor_plugin="wrong_plugin",
+        )
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
@@ -62,10 +60,11 @@ def test_prithvi_mae_plugin_offline(model_name: str):
     )
 
     pooling_params = PoolingParams(task="encode", softmax=False)
-    output = llm.encode_with_io_processor(
+    pooler_output = llm.encode(
         img_prompt,
         pooling_params=pooling_params,
     )
+    output = pooler_output[0].outputs
 
     # verify the output is formatted as expected for this plugin
     assert all(
@@ -116,7 +115,7 @@ async def test_prithvi_mae_plugin_online(
     }
 
     ret = requests.post(
-        server.url_for("io_processor_pooling"),
+        server.url_for("pooling"),
         json=request_payload_url,
     )
 
