@@ -13,7 +13,9 @@ pass in a `target_token` custom argument.
 
 The request-level dummy logits processor is wrapped to create a batch-level
 logits processor, which can apply the logits processor to output logits from
-all requests in the persistent batch in a given decode step.
+all requests in the persistent batch in a given decode step. For requests which
+do not provide a `target_token` argument, the corresponding row of `logits`
+will not be modified.
 
 A batch is constructed with `temperature=0.0` and 50% of requests specifying
 `target_token`, and for these requests - and *only* these requests - we
@@ -59,7 +61,7 @@ def get_req_dummy_logits_processor(
 
     Returns None if the logits processor should not be applied to the
     particular request. To use the logits processor the request must have
-    a "target_token" custom argument with an integer value.
+    a `target_token` custom argument with an integer value.
 
     Args:
       params: per-request sampling params
