@@ -153,8 +153,8 @@ async def test_fetch_image_local_files(image_url: str):
 
 
 @pytest.mark.asyncio
-async def test_fetch_image_local_files_with_space_in_name():
-    image_url = TEST_IMAGE_URLS[0]
+@pytest.mark.parametrize("image_url", [TEST_IMAGE_URLS[0]], indirect=True)
+async def test_fetch_image_local_files_with_space_in_name(image_url: str):
     connector = MediaConnector()
 
     with TemporaryDirectory() as temp_dir:
