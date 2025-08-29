@@ -16,6 +16,7 @@ assert current_platform.is_cuda(), (
 # DeepSeek-V3 weight shapes
 DEEPSEEK_V3_SHAPES = [
     (512 + 64, 7168),
+    (2112, 7168),
     ((128 + 64) * 128, 7168),
     (128 * (128 + 128), 512),
     (7168, 16384),
