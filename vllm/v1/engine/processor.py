@@ -12,7 +12,7 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
-from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
@@ -346,9 +346,8 @@ class Processor:
             pooling_params = params.clone()
 
         # Multimodal related.
-        sorted_mm_inputs: Optional[list[Optional[MultiModalKwargsItem]]] = None
-        sorted_mm_positions: Optional[list[PlaceholderRange]] = None
-        sorted_mm_hashes: Optional[list[str]] = None
+        mm_features: Optional[list[MultiModalFeatureSpec]] = None
+
         if decoder_inputs["type"] == "multimodal":
             decoder_mm_inputs = decoder_inputs["mm_kwargs"]
             decoder_mm_positions = decoder_inputs["mm_placeholders"]
@@ -359,25 +358,19 @@ class Processor:
             # in the input sequence.
             sorted_mm_idxs = argsort_mm_positions(decoder_mm_positions)
 
-            sorted_mm_inputs = [
-                decoder_mm_inputs[modality][idx]
-                for modality, idx in sorted_mm_idxs
-            ]
-            sorted_mm_positions = [
-                decoder_mm_positions[modality][idx]
-                for modality, idx in sorted_mm_idxs
-            ]
-            sorted_mm_hashes = [
-                decoder_mm_hashes[modality][idx]
-                for modality, idx in sorted_mm_idxs
-            ]
+            mm_features = []
+            for modality, idx in sorted_mm_idxs:
+                mm_features.append(
+                    MultiModalFeatureSpec(
+                        data=decoder_mm_inputs[modality][idx],
+                        modality=modality,
+                        identifier=decoder_mm_hashes[modality][idx],
+                        mm_position=decoder_mm_positions[modality][idx]))
 
         return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=decoder_inputs["prompt_token_ids"],
-            mm_kwargs=sorted_mm_inputs,
-            mm_hashes=sorted_mm_hashes,
-            mm_placeholders=sorted_mm_positions,
+            mm_features=mm_features,
             sampling_params=sampling_params,
             pooling_params=pooling_params,
             eos_token_id=eos_token_id,
