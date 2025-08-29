@@ -790,6 +790,8 @@ class OpenAIServingResponses(OpenAIServing):
 
     async def retrieve_responses(
         self,
+        starting_after: Optional[int],
+        stream: Optional[bool],
         response_id: str,
     ) -> Union[ErrorResponse, ResponsesResponse]:
         if not response_id.startswith("resp_"):
@@ -800,6 +802,16 @@ class OpenAIServingResponses(OpenAIServing):
 
         if response is None:
             return self._make_not_found_error(response_id)
+
+        if stream:
+            events = self.event_store.get(response_id, [])
+
+            async def event_generator(starting_after=starting_after):
+                for event in events:
+                    if event.sequence_number > starting_after:
+                        yield event
+
+            return event_generator()
         return response
 
     async def cancel_responses(
