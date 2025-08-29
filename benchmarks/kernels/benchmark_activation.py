@@ -37,7 +37,7 @@ def bench(
 
     if func_name == "silu_and_mul":
         layer = SiluAndMul()
-    if func_name == "mul_and_silu":
+    elif func_name == "mul_and_silu":
         layer = MulAndSilu()
     elif func_name == "gelu":
         layer = GeluAndMul(approximate="none")
