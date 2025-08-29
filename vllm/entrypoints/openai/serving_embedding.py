@@ -93,9 +93,7 @@ class EmbeddingMixin(OpenAIServing):
                     or ctx.chat_template,
                     chat_template_content_format=ctx.
                     chat_template_content_format,
-                    # In embedding requests, we are not generating tokens,
-                    # so there is no need to append extra tokens to the input
-                    add_generation_prompt=False,
+                    add_generation_prompt=ctx.add_generation_prompt,
                     continue_final_message=False,
                     truncate_prompt_tokens=ctx.truncate_prompt_tokens,
                     add_special_tokens=ctx.request.add_special_tokens,
