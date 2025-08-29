@@ -39,27 +39,23 @@ def dtype(request):
 
 
 @pytest.fixture(scope="module")
-def server(model_info, dtype: str):
-    args = [
-        "--runner",
-        "pooling",
-        # use half precision for speed and memory savings in CI environment
-        "--dtype",
-        dtype,
-        "--enforce-eager",
-        "--max-model-len",
-        "512"
-    ]
+def server(model_info, dtype: str, embedding_server):
+    if model_info.name == "intfloat/multilingual-e5-small":
+        yield embedding_server
+    else:
+        args = [
+            "--runner", "pooling", "--dtype", dtype, "--enforce-eager",
+            "--max-model-len", "512"
+        ]
 
-    if model_info.name == "Snowflake/snowflake-arctic-embed-m-v1.5":
-        # Manually enable Matryoshka Embeddings
-        args.extend([
-            "--trust_remote_code", "--hf_overrides",
-            '{"matryoshka_dimensions":[256]}'
-        ])
+        if model_info.name == "Snowflake/snowflake-arctic-embed-m-v1.5":
+            args.extend([
+                "--trust_remote_code", "--hf_overrides",
+                '{"matryoshka_dimensions":[256]}'
+            ])
 
-    with RemoteOpenAIServer(model_info.name, args) as remote_server:
-        yield remote_server
+        with RemoteOpenAIServer(model_info.name, args) as remote_server:
+            yield remote_server
 
 
 @pytest.fixture(scope="module")

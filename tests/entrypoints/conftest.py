@@ -201,10 +201,3 @@ table: "table_1" | "table_2"
 condition: column "=" number
 number: "1" | "2"
 """)
-
-
-@pytest.fixture(scope="session")
-def zephyr_lora_files():
-    """Download zephyr LoRA files once per test session."""
-    from huggingface_hub import snapshot_download
-    return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")

@@ -17,7 +17,6 @@ import pytest_asyncio
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 
-
 def _generate_random_text(word_count: int) -> str:
     """Generate random text with approximately the specified word count."""
     # Common English words with focus on verbs and nouns for realistic text

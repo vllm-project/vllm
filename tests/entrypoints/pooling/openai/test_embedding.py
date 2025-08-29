@@ -24,22 +24,8 @@ DTYPE = "bfloat16"
 
 
 @pytest.fixture(scope="module")
-def server():
-    args = [
-        "--runner",
-        "pooling",
-        # use half precision for speed and memory savings in CI environment
-        "--dtype",
-        DTYPE,
-        "--enforce-eager",
-        "--max-model-len",
-        "512",
-        "--chat-template",
-        DUMMY_CHAT_TEMPLATE,
-    ]
-
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-        yield remote_server
+def server(embedding_server):
+    return embedding_server
 
 
 @pytest_asyncio.fixture
