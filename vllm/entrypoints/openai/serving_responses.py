@@ -340,8 +340,6 @@ class OpenAIServingResponses(OpenAIServing):
                     ),
                     name=f"create_{request.request_id}",
                 )
-                return self.responses_background_stream_generator(
-                    request.request_id)
             else:
                 task = asyncio.create_task(
                     self._run_background_request(
@@ -362,6 +360,10 @@ class OpenAIServingResponses(OpenAIServing):
             self.background_tasks[response_id] = task
             task.add_done_callback(
                 lambda _: self.background_tasks.pop(response_id, None))
+
+            if request.stream:
+                return self.responses_background_stream_generator(
+                    request.request_id)
             return response
 
         if request.stream:
