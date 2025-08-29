@@ -40,11 +40,14 @@ def cutlass_scaled_mm(
     block_size: list[int],
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    return ops.cutlass_scaled_mm(A,
-                                 B.T,
-                                 out_dtype=output_dtype,
-                                 scale_a=As,
-                                 scale_b=Bs.T)
+    return ops.cutlass_scaled_mm(
+        A,
+        B.T,
+        out_dtype=output_dtype,
+        scale_a=As,
+        # SM90 block FP8 requires contiguous scale_b
+        scale_b=Bs.T.contiguous() if block_size is not None
+        and current_platform.is_device_capability(90) else Bs.T)
 
 
 def rocm_aiter_gemm_w8a8_blockscale_impl(

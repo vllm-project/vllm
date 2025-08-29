@@ -48,8 +48,7 @@ struct cutlass_3x_gemm_fp8_blockwise {
   using ElementBlockScale = float;
 
   using ScaleConfig = cutlass::detail::Sm90BlockwiseScaleConfig<
-        ScaleGranularityM, ScaleGranularityN, ScaleGranularityK,
-        cute::GMMA::Major::MN, cute::GMMA::Major::K>;
+        ScaleGranularityM, ScaleGranularityN, ScaleGranularityK>;
 
   using LayoutSFA = decltype(ScaleConfig::deduce_layoutSFA());
   using LayoutSFB = decltype(ScaleConfig::deduce_layoutSFB());
@@ -163,7 +162,7 @@ void cutlass_gemm_blockwise_sm90_fp8_dispatch(torch::Tensor& out,
   // TODO: better heuristics
   cutlass_gemm_caller_blockwise<cutlass_3x_gemm_fp8_blockwise<
       OutType, 1, 128, 128, Shape<_128, _128, _128>,
-      Shape<_1, _2, _1>, cutlass::epilogue::TmaWarpSpecializedCooperative,
+      Shape<_1, _1, _1>, cutlass::epilogue::TmaWarpSpecializedCooperative,
       cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8BlockScaledAccum>>(
       out, a, b, a_scales, b_scales);
 }
