@@ -790,9 +790,9 @@ class OpenAIServingResponses(OpenAIServing):
 
     async def retrieve_responses(
         self,
+        response_id: str,
         starting_after: Optional[int],
         stream: Optional[bool],
-        response_id: str,
     ) -> Union[ErrorResponse, ResponsesResponse]:
         if not response_id.startswith("resp_"):
             return self._make_invalid_id_error(response_id)
@@ -806,9 +806,11 @@ class OpenAIServingResponses(OpenAIServing):
         if stream:
             events = self.event_store.get(response_id, [])
 
-            async def event_generator(starting_after=starting_after):
-                for event in events:
-                    if event.sequence_number > starting_after:
+            async def event_generator():
+                start_sequence_number = (-1 if starting_after is None else
+                                         starting_after)
+                for current_sequence_number, event in enumerate(events):
+                    if current_sequence_number > start_sequence_number:
                         yield event
 
             return event_generator()

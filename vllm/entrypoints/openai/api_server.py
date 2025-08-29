@@ -631,7 +631,6 @@ async def retrieve_responses(
             response_id,
             starting_after=starting_after,
             stream=stream,
-            raw_request=raw_request,
         )
     except Exception as e:
         raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
