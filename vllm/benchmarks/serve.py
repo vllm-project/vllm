@@ -14,11 +14,17 @@ On the client side, run:
         --dataset-name <dataset_name. Default 'random'> \
         --request-rate <request_rate. Default inf> \
         --num-prompts <num_prompts. Default 1000>
+        
+    For load balancing across multiple servers, provide multiple base URLs:
+        --base-url http://server1:8000 http://server2:8000 http://server3:8000
+        
+    The script will test all URLs before starting the benchmark to ensure they're accessible.
 """
 import argparse
 import asyncio
 import gc
 import importlib.util
+import itertools
 import json
 import os
 import random
@@ -436,8 +442,8 @@ def calculate_metrics(
 
 async def benchmark(
     endpoint_type: str,
-    api_url: str,
-    base_url: str,
+    api_urls: list[str],
+    base_urls: list[str],
     model_id: str,
     model_name: str,
     tokenizer: PreTrainedTokenizerBase,
@@ -459,8 +465,8 @@ async def benchmark(
     ramp_up_end_rps: Optional[int] = None,
     ready_check_timeout_sec: int = 600,
 ):
-    task_type = (TaskType.EMBEDDING if api_url.endswith("/v1/embeddings") else
-                 TaskType.GENERATION)
+    task_type = (
+        TaskType.EMBEDDING if any(url.endswith("/v1/embeddings") for url in api_urls) else TaskType.GENERATION)
     if endpoint_type in ASYNC_REQUEST_FUNCS:
         if task_type == TaskType.EMBEDDING:
             request_func = ASYNC_REQUEST_FUNCS["openai-embeddings"]
@@ -478,7 +484,7 @@ async def benchmark(
         keepalive_timeout=60,
         enable_cleanup_closed=True,
         force_close=False,
-        ssl=("https://" in api_url),
+        ssl=(any("https://" in url for url in api_urls)),
     )
 
     session = aiohttp.ClientSession(
@@ -487,7 +493,6 @@ async def benchmark(
         timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
     )
 
-    print("Starting initial single prompt test run...")
     test_prompt, test_prompt_len, test_output_len, test_mm_content = (
         input_requests[0].prompt,
         input_requests[0].prompt_len,
@@ -499,43 +504,60 @@ async def benchmark(
             or (isinstance(test_mm_content, list)
                 and all(isinstance(item, dict) for item in test_mm_content))
             ), "multi_modal_data must be a dict or list[dict]"
-    test_input = RequestFuncInput(
-        model=model_id,
-        model_name=model_name,
-        prompt=test_prompt,
-        api_url=api_url,
-        prompt_len=test_prompt_len,
-        output_len=test_output_len,
-        logprobs=logprobs,
-        multi_modal_content=test_mm_content,
-        ignore_eos=ignore_eos,
-        extra_body=extra_body,
-    )
-
-    test_output = await wait_for_endpoint(
-        request_func,
-        test_input,
-        session,
-        timeout_seconds=ready_check_timeout_sec,
-    )
-    if not test_output.success:
-        raise ValueError(
-            "Initial test run failed - Please make sure benchmark arguments "
-            f"are correctly specified. Error: {test_output.error}")
-    else:
-        print("Initial test run completed. Starting main benchmark run...")
+    
+    # Test all URLs in parallel to ensure they're working
+    async def test_url(test_api_url, url_pbar):
+        test_input = RequestFuncInput(
+            model=model_id,
+            model_name=model_name,
+            prompt=test_prompt,
+            api_url=test_api_url,
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            logprobs=logprobs,
+            multi_modal_content=test_mm_content,
+            ignore_eos=ignore_eos,
+            extra_body=extra_body,
+        )
+        
+        test_output = await wait_for_endpoint(
+            request_func,
+            test_input,
+            session,
+            timeout_seconds=ready_check_timeout_sec,
+            pbar=url_pbar,
+        )
+        return test_api_url, test_output.success, test_output.error
+    
+    # Test all URLs in parallel with progress bar
+    with tqdm(total=len(api_urls), desc="Testing URLs", unit="url") as url_pbar:
+        test_results = await asyncio.gather(*[test_url(url, url_pbar) for url in api_urls])
+    
+    failed_urls = [(url, error) for url, success, error in test_results if not success]
+    
+    if failed_urls:
+        failed_url_list = [f"{url}: {error}" for url, error in failed_urls]
+        raise ValueError(f"URL test failed: {failed_url_list}")
+    
+    print(f"All {len(api_urls)} URL(s) ready. Starting benchmark...")
 
     if lora_modules:
         # For each input request, choose a LoRA module at random.
         lora_modules = iter(
             [random.choice(lora_modules) for _ in range(len(input_requests))])
+        
+    # Create round-robin iterator for URLs
+    api_url_cycle = itertools.cycle(api_urls)
+    base_url_cycle = itertools.cycle(base_urls)
 
     if profile:
         print("Starting profiler...")
+        # Get the first base URL from the cycle for profiling
+        profile_base_url = next(base_url_cycle)
         profile_input = RequestFuncInput(model=model_id,
                                          model_name=model_name,
                                          prompt=test_prompt,
-                                         api_url=base_url + "/start_profile",
+                                         api_url=profile_base_url + "/start_profile",
                                          prompt_len=test_prompt_len,
                                          output_len=test_output_len,
                                          logprobs=logprobs,
@@ -616,11 +638,14 @@ async def benchmark(
             req_lora_module = next(lora_modules)
             req_model_id, req_model_name = req_lora_module, req_lora_module
 
+        # Get the next URL from the cycle for round-robin load balancing
+        current_api_url = next(api_url_cycle)
+        
         request_func_input = RequestFuncInput(
             model=req_model_id,
             model_name=req_model_name,
             prompt=prompt,
-            api_url=api_url,
+            api_url=current_api_url,
             prompt_len=prompt_len,
             output_len=output_len,
             logprobs=logprobs,
@@ -768,7 +793,7 @@ async def benchmark(
         profile_input = RequestFuncInput(
             model=model_id,
             prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
+            api_url=profile_base_url + "/stop_profile",
             prompt_len=test_prompt_len,
             output_len=test_output_len,
             logprobs=logprobs,
@@ -866,8 +891,10 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--base-url",
         type=str,
+        nargs='*',
         default=None,
-        help="Server or API base url if not using http host and port.",
+        help="Server or API base url(s) if not using http host and port. "
+        "Multiple URLs can be provided for round-robin load balancing.",
     )
     # Use 127.0.0.1 here instead of localhost to force the use of ipv4
     parser.add_argument("--host", type=str, default="127.0.0.1")
@@ -1158,11 +1185,27 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     tokenizer_mode = args.tokenizer_mode
 
     if args.base_url is not None:
-        api_url = f"{args.base_url}{args.endpoint}"
-        base_url = f"{args.base_url}"
+        # Handle multiple base URLs for round-robin load balancing
+        if isinstance(args.base_url, list):
+            api_urls = [f"{url}{args.endpoint}" for url in args.base_url]
+            base_urls = args.base_url
+        else:
+            # Single URL (backward compatibility)
+            api_urls = [f"{args.base_url}{args.endpoint}"]
+            base_urls = [args.base_url]
     else:
-        api_url = f"http://{args.host}:{args.port}{args.endpoint}"
-        base_url = f"http://{args.host}:{args.port}"
+        # Single host:port configuration
+        api_urls = [f"http://{args.host}:{args.port}{args.endpoint}"]
+        base_urls = [f"http://{args.host}:{args.port}"]
+    
+    
+    # Print the URLs that will be used for load balancing
+    if len(api_urls) > 1:
+        print(f"Round-robin load balancing enabled across {len(api_urls)} URLs:")
+        for i, url in enumerate(api_urls, 1):
+            print(f"  {i}. {url}")
+    else:
+        print(f"Single URL: {api_urls[0]}")
 
     tokenizer = get_tokenizer(tokenizer_id,
                               tokenizer_mode=tokenizer_mode,
@@ -1202,8 +1245,8 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     benchmark_result = await benchmark(
         endpoint_type=args.endpoint_type,
-        api_url=api_url,
-        base_url=base_url,
+        api_urls=api_urls,
+        base_urls=base_urls,
         model_id=model_id,
         model_name=model_name,
         tokenizer=tokenizer,
