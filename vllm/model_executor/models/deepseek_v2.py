@@ -882,6 +882,11 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+
+            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
+            if spec_layer is not None:
+                continue  # skip spec decode layers for main model
+
             # Special handling: when AITER fusion_shared_experts is enabled,
             # checkpoints may provide a single widened shared_experts tensor
             # without explicit expert indices
@@ -953,10 +958,6 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
                     # Mark original shared_experts weight as handled
                     loaded_params.add(name)
                     continue
-
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
-            if spec_layer is not None:
-                continue  # skip spec decode layers for main model
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).

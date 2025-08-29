@@ -961,6 +961,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        num_fused_shared_experts: int = 0,
+        routed_scaling_factor: float = 1.0,
     ) -> torch.Tensor:
         if enable_eplb:
             assert expert_load_view is not None
@@ -1026,8 +1028,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
-            num_fused_shared_experts=layer.num_fused_shared_experts,
-            routed_scaling_factor=layer.routed_scaling_factor,
+            num_fused_shared_experts=num_fused_shared_experts,
+            routed_scaling_factor=routed_scaling_factor,
         )
 
         if self.rocm_aiter_moe_enabled:

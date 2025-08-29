@@ -786,6 +786,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        num_fused_shared_experts: int = 0,
+        routed_scaling_factor: float = 1.0,
     ) -> torch.Tensor:
         if enable_eplb:
             raise NotImplementedError(
@@ -804,8 +806,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
-            num_fused_shared_experts=layer.num_fused_shared_experts,
-            routed_scaling_factor=layer.routed_scaling_factor,
+            num_fused_shared_experts=num_fused_shared_experts,
+            routed_scaling_factor=routed_scaling_factor,
         )
 
         # cutlass path
