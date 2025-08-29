@@ -397,8 +397,7 @@ class GraniteMoeHybridModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         num_attn = 0
-        for i in range(len(self.layers)):
-            layer = self.layers[i]
+        for i, layer in enumerate(self.layers):
             if isinstance(layer, GraniteMoeHybridAttentionDecoderLayer):
                 num_attn += 1
 

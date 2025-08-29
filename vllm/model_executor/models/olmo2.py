@@ -26,6 +26,7 @@
 
 from collections.abc import Iterable
 from functools import partial
+from itertools import islice
 from typing import Optional, Union
 
 import torch
@@ -305,7 +306,7 @@ class Olmo2Model(nn.Module):
             assert isinstance(hidden_states, torch.Tensor)
 
         # Apply blocks one-by-one.
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             # shape: (batch_size, seq_len, d_model)
             hidden_states = layer(positions, hidden_states)
 

@@ -399,8 +399,7 @@ class NemotronHModel(nn.Module):
 
         residual = None
         num_non_mamba_layers = 0
-        for i in range(len(self.layers)):
-            layer = self.layers[i]
+        for i, layer in enumerate(self.layers):
             layer_mamba_cache_params = None
             if isinstance(layer,
                           NemotronHMambaDecoderLayer) and mamba_cache_params:
