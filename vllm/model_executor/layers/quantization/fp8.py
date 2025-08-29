@@ -359,7 +359,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 weight = layer.weight.data
                 weight_scale_inv = layer.weight_scale_inv.data
 
-            if current_platform.is_device_capability(
+            if current_platform.has_device_capability(
                     90) and layer.weight.shape[0] == 576:
                 from vllm.model_executor.layers.quantization.utils.quant_utils import (  # noqa: E501
                     group_broadcast)
