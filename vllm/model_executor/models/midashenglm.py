@@ -277,8 +277,8 @@ class DashengBlock(nn.Module):
         x: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        x = x + self.ls1(self.attn(self.norm1(x), mask))
-        x = x + self.ls2(self.mlp(self.norm2(x)))
+        x += self.ls1(self.attn(self.norm1(x), mask))
+        x += self.ls2(self.mlp(self.norm2(x)))
         return x
 
 
@@ -354,9 +354,9 @@ class DashengAudioTransformer(nn.Module):
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         t = x.shape[-1]
-        x = x + self.time_pos_embed[:, :, :, :t]
-        x = (x + self.freq_pos_embed[:, :, :, :]
-             )  # Just to support __getitem__ in posembed
+        x += self.time_pos_embed[:, :, :, :t]
+        # Just to support __getitem__ in posembed
+        x += self.freq_pos_embed[:, :, :, :]
         x = torch.permute(torch.flatten(x, 2, 3),
                           (0, 2, 1))  # rearrange(x, "b c f t -> b (f t) c")
         for block in self.blocks:

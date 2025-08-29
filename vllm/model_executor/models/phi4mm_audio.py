@@ -225,10 +225,10 @@ class ConformerEncoderLayer(nn.Module):
             relative_attention_bias: bias added to attention logits w.r.t.
                 relative positions (1, n_head, time1, time2)
         """
-        x = x + 0.5 * self.feed_forward_in(x)
+        x += 0.5 * self.feed_forward_in(x)
         norm_x = self.layer_norm_att(x)
 
-        x = x + self.self_attn(
+        x += self.self_attn(
             norm_x,
             norm_x,
             norm_x,
@@ -237,8 +237,8 @@ class ConformerEncoderLayer(nn.Module):
             mask,
             relative_attention_bias=relative_attention_bias,
         )
-        x = x + self.conv(x)
-        x = x + 0.5 * self.feed_forward_out(x)
+        x += self.conv(x)
+        x += 0.5 * self.feed_forward_out(x)
 
         out = self.layer_norm(x)
 

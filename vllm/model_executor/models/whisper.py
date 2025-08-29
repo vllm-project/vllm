@@ -403,11 +403,11 @@ class WhisperEncoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states = self.self_attn(hidden_states=hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         hidden_states = cast_overflow_tensors(hidden_states)
 
@@ -456,7 +456,7 @@ class WhisperDecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states = self.self_attn(hidden_states=hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         residual = hidden_states
         hidden_states = self.encoder_attn_layer_norm(hidden_states)
@@ -464,12 +464,12 @@ class WhisperDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             encoder_hidden_states=encoder_hidden_states,
         )
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         return hidden_states
 

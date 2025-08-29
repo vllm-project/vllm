@@ -198,13 +198,13 @@ class OrionDecoderLayer(nn.Module):
             hidden_states=hidden_states,
         )
 
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         return hidden_states
 
 

@@ -32,7 +32,7 @@ class ResidualBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for layer in self.layers:
-            x = x + self.act(layer(x))
+            x += self.act(layer(x))
         return x
 
 

@@ -89,7 +89,7 @@ class Mixer2RMSNormGated(CustomOp):
         #   3. The general case can be pretty complicated so we AllGather
         #      the input and then redundantly compute the RMSNorm.
         input_dtype = x.dtype
-        x = x * nn.functional.silu(gate.to(torch.float32))
+        x *= nn.functional.silu(gate.to(torch.float32))
         if not self.use_rms_norm:
             return x.to(input_dtype)
 
@@ -104,7 +104,7 @@ class Mixer2RMSNormGated(CustomOp):
 
             else:
                 variance = x.pow(2).mean(-1, keepdim=True)
-            x = x * torch.rsqrt(variance + self.variance_epsilon)
+            x *= torch.rsqrt(variance + self.variance_epsilon)
         else:
             redundant_tp: bool = self.n_groups % self.tp_size != 0
             if redundant_tp:
@@ -115,8 +115,7 @@ class Mixer2RMSNormGated(CustomOp):
             group_count = hidden_dim // self.group_size
             x_grouped = x.view(*prefix_dims, group_count, self.group_size)
             variance = x_grouped.pow(2).mean(-1, keepdim=True)
-            x_grouped = x_grouped * torch.rsqrt(variance +
-                                                self.variance_epsilon)
+            x_grouped *= torch.rsqrt(variance + self.variance_epsilon)
             x = x_grouped.view(*prefix_dims, hidden_dim)
 
             if redundant_tp:

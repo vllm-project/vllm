@@ -87,7 +87,7 @@ class AIMv2ViTPreprocessor(nn.Module):
         tokens = self.patchifier(x)
         _, N, _ = tokens.shape
         pos_embed = self.pos_embed.to(tokens.device)
-        tokens = tokens + pos_embed[:, :N]
+        tokens += pos_embed[:, :N]
         return tokens
 
 
@@ -154,8 +154,8 @@ class AIMv2Block(nn.Module):
         self.norm_2 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.norm_1.forward_native(x))
-        x = x + self.mlp(self.norm_2.forward_native(x))
+        x += self.attn(self.norm_1.forward_native(x))
+        x += self.mlp(self.norm_2.forward_native(x))
         return x
 
 

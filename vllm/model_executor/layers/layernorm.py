@@ -179,7 +179,7 @@ class RMSNorm(CustomOp):
         orig_dtype = x.dtype
         x = x.to(torch.float32)
         if residual is not None:
-            x = x + residual.to(torch.float32)
+            x += residual.to(torch.float32)
             residual = x.to(orig_dtype)
 
         hidden_size = x.shape[-1]
@@ -199,10 +199,10 @@ class RMSNorm(CustomOp):
 
         variance = x_var.pow(2).mean(dim=-1, keepdim=True)
 
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
+        x *= torch.rsqrt(variance + self.variance_epsilon)
         x = x.to(orig_dtype)
         if self.has_weight:
-            x = x * self.weight
+            x *= self.weight
         if residual is None:
             return x
         else:
@@ -298,17 +298,17 @@ class GemmaRMSNorm(CustomOp):
         orig_dtype = x.dtype
         if residual is not None:
             if orig_dtype == torch.float16:
-                x = x + residual.float()
+                x += residual.float()
             else:
-                x = x + residual
+                x += residual
             residual = x
 
         x = x.float()
         variance = x.pow(2).mean(dim=-1, keepdim=True)
-        x = x * torch.rsqrt(variance + variance_epsilon)
+        x *= torch.rsqrt(variance + variance_epsilon)
         # Llama does x.to(float16) * w whilst Gemma is (x * w).to(float16)
         # See https://github.com/huggingface/transformers/pull/29402
-        x = x * (1.0 + weight.float())
+        x *= (1.0 + weight.float())
         x = x.to(orig_dtype)
         return x if residual is None else (x, residual)
 

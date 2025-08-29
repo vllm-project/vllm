@@ -66,7 +66,7 @@ def layer_norm_func(hidden_states, weight, variance_epsilon):
     variance = (hidden_states - mean).pow(2).mean(-1, keepdim=True)
     hidden_states = (hidden_states - mean) * torch.rsqrt(variance +
                                                          variance_epsilon)
-    hidden_states = weight.to(torch.float32) * hidden_states
+    hidden_states *= weight.to(torch.float32)
     return hidden_states.to(input_dtype)
 
 

@@ -172,7 +172,7 @@ class DeepseekMoE(nn.Module):
                                         inplace=True)
 
         if self.config.n_shared_experts is not None:
-            final_hidden_states = final_hidden_states + shared_output
+            final_hidden_states += shared_output
         final_hidden_states = tensor_model_parallel_all_reduce(
             final_hidden_states)
 

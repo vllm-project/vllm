@@ -259,13 +259,13 @@ class Olmo2DecoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.self_attn(positions, hidden_states)
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = hidden_states + residual
+        hidden_states += residual
 
         # MLP block.
         residual = hidden_states
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_feedforward_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         return hidden_states
 
 

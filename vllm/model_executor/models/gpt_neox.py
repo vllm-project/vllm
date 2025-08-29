@@ -179,12 +179,12 @@ class GPTNeoXLayer(nn.Module):
             # x = x + attn(ln1(x)) + mlp(ln2(x))
             mlp_input = self.post_attention_layernorm(hidden_states)
             mlp_output = self.mlp(mlp_input)
-            hidden_states = mlp_output + attn_output + hidden_states
+            hidden_states += mlp_output + attn_output
         else:
             # pseudocode:
             # x = x + attn(ln1(x))
             # x = x + mlp(ln2(x))
-            attn_output = attn_output + hidden_states
+            attn_output += hidden_states
             mlp_input = self.post_attention_layernorm(attn_output)
             mlp_output = self.mlp(mlp_input)
             hidden_states = mlp_output + attn_output

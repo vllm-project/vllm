@@ -150,7 +150,7 @@ class mp(torch.autograd.Function):
     ):
         multiplier, selected_experts, masked_gates = ctx.saved_tensors
 
-        grad_at_output = grad_at_output * multiplier
+        grad_at_output *= multiplier
 
         grad_at_scores_expanded = masked_gates * grad_at_output.mul(-1)
         grad_at_scores_expanded.scatter_add_(
@@ -433,14 +433,14 @@ class PhiMoEDecoderLayer(nn.Module):
             positions=positions,
             hidden_states=hidden_states,
         )
-        hidden_states = hidden_states + residual
+        hidden_states += residual
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.block_sparse_moe(hidden_states)
 
-        hidden_states = hidden_states + residual
+        hidden_states += residual
         return hidden_states, residual
 
 

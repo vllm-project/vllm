@@ -174,9 +174,9 @@ class ModernBertLayer(nn.Module):
     ) -> torch.Tensor:
         attn_outputs = self.attn(hidden_states=self.attn_norm(hidden_states),
                                  position_ids=position_ids)
-        hidden_states = hidden_states + attn_outputs
+        hidden_states += attn_outputs
         mlp_output = self.mlp(self.mlp_norm(hidden_states))
-        hidden_states = hidden_states + mlp_output
+        hidden_states += mlp_output
         return hidden_states
 
 

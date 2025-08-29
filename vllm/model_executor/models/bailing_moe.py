@@ -236,7 +236,7 @@ class BailingMoE(nn.Module):
                                            router_logits=router_logits)
 
         if self.num_shared_experts > 0:
-            final_hidden_states = final_hidden_states + shared_output
+            final_hidden_states += shared_output
 
         if self.tp_size > 1:
             final_hidden_states = tensor_model_parallel_all_reduce(

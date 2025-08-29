@@ -242,8 +242,8 @@ class VisualAttentionBlock(nn.Module):
         x: torch.Tensor,
         attn_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        x = x + self.attention(self.ln_1(x), attn_mask=attn_mask)
-        x = x + self.mlp(self.ln_2(x))
+        x += self.attention(self.ln_1(x), attn_mask=attn_mask)
+        x += self.mlp(self.ln_2(x))
         return x
 
 
@@ -359,8 +359,7 @@ class VisionTransformer(nn.Module):
                       -1)  # shape = [*, width, grid ** 2]
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
 
-        x = x + get_abs_pos(self.positional_embedding, int(math.sqrt(
-            x.size(1))))
+        x += get_abs_pos(self.positional_embedding, int(math.sqrt(x.size(1))))
 
         x = self.ln_pre(x)
 

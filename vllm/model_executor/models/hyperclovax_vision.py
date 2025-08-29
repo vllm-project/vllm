@@ -500,7 +500,7 @@ class HCXVisionCAbstractor(nn.Module):
             x = self.prenorm(x)
 
         if self.pos_emb is not None:
-            x = x + self.pos_emb
+            x += self.pos_emb
 
         x = self._forward(
             x,

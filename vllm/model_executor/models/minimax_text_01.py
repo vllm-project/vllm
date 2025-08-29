@@ -422,7 +422,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
             kv_caches=kv_caches,
         )
 
-        residual = residual * self.layernorm_attention_alpha
+        residual *= self.layernorm_attention_alpha
         self_attention_output = (self_attention_output *
                                  self.layernorm_attention_beta)
 
@@ -456,10 +456,10 @@ class MiniMaxText01DecoderLayer(nn.Module):
             else:
                 hidden_states = moe_hidden_states
 
-        residual = residual * self.layernorm_mlp_alpha
-        hidden_states = hidden_states * self.layernorm_mlp_beta
+        residual *= self.layernorm_mlp_alpha
+        hidden_states *= self.layernorm_mlp_beta
 
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         return hidden_states, None
 

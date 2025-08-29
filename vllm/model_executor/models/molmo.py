@@ -255,8 +255,8 @@ class ResidualAttentionBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attention(self.attention_norm(x))
-        x = x + self.feed_forward(self.ffn_norm(x))
+        x += self.attention(self.attention_norm(x))
+        x += self.feed_forward(self.ffn_norm(x))
         return x
 
 
@@ -335,8 +335,8 @@ class VisionTransformer(nn.Module):
             pos_emb = pos_emb.permute(0, 2, 3, 1).squeeze(0)
 
         pos_emb = pos_emb.reshape(-1, pos_emb.shape[-1])
-        x = x + torch.cat([cls_emb[None, :, :], pos_emb[None, :, :]],
-                          dim=1).to(x.dtype)
+        x += torch.cat([cls_emb[None, :, :], pos_emb[None, :, :]],
+                       dim=1).to(x.dtype)
         return x
 
     def forward(self,
@@ -612,12 +612,12 @@ class MolmoDecoderNormAfterLayer(MolmoDecoderLayer):
         )
 
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = hidden_states + residual
+        hidden_states += residual
         residual = hidden_states
 
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = hidden_states + residual
+        hidden_states += residual
         residual = None
         return hidden_states, residual
 
@@ -688,7 +688,7 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         if self.num_prefix_tokens > 0:
             image_features = image_features[:, 1:]
 
-        image_features = image_features * mask
+        image_features *= mask
         image_features = image_features.view(B, T, N, -1)
 
         return image_features
@@ -711,10 +711,8 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
             image_masks < 1,
             torch.logical_not(all_pad)).to(dtype=torch.float32)
         all_pad = all_pad.to(dtype=torch.float32)
-        image_features = image_features + pad_embed[0] * torch.unsqueeze(
-            all_pad, -1)
-        image_features = image_features + pad_embed[1] * torch.unsqueeze(
-            partial_pad, -1)
+        image_features += pad_embed[0] * torch.unsqueeze(all_pad, -1)
+        image_features += pad_embed[1] * torch.unsqueeze(partial_pad, -1)
 
         image_features = image_features.to(og_dtype)
 

@@ -358,9 +358,8 @@ class Phi4MultimodalAudioConformerEncoderLayer(nn.Module):
 
         hidden_states = residual + self.self_attn(hidden_states,
                                                   attention_mask)
-        hidden_states = hidden_states + self.conv(hidden_states)
-        hidden_states = hidden_states + 0.5 * self.feed_forward_out(
-            hidden_states)
+        hidden_states += self.conv(hidden_states)
+        hidden_states += 0.5 * self.feed_forward_out(hidden_states)
 
         out = self.layer_norm(hidden_states)
 

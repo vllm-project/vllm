@@ -89,7 +89,7 @@ class LlamaModel(nn.Module):
                 hidden_states,
                 residual,
             )
-        hidden_states = hidden_states + residual
+        hidden_states += residual
         return hidden_states, hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,

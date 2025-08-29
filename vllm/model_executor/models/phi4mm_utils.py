@@ -1793,7 +1793,7 @@ class MultiHeadedAttention(nn.Module):
                 scores = A
 
             if relative_attention_bias is not None:
-                scores = scores + relative_attention_bias
+                scores += relative_attention_bias
 
             attn = masked_softmax(scores, mask)  # (batch, head, time1, time2)
 
@@ -1810,7 +1810,7 @@ class MultiHeadedAttention(nn.Module):
                 attn_v = (torch.matmul(reshape_attn, pos_v).transpose(
                     0, 1).contiguous().view(n_batch, self.h, pos_v.size(0),
                                             self.d_k))
-                x = x + attn_v
+                x += attn_v
         x = (x.transpose(1, 2).contiguous().view(n_batch, -1,
                                                  self.h_k * self.d_k)
              )  # (batch, time1, d_model)

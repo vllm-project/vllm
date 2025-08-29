@@ -92,7 +92,7 @@ class InternVisionEmbeddings(nn.Module):
                                                    -1).to(target_dtype)
         embeddings = torch.cat([class_embeds, patch_embeds], dim=1)
         position_embedding = self._get_position_embedding(height, width)
-        embeddings = embeddings + position_embedding.to(target_dtype)
+        embeddings += position_embedding.to(target_dtype)
         return embeddings
 
 
@@ -369,11 +369,9 @@ class InternVisionEncoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
     ):
-        hidden_states = hidden_states + self.attn(
-            self.norm1(hidden_states)) * self.ls1
+        hidden_states += self.attn(self.norm1(hidden_states)) * self.ls1
 
-        hidden_states = hidden_states + self.mlp(
-            self.norm2(hidden_states)) * self.ls2
+        hidden_states += self.mlp(self.norm2(hidden_states)) * self.ls2
 
         return hidden_states
 

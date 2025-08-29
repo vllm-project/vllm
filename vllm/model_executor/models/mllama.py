@@ -438,9 +438,9 @@ class MllamaPrecomputedAspectRatioEmbedding(nn.Module):
                                         self.hidden_size)
 
         if self.is_gated:
-            embeddings = embeddings * self.gate.tanh()
+            embeddings *= self.gate.tanh()
 
-        hidden_state = hidden_state + embeddings
+        hidden_state += embeddings
         return hidden_state
 
 
@@ -469,8 +469,8 @@ class MllamaPrecomputedPositionEmbedding(nn.Module):
                 aspect_ratio_ids: torch.Tensor) -> torch.Tensor:
         # position embeddings
         gated_position_embedding = (1 - self.gate.tanh()) * self.embedding
-        hidden_state = hidden_state + gated_position_embedding.view(
-            1, 1, self.num_patches, self.hidden_size)
+        hidden_state += gated_position_embedding.view(1, 1, self.num_patches,
+                                                      self.hidden_size)
 
         # precomputed tile position embeddings
         tile_position_embedding = self.tile_embedding(aspect_ratio_ids)
@@ -479,7 +479,7 @@ class MllamaPrecomputedPositionEmbedding(nn.Module):
             batch_size, self.max_num_tiles, self.num_patches, self.hidden_size)
         gated_tile_position_embedding = self.gate.tanh(
         ) * tile_position_embedding
-        hidden_state = hidden_state + gated_tile_position_embedding
+        hidden_state += gated_tile_position_embedding
 
         return hidden_state
 
@@ -851,8 +851,7 @@ class MllamaTextRMSNorm(nn.Module):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance +
-                                                    self.variance_epsilon)
+        hidden_states *= torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
 
     def extra_repr(self):
@@ -1078,14 +1077,14 @@ class MllamaCrossAttentionDecoderLayer(torch.nn.Module):
             kv_range_for_decode=kv_range_for_decode,
             cross_attention_states=cross_attention_states,
         )
-        hidden_states = full_text_row_masked_out_mask * hidden_states
+        hidden_states *= full_text_row_masked_out_mask
         hidden_states = residual + self.cross_attn_attn_gate.tanh(
         ) * hidden_states
 
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = full_text_row_masked_out_mask * hidden_states
+        hidden_states *= full_text_row_masked_out_mask
         hidden_states = residual + self.cross_attn_mlp_gate.tanh(
         ) * hidden_states
         return hidden_states
@@ -1161,7 +1160,7 @@ class MllamaTextModel(nn.Module):
                     hidden_states=hidden_states,
                     residual=None,
                 )
-                hidden_states = hidden_states + residual
+                hidden_states += residual
         hidden_states = self.norm(hidden_states)
         return hidden_states
 

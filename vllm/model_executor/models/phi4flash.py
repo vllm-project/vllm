@@ -68,7 +68,7 @@ class SambaYMLP(nn.Module):
     def forward(self, hidden_states):
         y = self.fc1(hidden_states)
         gate, y = y.chunk(2, dim=-1)
-        y = y * self.activation_fn(gate)
+        y *= self.activation_fn(gate)
         return self.fc2(y)
 
 
@@ -484,7 +484,7 @@ class SambaYDecoderLayer(nn.Module):
         hidden_states = self.post_attention_layernorm(
             hidden_states.to(dtype=self.post_attention_layernorm.weight.dtype))
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         return hidden_states, ssm_output
 

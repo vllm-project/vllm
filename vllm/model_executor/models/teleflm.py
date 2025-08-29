@@ -60,7 +60,7 @@ class TeleFLMModel(LlamaModel):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         embedding = self.embed_tokens(input_ids)
         if self.use_mup:
-            embedding = embedding * self.input_mult
+            embedding *= self.input_mult
         return embedding
 
 

@@ -85,7 +85,7 @@ class MiMoMultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(positions=positions,
                                                  hidden_states=hidden_states,
                                                  residual=None)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         return self.final_layernorm(hidden_states)
 
 

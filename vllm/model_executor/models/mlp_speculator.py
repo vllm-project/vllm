@@ -49,11 +49,11 @@ class MLPSpeculatorLayerNorm(nn.Module):
 
     def forward(self, x):
         xf = x
-        xf = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
+        xf *= torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
         x = xf.type_as(x)
         if self.elementwise_scale_and_shift:
-            x = self.weight * x
-            x = x + self.bias
+            x *= self.weight
+            x += self.bias
         return x
 
 

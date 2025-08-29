@@ -308,7 +308,7 @@ class DbrxBlock(nn.Module):
             hidden_states=hidden_states,
         )
         hidden_states = self.ffn(hidden_states)
-        hidden_states = hidden_states + residual
+        hidden_states += residual
         return hidden_states
 
 

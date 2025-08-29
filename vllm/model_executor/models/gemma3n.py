@@ -659,7 +659,7 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
 
         if per_layer_inputs is not None:
             # Profiling run does not compute per_layer_inputs
-            per_layer_inputs = per_layer_projection + per_layer_inputs
+            per_layer_inputs += per_layer_projection
             per_layer_inputs *= self.per_layer_input_scale
         else:
             per_layer_inputs = per_layer_projection
