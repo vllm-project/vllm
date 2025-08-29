@@ -512,8 +512,8 @@ def run_dp_sharded_mrope_vision_model_tensor_Kimi(
     # Calculate cumulative patches using tensor operations
     cum_patches_tensor = torch.cat([
         torch.zeros(1, 
-                   device=patches_per_item_tensor.device, 
-                   dtype=patches_per_item_tensor.dtype),
+                    device=patches_per_item_tensor.device, 
+                    dtype=patches_per_item_tensor.dtype),
         patches_per_item_tensor.cumsum(dim=0)
     ])
 
@@ -526,7 +526,8 @@ def run_dp_sharded_mrope_vision_model_tensor_Kimi(
 
     # Get items assigned to this rank
     item_idxs_local = image_to_tp_rank[cum_gpu_sample_counts[tp_rank_local]:
-                                      cum_gpu_sample_counts[tp_rank_local + 1]]
+                                      cum_gpu_sample_counts[tp_rank_local +
+                                                            1]]
 
     # Get the pixel values for the local items
     if len(item_idxs_local) > 0:
@@ -540,23 +541,25 @@ def run_dp_sharded_mrope_vision_model_tensor_Kimi(
         pixel_values_local = torch.cat(pixel_slices, dim=0)
 
         # Extract grid_thw for local items using tensor indexing
-        item_idxs_tensor = torch.tensor(
-            item_idxs_local, device=grid_thw.device, dtype=torch.long)
+        item_idxs_tensor = torch.tensor(item_idxs_local,
+                                        device=grid_thw.device,
+                                        dtype=torch.long)
         grid_thw_local = grid_thw[item_idxs_tensor]
     else:
         # Handle case where this rank has no items
         pixel_values_local = torch.empty((0, pixel_values.shape[1]),
                                          device=pixel_values.device,
                                          dtype=pixel_values.dtype)
-        grid_thw_local = torch.empty(
-            (0, grid_thw.shape[1]), device=grid_thw.device, dtype=grid_thw.dtype)
+        grid_thw_local = torch.empty((0, grid_thw.shape[1]),
+                                     device=grid_thw.device,
+                                     dtype=grid_thw.dtype)
 
     # Calculate output dimensions
     embed_dim_reduction_factor = (vision_model.merge_kernel_size[0] *
                                   vision_model.merge_kernel_size[1])
     # Find max length for padding
-    max_len_per_rank = (max(grouped_pixel_values_len) // 
-                       embed_dim_reduction_factor)
+    max_len_per_rank = (max(grouped_pixel_values_len) //
+                        embed_dim_reduction_factor)
 
     # Run the vision model on local data
     if pixel_values_local.shape[0] > 0:
@@ -568,25 +571,28 @@ def run_dp_sharded_mrope_vision_model_tensor_Kimi(
         out_dim = None
         # 1. use projector output size first
         if hasattr(vision_model, "multi_modal_projector"):
-            out_dim = getattr(vision_model.multi_modal_projector.linear_2, "out_features", None)
+            out_dim = getattr(vision_model.multi_modal_projector.linear_2,
+                              "out_features", None)
         # 2. MoonVit: config.hidden_size
         elif hasattr(vision_model, "config"):
             out_dim = getattr(vision_model.config, "hidden_size", None)
         # 3. QwenVL: out_hidden_size
         out_dim = out_dim or getattr(vision_model, "out_hidden_size", None)
-        image_embeds_local = torch.empty((0, embed_dim_reduction_factor, out_dim),
-                                         device=pixel_values.device,
-                                         dtype=pixel_values.dtype)
+        image_embeds_local = torch.empty(
+            (0, embed_dim_reduction_factor, out_dim),
+            device=pixel_values.device,
+            dtype=pixel_values.dtype)
 
     # Pad the output for all_gather
     current_len = image_embeds_local.shape[0]
     if current_len < max_len_per_rank:
         padding_size = max_len_per_rank - current_len
-        padding = torch.empty((padding_size, image_embeds_local.shape[1],image_embeds_local.shape[2]),
+        padding = torch.empty((padding_size, image_embeds_local.shape[1],
+                               image_embeds_local.shape[2]),
                               dtype=image_embeds_local.dtype,
                               device=image_embeds_local.device)
-        image_embeds_local_padded = torch.cat(
-            [image_embeds_local, padding], dim=0)
+        image_embeds_local_padded = torch.cat([image_embeds_local, padding],
+                                              dim=0)
     else:
         image_embeds_local_padded = image_embeds_local
 
@@ -597,8 +603,8 @@ def run_dp_sharded_mrope_vision_model_tensor_Kimi(
     rank_embeddings = []
     for rank in range(tp_size):
         start_idx = rank * max_len_per_rank
-        end_idx = start_idx + (grouped_pixel_values_len[rank] // 
-                              embed_dim_reduction_factor)
+        end_idx = start_idx + (grouped_pixel_values_len[rank] //
+                               embed_dim_reduction_factor)
         rank_embeddings.append(gathered_embeds[start_idx:end_idx])
 
     # Calculate patches per output item after spatial merging
@@ -622,11 +628,13 @@ def run_dp_sharded_mrope_vision_model_tensor_Kimi(
                 embed_start += item_patches
             current_idx += count
 
-    out_embeddings = [embed for embed in original_order_embeddings
-                           if embed is not None]
+    out_embeddings = [
+        embed for embed in original_order_embeddings if embed is not None
+    ]
     assert (len(out_embeddings) == len(original_order_embeddings)), \
         "Found unassigned embeddings"
     return out_embeddings
+
 
 def get_load_balance_assignment(
     sizes: list[int],

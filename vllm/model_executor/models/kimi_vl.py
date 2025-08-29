@@ -106,36 +106,25 @@ class KimiVLMultiModalProjector(nn.Module):
 
         self.pre_norm = torch.nn.LayerNorm(config.vision_config.hidden_size,
                                            eps=1e-5)
-        if self.use_data_parallel:
-            self.linear_1 = ReplicatedLinear(self.hidden_size,
-                                    self.hidden_size,
-                                    bias=True,
-                                    prefix=maybe_prefix(prefix, "linear_1"))
-            self.linear_2 = ReplicatedLinear(self.hidden_size,
-                                  config.text_config.hidden_size,
-                                  bias=True,
-                                  prefix=maybe_prefix(prefix, "linear_2"))
-        else:
-            self.linear_1 = nn.Linear(self.hidden_size,
-                                    self.hidden_size,
-                                    bias=True)
-            self.linear_2 = nn.Linear(self.hidden_size,
-                                  config.text_config.hidden_size,
-                                  bias=True)
+        self.linear_1 = ReplicatedLinear(self.hidden_size,
+                                         self.hidden_size,
+                                         bias=True,
+                                         prefix=maybe_prefix(
+                                            prefix, "linear_1"))
+        self.linear_2 = ReplicatedLinear(self.hidden_size,
+                                         config.text_config.hidden_size,
+                                         bias=True,
+                                         prefix=maybe_prefix(
+                                            prefix, "linear_2"))
         self.act = GELUActivation()
         
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states = self.pre_norm(image_features).view(
             -1, self.hidden_size)
-        if self.use_data_parallel:
-            hidden_states, _ = self.linear_1(hidden_states)
-            hidden_states = self.act(hidden_states)
-            hidden_states, _ = self.linear_2(hidden_states)
-        else:
-            hidden_states = self.linear_1(hidden_states)
-            hidden_states = self.act(hidden_states)
-            hidden_states = self.linear_2(hidden_states)
+        hidden_states, _ = self.linear_1(hidden_states)
+        hidden_states = self.act(hidden_states)
+        hidden_states, _ = self.linear_2(hidden_states)
         return hidden_states
 
 
@@ -293,6 +282,8 @@ class KimiVLMultiModalProcessor(BaseMultiModalProcessor[KimiVLProcessingInfo]):
 class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                      SupportsPP):
 
+    supports_encoder_tp_data = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
@@ -314,9 +305,10 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         assert isinstance(config.vision_config, MoonViTConfig)
         self.use_data_parallel = model_config.multimodal_config.mm_encoder_tp_mode == "data"
         self.hidden_size = config.text_config.hidden_size
-        self.vision_tower = MoonVitPretrainedModel(
-            config.vision_config, self.use_data_parallel,
-            prefix=maybe_prefix(prefix, "vision_tower"))
+        self.vision_tower = MoonVitPretrainedModel(config.vision_config,
+                                                   self.use_data_parallel,
+                                                   prefix=maybe_prefix(
+                                                    prefix, "vision_tower"))
 
         self.multi_modal_projector = KimiVLMultiModalProjector(
             config=config,
@@ -404,9 +396,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_grid_hws = inputs["image_grid_hws"]
         if self.use_data_parallel:
             return run_dp_sharded_mrope_vision_model_tensor_Kimi(
-                self.vision_tower,
-                pixel_values,
-                image_grid_hws)
+                self.vision_tower, pixel_values, image_grid_hws)
         else:
             return self.vision_tower(pixel_values, image_grid_hws)
 
