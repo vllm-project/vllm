@@ -238,7 +238,11 @@ def test_moe_permute_unpermute(n_token: int, n_hidden: int, topk: int,
                                atol=0,
                                rtol=0)
     # check mindice
-    torch.testing.assert_close(gold_m_indices, m_indices, atol=0, rtol=0)
+    # current kernel usage assumes deepgemm requires align_block_size
+    # when it's not provided then we don't compute m_indices (for cutlass)
+    if align_block_size is not None:
+        torch.testing.assert_close(gold_m_indices, m_indices, atol=0, rtol=0)
+
     # check permuted_hidden_states, only valid token
     torch.testing.assert_close(gold_permuted_hidden_states[valid_row_idx],
                                permuted_hidden_states[valid_row_idx],

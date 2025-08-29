@@ -173,6 +173,37 @@ def run_deepseek_vl2(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Ernie4.5-VL
+def run_ernie45_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "baidu/ERNIE-4.5-VL-28B-A3B-PT"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        limit_mm_per_prompt={modality: 1},
+        trust_remote_code=True,
+    )
+
+    if modality == "image":
+        placeholder = "Picture 1:<|IMAGE_START|><|image@placeholder|><|IMAGE_END|>"
+    elif modality == "video":
+        placeholder = "Video 1:<|VIDEO_START|><|video@placeholder|><|VIDEO_END|>"
+
+    prompts = [
+        (
+            f"<|begin_of_sentence|>User: {question}{placeholder}\n"
+            "Assistant: <think></think>"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Florence2
 def run_florence2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -283,8 +314,10 @@ def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
     )
 
     prompts = [
-        f"<|user|>\n<|begin_of_image|><|endoftext|><|end_of_image|>\
-        {question}<|assistant|>"
+        (
+            "<|user|>\n<|begin_of_image|><|endoftext|><|end_of_image|>"
+            f"{question}<|assistant|>"
+        )
         for question in questions
     ]
 
@@ -767,15 +800,13 @@ def run_llava_next_video(questions: list[str], modality: str) -> ModelRequestDat
 def run_llava_onevision(questions: list[str], modality: str) -> ModelRequestData:
     if modality == "video":
         prompts = [
-            f"<|im_start|>user <video>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
+            f"<|im_start|>user <video>\n{question}<|im_end|><|im_start|>assistant\n"
             for question in questions
         ]
 
     elif modality == "image":
         prompts = [
-            f"<|im_start|>user <image>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
+            f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
             for question in questions
         ]
 
@@ -998,8 +1029,7 @@ def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
     )
 
     prompts = [
-        f"<|im_start|>user <image>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
+        f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
         for question in questions
     ]
 
@@ -1094,6 +1124,38 @@ def run_ovis(questions: list[str], modality: str) -> ModelRequestData:
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [
         [{"role": "user", "content": f"<image>\n{question}"}] for question in questions
+    ]
+    prompts = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# Ovis2_5
+def run_ovis2_5(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "AIDC-AI/Ovis2.5-2B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        trust_remote_code=True,
+        dtype="half",
+        limit_mm_per_prompt={modality: 1},
+    )
+    if modality == "image":
+        placeholder = "<image>"
+    elif modality == "video":
+        placeholder = "<video>"
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    messages = [
+        [{"role": "user", "content": f"{placeholder}\n{question}"}]
+        for question in questions
     ]
     prompts = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
@@ -1404,6 +1466,28 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
     )
 
 
+# R-4B
+def run_r_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "YannQi/R-4B"
+
+    prompts = [
+        f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
+        for question in questions
+    ]
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=16384,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # SkyworkR1V
 def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1549,6 +1633,7 @@ model_example_map = {
     "chameleon": run_chameleon,
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
+    "ernie45_vl": run_ernie45_vl,
     "florence2": run_florence2,
     "fuyu": run_fuyu,
     "gemma3": run_gemma3,
@@ -1579,6 +1664,7 @@ model_example_map = {
     "nemotron_vl": run_nemotron_vl,
     "NVLM_D": run_nvlm_d,
     "ovis": run_ovis,
+    "ovis2_5": run_ovis2_5,
     "paligemma": run_paligemma,
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
@@ -1589,6 +1675,7 @@ model_example_map = {
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
     "qwen2_5_omni": run_qwen2_5_omni,
+    "rvl": run_r_vl,
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
     "step3": run_step3,
