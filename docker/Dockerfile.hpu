@@ -17,6 +17,9 @@ RUN apt-get update && \
       git build-essential ca-certificates bash && \
     rm -rf /var/lib/apt/lists/*
 
+# copy needed patches
+COPY patches/*.patch /tmp/
+
 # --- Workspace root ---
 WORKDIR /workspace
 
@@ -26,6 +29,8 @@ WORKDIR /workspace
 RUN git clone --depth=1 https://github.com/vllm-project/vllm /workspace/vllm
 WORKDIR /workspace/vllm
 
+# Patch needed patches
+RUN git apply /tmp/*.patch
 # Install build reqs but strip any torch* so we don't overwrite Habana torch
 RUN sed '/^[[:space:]]*torch/Id' requirements/build.txt > /tmp/vllm-build-no-torch.txt && \
     python -m pip install --upgrade pip && \
