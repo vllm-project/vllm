@@ -133,17 +133,19 @@ We consider 3 different scenarios:
 For case (1), we recommend looking at the implementation of [`MambaForCausalLM`](gh-file:vllm/model_executor/models/mamba.py) (for Mamba-1) or [`Mamba2ForCausalLM`](gh-file:vllm/model_executor/models/mamba2.py) (for Mamba-2) as a reference.
 The model should inherit protocol `IsAttentionFree` and also implement class methods `get_mamba_state_dtype_from_config` and `get_mamba_state_shape_from_config` to calculate the state shapes and data types from the config.
 For the mamba layers themselves, please use the [`MambaMixer`](gh-file:vllm/model_executor/layers/mamba/mamba_mixer.py) (for Mamba-1) or [`MambaMixer2`](gh-file:vllm/model_executor/layers/mamba/mamba_mixer2.py) (for Mamba-2) classes.
-The model should also be added to the [`MODELS_CONFIG_MAP`](gh-file:vllm/model_executor/models/config.py#L419-L421) dictionary to ensure that the runtime defaults are optimized.
+Please *do not* use the `MambaCacheManager` (deprecated in V1) or replicate any of the V0-specific code paths in the existing model implementations.
+V0-only classes and code will be removed in the very near future.
+The model should also be added to the `MODELS_CONFIG_MAP` dictionary in <gh-file:vllm/model_executor/models/config.py> to ensure that the runtime defaults are optimized.
 
 For case (2), we recommend using as a reference the implementation of [`JambaForCausalLM`](gh-file:vllm/model_executor/models/jamba.py) (for an example of a model that uses Mamba-1 and attention together) or [`BambaForCausalLM`](gh-file:vllm/model_executor/models/bamba.py) (for an example of a model that uses Mamba-2 and attention together).
 These models should follow the same instructions as case (1), but they should inherit protocol `IsHybrid` (instead of `IsAttentionFree`) and it is *not* necessary to add them to the `MODELS_CONFIG_MAP` (their runtime defaults will be inferred from the protocol).
 
-For case (3), we recommend looking at the implementation of [`MiniMaxText01ForCausalLM`](gh-file:vllm/model_executor/models/minimax_text_01.py) or [`Lfm2ForCausalLM`](gh-file:vllm/model_executor/models/lfm2.py) as a reference, which use custom "mamba-like" layers [`MiniMaxText01LinearAttention`](gh-file:vllm/model_executor/models/minimax_text_01.py#L287) and [`ShortConv`](gh-file:vllm/model_executor/layers/mamba/short_conv.py) respectively.
+For case (3), we recommend looking at the implementation of [`MiniMaxText01ForCausalLM`](gh-file:vllm/model_executor/models/minimax_text_01.py) or [`Lfm2ForCausalLM`](gh-file:vllm/model_executor/models/lfm2.py) as a reference, which use custom "mamba-like" layers `MiniMaxText01LinearAttention` and `ShortConv` respectively.
 Please follow the same guidelines as case (2) for implementing these models.
-We use "mamba-like" to refer to layers that posses a state that is updated in-place, rather than being concatenated-to (like KV cache for attention).
+We use "mamba-like" to refer to layers that posses a state that is updated in-place, rather than being appended-to (like KV cache for attention).
 For implementing new custom mamba-like layers, one should inherit from `MambaBase` and implement the methods `get_state_dtype`, `get_state_shape` to calculate the data types and state shapes at runtime, as well as `mamba_type` and `get_attn_backend`.
 It is also necessary to implement the "attention meta-data" class which handles the meta-data that is common across all layers.
 Please see [`LinearAttentionMetadata`](gh-file:vllm/v1/attention/backends/linear_attn.py) or [`ShortConvAttentionMetadata`](gh-file:v1/attention/backends/short_conv_attn.py) for examples of this.
-Finally, if one wants to support torch compile and CUDA graphs, it necessary to wrap the call to the mamba-like layer inside a custom op.
-Please see examples for [`linear-attention`](gh-file:vllm/model_executor/models/minimax_text_01.py#L1402-L1431) and [`short-conv`](gh-file:vllm/model_executor/layers/mamba/short_conv.py#L244-L270) respectively.
-The new custom op should then be added to the list [here](gh-file:vllm/config/compilation.py#L335-L343) to ensure that piecewise CUDA graphs works as intended.
+Finally, if one wants to support torch compile and CUDA graphs, it necessary to wrap the call to the mamba-like layer inside a custom op and register them.
+Please see the calls to `direct_register_custom_op` in <gh-file:vllm/model_executor/models/minimax_text_01.py> or <gh-file:vllm/model_executor/layers/mamba/short_conv.py> for examples of this.
+The new custom op should then be added to the list `_attention_ops` in <gh-file:vllm/config/compilation.py> to ensure that piecewise CUDA graphs works as intended.
