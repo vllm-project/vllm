@@ -10,7 +10,8 @@ from typing_extensions import TypeAlias, override
 
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, LRUCache
-from vllm.utils.jsontree import json_map_leaves, json_reduce_leaves
+from vllm.utils.jsontree import (json_count_leaves, json_map_leaves,
+                                 json_reduce_leaves)
 
 from .inputs import (MultiModalFeatureSpec, MultiModalFieldElem,
                      MultiModalKwargs, MultiModalKwargsItem,
@@ -127,10 +128,31 @@ class MultiModalCache:
         )
 
         if debug:
-            logger.debug("Calculated size of %s to be %.2f GiB", type(value),
-                         size / GiB_bytes)
+            leaf_count = json_count_leaves(value)
+            logger.debug(
+                "Calculated size of %s to be %.2f GiB (%d leaves)",
+                type(value),
+                size / GiB_bytes,
+                leaf_count,
+            )
 
         return size
+
+    @classmethod
+    def get_item_complexity(cls, value: MultiModalCacheValue) -> int:
+        """
+        Get the number of leaf elements in a multi-modal cache value.
+
+        This provides a measure of structural complexity that can be useful
+        for debugging cache performance and understanding data patterns.
+
+        Args:
+            value: The multi-modal cache value to analyze.
+
+        Returns:
+            The number of leaf elements in the nested structure.
+        """
+        return json_count_leaves(value)
 
     @classmethod
     def get_lru_cache(
@@ -184,7 +206,7 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
         """
         Possibly update a multi-modal item based on whether it is
         in the underlying cache.
-        
+
         This update is done out-of-place and updates the cache eviction order.
 
         Args:
@@ -262,7 +284,7 @@ class BaseMultiModalProcessorCache(
         in the underlying cache.
 
         This **DOES NOT** update the cache eviction order.
-    
+
         Args:
             mm_hashes: The hash of each item to check.
 
