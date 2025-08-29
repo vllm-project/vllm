@@ -286,7 +286,7 @@ class Fp8LinearMethod(LinearMethodBase):
         # first reported in https://github.com/vllm-project/vllm/issues/19855, together with 
         # the solutions used here. 
         with disable_mem_pool(
-            not self.quant_config.is_checkpoint_fp8_serialized
+            disable=not self.quant_config.is_checkpoint_fp8_serialized
         ):
             weight = ModelWeightParameter(data=torch.empty(
                 output_size_per_partition,
@@ -593,7 +593,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # first reported in https://github.com/vllm-project/vllm/issues/19855, together with 
         # the solutions used here. 
         with disable_mem_pool(
-            not self.quant_config.is_checkpoint_fp8_serialized
+            disable=not self.quant_config.is_checkpoint_fp8_serialized
         ):
             w13_weight = torch.nn.Parameter(torch.empty(
                 num_experts,
