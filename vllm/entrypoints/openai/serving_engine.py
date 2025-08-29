@@ -742,6 +742,8 @@ class OpenAIServing:
         tasks = []
         for prompt_input in batch_inputs:
             if prompt_input["is_tokens"] is False:
+                assert tokenizer is not None, \
+                    "Tokenizer is required for text prompts"
                 task = self._normalize_prompt_text_to_input(
                     request,
                     prompt_input["content"],
