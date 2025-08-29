@@ -306,7 +306,9 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         self.config = config
         self.model = ModernBertModel(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "modernbert"))
-        self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        self.classifier = nn.Linear(config.hidden_size,
+                                    config.num_labels,
+                                    dtype=vllm_config.model_config.head_dtype)
         self.pooling = ModernBertPooler(config)
 
         pooler_config = vllm_config.model_config.pooler_config
