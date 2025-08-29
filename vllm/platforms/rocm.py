@@ -11,13 +11,13 @@ from torch.distributed import PrefixStore, ProcessGroup
 from torch.distributed.distributed_c10d import is_nccl_available
 
 import vllm.envs as envs
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 if TYPE_CHECKING:
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
