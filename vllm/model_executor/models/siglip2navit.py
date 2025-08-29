@@ -879,7 +879,7 @@ class Siglip2PreTrainedModel(PreTrainedModel):
 
 
 class Siglip2TextEmbeddings(nn.Module):
-    def __init__(self, config: Siglip2TextConfig):
+    def __init__(self, config: Siglip2TextConfig, prefix: str = ""):
         super().__init__()
         embed_dim = config.hidden_size
 
@@ -920,7 +920,7 @@ class Siglip2TextEmbeddings(nn.Module):
 
 
 class Siglip2TextTransformer(nn.Module):
-    def __init__(self, config: Siglip2TextConfig):
+    def __init__(self, config: Siglip2TextConfig, prefix: str = "",):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
@@ -995,7 +995,7 @@ class Siglip2TextTransformer(nn.Module):
 class Siglip2TextModel(Siglip2PreTrainedModel):
     config: Siglip2TextConfig
 
-    def __init__(self, config: Siglip2TextConfig):
+    def __init__(self, config: Siglip2TextConfig, prefix: str = "",):
         super().__init__(config)
         self.text_model = Siglip2TextTransformer(config)
         # Initialize weights and apply final processing
@@ -1046,7 +1046,7 @@ class Siglip2TextModel(Siglip2PreTrainedModel):
 class Siglip2MultiheadAttentionPoolingHead(nn.Module):
     """Multihead Attention Pooling."""
 
-    def __init__(self, config: Siglip2VisionConfig):
+    def __init__(self, config: Siglip2VisionConfig, prefix: str = "",):
         super().__init__()
 
         self.probe = nn.Parameter(torch.randn(1, 1, config.hidden_size))
@@ -1088,7 +1088,7 @@ class Siglip2VisionModel(Siglip2PreTrainedModel):
     config: Siglip2VisionConfig
     main_input_name = "pixel_values"
 
-    def __init__(self, config: Siglip2VisionConfig):
+    def __init__(self, config: Siglip2VisionConfig, prefix: str = "",):
         super().__init__(config)
 
         self.vision_model = Siglip2VisionTransformer(config)
@@ -1147,7 +1147,7 @@ class Siglip2VisionModel(Siglip2PreTrainedModel):
 class Siglip2Model(Siglip2PreTrainedModel):
     config: Siglip2Config
 
-    def __init__(self, config: Siglip2Config):
+    def __init__(self, config: Siglip2Config, prefix: str = "",):
         super().__init__(config)
 
         if not isinstance(config.text_config, Siglip2TextConfig):
@@ -1458,7 +1458,7 @@ class Siglip2NavitModel(torch.nn.Module):
 class Siglip2ForImageClassification(Siglip2PreTrainedModel):
     main_input_name = "pixel_values"
 
-    def __init__(self, config: Siglip2Config) -> None:
+    def __init__(self, config: Siglip2Config, prefix: str = "",) -> None:
         super().__init__(config)
 
         self.num_labels = config.num_labels
