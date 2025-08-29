@@ -339,7 +339,8 @@ class OpenAIServingResponses(OpenAIServing):
                     ),
                     name=f"create_{request.request_id}",
                 )
-                return self.responses_background_stream_generator(request)
+                return self.responses_background_stream_generator(
+                    request.request_id)
             else:
                 task = asyncio.create_task(
                     self._run_background_request(
