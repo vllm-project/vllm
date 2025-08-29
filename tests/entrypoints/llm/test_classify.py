@@ -62,3 +62,9 @@ def test_encode_api(llm: LLM):
     err_msg = "pooling_task must be one of.+"
     with pytest.raises(ValueError, match=err_msg):
         llm.encode(prompts, use_tqdm=False)
+
+
+def test_score_api(llm: LLM):
+    err_msg = "Score API is only enabled for num_labels == 1."
+    with pytest.raises(ValueError, match=err_msg):
+        llm.score("ping", "pong", use_tqdm=False)
