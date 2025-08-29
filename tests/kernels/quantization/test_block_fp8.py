@@ -103,8 +103,7 @@ def test_w8a8_block_fp8_cutlass_matmul():
     # Test simple case where weight.shape % 128 != 0,
     # like in DSV3 kv_a_proj_with_mqa
     M = 32
-    # N = 576
-    N = 512
+    N = 576
     K = 7168
     block_size = [128, 128]
     out_dtype = torch.bfloat16
@@ -125,6 +124,9 @@ def test_w8a8_block_fp8_cutlass_matmul():
     k_tiles = (K + block_k - 1) // block_k
 
     Bs = torch.rand(n_tiles, k_tiles, dtype=torch.float32) * factor_for_scale
+    # Hopper requires row-major format for scales
+    Bs_cutlass = Bs.T.contiguous() if current_platform.is_device_capability(
+        90) else Bs
 
     A_fp8, As = per_token_group_quant_fp8(A_fp32,
                                           block_size[1],
@@ -135,8 +137,8 @@ def test_w8a8_block_fp8_cutlass_matmul():
 
     ref_out = native_w8a8_block_matmul(A_fp8, B_fp8, As, Bs, block_size,
                                        out_dtype)
-    out = cutlass_scaled_mm(A_fp8_cutlass, B_fp8, As_cutlass, Bs, block_size,
-                            out_dtype)
+    out = cutlass_scaled_mm(A_fp8_cutlass, B_fp8, As_cutlass, Bs_cutlass,
+                            block_size, out_dtype)
 
     rel_diff = (torch.mean(
         torch.abs(out.to(torch.float32) - ref_out.to(torch.float32))) /

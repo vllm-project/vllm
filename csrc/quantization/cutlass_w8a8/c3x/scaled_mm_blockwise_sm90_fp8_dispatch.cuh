@@ -118,6 +118,8 @@ void cutlass_gemm_caller_blockwise(torch::Tensor& out, torch::Tensor const& a,
 
   int32_t m = a.size(0), n = b.size(1), k = a.size(1);
 
+  TORCH_CHECK(m % 4 == 0, "m must be divisible by 4");
+
   StrideA a_stride;
   StrideB b_stride;
   StrideC c_stride;

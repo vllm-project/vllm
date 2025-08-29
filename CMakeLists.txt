@@ -409,7 +409,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_SM90=1")
-    # list(APPEND VLLM_GPU_FLAGS "-DCUTLASS_DEBUG_TRACE_LEVEL=1")
     # Let scaled_mm_c2x know it doesn't need to build these arches
     list(APPEND SCALED_MM_3X_ARCHS "${SCALED_MM_ARCHS}")
     message(STATUS "Building scaled_mm_c3x_sm90 for archs: ${SCALED_MM_ARCHS}")
@@ -704,7 +703,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env
-        PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${CUTLASS_DIR}/python/cutlass_library/:${VLLM_PYTHON_PATH}:$PYTHONPATH
+        PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH
           ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT}
         RESULT_VARIABLE machete_generation_result
         OUTPUT_VARIABLE machete_generation_output
