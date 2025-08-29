@@ -81,7 +81,6 @@ struct PackedVec<__nv_fp8_e4m3> {
 
 // Convert 8 float32 values into 8 e2m1 values (represented as one uint32_t).
 inline __device__ uint32_t fp32_vec_to_e2m1(float (&array)[8]) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t val;
   asm volatile(
       "{\n"
@@ -99,14 +98,10 @@ inline __device__ uint32_t fp32_vec_to_e2m1(float (&array)[8]) {
       : "f"(array[0]), "f"(array[1]), "f"(array[2]), "f"(array[3]),
         "f"(array[4]), "f"(array[5]), "f"(array[6]), "f"(array[7]));
   return val;
-#else
-  return 0;
-#endif
 }
 
 // Convert 4 float2 values into 8 e2m1 values (represented as one uint32_t).
 inline __device__ uint32_t fp32_vec_to_e2m1(float2 (&array)[4]) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   uint32_t val;
   asm volatile(
       "{\n"
@@ -124,9 +119,6 @@ inline __device__ uint32_t fp32_vec_to_e2m1(float2 (&array)[4]) {
       : "f"(array[0].x), "f"(array[0].y), "f"(array[1].x), "f"(array[1].y),
         "f"(array[2].x), "f"(array[2].y), "f"(array[3].x), "f"(array[3].y));
   return val;
-#else
-  return 0;
-#endif
 }
 
 // Fast reciprocal.
@@ -140,7 +132,6 @@ template <class SFType, int CVT_FP4_NUM_THREADS_PER_SF>
 __device__ uint8_t* cvt_quant_to_fp4_get_sf_out_offset(int rowIdx, int colIdx,
                                                        int numCols,
                                                        SFType* SFout) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   static_assert(CVT_FP4_NUM_THREADS_PER_SF == 1 ||
                 CVT_FP4_NUM_THREADS_PER_SF == 2);
 
@@ -181,7 +172,6 @@ __device__ uint8_t* cvt_quant_to_fp4_get_sf_out_offset(int rowIdx, int colIdx,
 
     return reinterpret_cast<uint8_t*>(SFout) + SFOffset;
   }
-#endif
   return nullptr;
 }
 
@@ -189,12 +179,11 @@ __device__ uint8_t* cvt_quant_to_fp4_get_sf_out_offset(int rowIdx, int colIdx,
 template <class Type, bool UE8M0_SF = false>
 __device__ uint32_t cvt_warp_fp16_to_fp4(PackedVec<Type>& vec, float SFScaleVal,
                                          uint8_t* SFout) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   // Get absolute maximum values among the local 8 values.
   auto localMax = __habs2(vec.elts[0]);
 
-  // Local maximum value.
-  #pragma unroll
+// Local maximum value.
+#pragma unroll
   for (int i = 1; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
     localMax = __hmax2(localMax, __habs2(vec.elts[i]));
   }
@@ -241,7 +230,7 @@ __device__ uint32_t cvt_warp_fp16_to_fp4(PackedVec<Type>& vec, float SFScaleVal,
   // Convert the input to float.
   float2 fp2Vals[CVT_FP4_ELTS_PER_THREAD / 2];
 
-  #pragma unroll
+#pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
     if constexpr (std::is_same_v<Type, half>) {
       fp2Vals[i] = __half22float2(vec.elts[i]);
@@ -257,9 +246,6 @@ __device__ uint32_t cvt_warp_fp16_to_fp4(PackedVec<Type>& vec, float SFScaleVal,
 
   // Write the e2m1 values to global memory.
   return e2m1Vec;
-#else
-  return 0;
-#endif
 }
 
 }  // namespace vllm
