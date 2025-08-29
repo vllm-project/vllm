@@ -374,7 +374,7 @@ class PoolerMultiLabelClassify(PoolerActivation):
 
 class PoolerClassify(PoolerActivation):
 
-    def __init__(self, static_num_labels=True):
+    def __init__(self, *, static_num_labels: bool = True) -> None:
         super().__init__()
 
         if static_num_labels:
