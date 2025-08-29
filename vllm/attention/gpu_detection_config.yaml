@@ -1,0 +1,92 @@
+# GPU Detection Configuration for vLLM Attention Backend Selection
+# This file defines the optimal attention backends for different GPU architectures
+
+gpu_architectures:
+  blackwell:  # SM 10.x - Latest NVIDIA GPUs (B200, etc.)
+    min_capability: [10, 0]
+    max_capability: [10, 9]
+    backends:
+      - name: "flashinfer"
+        priority: 1
+        requirements:
+          dependencies: ["flashinfer"]
+          head_sizes: [64, 128, 256]
+          dtypes: ["float16", "bfloat16"]
+          description: "Optimal backend for Blackwell GPUs with FlashInfer support"
+      
+      - name: "flex_attention"
+        priority: 2
+        requirements: {}
+        description: "Fallback backend for Blackwell GPUs"
+  
+  hopper:  # SM 9.x - H100, H200, etc.
+    min_capability: [9, 0]
+    max_capability: [9, 9]
+    backends:
+      - name: "flash_attention"
+        priority: 1
+        requirements:
+          dependencies: ["flash_attn"]
+          head_sizes: [64, 128, 256]
+          dtypes: ["float16", "bfloat16"]
+          description: "Optimal backend for Hopper GPUs with FlashAttention support"
+      
+      - name: "xformers"
+        priority: 2
+        requirements:
+          dependencies: ["xformers"]
+          max_capability: [9, 9]  # Not compatible with Blackwell
+          description: "Alternative backend for Hopper GPUs"
+  
+  ampere:  # SM 8.x - RTX 30 series, A100, etc.
+    min_capability: [8, 0]
+    max_capability: [8, 9]
+    backends:
+      - name: "flash_attention"
+        priority: 1
+        requirements:
+          dependencies: ["flash_attn"]
+          head_sizes: [64, 128, 256]
+          dtypes: ["float16", "bfloat16"]
+          description: "Optimal backend for Ampere GPUs with FlashAttention support"
+      
+      - name: "xformers"
+        priority: 2
+        requirements:
+          dependencies: ["xformers"]
+          description: "Alternative backend for Ampere GPUs"
+  
+  legacy:  # SM 7.x and below - Volta, Turing, older GPUs
+    max_capability: [7, 9]
+    backends:
+      - name: "xformers"
+        priority: 1
+        requirements:
+          dependencies: ["xformers"]
+          description: "Optimal backend for legacy GPUs"
+      
+      - name: "torch_sdpa"
+        priority: 2
+        requirements: {}
+        description: "Fallback backend for legacy GPUs"
+
+# Global fallback backend when no specific backend is available
+fallback_backend: "torch_sdpa"
+
+# Configuration for special cases
+special_cases:
+  # Force specific backends for certain conditions
+  force_torch_sdpa:
+    - condition: "rocm_platform"
+      backend: "torch_sdpa"
+      description: "ROCm platform only supports torch_sdpa"
+  
+  force_flex_attention:
+    - condition: "attention_free_model"
+      backend: "flex_attention"
+      description: "Attention-free models use flex_attention"
+
+# Environment variable overrides
+env_overrides:
+  VLLM_ATTENTION_BACKEND: "force_specific_backend"
+  VLLM_USE_V1: "use_v1_engine_backends"
