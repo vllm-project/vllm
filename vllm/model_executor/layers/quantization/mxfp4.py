@@ -597,7 +597,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 "Mxfp4 does not support batched experts format for EP")
         else:
             if (self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-                or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
+                    or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16):
                 # B200 code-path
                 kwargs = {
                     "gemm1_alpha": layer.gemm1_alpha,
