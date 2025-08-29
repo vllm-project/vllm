@@ -171,7 +171,7 @@ class OpenAIServingResponses(OpenAIServing):
         # HACK(wuhang): This is a hack. We should use a better store.
         # FIXME: If enable_store=True, this may cause a memory leak since we
         # never remove events from the store.
-        self.event_store: dict[str, list[str]] = {}
+        self.event_store: dict[str, asyncio.Queue[str]] = {}
 
         self.background_tasks: dict[str, asyncio.Task] = {}
 
@@ -339,7 +339,7 @@ class OpenAIServingResponses(OpenAIServing):
                     ),
                     name=f"create_{request.request_id}",
                 )
-                return await task
+                return self.responses_background_stream_generator(request)
             else:
                 task = asyncio.create_task(
                     self._run_background_request(
@@ -754,16 +754,15 @@ class OpenAIServingResponses(OpenAIServing):
         *args,
         **kwargs,
     ):
-
-        async def event_generator():
-            self.event_store.setdefault(request.request_id, [])
-            response = self.responses_stream_generator(request, *args,
-                                                       **kwargs)
+        queue = self.event_store.setdefault(request.request_id,
+                                            asyncio.Queue())
+        response = self.responses_stream_generator(request, *args, **kwargs)
+        try:
             async for event in response:
-                self.event_store[request.request_id].append(event)
-                yield event
-
-        return event_generator()
+                await queue.put(event)
+        finally:
+            # Signal completion with a sentinel value
+            await queue.put(None)  # or use a special "END" marker
 
     async def _run_background_request(
         self,
@@ -788,6 +787,35 @@ class OpenAIServingResponses(OpenAIServing):
                 if stored_response.status not in ("completed", "cancelled"):
                     stored_response.status = "failed"
 
+    async def responses_background_stream_generator(
+        self,
+        response_id: str,
+        starting_after: Optional[int] = None,
+    ):
+        queue = self.event_store.get(response_id)
+        if not queue:
+            return
+
+        events_seen = 0
+        start_sequence_number = -1 if starting_after is None else starting_after
+
+        while True:
+            try:
+                event = await asyncio.wait_for(queue.get(),
+                                               timeout=30.0)  # 30s timeout
+                if event is None:  # Sentinel value indicating completion
+                    break
+
+                if events_seen > start_sequence_number:
+                    yield event
+                events_seen += 1
+
+            except asyncio.TimeoutError:
+                # Handle timeout - maybe the stream is slow
+                continue
+            except Exception:
+                break
+
     async def retrieve_responses(
         self,
         response_id: str,
@@ -804,16 +832,10 @@ class OpenAIServingResponses(OpenAIServing):
             return self._make_not_found_error(response_id)
 
         if stream:
-            events = self.event_store.get(response_id, [])
-
-            async def event_generator():
-                start_sequence_number = (-1 if starting_after is None else
-                                         starting_after)
-                for current_sequence_number, event in enumerate(events):
-                    if current_sequence_number > start_sequence_number:
-                        yield event
-
-            return event_generator()
+            return await self.responses_background_stream_generator(
+                response_id,
+                starting_after,
+            )
         return response
 
     async def cancel_responses(
