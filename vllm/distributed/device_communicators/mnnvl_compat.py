@@ -30,18 +30,19 @@ class CustomCommunicator(CommBackend):
             gathered = self._group.all_gather(local_tensor)
             return [int(x.item()) for x in gathered]
         elif isinstance(data, bytes):
-            device_id = torch.cuda.current_device()
-            device_str = f"cuda:{device_id}"
-            local_tensor = torch.ByteTensor(
-                list(data)).unsqueeze(0).to(device_str)
+            local_tensor = torch.ByteTensor(list(data)).unsqueeze(0).to(device)
             gathered = self._group.all_gather(local_tensor, dim=0)
-            result = [
-                bytes(gathered[i].cpu().tolist())
-                for i in range(self.Get_size())
-            ]
-            return result
+            return [bytes(gathered[i].cpu().tolist()) for i in range(self.Get_size())]
         else:
             raise TypeError(f"Unsupported type for allgather: {type(data)}")
 
     def Split(self, color: int, key: int) -> 'CustomCommunicator':
         return self
+
+
+    def allgather_bytes(self, data: bytes):
+        # return torch.distributed.broadcast_object_list(
+        result = [data] * self.Get_size()
+        torch.distributed.all_gather_object(result, data)
+        # print(result)
+        return result

@@ -1387,6 +1387,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
             if use_llama4_routing:
                 routing_method_type = flashinfer.RoutingMethodType.Llama4
+            # out = torch.empty_like(x)
             out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
                 routing_logits=router_logits
                 if use_llama4_routing else router_logits.to(torch.float32),
