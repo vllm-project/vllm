@@ -351,7 +351,7 @@ class MultiprocExecutor(Executor):
         if has_kv_transfer_group():
             kv_connector = get_kv_transfer_group()
             self.kv_output_aggregator = KVOutputAggregator(
-                kv_connector.get_finished_count())
+                kv_connector.get_finished_count() or self.parallel_config.world_size)
         else:
             self.kv_output_aggregator = KVOutputAggregator(
                 self.parallel_config.world_size)
