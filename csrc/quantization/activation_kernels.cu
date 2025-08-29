@@ -102,28 +102,18 @@ __device__ __forceinline__ float2 silu2(float2 x) {
 
 // warp-wide max reduction
 template <int PARTICIPATING_WARPS = WARP_SIZE>
-__device__ __forceinline__ float warp_max(float v) {
+__device__ __forceinline__ __nv_bfloat16 warp_max(__nv_bfloat16 v) {
   unsigned mask = 0xffffffffu;
   // shuffle-down tree
   for (int offset = PARTICIPATING_WARPS / 2; offset > 0; offset >>= 1) {
-    float other = __shfl_down_sync(mask, v, offset);
-    v = fmaxf(v, other);
+    __nv_bfloat16 other = __shfl_down_sync(mask, v, offset);
+    v = __hmax(v, other);
   }
   return v;
 }
 
-__device__ inline void cp_async1(void* smem_ptr, const void* glob_ptr) {
-  const int BYTES = 4;
-  uint32_t smem = static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
-  asm volatile(
-      "{\n"
-      "   cp.async.ca.shared.global [%0], [%1], %2;\n"
-      "}\n" ::"r"(smem),
-      "l"(glob_ptr), "n"(BYTES));
-}
-
 template <typename T, typename U>
-__device__ inline void cp_async4(T* _smem_ptr, const U* _glob_ptr) {
+__device__ __forceinline__ void cp_async4(T* _smem_ptr, const U* _glob_ptr) {
   auto smem_ptr = reinterpret_cast<void*>(_smem_ptr);
   auto glob_ptr = reinterpret_cast<const void*>(_glob_ptr);
   const int BYTES = 16;
@@ -149,7 +139,7 @@ __device__ __forceinline__ void cp_async_wait<0>() {
   asm volatile("cp.async.wait_all;\n" ::);
 }
 template <typename scalar_t, uint32_t NUM_WARPS, typename Idx_t, bool USE_UE8M0,
-          int GROUP_SIZE = 128, int NUM_STAGES = 3>
+          int GROUP_SIZE = 128, int NUM_STAGES = 4>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const scalar_t* __restrict__ _input,  // (E, T, 2*H), element strides
     __nv_fp8_e4m3* __restrict__ _y_q,     // (E, T, H)
@@ -165,9 +155,14 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     Idx_t stride_ys_g, Idx_t stride_counts_e,
 
     // quant params
-    float eps, float fp8_min, float fp8_max) {
+    float _fp8_min, float _fp8_max) {
+  __nv_bfloat16 fp8_min = _fp8_min;
+  __nv_bfloat16 fp8_max = _fp8_max;
+  static constexpr float EPS = 1e-10;
   static constexpr uint32_t S_NUM_128 =
       2 * (GROUP_SIZE / 4) * NUM_WARPS * NUM_STAGES;
+  static constexpr auto THREAD_COUNT = NUM_WARPS * WARP_SIZE;
+  static constexpr int HALF_THREAD_COUNT = THREAD_COUNT / 2;
   static constexpr uint32_t S_NUM_64 = S_NUM_128 * 2;
   static constexpr uint32_t S_NUM_32 = S_NUM_64 * 2;
   __shared__ __int128_t __align__(16) s_buff_128[S_NUM_128];
@@ -200,7 +195,6 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   auto input_128_ptr = reinterpret_cast<const __int128_t*>(_input);
 
-  static constexpr auto THREAD_COUNT = NUM_WARPS * WARP_SIZE;
   auto gate_128_ptr = input_128_ptr + gate_off_128 + (tid % 64);
   auto up_128_ptr = gate_128_ptr + (H * stride_i_h) / 8u;
 
@@ -212,7 +206,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   const Idx_t n_tokens = s_counts[0];
 
   Idx_t t_load = 0, stage = 0;
-  auto s_buff_gate_load_128 = s_buff_128 + (tid % 64u);
+  auto s_buff_gate_load_128 = s_buff_128 + (tid % HALF_THREAD_COUNT);
   auto s_buff_up_load_128 = s_buff_gate_load_128 + S_NUM_128 / 2u;
   auto load_and_advance_y_pred = [&] {
     if (t_load < n_tokens) {
@@ -235,21 +229,23 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   };
 
 #pragma unroll
-  for (int i = 0; i < NUM_STAGES; i++) {
+  for (int i = 0; i < NUM_STAGES - 1; i++) {
     load_and_advance_y_pred();
   }
 
   auto s_gate_ptr = s_buff_compute_32 + warp_id * (GROUP_SIZE / 2) + lane_id;
   auto s_up_ptr = s_gate_ptr + S_NUM_32 / 2;
 
+  // TODO: Parallelize over this...
   for (Idx_t t = 0; t < n_tokens; ++t) {
     float2 gate, upv;
-    float y_max = eps;
+    float y_max = EPS;
     float2 results[2];
 
-    cp_async_wait<NUM_STAGES - 1>();
+    cp_async_wait<NUM_STAGES - 2>();
     __syncthreads();
 
+    load_and_advance_y_pred();
     const auto compute_pipeline_offset =
         (t % NUM_STAGES) * (GROUP_SIZE / 2u) * NUM_WARPS;
 
@@ -265,9 +261,6 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       s_gate_compute += WARP_SIZE;
       s_up_compute += WARP_SIZE;
     }
-
-    __syncthreads();
-    load_and_advance_y_pred();
 
     float y_s = warp_max(y_max) / fp8_max;
 
@@ -368,8 +361,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
         reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), H, G, stride_i_e,
         stride_i_t, stride_i_h, stride_yq_e, stride_yq_t, stride_yq_h,
         stride_ys_e, stride_ys_t, stride_ys_g, stride_counts_e,
-        static_cast<float>(eps), static_cast<float>(fp8_min),
-        static_cast<float>(fp8_max));
+        static_cast<float>(fp8_min), static_cast<float>(fp8_max));
   } else {
     vllm::silu_mul_fp8_quant_deep_gemm_kernel<__nv_bfloat16, NUM_WARPS, Idx_t,
                                               false><<<grid, block>>>(
@@ -379,7 +371,6 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
         reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), H, G, stride_i_e,
         stride_i_t, stride_i_h, stride_yq_e, stride_yq_t, stride_yq_h,
         stride_ys_e, stride_ys_t, stride_ys_g, stride_counts_e,
-        static_cast<float>(eps), static_cast<float>(fp8_min),
-        static_cast<float>(fp8_max));
+        static_cast<float>(fp8_min), static_cast<float>(fp8_max));
   }
 }
