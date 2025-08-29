@@ -278,6 +278,7 @@ def download_weights_from_hf(
     Returns:
         str: The path to the downloaded model weights.
     """
+    assert len(allow_patterns) > 0
     local_only = huggingface_hub.constants.HF_HUB_OFFLINE
     if not local_only:
         # Attempt to reduce allow_patterns to a single pattern
@@ -287,25 +288,23 @@ def download_weights_from_hf(
             file_list = fs.ls(model_name_or_path,
                               detail=False,
                               revision=revision)
+
+            # Use the first pattern found in the HF repo's files.
+            for pattern in allow_patterns:
+                matching = fnmatch.filter(file_list, pattern)
+                if len(matching) > 0:
+                    allow_patterns = [pattern]
+                break
         except Exception as e:
             logger.warning(
                 "Failed to get file list for '%s'. Trying each pattern in "
                 "allow_patterns individually until weights have been "
                 "downloaded. Error: %s", model_name_or_path, e)
-            file_list = []
-
-        # Use the first pattern found in the HF repo's files.
-        for pattern in allow_patterns:
-            matching = fnmatch.filter(file_list, pattern)
-            if len(matching) > 0:
-                allow_patterns = [pattern]
-                break
 
     logger.info("Using model weights format %s", allow_patterns)
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
-        assert len(allow_patterns) > 0
         start_time = time.perf_counter()
         for allow_pattern in allow_patterns:
             hf_folder = snapshot_download(
