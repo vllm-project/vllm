@@ -29,7 +29,7 @@ from .interfaces import (has_inner_state, has_noops, is_attention_free,
                          is_hybrid, supports_cross_encoding,
                          supports_multimodal,
                          supports_multimodal_encoder_tp_data,
-                         supports_multimodal_raw_input, supports_pp,
+                         supports_multimodal_raw_input_only, supports_pp,
                          supports_transcription, supports_v0_only)
 from .interfaces_base import (get_default_pooling_type, is_pooling_model,
                               is_text_generation_model)
@@ -39,6 +39,7 @@ logger = init_logger(__name__)
 # yapf: disable
 _TEXT_GENERATION_MODELS = {
     # [Decoder-only]
+    "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArceeForCausalLM": ("arcee", "ArceeForCausalLM"),
@@ -191,12 +192,14 @@ _EMBEDDING_MODELS = {
 
 _CROSS_ENCODER_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+    "GteNewForSequenceClassification": ("bert_with_rope",
+                                        "GteNewForSequenceClassification"),
+    "ModernBertForSequenceClassification": ("modernbert",
+                                            "ModernBertForSequenceClassification"),
     "RobertaForSequenceClassification": ("roberta",
                                          "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": ("roberta",
                                             "RobertaForSequenceClassification"),
-    "ModernBertForSequenceClassification": ("modernbert",
-                                            "ModernBertForSequenceClassification"),
     # [Auto-converted (see adapters.py)]
     "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"), # noqa: E501,
 }
@@ -220,6 +223,7 @@ _MULTIMODAL_MODELS = {
     "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "InternS1ForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),  # noqa: E501
+    "InternVLForConditionalGeneration": ("interns1", "InternS1ForConditionalGeneration"),  # noqa: E501
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
     "SmolVLMForConditionalGeneration": ("smolvlm","SmolVLMForConditionalGeneration"),  # noqa: E501
     "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
@@ -325,7 +329,7 @@ class _ModelInfo:
     default_pooling_type: str
     supports_cross_encoding: bool
     supports_multimodal: bool
-    supports_multimodal_raw_input: bool
+    supports_multimodal_raw_input_only: bool
     supports_multimodal_encoder_tp_data: bool
     supports_pp: bool
     has_inner_state: bool
@@ -345,7 +349,8 @@ class _ModelInfo:
             default_pooling_type=get_default_pooling_type(model),
             supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
-            supports_multimodal_raw_input=supports_multimodal_raw_input(model),
+            supports_multimodal_raw_input_only=
+            supports_multimodal_raw_input_only(model),
             supports_multimodal_encoder_tp_data=
             supports_multimodal_encoder_tp_data(model),
             supports_pp=supports_pp(model),
@@ -742,13 +747,13 @@ class _ModelRegistry:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.supports_multimodal
 
-    def supports_multimodal_raw_input(
+    def is_multimodal_raw_input_only_model(
         self,
         architectures: Union[str, list[str]],
         model_config: ModelConfig,
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
-        return model_cls.supports_multimodal_raw_input
+        return model_cls.supports_multimodal_raw_input_only
 
     def is_pp_supported_model(
         self,

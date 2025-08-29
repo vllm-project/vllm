@@ -670,12 +670,18 @@ class MRotaryEmbedding(RotaryEmbedding):
         image_index, video_index = 0, 0
         for _ in range(image_nums + video_nums):
             video_second_per_grid_t = 0.0
-            if image_token_id in input_tokens and remain_images > 0:
-                ed_image = input_tokens.index(image_token_id, st)
+            if remain_images > 0:
+                try:
+                    ed_image = input_tokens.index(image_token_id, st)
+                except ValueError:
+                    ed_image = len(input_tokens) + 1
             else:
                 ed_image = len(input_tokens) + 1
-            if video_token_id in input_tokens and remain_videos > 0:
-                ed_video = input_tokens.index(video_token_id, st)
+            if remain_videos > 0:
+                try:
+                    ed_video = input_tokens.index(video_token_id, st)
+                except ValueError:
+                    ed_video = len(input_tokens) + 1
             else:
                 ed_video = len(input_tokens) + 1
             if ed_image < ed_video:
