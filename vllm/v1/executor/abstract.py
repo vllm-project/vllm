@@ -13,6 +13,7 @@ from vllm.executor.uniproc_executor import (  # noqa
     ExecutorWithExternalLauncher as ExecutorWithExternalLauncherV0)
 from vllm.executor.uniproc_executor import (  # noqa
     UniProcExecutor as UniProcExecutorV0)
+from vllm.utils import resolve_obj_by_qualname
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 
@@ -50,6 +51,13 @@ class Executor(ExecutorBase):
             # TODO: make v1 scheduling deterministic
             # to support external launcher
             executor_class = ExecutorWithExternalLauncher
+        elif isinstance(distributed_executor_backend, str):
+            executor_class = resolve_obj_by_qualname(
+                distributed_executor_backend)
+            if not issubclass(executor_class, ExecutorBase):
+                raise TypeError(
+                    "distributed_executor_backend must be a subclass of "
+                    f"ExecutorBase. Got {executor_class}.")
         else:
             raise ValueError("Unknown distributed executor backend: "
                              f"{distributed_executor_backend}")
