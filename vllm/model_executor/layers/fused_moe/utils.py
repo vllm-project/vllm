@@ -5,7 +5,15 @@ from typing import Optional, Union
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.config import VllmConfig
+from vllm.model_executor.layers.fused_moe.config import (  # noqa: E501
+    FusedMoEParallelConfig)
+from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
+    is_flashinfer_fp4_cutlass_moe_available)
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    FlashinferMoeBackend, get_flashinfer_moe_backend)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
@@ -14,6 +22,8 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     quant_dequant_mxfp4)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_quantize)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    cutlass_fp4_supported)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
@@ -268,3 +278,48 @@ def _validate_scale_shape(
         assert block_shape is not None
         expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
         assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"
+
+
+def needs_gloo_all_reduce(vllm_config: VllmConfig, num_local_tokens: int):
+    """
+    Checks whether a Gloo AllReduce is needed for the current MoE setup.
+    """
+    moe_dp_chunk_size: int = envs.VLLM_MOE_DP_CHUNK_SIZE
+    naive_a2a_backend: bool = envs.VLLM_ALL2ALL_BACKEND == "naive"
+
+    # Check whether NaiveA2A is going to be used
+    if naive_a2a_backend:
+        return True
+
+    # Check whether chunked MoE is going to be used with chunk_length > 1
+    parallel_config = vllm_config.parallel_config
+    moe_parallel_config: FusedMoEParallelConfig = (FusedMoEParallelConfig.make(
+        tp_size_=parallel_config.tensor_parallel_size,
+        dp_size_=parallel_config.data_parallel_size,
+        vllm_parallel_config=parallel_config))
+
+    if (moe_parallel_config.use_forward_impl_chunked
+            and num_local_tokens > moe_dp_chunk_size):
+        # NOTE The opposite is only guaranteed to be single-chunk when methods
+        # that use chunking assure even split of tokens across ranks.
+        return True
+
+    # Check whether FlashInferCutlassMoEPrepareAndFinalize is going to be used
+    # This is currently used in quantization with cutlass
+    try:
+        flashinfer_moe_backend = get_flashinfer_moe_backend()
+    except ValueError:
+        flashinfer_moe_backend = ""
+
+    if flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+        quant_method = vllm_config.quantization_config.quantization_method
+        if quant_method == "modelopt_fp4":
+            # NVFP4 with cutlass detected
+            if (cutlass_fp4_supported()
+                    and is_flashinfer_fp4_cutlass_moe_available()):
+                return True
+        elif quant_method in ["fp8", "modelopt"]:
+            # FP8 or ModelOpt with cutlass detected
+            return True
+
+    return False
