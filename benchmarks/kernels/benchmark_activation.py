@@ -26,10 +26,6 @@ def bench(
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
 
-    # if func_name == "silu_and_mul":
-    #     layer = SiluAndMul()
-    # elif func_name == "mul_and_silu":
-    #     layer = MulAndSilu()
     if func_name == "gelu_and_mul":
         layer = CustomOp.op_registry[func_name](approximate="none")
     elif func_name == "gelu_and_mul_tanh":
