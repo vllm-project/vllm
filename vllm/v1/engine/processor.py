@@ -158,7 +158,7 @@ class Processor:
         auto-hashed downstream.
         """
 
-        def _validate_single(single_prompt: Union[dict, str]) -> None:
+        def _validate_single_prompt(single_prompt: Union[dict, str]) -> None:
             if not isinstance(single_prompt, dict):
                 return
             mm_data = single_prompt.get("multi_modal_data")
@@ -187,11 +187,11 @@ class Processor:
             enc = prompt.get("encoder_prompt")
             dec = prompt.get("decoder_prompt")
             if enc is not None:
-                _validate_single(enc)
+                _validate_single_prompt(enc)
             if dec is not None:
-                _validate_single(dec)
+                _validate_single_prompt(dec)
         else:
-            _validate_single(prompt)  # type: ignore[arg-type]
+            _validate_single_prompt(prompt)  # type: ignore[arg-type]
 
     def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
         if lora_request is not None and not self.lora_config:
