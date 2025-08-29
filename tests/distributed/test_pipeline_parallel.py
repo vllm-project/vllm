@@ -353,7 +353,7 @@ def _compare_tp(
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
     if skip_tokenizer_init:
-        common_args.extend(["--skip-tokenizer-init", "true"])
+        common_args.append("--skip-tokenizer-init")
     specific_case = tp_size == 2 and pp_size == 2 and chunked_prefill
     testing_ray_compiled_graph = False
     if distributed_backend == "ray" and (vllm_major_version == "1"

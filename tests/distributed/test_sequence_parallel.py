@@ -229,7 +229,7 @@ def _compare_sp(
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
     if skip_tokenizer_init:
-        common_args.extend(["--skip-tokenizer-init", "true"])
+        common_args.append("--skip-tokenizer-init")
 
     compilation_config = {
         'level': 3,
