@@ -218,7 +218,7 @@ VLM_TEST_SETTINGS = {
         },
         marks=[pytest.mark.core_model],
     ),
-    Pixel values from processor are not 4D or 5D arrays
+    # Pixel values from processor are not 4D or 5D arrays
     "qwen2_5_vl-transformers": VLMTestInfo(
         models=["Qwen/Qwen2.5-VL-3B-Instruct"],
         test_type=VLMTestType.IMAGE,
