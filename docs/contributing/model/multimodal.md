@@ -629,7 +629,7 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
             self,
             mm_items: MultiModalDataItems,
             hf_processor_mm_kwargs: Mapping[str, object],
-            out_mm_kwargs: MultiModalKwargs,
+            out_mm_kwargs: MultiModalKwargsItems,
         ) -> Sequence[PromptUpdate]:
             hf_config = self.info.get_hf_config()
             image_token_id = hf_config.image_token_index
@@ -778,7 +778,7 @@ Each [PromptUpdate][vllm.multimodal.processing.PromptUpdate] instance specifies 
             self,
             mm_items: MultiModalDataItems,
             hf_processor_mm_kwargs: Mapping[str, object],
-            out_mm_kwargs: MultiModalKwargs,
+            out_mm_kwargs: MultiModalKwargsItems,
         ) -> Sequence[PromptUpdate]:
             hf_config = self.info.get_hf_config()
             bos_token_id = hf_config.bos_token_id
@@ -855,7 +855,7 @@ Examples:
 
 ### Custom HF processor
 
-Some models don't define a HF processor class on HF Hub. In that case, you can define a custom HF processor that has the same call signature as HF processors and pass it to [_call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor].
+Some models don't define an HF processor class on HF Hub. In that case, you can define a custom HF processor that has the same call signature as HF processors and pass it to [_call_hf_processor][vllm.multimodal.processing.BaseMultiModalProcessor._call_hf_processor].
 
 Examples:
 

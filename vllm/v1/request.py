@@ -3,7 +3,8 @@
 
 import enum
 import time
-from typing import TYPE_CHECKING, Any, Optional, Union
+from functools import partial
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
 from vllm.pooling_params import PoolingParams
@@ -16,6 +17,7 @@ from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
     from vllm.lora.request import LoRARequest
+    from vllm.v1.core.kv_cache_utils import BlockHash
 
 
 class Request:
@@ -36,6 +38,8 @@ class Request:
         structured_output_request: Optional["StructuredOutputRequest"] = None,
         cache_salt: Optional[str] = None,
         priority: int = 0,
+        block_hasher: Optional[Callable[["Request"],
+                                        list["BlockHash"]]] = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -50,8 +54,7 @@ class Request:
             time.time()
 
         self.status = RequestStatus.WAITING
-        if sampling_params and sampling_params.guided_decoding is not None:
-            self.status = RequestStatus.WAITING_FOR_FSM
+        self.use_structured_output = False
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: Union[int, str, None] = None
 
@@ -59,12 +62,15 @@ class Request:
         self.kv_transfer_params: Optional[dict[str, Any]] = None
 
         if pooling_params is not None:
+            # Pooling models.
             self.max_tokens = 1
         elif sampling_params is not None:
+            # Generative models.
             assert sampling_params.max_tokens is not None
             self.max_tokens = sampling_params.max_tokens
             if sampling_params.guided_decoding is not None:
                 self.status = RequestStatus.WAITING_FOR_FSM
+                self.use_structured_output = True
 
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = \
@@ -108,17 +114,30 @@ class Request:
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
 
+        self.block_hashes: list[BlockHash] = []
+        self.get_hash_new_full_blocks: Optional[Callable[
+            [], list[BlockHash]]] = None
+        if block_hasher is not None:
+            self.get_hash_new_full_blocks = partial(block_hasher, self)
+            self.block_hashes = self.get_hash_new_full_blocks()
+
     @classmethod
-    def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
+    def from_engine_core_request(
+        cls, request: EngineCoreRequest,
+        block_hasher: Optional[Callable[["Request"], list["BlockHash"]]]
+    ) -> "Request":
         if request.mm_kwargs is not None:
-            assert is_list_of(request.mm_kwargs, MultiModalKwargsItem), (
+            mm_kwargs_lst = list(request.mm_kwargs)
+            assert is_list_of(mm_kwargs_lst, MultiModalKwargsItem), (
                 "mm_kwargs was not updated in EngineCore.add_request")
+        else:
+            mm_kwargs_lst = None
 
         return cls(
             request_id=request.request_id,
             client_index=request.client_index,
             prompt_token_ids=request.prompt_token_ids,
-            multi_modal_kwargs=request.mm_kwargs,
+            multi_modal_kwargs=mm_kwargs_lst,
             multi_modal_hashes=request.mm_hashes,
             multi_modal_placeholders=request.mm_placeholders,
             sampling_params=request.sampling_params,
@@ -131,6 +150,7 @@ class Request:
                     if request.sampling_params else None,
             cache_salt=request.cache_salt,
             priority=request.priority,
+            block_hasher=block_hasher,
         )
 
     def append_output_token_ids(
@@ -143,6 +163,9 @@ class Request:
         else:
             self._output_token_ids.extend(token_ids)
             self._all_token_ids.extend(token_ids)
+
+        if self.get_hash_new_full_blocks is not None:
+            self.block_hashes.extend(self.get_hash_new_full_blocks())
 
     @property
     def is_output_corrupted(self) -> bool:
@@ -170,11 +193,6 @@ class Request:
         assert input_id < len(self.mm_positions)
         num_tokens = self.mm_positions[input_id].length
         return num_tokens
-
-    @property
-    def use_structured_output(self) -> bool:
-        return self.sampling_params is not None and \
-            self.sampling_params.guided_decoding is not None
 
     def record_event(
         self,
