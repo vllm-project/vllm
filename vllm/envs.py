@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
+    VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -774,6 +775,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in
              ("true", "1")),
 
+    # Whether to use aiter triton fp8 bmm kernel
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_FP8BMM":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "True").lower() in
+             ("true", "1")),
+
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM":
     lambda: (os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in
@@ -1272,6 +1279,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_USE_AITER_RMSNORM",
         "VLLM_ROCM_USE_AITER_MLA",
         "VLLM_ROCM_USE_AITER_MHA",
+        "VLLM_ROCM_USE_AITER_FP8BMM",
         "VLLM_ROCM_USE_SKINNY_GEMM",
         "VLLM_ROCM_FP8_PADDING",
         "VLLM_ROCM_MOE_PADDING",
