@@ -325,7 +325,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # for CP
         self.cp_rank = get_cp_group().rank_in_group
-        self.cp_local_token_select_indices = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
+        self.cp_local_token_select_indices = self._make_buffer(
+            self.max_num_tokens, dtype=torch.int32)
         self.num_decodes = 0
 
     def _make_buffer(self, *args, dtype: torch.dtype) -> CpuGpuBuffer:

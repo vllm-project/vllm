@@ -199,9 +199,14 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
     """
 
     def __init__(self, kv_cache_config: KVCacheConfig, max_model_len: int,
-                 use_eagle: bool, enable_kv_cache_events: bool):
-        super().__init__(kv_cache_config, max_model_len, use_eagle, False,
-                         enable_kv_cache_events)
+                 use_eagle: bool, enable_kv_cache_events: bool,
+                 cp_world_size: int):
+        super().__init__(kv_cache_config,
+                         max_model_len,
+                         use_eagle,
+                         False,
+                         enable_kv_cache_events,
+                         cp_world_size=cp_world_size)
         self.num_single_type_manager = len(self.single_type_managers)
 
     def get_num_common_prefix_blocks(self, request_id: str,
@@ -415,9 +420,11 @@ def get_kv_cache_coordinator(kv_cache_config: KVCacheConfig,
                              enable_kv_cache_events: bool,
                              cp_world_size: int) -> KVCacheCoordinator:
     if not enable_caching:
-        return KVCacheCoordinatorNoPrefixCache(kv_cache_config, max_model_len,
+        return KVCacheCoordinatorNoPrefixCache(kv_cache_config,
+                                               max_model_len,
                                                use_eagle,
-                                               enable_kv_cache_events)
+                                               enable_kv_cache_events,
+                                               cp_world_size=cp_world_size)
     if len(kv_cache_config.kv_cache_groups) == 1:
         return UnitaryKVCacheCoordinator(kv_cache_config,
                                          max_model_len,
