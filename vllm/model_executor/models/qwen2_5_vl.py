@@ -966,6 +966,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
         self.video_pruning_rate = multimodal_config.video_pruning_rate
+        self.is_multimodal_pruning_enabled = (
+            multimodal_config.is_multimodal_pruning_enabled())
 
         if multimodal_config.get_limit_per_prompt("image") or \
             multimodal_config.get_limit_per_prompt("video"):
@@ -988,10 +990,6 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
-
-    def is_multimodal_pruning_enabled(self) -> bool:
-        return (self.video_pruning_rate is not None
-                and self.video_pruning_rate > 0)
 
     def _maybe_ignore_quant_config(self, config: Optional[QuantizationConfig]):
         # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
@@ -1117,10 +1115,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return image_embeds.split(sizes)
 
-    def _postrocess_image_embeds_evs(
-            self, image_embeds_split: tuple[torch.FloatTensor, ...],
-            image_input: Qwen2_5_VLImageInputs
-    ) -> tuple[torch.FloatTensor, ...]:
+    def _postprocess_image_embeds_evs(
+            self, image_embeds_split: tuple[torch.Tensor, ...],
+            image_input: Qwen2_5_VLImageInputs) -> tuple[torch.Tensor, ...]:
         """
         Append mrope positions for each for images.
         This is necessary to recover correct mrope 
@@ -1174,10 +1171,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         return video_embeds.split(sizes)
 
-    def _postrocess_video_embeds_evs(
-            self, video_embeds_split: tuple[torch.FloatTensor, ...],
-            video_input: Qwen2_5_VLVideoInputs
-    ) -> tuple[torch.FloatTensor, ...]:
+    def _postprocess_video_embeds_evs(
+            self, video_embeds_split: tuple[torch.Tensor, ...],
+            video_input: Qwen2_5_VLVideoInputs) -> tuple[torch.Tensor, ...]:
         """
         Prunes video embeddings via Efficient Video Sampling (EVS)
         and then appends mrope positions for each retained embeddings
@@ -1321,15 +1317,15 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
                 vision_embeddings = self._process_image_input(multimodal_input)
-                if self.is_multimodal_pruning_enabled():
-                    vision_embeddings = self._postrocess_image_embeds_evs(
+                if self.is_multimodal_pruning_enabled:
+                    vision_embeddings = self._postprocess_image_embeds_evs(
                         vision_embeddings, multimodal_input
                     )
                 multimodal_embeddings += vision_embeddings
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
-                if self.is_multimodal_pruning_enabled():
-                    video_embeddings = self._postrocess_video_embeds_evs(
+                if self.is_multimodal_pruning_enabled:
+                    video_embeddings = self._postprocess_video_embeds_evs(
                         video_embeddings, multimodal_input
                     )
                 multimodal_embeddings += video_embeddings
@@ -1357,8 +1353,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds = self.get_input_embeddings(input_ids)
         if image_input is not None:
             image_embeds = self._process_image_input(image_input)
-            if self.is_multimodal_pruning_enabled():
-                image_embeds = self._postrocess_image_embeds_evs(
+            if self.is_multimodal_pruning_enabled:
+                image_embeds = self._postprocess_image_embeds_evs(
                     image_embeds, image_input
                 )
             inputs_embeds = merge_multimodal_embeddings(
@@ -1370,8 +1366,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         if video_input is not None:
             video_embeds = self._process_video_input(video_input)
-            if self.is_multimodal_pruning_enabled():
-                video_embeds = self._postrocess_video_embeds_evs(
+            if self.is_multimodal_pruning_enabled:
+                video_embeds = self._postprocess_video_embeds_evs(
                     video_embeds, video_input
                 )
             inputs_embeds = merge_multimodal_embeddings(

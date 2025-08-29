@@ -2656,6 +2656,10 @@ class MultiModalConfig:
         kwargs = self.mm_processor_kwargs or {}
         return kwargs | dict(inference_kwargs)
 
+    def is_multimodal_pruning_enabled(self):
+        return (self.video_pruning_rate is not None
+                and self.video_pruning_rate > 0)
+
 
 @config
 @dataclass

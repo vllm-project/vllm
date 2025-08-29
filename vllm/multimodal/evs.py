@@ -7,7 +7,7 @@ import torch
 
 
 def compute_retention_mask(
-    video_embeds: torch.FloatTensor,
+    video_embeds: torch.Tensor,
     video_size_thw: torch.LongTensor,
     spatial_merge_size: int,
     q: float,
@@ -16,7 +16,7 @@ def compute_retention_mask(
     Computes the retention mask for input video embeddings.
 
     Args:
-        video_embeds (`torch.FloatTensor`): The input video embeddings
+        video_embeds (`torch.Tensor`): The input video embeddings
             of shape `(T * H * W // spatial_merge_size ^ 2, hidden_size)`
         video_size_thw (`torch.LongTensor` of shape `(3)`):
             The temporal, height and width of video.

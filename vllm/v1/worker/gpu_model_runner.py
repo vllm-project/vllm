@@ -2056,7 +2056,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # CudagraphWraper and CudagraphDispatcher of vllm.
 
         self.is_multimodal_pruning_enabled = (supports_multimodal_pruning(
-            self.model) and self.model.is_multimodal_pruning_enabled())
+            self.model) and self.model_config.multimodal_config.
+                                              is_multimodal_pruning_enabled())
         # wrap the model with full cudagraph wrapper if needed.
         if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.model = CUDAGraphWrapper(self.model,

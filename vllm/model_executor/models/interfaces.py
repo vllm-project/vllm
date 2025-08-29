@@ -128,12 +128,6 @@ class SupportsMultiModalPruning(Protocol):
     """
     supports_multimodal_pruning: ClassVar[Literal[True]] = True
 
-    def is_multimodal_pruning_enabled(self) -> bool:
-        """
-        Returns a flag whether the pruning is enabled for a given model
-        """
-        ...
-
     def recompute_mrope_positions(
             self, input_ids: list[int],
             multimodal_embeddings: MultiModalEmbeddings,
