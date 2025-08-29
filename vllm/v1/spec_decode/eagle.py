@@ -183,98 +183,20 @@ class EagleProposer:
         assert self.runner is not None
 
         # Select the correct attention metadata builder for EAGLE layers.
-        builder = None
-        chosen_layer = self.attn_layer_names[0]
-
-        for kv_cache_group in self.runner.attn_groups:
-            for attn_group in kv_cache_group:
-                if chosen_layer in attn_group.layer_names:
-                    builder = attn_group.metadata_builder
-                    break
-            if builder is not None:
-                break
-        assert builder is not None, (
-            "Failed to find attention metadata builder for EAGLE layers.")
+        builder = self._get_attention_metadata_builder()
         new_common_attn_metadata = None
         # For FlashInfer first pass, reorder to decode-first contiguous layout
         # so that prefill slice matches num_prefill_tokens.
         if isinstance(builder, FlashInferMetadataBuilder):
-            qsl_cpu = common_attn_metadata.query_start_loc_cpu
-            query_lens_cpu = qsl_cpu[1:] - qsl_cpu[:-1]
-            decode_req_idxs = torch.nonzero(query_lens_cpu <= 1,
-                                            as_tuple=False).view(-1)
-            prefill_req_idxs = torch.nonzero(query_lens_cpu > 1,
-                                             as_tuple=False).view(-1)
-            if decode_req_idxs.numel() > 0 and prefill_req_idxs.numel() > 0:
-                req_order = torch.cat([decode_req_idxs, prefill_req_idxs], 0)
-
-                # Build token permutation by concatenating per-request spans
-                spans_start = qsl_cpu[:-1]
-                spans_end = qsl_cpu[1:]
-                token_indices = []
-                for r in req_order.tolist():
-                    start = int(spans_start[r].item())
-                    end = int(spans_end[r].item())
-                    if end > start:
-                        token_indices.append(
-                            torch.arange(start, end, dtype=torch.int64))
-                if token_indices:
-                    token_perm_cpu = torch.cat(token_indices, dim=0)
-                else:
-                    token_perm_cpu = torch.arange(
-                        0,
-                        common_attn_metadata.num_actual_tokens,
-                        dtype=torch.int64)
-
-                # Build reordered CommonAttentionMetadata
-                reordered_query_lens = query_lens_cpu[req_order]
-                new_qsl_cpu = torch.zeros_like(qsl_cpu)
-                new_qsl_cpu[1:] = torch.cumsum(reordered_query_lens,
-                                               dim=0,
-                                               dtype=qsl_cpu.dtype)
-                new_max_q_len = int(reordered_query_lens.max().item())
-                new_seq_lens = common_attn_metadata.seq_lens[req_order].to(
-                    device=common_attn_metadata.seq_lens.device,
-                    non_blocking=True)
-                new_max_seq_len = int(new_seq_lens.max().item())
-                new_common_attn_metadata = CommonAttentionMetadata(
-                    query_start_loc=new_qsl_cpu.to(
-                        device=common_attn_metadata.query_start_loc.device,
-                        non_blocking=True),
-                    query_start_loc_cpu=new_qsl_cpu,
-                    seq_lens=new_seq_lens,
-                    seq_lens_cpu=common_attn_metadata.seq_lens_cpu[req_order],
-                    num_computed_tokens_cpu=common_attn_metadata.
-                    num_computed_tokens_cpu[req_order],
-                    num_reqs=common_attn_metadata.num_reqs,
-                    num_actual_tokens=common_attn_metadata.num_actual_tokens,
-                    max_query_len=new_max_q_len,
-                    max_seq_len=new_max_seq_len,
-                    block_table_tensor=common_attn_metadata.
-                    block_table_tensor[req_order],
-                    slot_mapping=common_attn_metadata.slot_mapping[
-                        token_perm_cpu.to(
-                            device=common_attn_metadata.slot_mapping.device)],
-                    causal=True,
-                )
-
+            reorder_result = self._reorder_for_flashinfer(
+                common_attn_metadata, next_token_ids, num_tokens, target_positions.device)
+            
+            if reorder_result is not None:
+                new_common_attn_metadata, token_perm, req_order = reorder_result
+                
                 # Apply new order to inputs
-                token_perm = token_perm_cpu.to(device=target_positions.device,
-                                               dtype=torch.int64)
                 target_positions = target_positions[token_perm]
                 target_hidden_states = target_hidden_states[token_perm]
-
-                # Rebuild input_ids for new order: start from existing shifted
-                # view, then set last tokens per reordered request
-                permuted_input_ids = self.input_ids[:num_tokens][token_perm]
-                last_token_indices = (
-                    new_common_attn_metadata.query_start_loc[1:].to(
-                        device=target_positions.device, dtype=torch.int64) - 1)
-                next_token_ids_reordered = next_token_ids[req_order.to(
-                    device=next_token_ids.device)]
-                permuted_input_ids[last_token_indices] = (
-                    next_token_ids_reordered)
-                self.input_ids[:num_tokens] = permuted_input_ids
 
         base_common = new_common_attn_metadata if new_common_attn_metadata is not None else common_attn_metadata
         attn_metadata = builder.build_for_drafting(
@@ -303,7 +225,6 @@ class EagleProposer:
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
             input_ids = None
         else:
-            # inputs_embeds = None
             input_ids = self.input_ids[:num_input_tokens]
 
         with set_forward_context(per_layer_attn_metadata,
@@ -363,34 +284,9 @@ class EagleProposer:
 
         # After the first draft forward, switch FlashInfer to decode-only (len=1)
         if isinstance(builder, FlashInferMetadataBuilder):
-            qsl_gpu = self.arange[:batch_size + 1]
-            qsl_cpu = qsl_gpu.cpu().to(torch.int32)
-            seq_lens_gpu = attn_metadata.seq_lens[:batch_size]
-            seq_lens_cpu = seq_lens_gpu.detach().cpu().to(torch.int32)
-            block_table_tensor = getattr(attn_metadata, 'block_table_tensor',
-                                         None)
-            if block_table_tensor is None:
-                block_table_tensor = attn_metadata.block_table
-
-            new_common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=qsl_gpu,
-                query_start_loc_cpu=qsl_cpu,
-                seq_lens=seq_lens_gpu,
-                seq_lens_cpu=seq_lens_cpu,
-                num_computed_tokens_cpu=torch.zeros(batch_size,
-                                                    dtype=torch.int32),
-                num_reqs=batch_size,
-                num_actual_tokens=batch_size,
-                max_query_len=attn_metadata.max_query_len,
-                max_seq_len=attn_metadata.max_seq_len,
-                block_table_tensor=block_table_tensor[:batch_size],
-                slot_mapping=attn_metadata.slot_mapping,
-                causal=True,
-            )
-
-            attn_metadata = builder.build_for_drafting(
-                common_attn_metadata=new_common_attn_metadata, draft_index=0)
-
+            attn_metadata = self._create_decode_only_metadata(
+                builder, attn_metadata, batch_size)
+            
             for layer_name in self.attn_layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
         for _ in range(self.num_speculative_tokens - 1):
@@ -467,14 +363,6 @@ class EagleProposer:
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
-        try:
-            head = draft_token_ids[0, :min(8, draft_token_ids.shape[1])]
-            logger.info(
-                "[EAGLE3 dbg] proposed draft ids (req0) head=%s shape=%s",  # noqa: G004
-                head.tolist(),
-                tuple(draft_token_ids.shape))
-        except Exception:
-            pass
         return draft_token_ids
 
     def propose_tree(
@@ -830,6 +718,175 @@ class EagleProposer:
                 for layer_name in self.attn_layer_names
             ])
         ) == 1, "All eagle layers should belong to the same kv cache group"
+    
+    def _get_attention_metadata_builder(self):
+        """Find and return the attention metadata builder for EAGLE layers.
+        
+        This helper method extracts the builder selection logic to improve readability.
+        The builder is found by looking up the first EAGLE layer in the attention groups.
+        
+        Returns:
+            The metadata builder for EAGLE layers.
+            
+        Raises:
+            AssertionError: If no metadata builder is found for EAGLE layers.
+        """
+        builder = None
+        chosen_layer = self.attn_layer_names[0]
+
+        for kv_cache_group in self.runner.attn_groups:
+            for attn_group in kv_cache_group:
+                if chosen_layer in attn_group.layer_names:
+                    builder = attn_group.metadata_builder
+                    break
+            if builder is not None:
+                break
+        
+        assert builder is not None, (
+            "Failed to find attention metadata builder for EAGLE layers.")
+        return builder
+    
+    def _reorder_for_flashinfer(self, common_attn_metadata, next_token_ids, 
+                                num_tokens, device):
+        """Reorder requests for FlashInfer decode-first contiguous layout.
+        
+        FlashInfer requires decode requests to come before prefill requests in memory
+        for optimal performance. This method reorders the requests and creates the
+        necessary token permutation and metadata.
+        
+        Args:
+            common_attn_metadata: The current attention metadata
+            next_token_ids: The next token IDs for each request
+            num_tokens: Total number of tokens
+            device: Target device for tensors
+            
+        Returns:
+            Tuple of (new_metadata, token_perm, req_order) if reordering is needed,
+            None otherwise.
+        """
+        qsl_cpu = common_attn_metadata.query_start_loc_cpu
+        query_lens_cpu = qsl_cpu[1:] - qsl_cpu[:-1]
+        decode_req_idxs = torch.nonzero(query_lens_cpu <= 1,
+                                        as_tuple=False).view(-1)
+        prefill_req_idxs = torch.nonzero(query_lens_cpu > 1,
+                                         as_tuple=False).view(-1)
+        
+        # Only reorder if we have both decode and prefill requests
+        if decode_req_idxs.numel() == 0 or prefill_req_idxs.numel() == 0:
+            return None
+            
+        req_order = torch.cat([decode_req_idxs, prefill_req_idxs], 0)
+
+        # Build token permutation by concatenating per-request spans
+        spans_start = qsl_cpu[:-1]
+        spans_end = qsl_cpu[1:]
+        token_indices = []
+        for r in req_order.tolist():
+            start = int(spans_start[r].item())
+            end = int(spans_end[r].item())
+            if end > start:
+                token_indices.append(
+                    torch.arange(start, end, dtype=torch.int64))
+        if token_indices:
+            token_perm_cpu = torch.cat(token_indices, dim=0)
+        else:
+            token_perm_cpu = torch.arange(
+                0,
+                common_attn_metadata.num_actual_tokens,
+                dtype=torch.int64)
+
+        # Build reordered CommonAttentionMetadata
+        reordered_query_lens = query_lens_cpu[req_order]
+        new_qsl_cpu = torch.zeros_like(qsl_cpu)
+        new_qsl_cpu[1:] = torch.cumsum(reordered_query_lens,
+                                       dim=0,
+                                       dtype=qsl_cpu.dtype)
+        new_max_q_len = int(reordered_query_lens.max().item())
+        new_seq_lens = common_attn_metadata.seq_lens[req_order].to(
+            device=common_attn_metadata.seq_lens.device,
+            non_blocking=True)
+        new_max_seq_len = int(new_seq_lens.max().item())
+        new_common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=new_qsl_cpu.to(
+                device=common_attn_metadata.query_start_loc.device,
+                non_blocking=True),
+            query_start_loc_cpu=new_qsl_cpu,
+            seq_lens=new_seq_lens,
+            seq_lens_cpu=common_attn_metadata.seq_lens_cpu[req_order],
+            num_computed_tokens_cpu=common_attn_metadata.
+            num_computed_tokens_cpu[req_order],
+            num_reqs=common_attn_metadata.num_reqs,
+            num_actual_tokens=common_attn_metadata.num_actual_tokens,
+            max_query_len=new_max_q_len,
+            max_seq_len=new_max_seq_len,
+            block_table_tensor=common_attn_metadata.
+            block_table_tensor[req_order],
+            slot_mapping=common_attn_metadata.slot_mapping[
+                token_perm_cpu.to(
+                    device=common_attn_metadata.slot_mapping.device)],
+            causal=True,
+        )
+        
+        # Convert token permutation to target device
+        token_perm = token_perm_cpu.to(device=device, dtype=torch.int64)
+        
+        # Rebuild input_ids for new order: start from existing shifted
+        # view, then set last tokens per reordered request
+        permuted_input_ids = self.input_ids[:num_tokens][token_perm]
+        last_token_indices = (
+            new_common_attn_metadata.query_start_loc[1:].to(
+                device=device, dtype=torch.int64) - 1)
+        next_token_ids_reordered = next_token_ids[req_order.to(
+            device=next_token_ids.device)]
+        permuted_input_ids[last_token_indices] = (
+            next_token_ids_reordered)
+        self.input_ids[:num_tokens] = permuted_input_ids
+        
+        return new_common_attn_metadata, token_perm, req_order
+    
+    def _create_decode_only_metadata(self, builder, attn_metadata, batch_size):
+        """Create decode-only metadata for FlashInfer after first draft forward.
+        
+        This switches FlashInfer to decode-only mode (query length = 1) for
+        better performance during subsequent draft token generation.
+        
+        Args:
+            builder: The FlashInferMetadataBuilder instance
+            attn_metadata: Current attention metadata
+            batch_size: Number of sequences in the batch
+            
+        Returns:
+            Updated attention metadata configured for decode-only mode
+        """
+        qsl_gpu = self.arange[:batch_size + 1]
+        qsl_cpu = qsl_gpu.cpu().to(torch.int32)
+        seq_lens_gpu = attn_metadata.seq_lens[:batch_size]
+        seq_lens_cpu = seq_lens_gpu.detach().cpu().to(torch.int32)
+        
+        # Handle different attribute names for block table tensor
+        block_table_tensor = getattr(attn_metadata, 'block_table_tensor',
+                                     None)
+        if block_table_tensor is None:
+            block_table_tensor = attn_metadata.block_table
+
+        new_common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=qsl_gpu,
+            query_start_loc_cpu=qsl_cpu,
+            seq_lens=seq_lens_gpu,
+            seq_lens_cpu=seq_lens_cpu,
+            num_computed_tokens_cpu=torch.zeros(batch_size,
+                                                dtype=torch.int32),
+            num_reqs=batch_size,
+            num_actual_tokens=batch_size,
+            max_query_len=attn_metadata.max_query_len,
+            max_seq_len=attn_metadata.max_seq_len,
+            block_table_tensor=block_table_tensor[:batch_size],
+            slot_mapping=attn_metadata.slot_mapping,
+            causal=True,
+        )
+
+        return builder.build_for_drafting(
+            common_attn_metadata=new_common_attn_metadata, draft_index=0)
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
