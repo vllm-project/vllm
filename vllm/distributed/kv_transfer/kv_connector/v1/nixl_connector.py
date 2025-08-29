@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
+import numpy as np
 import torch
 import zmq
 
