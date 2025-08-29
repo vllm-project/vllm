@@ -34,13 +34,17 @@ def test_config_arg_parsing(serve_parser, cli_config_file):
     args = serve_parser.parse_args(['--config', cli_config_file])
     assert args.port == 12312
     args = serve_parser.parse_args([
-        '--config', cli_config_file,
-        '--port', '9000',
+        '--config',
+        cli_config_file,
+        '--port',
+        '9000',
     ])
     assert args.port == 9000
     args = serve_parser.parse_args([
-        '--port', '9000',
-        '--config', cli_config_file,
+        '--port',
+        '9000',
+        '--config',
+        cli_config_file,
     ])
     assert args.port == 9000
 
