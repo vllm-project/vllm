@@ -44,7 +44,7 @@ def kernel_warmup(worker: "Worker"):
             return backend.get_name() == "FLASHINFER_VLLM_V1"
         except NotImplementedError:
             return False
-    
+
     if all(
             _is_flashinfer_backend(group.backend)
             for groups in worker.model_runner.attn_groups for group in groups):
