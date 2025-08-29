@@ -8,8 +8,14 @@ import torch.distributed as dist
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils import has_deep_ep, has_pplx
+from vllm.utils.flashinfer import has_flashinfer_all2all
 
 from .base_device_communicator import All2AllManagerBase, Cache
+
+if has_flashinfer_all2all():
+    from flashinfer.comm import Mapping
+    from flashinfer.comm.mnnvl import MnnvlConfig
+    from flashinfer.comm.trtllm_alltoall import MnnvlMoe
 
 logger = init_logger(__name__)
 
@@ -262,3 +268,97 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         # in get_or_create must be updated.
         handle.set_num_sms(self.num_sms)
         return handle
+
+
+class FlashInferAllToAllManager(All2AllManagerBase):
+    """
+    All2All communication based on flashinfer kernels.
+    """
+
+    def __init__(self, cpu_group):
+        assert has_flashinfer_all2all(
+        ), "flashinfer all2all module not found. Please install/check flashinfer"  # noqa
+        super().__init__(cpu_group)
+        logger.debug(
+            "Initialize for flashinfer All2All "
+            "rank=%d, world size=%d", self.rank, self.world_size)
+        self.initialized = False
+        self.alltoall_info = None
+
+    def initialize(
+            self,
+            world_size: int,
+            rank: int,
+            gpus_per_node: int = 4,  #TODO(shuw): remove hardcode
+    ):
+        """Initialize workspace"""
+        if self.initialized and self.world_size == world_size:
+            return
+
+        self.cleanup()
+        logger.debug("making map: "
+                     "rank=%d, world size=%d", rank, world_size)
+        self.mapping = Mapping(
+            world_size,
+            rank,
+            gpus_per_node,
+            tp_size=world_size,
+        )
+
+        from vllm.distributed import get_dp_group
+        from vllm.distributed.device_communicators.mnnvl_compat import (
+            CustomCommunicator)
+
+        def get_vllm_mnnvl_config() -> MnnvlConfig:
+            """Ready-to-use config for vLLM"""
+            return MnnvlConfig(
+                comm_backend=CustomCommunicator(get_dp_group()),
+                fabric_page_size=1 << 29,  # 512MB
+                allocation_granularity=0  # Auto-detect
+            )
+
+        self.dp_config = get_vllm_mnnvl_config()
+
+        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(
+            self.mapping, self.dp_config)
+        self.prepare_workspace = MnnvlMoe.get_moe_prepare_workspace(
+            self.mapping, self.dp_config)
+
+        self.world_size = world_size
+        self.rank = rank
+        self.gpus_per_node = gpus_per_node
+        self.initialized = True
+
+        logger.info("FlashInfer All2All initialized for rank %s, size %s",
+                    rank, world_size)
+
+    def ensure_alltoall_workspace_initialized(self):
+        """Ensure workspace is initialized"""
+        if not has_flashinfer_all2all():
+            return False
+
+        if self.world_size <= 1:
+            return False
+
+        if not self.initialized:
+            self.initialize(
+                world_size=self.world_size,
+                rank=self.rank,
+            )
+        return self.initialized
+
+    def get_handle(self, kwargs):
+        return self
+
+    def cleanup(self):
+        """Clean up workspace"""
+        if self.initialized and self.workspace_tensor is not None \
+            and self.prepare_workspace_tensor is not None:
+            try:
+                del self.workspace_tensor
+            except Exception as e:
+                logger.warning("Failed to cleanup FlashInfer workspace: %s", e)
+            finally:
+                self.workspace_tensor = None
+                self.mapping = None
+                self.initialized = False
