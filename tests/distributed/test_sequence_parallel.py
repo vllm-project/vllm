@@ -292,7 +292,7 @@ SP_TEST_MODELS = [
     # TODO support other models
     # [LANGUAGE GENERATION]
     "meta-llama/Llama-3.2-1B-Instruct",
-    "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8"
+    "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
 ]
 
 
