@@ -337,16 +337,18 @@ class EngineCore:
             model_executed = scheduler_output.total_num_scheduled_tokens > 0
             if model_executed and len(batch_queue) < self.batch_queue_size \
                 and not batch_queue[-1][0].done():
+                # Don't block on next worker response unless the queue is full
+                # or there are no more requests to schedule.
                 return None, True
 
         elif not batch_queue:
+            # Queue is empty. We should not reach here since this method should
+            # only be called when the scheduler contains requests or the queue
+            # is non-empty.
             return None, False
 
-        # If no more requests can be scheduled and the job queue is not empty,
-        # block until the first batch in the job queue is finished.
+        # Block until the next result is available.
         future, scheduler_output = batch_queue.pop()
-
-        # Blocking until the first result is available.
         model_output = self.execute_model_with_error_logging(
             lambda _: future.result(), scheduler_output)
 

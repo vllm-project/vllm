@@ -247,6 +247,7 @@ class MultiprocExecutor(Executor):
                     deadline - time.monotonic())
 
                 if self.io_thread_pool is not None:
+                    # We must consume worker_response_mq from a single thread.
                     result = self.io_thread_pool.submit(  # type: ignore
                         get_response, w, dequeue_timeout, self.shutdown_event)
                     if not non_block:

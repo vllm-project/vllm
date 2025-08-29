@@ -354,8 +354,8 @@ class Worker(WorkerBase):
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
         intermediate_tensors = None
-        if scheduler_output.total_num_scheduled_tokens > 0 and (
-                not get_pp_group().is_first_rank):
+        forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        if forward_pass and not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
