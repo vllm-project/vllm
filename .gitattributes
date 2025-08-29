@@ -1,0 +1,15 @@
+# Enforce LF line endings for shell scripts and other text files that must be LF
+*.sh text eol=lf
+tools/* text eol=lf
+*.py text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+docs/** text eol=lf
+
+# Keep binary files as is
+*.png binary
+*.jpg binary
+*.gif binary
+*.exe binary
+*.dll binary
