@@ -1264,7 +1264,7 @@ class AssetHandler(http.server.BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        # Accepts paths like:/1280px-Venn_diagram_rgb.jpg
+        # Accepts paths like: /1280px-Venn_diagram_rgb.jpg
         filename = self.path.lstrip("/")
         if not filename or "." not in filename:
             self.send_error(404, "Missing filename (expected /<name>.<ext>)")
