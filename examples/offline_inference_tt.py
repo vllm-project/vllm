@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import requests
 import uvloop
 from PIL import Image as PIL_Image
 from pkg_resources import resource_filename
@@ -62,6 +63,12 @@ def register_tt_models():
         "TTMistralForCausalLM",
         "models.tt_transformers.tt.generator_vllm:MistralForCausalLM")
 
+    # Gemma3
+    ModelRegistry.register_model(
+        "TTGemma3ForConditionalGeneration",
+        "models.tt_transformers.tt.generator_vllm:Gemma3ForConditionalGeneration"
+    )
+
 
 register_tt_models()  # Import and register models from tt-metal
 
@@ -95,54 +102,86 @@ def get_sample_multi_modal_llama_inputs():
     return inputs
 
 
-def get_sample_multi_modal_qwen_inputs(model):
-    # Prepare a sample multi-modal prompt for Qwen2.5-VL
+def get_sample_multi_modal_inputs(model: str):
+    """
+    Build sample multi-modal inputs for vision-language models.
+    Currently supports Qwen2.5-VL and Gemma-3.
+
+    Args:
+        model (str): Hugging Face model identifier
+
+    Returns:
+        list[dict]: A list of input dicts ready for model.generate
+    """
     text_prompts = []
     imgs = []
-    questions = ["Describe this image."]
+
+    # Example data
+    questions = ["Describe this image.", "What is the capital of France?"]
     img_refs = [
-        "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
+        "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg",
+        None
     ]
+
+    # Build chat-style prompts
     prompts = [[{
         "role":
         "user",
-        "content": [{
-            "type": "image",
-            "image": img_ref
-        }, {
-            "type": "text",
-            "text": question
-        }]
+        "content": [
+            {
+                "type": "image",
+                "image": img_ref
+            },
+            {
+                "type": "text",
+                "text": question
+            },
+        ],
     }] for img_ref, question in zip(img_refs, questions)]
+
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
+
     for prompt in prompts:
-        chat_prompt = tokenizer.apply_chat_template(prompt,
-                                                    tokenize=False,
-                                                    add_generation_prompt=True)
-        if any(ctnt["type"] == "image" for entry in prompt
-               for ctnt in entry['content']):
-            from qwen_vl_utils import (
-                process_vision_info)  # Import here to avoid for other models
+        chat_prompt = tokenizer.apply_chat_template(
+            prompt,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+        image_inputs = None
+        if "Qwen2.5-VL" in model:
+            # Lazy import only when needed
+            from qwen_vl_utils import process_vision_info
             image_inputs, video_inputs = process_vision_info(prompt)
             assert video_inputs is None, "Video inputs not supported yet"
-            assert len(
-                image_inputs) == 1, "Multi-image inputs not supported yet"
-            imgs.append(image_inputs[0])
+        elif "gemma-3" in model:
+            image_inputs = [
+                ctnt["image"] for entry in prompt for ctnt in entry["content"]
+                if ctnt["type"] == "image"
+            ]
+
+            image_inputs = [
+                PIL_Image.open(requests.get(image_url, stream=True).raw)
+                if image_url is not None else None
+                for image_url in image_inputs
+            ]
         else:
-            imgs.append(None)
+            raise NotImplementedError(
+                f"Multi-modal preprocessing not implemented for model: {model}"
+            )
+
+        assert len(image_inputs) == 1, "Multi-image inputs not supported yet"
+        imgs.append(image_inputs[0])
         text_prompts.append(chat_prompt)
 
+    # Pack inputs
     inputs = []
     for img, text_prompt in zip(imgs, text_prompts):
+        entry = {"prompt": text_prompt}
         if img is not None:
-            inputs.append({
-                "prompt": text_prompt,
-                "multi_modal_data": {
-                    "image": img
-                }
-            })
-        else:
-            inputs.append({"prompt": text_prompt})
+            entry["multi_modal_data"] = {"image": img}
+        inputs.append(entry)
+
     return inputs
 
 
@@ -183,6 +222,8 @@ def check_tt_model_supported(model):
         "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
         "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
         "mistralai/Mistral-7B-Instruct-v0.3",
+        "google/gemma-3-4b-it",
+        "google/gemma-3-27b-it",
     ]
     assert model in supported_models, f"Invalid model: {model}"
 
@@ -239,9 +280,14 @@ def run_inference(
     check_tt_model_supported(model)
 
     if multi_modal:
-        assert "Llama-3.2" in model or "Qwen2.5-VL" in model, (
+        supported_models = [
+            "Llama-3.2",
+            "Qwen2.5-VL",
+            "gemma",
+        ]
+        assert any(name in model for name in supported_models), (
             "The multi-modal inference test "
-            "currently only supports Llama-3.2 and Qwen2.5-VL models")
+            f"currently only supports {supported_models} models")
 
     # LLM args
     engine_kw_args = {
@@ -299,8 +345,8 @@ def run_inference(
             print("Ignoring prompts json for multi-modal inference")
             if "Llama-3.2" in model:
                 prompts = get_sample_multi_modal_llama_inputs()
-            elif "Qwen2.5-VL" in model:
-                prompts = get_sample_multi_modal_qwen_inputs(model)
+            elif any(name in model for name in ["Qwen2.5-VL", "gemma"]):
+                prompts = get_sample_multi_modal_inputs(model)
             else:
                 raise ValueError(
                     f"Unsupported model for multi-modal inference test: {model}"
@@ -326,6 +372,8 @@ def run_inference(
                 IMAGE_TOKEN_ID = 128256  # Specific to multi-modal llama
             elif "Qwen2.5-VL" in model:
                 IMAGE_TOKEN_ID = 151655  # Specific to multi-modal qwen
+            elif "gemma" in model:
+                IMAGE_TOKEN_ID = 262144  # Specific to multi-modal gemma
             else:
                 raise ValueError(
                     f"Unsupported model for multi-modal inference test in perf "

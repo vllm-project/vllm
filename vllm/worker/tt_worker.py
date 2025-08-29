@@ -207,9 +207,10 @@ class TTWorker(LoRANotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                                  data_parallel)
 
         if (("Llama-3.1-8B" in self.model_config.model
-             or "Mistral-7B" in self.model_config.model)
+             or "Mistral-7B" in self.model_config.model
+             or "gemma-3-4b" in self.model_config.model)
                 and num_devices_per_model == 1 and is_wormhole):
-            # Llama8B on N150 and Mistral7B on N150
+            # Llama8B, Mistral7B, and gemma3-4b on N150
             max_tokens_all_users = 65536
         elif (("DeepSeek-R1-Distill-Qwen-14B" in self.model_config.model
                or "Qwen2.5-14B" in self.model_config.model)
@@ -503,6 +504,9 @@ def device_params_from_override_tt_config(override_tt_config, trace_mode):
 
     if override_tt_config and "worker_l1_size" in override_tt_config:
         device_params["worker_l1_size"] = override_tt_config["worker_l1_size"]
+
+    if override_tt_config and "l1_small_size" in override_tt_config:
+        device_params["l1_small_size"] = override_tt_config["l1_small_size"]
 
     return device_params
 
