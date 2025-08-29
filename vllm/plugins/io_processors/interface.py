@@ -49,7 +49,8 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
         request_id: Optional[str] = None,
         **kwargs,
     ) -> IOProcessorOutput:
-        return self.post_process(model_output, request_id, **kwargs)
+        collected_output = [item async for i, item in model_output]
+        return self.post_process(collected_output, request_id, **kwargs)
 
     @abstractmethod
     def parse_request(self, request: Any) -> IOProcessorInput:
