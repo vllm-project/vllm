@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
+import inspect
 import itertools
 from abc import abstractmethod
 from collections.abc import Sequence
+from functools import partial
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
@@ -181,38 +183,30 @@ def build_logitsprocs(
             BUILTIN_LOGITS_PROCESSORS, custom_logitsprocs_classes))
 
 
-RequestLPState = tuple[RequestLogitsProcessor, list[int], list[int]]
-
-
 class AdapterLogitsProcessor(LogitsProcessor):
     """Wrapper for per-request logits processors
     
     To wrap a specific per-request logits processor, 
     * Implement `self.is_argmax_invariant()` base-class method
-    * Implement `self._new_logits_processor()`
+    * Implement `self.req_logits_processor()`
     * `__init__()` must call `super().__init__()`
     """
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device,
                  is_pin_memory: bool):
-        # For each request that is assigned a key in self.req_info, store a
-        # tuple of per-request logits processor, prompt token ids, and
-        # previously decoded token ids
-        self.req_info: dict[int, RequestLPState] = {}
-
-        # Per-request logits processors can have 2 or 3 arguments
-        assert (nargs := self._nargs) in {2, 3}
-        self.nargs = nargs
-
-    @property
-    @abstractmethod
-    def _nargs(self) -> int:
-        """Returns the number of arguments supported by this per-request logits
-        processor. Must be 2 or 3"""
-        raise NotImplementedError
+        # Map req index -> logits processor state
+        #
+        # State representation is a partial[Tensor] comprising a request-level
+        # logits processor with the output token ids argument and (if required)
+        # the prompt token ids argument pre-populated
+        #
+        # Note that the partial carries a *reference* to output token ids, and
+        # will thus always operate on the list as it is currently, not as it
+        # was when the partial was created.
+        self.req_info: dict[int, partial[torch.Tensor]] = {}
 
     @abstractmethod
-    def _new_logits_processor(
+    def req_logits_processor(
         self,
         params: SamplingParams,
     ) -> Optional[RequestLogitsProcessor]:
@@ -233,29 +227,26 @@ class AdapterLogitsProcessor(LogitsProcessor):
     def _new_state(
         self,
         params: SamplingParams,
-        prompt_tok_ids: list[int],
-        out_tok_ids: list[int],
-    ) -> Optional[RequestLPState]:
+        prompt_ids: list[int],
+        output_ids: list[int],
+    ) -> Optional[partial[torch.Tensor]]:
         """Return state representation for new request
 
         Returns None if logits processor is not applicable to request
 
         Args:
           params: request sampling params
-          prompt_tok_ids: request prompt token ids
-          out_tok_ids: decoded tokens so far for this request
+          prompt_ids: request prompt token ids
+          output_ids: decoded tokens so far for this request
 
         Returns:
-          (new logits processor, prompt token ids,
-           previous decoded tokens) or None
+          logits processor partial[Tensor] or None
         
         """
-        if (v0_lp := self._new_logits_processor(params)):
-            return (
-                v0_lp,
-                prompt_tok_ids,
-                out_tok_ids,
-            )
+        if (v0_lp := self.req_logits_processor(params)):
+            args = [prompt_ids, output_ids] if (len(
+                inspect.signature(v0_lp).parameters) == 3) else [output_ids]
+            return partial(v0_lp, *args)
         return None
 
     def update_state(self, batch_update: Optional[BatchUpdate]):
@@ -266,21 +257,15 @@ class AdapterLogitsProcessor(LogitsProcessor):
         )
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
-        if not self.req_info:
-            return logits
-
-        # Apply per-request logits processors to corresponding rows of logits
-        # tensor
-        if self.nargs == 2:
-            for req_idx, (v0_lp, _, out_tok_ids) in self.req_info.items():
-                logits[req_idx] = v0_lp(out_tok_ids,
-                                        logits[req_idx])  # type: ignore
-        else:
-            # nargs == 3
-            for req_idx, (v0_lp, prompt_tok_ids,
-                          out_tok_ids) in self.req_info.items():
-                logits[req_idx] = v0_lp(prompt_tok_ids, out_tok_ids,
-                                        logits[req_idx])  # type: ignore
+        if self.req_info:
+            # Apply per-request logits processors to corresponding rows of
+            # logits tensor
+            for req_idx, v0_lp in self.req_info.items():
+                req_logits = logits[req_idx]
+                new_logits = v0_lp(req_logits)
+                if new_logits is not req_logits:
+                    # Modify logits tensor row in-place if necessary
+                    logits[req_idx] = new_logits
 
         return logits
 
