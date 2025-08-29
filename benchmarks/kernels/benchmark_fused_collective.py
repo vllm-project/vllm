@@ -64,12 +64,13 @@ except ImportError:
 FP8_DTYPE = current_platform.fp8_dtype()
 MiB = 1024 * 1024
 
-# FlashInfer max sizes per world size (from collective_fusion.py)
+# FlashInfer max sizes per world size
+# Enable 64MB for 2, 4, 8 world sizes to verify large input sizes
+# use --disable-oneshot to disable oneshot mode for very large input sizes
 _FI_MAX_SIZES = {
     2: 64 * MiB,  # 64MB
-    4: 32 * MiB,  # 32MB
-    6: 32 * MiB,  # 32MB
-    8: 32 * MiB,  # 32MB
+    4: 64 * MiB,  # 64MB
+    8: 64 * MiB,  # 64MB
 }
 
 # Global workspace tensor for FlashInfer
@@ -186,7 +187,7 @@ def flashinfer_fused_allreduce_rmsnorm(
         allreduce_out=None,
         quant_out=None,
         scale_out=None,
-        layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED,
+        layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4_,
         scale_factor=None,
         use_oneshot=use_oneshot,
         **allreduce_params.get_trtllm_fused_allreduce_kwargs(),
@@ -228,7 +229,7 @@ def flashinfer_fused_allreduce_rmsnorm_fp8_quant(
         allreduce_out=None,
         quant_out=quant_out,
         scale_out=None,
-        layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED,
+        layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4,
         scale_factor=scale_factor,
         use_oneshot=use_oneshot,
         **allreduce_params.get_trtllm_fused_allreduce_kwargs(),
@@ -271,7 +272,7 @@ def flashinfer_fused_allreduce_rmsnorm_fp4_quant(
         allreduce_out=None,
         quant_out=quant_out,
         scale_out=output_scale,
-        layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED,
+        layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4,
         scale_factor=input_global_scale,
         use_oneshot=use_oneshot,
         **allreduce_params.get_trtllm_fused_allreduce_kwargs(),
@@ -579,6 +580,7 @@ def run_benchmarks(
     use_residual: bool,
     allreduce_params: Optional[FlashInferFusedAllReduceParams],
     quant_mode: str = "all",
+    disable_oneshot: bool = False,
 ):
     """Run all benchmarks for given configuration.
 
@@ -638,17 +640,18 @@ def run_benchmarks(
         # FlashInfer Fused AllReduce + RMSNorm Oneshot
         if flashinfer_comm is not None and allreduce_params is not None:
             try:
-                time_ms = benchmark_operation(
-                    flashinfer_fused_allreduce_rmsnorm,
-                    input_tensor,
-                    residual=residual,
-                    norm_out=norm_out,
-                    rms_gamma=rms_gamma,
-                    rms_eps=rms_eps,
-                    allreduce_params=allreduce_params,
-                    use_oneshot=True,
-                )
-                results["flashinfer_fused_allreduce_rmsnorm_oneshot"] = time_ms
+                if not disable_oneshot:
+                    time_ms = benchmark_operation(
+                        flashinfer_fused_allreduce_rmsnorm,
+                        input_tensor,
+                        residual=residual,
+                        norm_out=norm_out,
+                        rms_gamma=rms_gamma,
+                        rms_eps=rms_eps,
+                        allreduce_params=allreduce_params,
+                        use_oneshot=True,
+                    )
+                    results["flashinfer_fused_allreduce_rmsnorm_oneshot"] = time_ms
             except Exception as e:
                 logger.error("FlashInfer Fused AllReduce+RMSNorm Oneshot failed: %s", e)
                 results["flashinfer_fused_allreduce_rmsnorm_oneshot"] = float("inf")
@@ -712,21 +715,22 @@ def run_benchmarks(
         # FlashInfer Fused AllReduce + RMSNorm + FP8 Quant Oneshot
         if flashinfer_comm is not None and allreduce_params is not None:
             try:
-                time_ms = benchmark_operation(
-                    flashinfer_fused_allreduce_rmsnorm_fp8_quant,
-                    input_tensor,
-                    norm_out=norm_out,
-                    residual=residual,
-                    rms_gamma=rms_gamma,
-                    rms_eps=rms_eps,
-                    scale_factor=scale_fp8,
-                    quant_out=quant_out_fp8,
-                    allreduce_params=allreduce_params,
-                    use_oneshot=True,
-                )
-                results["flashinfer_fused_allreduce_rmsnorm_fp8_quant_oneshot"] = (
-                    time_ms
-                )
+                if not disable_oneshot:
+                    time_ms = benchmark_operation(
+                        flashinfer_fused_allreduce_rmsnorm_fp8_quant,
+                        input_tensor,
+                        norm_out=norm_out,
+                        residual=residual,
+                        rms_gamma=rms_gamma,
+                        rms_eps=rms_eps,
+                        scale_factor=scale_fp8,
+                        quant_out=quant_out_fp8,
+                        allreduce_params=allreduce_params,
+                        use_oneshot=True,
+                    )
+                    results["flashinfer_fused_allreduce_rmsnorm_fp8_quant_oneshot"] = (
+                        time_ms
+                    )
             except Exception as e:
                 logger.error(
                     "FlashInfer Fused AllReduce+RMSNorm+FP8 Oneshot failed: %s",
@@ -802,22 +806,23 @@ def run_benchmarks(
         # FlashInfer Fused AllReduce + RMSNorm + FP4 Quant Oneshot
         if flashinfer_comm is not None and allreduce_params is not None:
             try:
-                time_ms = benchmark_operation(
-                    flashinfer_fused_allreduce_rmsnorm_fp4_quant,
-                    input_tensor,
-                    residual=residual,
-                    norm_out=norm_out,
-                    rms_gamma=rms_gamma,
-                    rms_eps=rms_eps,
-                    input_global_scale=scale_fp4,
-                    allreduce_params=allreduce_params,
-                    quant_out=fp4_quant_out,
-                    output_scale=fp4_output_scale,
-                    use_oneshot=True,
-                )
-                results["flashinfer_fused_allreduce_rmsnorm_fp4_quant_oneshot"] = (
-                    time_ms
-                )
+                if not disable_oneshot:
+                    time_ms = benchmark_operation(
+                        flashinfer_fused_allreduce_rmsnorm_fp4_quant,
+                        input_tensor,
+                        residual=residual,
+                        norm_out=norm_out,
+                        rms_gamma=rms_gamma,
+                        rms_eps=rms_eps,
+                        input_global_scale=scale_fp4,
+                        allreduce_params=allreduce_params,
+                        quant_out=fp4_quant_out,
+                        output_scale=fp4_output_scale,
+                        use_oneshot=True,
+                    )
+                    results["flashinfer_fused_allreduce_rmsnorm_fp4_quant_oneshot"] = (
+                        time_ms
+                    )
             except Exception as e:
                 logger.error(
                     "FlashInfer Fused AllReduce+RMSNorm+FP4 Oneshot failed: %s",
@@ -1224,6 +1229,7 @@ def main():
                 use_residual,
                 allreduce_params,
                 quant_mode=quant_mode,
+                disable_oneshot=args.disable_oneshot,
             )
 
             # Store results for markdown export
