@@ -127,7 +127,11 @@ class OpenAIServingCompletion(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            if self.model_config.skip_tokenizer_init:
+                tokenizer = None
+            else:
+                tokenizer = await self.engine_client.get_tokenizer(lora_request
+                                                                   )
 
             request_prompts, engine_prompts = await self._preprocess_completion(
                 request,

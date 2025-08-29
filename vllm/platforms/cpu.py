@@ -69,6 +69,7 @@ class CpuPlatform(Platform):
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
     dist_backend: str = "gloo"
+    device_control_env_var = "CPU_VISIBLE_MEMORY_NODES"
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -296,6 +297,13 @@ class CpuPlatform(Platform):
         for x in logical_cpu_list:
             allowed_numa_nodes.add(x.numa_node)  # type: ignore
         allowed_numa_nodes_list = sorted(allowed_numa_nodes)
+
+        env_key = CpuPlatform.device_control_env_var
+        if (env_key in os.environ and os.environ[env_key] != ""):
+            visible_nodes = [int(s) for s in os.environ[env_key].split(',')]
+            allowed_numa_nodes_list = [
+                x for x in visible_nodes if x in allowed_cpu_id_list
+            ]
 
         return allowed_numa_nodes_list, logical_cpu_list
 

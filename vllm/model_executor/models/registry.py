@@ -39,6 +39,7 @@ logger = init_logger(__name__)
 # yapf: disable
 _TEXT_GENERATION_MODELS = {
     # [Decoder-only]
+    "ApertusForCausalLM": ("apertus", "ApertusForCausalLM"),
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArceeForCausalLM": ("arcee", "ArceeForCausalLM"),
@@ -191,12 +192,14 @@ _EMBEDDING_MODELS = {
 
 _CROSS_ENCODER_MODELS = {
     "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+    "GteNewForSequenceClassification": ("bert_with_rope",
+                                        "GteNewForSequenceClassification"),
+    "ModernBertForSequenceClassification": ("modernbert",
+                                            "ModernBertForSequenceClassification"),
     "RobertaForSequenceClassification": ("roberta",
                                          "RobertaForSequenceClassification"),
     "XLMRobertaForSequenceClassification": ("roberta",
                                             "RobertaForSequenceClassification"),
-    "ModernBertForSequenceClassification": ("modernbert",
-                                            "ModernBertForSequenceClassification"),
     # [Auto-converted (see adapters.py)]
     "JinaVLForRanking": ("jina_vl", "JinaVLForSequenceClassification"), # noqa: E501,
 }

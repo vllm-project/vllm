@@ -3,6 +3,7 @@
 """Inference-only MiniMaxText01 model."""
 import math
 from collections.abc import Iterable
+from itertools import islice
 from typing import TYPE_CHECKING, Optional, Union
 
 if TYPE_CHECKING:
@@ -1019,8 +1020,7 @@ class MiniMaxText01Model(nn.Module):
 
         minimax_cache_index = 0
 
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             _caches = None
             if not envs.VLLM_USE_V1 and isinstance(
                     layer.self_attn, MiniMaxText01LinearAttention):

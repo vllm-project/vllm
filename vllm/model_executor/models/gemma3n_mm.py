@@ -620,7 +620,7 @@ class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
         # NOTE (NickLucche) Each pass needs tokens to compute PLE so we cache
         # them here, as the model  forward has only access to the input_embeds.
         if input_ids is not None:
-            per_layer_inputs = self.language_model.model.get_per_layer_input_embeddings(
+            per_layer_inputs = self.language_model.model.self_decoder.get_per_layer_input_embeddings(
                 input_ids)
             per_layer_inputs = per_layer_inputs.reshape(
                 -1, self.config.text_config.num_hidden_layers,

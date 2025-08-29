@@ -355,7 +355,6 @@ class InputPreprocessor:
         mm_hash_overrides: Optional[dict[str, list[str]]] = None,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_token_ids = parsed_content["prompt_token_ids"]
-        token_type_ids = parsed_content.get("token_type_ids")
 
         inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):
@@ -368,10 +367,7 @@ class InputPreprocessor:
                 mm_hash_overrides=mm_hash_overrides,
             )
         else:
-            inputs = token_inputs(
-                prompt_token_ids=prompt_token_ids,
-                token_type_ids=token_type_ids,
-            )
+            inputs = token_inputs(prompt_token_ids=prompt_token_ids)
 
         if cache_salt := parsed_content.get("cache_salt"):
             inputs["cache_salt"] = cache_salt
@@ -387,7 +383,6 @@ class InputPreprocessor:
         mm_hash_overrides: Optional[dict[str, list[str]]] = None,
     ) -> Union[TokenInputs, MultiModalInputs]:
         prompt_token_ids = parsed_content["prompt_token_ids"]
-        token_type_ids = parsed_content.get("token_type_ids")
 
         inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):
@@ -400,10 +395,7 @@ class InputPreprocessor:
                 mm_hash_overrides=mm_hash_overrides,
             )
         else:
-            inputs = token_inputs(
-                prompt_token_ids=prompt_token_ids,
-                token_type_ids=token_type_ids,
-            )
+            inputs = token_inputs(prompt_token_ids=prompt_token_ids, )
 
         if cache_salt := parsed_content.get("cache_salt"):
             inputs["cache_salt"] = cache_salt

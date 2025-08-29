@@ -16,14 +16,6 @@ MODEL_NAME = "internlm/internlm2-1_8b-reward"
 prompts = ["The chef prepared a delicious meal."]
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
-
-
 @pytest.fixture(scope="module")
 def llm():
     # pytest caches the fixture so we use weakref.proxy to

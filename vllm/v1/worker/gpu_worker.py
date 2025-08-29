@@ -354,36 +354,37 @@ class Worker(WorkerBase):
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
         intermediate_tensors = None
-        if not get_pp_group().is_first_rank:
+        forward_pass = scheduler_output.total_num_scheduled_tokens > 0
+        if forward_pass and not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group()))
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
-
-        parallel_config = self.vllm_config.parallel_config
-        if parallel_config.distributed_executor_backend != "external_launcher" \
-            and not get_pp_group().is_last_rank:
-            assert isinstance(output, IntermediateTensors)
-            get_pp_group().send_tensor_dict(output.tensors,
-                                            all_gather_group=get_tp_group())
-
-            kv_connector_output = output.kv_connector_output
-            if not kv_connector_output:
-                return None
-
-            # In case of PP with kv transfer, we need to pass through the
-            # kv_connector_output
-            if (not kv_connector_output.finished_sending
-                    and not kv_connector_output.finished_recving):
-                return EMPTY_MODEL_RUNNER_OUTPUT
-
-            output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-            output.kv_connector_output = kv_connector_output
+        if isinstance(output, ModelRunnerOutput):
             return output
 
-        assert isinstance(output, ModelRunnerOutput)
+        assert isinstance(output, IntermediateTensors)
+        parallel_config = self.vllm_config.parallel_config
+        assert parallel_config.distributed_executor_backend != (
+            "external_launcher") and not get_pp_group().is_last_rank
+
+        get_pp_group().send_tensor_dict(output.tensors,
+                                        all_gather_group=get_tp_group())
+
+        kv_connector_output = output.kv_connector_output
+        if not kv_connector_output:
+            return None
+
+        # In case of PP with kv transfer, we need to pass through the
+        # kv_connector_output
+        if (not kv_connector_output.finished_sending
+                and not kv_connector_output.finished_recving):
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.kv_connector_output = kv_connector_output
         return output
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
