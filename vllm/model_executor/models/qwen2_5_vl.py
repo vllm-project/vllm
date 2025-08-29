@@ -853,6 +853,7 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsQuant):
 
     packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
@@ -866,6 +867,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
         })
+
+    supports_encoder_tp_data = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:

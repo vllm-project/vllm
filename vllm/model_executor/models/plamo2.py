@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only PLaMo2 model."""
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional
 
 import torch
@@ -614,7 +615,7 @@ class Plamo2Decoder(torch.nn.Module):
         mamba2_metadata: Mamba2Metadata,
     ) -> torch.Tensor:
         mamba_cache_index = 0
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             layer_mamba_cache_params = None
             if layer.is_mamba:
                 layer_mamba_cache_params = mamba_cache_params.at_layer_idx(

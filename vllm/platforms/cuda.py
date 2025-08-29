@@ -443,6 +443,10 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
+    def opaque_attention_op(cls) -> bool:
+        return True
+
+    @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
@@ -517,6 +521,26 @@ class CudaPlatformBase(Platform):
                 else:
                     supported = True
         return supported
+
+    @classmethod
+    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+            if not cls.has_device_capability(80):
+                capability = cls.get_device_capability()
+                gpu_name = cls.get_device_name()
+
+                if capability is None:
+                    compute_str = "does not have a compute capability"
+                else:
+                    version_str = capability.as_version_str()
+                    compute_str = f"has compute capability {version_str}"
+
+                raise ValueError(
+                    "Bfloat16 is only supported on GPUs "
+                    "with compute capability of at least 8.0. "
+                    f"Your {gpu_name} GPU {compute_str}. "
+                    "You can use float16 instead by explicitly setting the "
+                    "`dtype` flag in CLI, for example: --dtype=half.")
 
 
 # NVML utils

@@ -25,12 +25,13 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.llava import LlavaDummyInputsBuilder
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, ProcessingCache,
-                                        PromptReplacement, PromptUpdate)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.jsontree import json_map_leaves
@@ -332,7 +333,7 @@ def _build_tarsier_hf_processor(
     info: _I_Tarsier,
     dummy_inputs: BaseDummyInputsBuilder[_I_Tarsier],
     *,
-    cache: Optional[ProcessingCache] = None,
+    cache: Optional[BaseMultiModalProcessorCache] = None,
 ) -> BaseMultiModalProcessor:
     if isinstance(info, TarsierProcessingInfo):
         return TarsierMultiModalProcessor(

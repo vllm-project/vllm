@@ -749,7 +749,7 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
 
 Benchmark. It is recommended to use the flag `--ignore-eos` to simulate real responses. You can set the size of the output via the arg `random-output-len`.
 
-Ex.1: Fixed number of items and a single image resolutionm, enforcing generation of approx 40 tokens:
+Ex.1: Fixed number of items and a single image resolution, enforcing generation of approx 40 tokens:
 
 ```bash
 vllm bench serve \

@@ -55,7 +55,14 @@ class CPUWorker(Worker):
             else:
                 self.local_omp_cpuid = "all"
         else:
-            self.local_omp_cpuid = omp_cpuids.split("|")[self.rank]
+            local_dp_rank = self.parallel_config.data_parallel_rank_local
+            omp_cpuids = omp_cpuids.split("|")
+            if local_dp_rank is not None:
+                world_size = self.parallel_config.world_size
+                omp_cpuids = omp_cpuids[local_dp_rank *
+                                        world_size:(local_dp_rank + 1) *
+                                        world_size]
+            self.local_omp_cpuid = omp_cpuids[self.rank]
 
         if self.local_omp_cpuid != "all":
             ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
@@ -162,7 +169,9 @@ class CPUWorker(Worker):
         # Reserve CPUs for other processes
         reserve_cpu_num = envs.VLLM_CPU_NUM_OF_RESERVED_CPU
         if reserve_cpu_num is None:
-            reserve_cpu_num = 1 if self.parallel_config.world_size > 1 else 0
+            need_reserve = (self.parallel_config.world_size > 1 or
+                            self.parallel_config.data_parallel_size_local > 1)
+            reserve_cpu_num = 1 if need_reserve else 0
         assert len(logical_cpu_list) > reserve_cpu_num, (
             f"VLLM_CPU_NUM_OF_RESERVED_CPU ({reserve_cpu_num}) "
             f"should less than {len(logical_cpu_list)}.")

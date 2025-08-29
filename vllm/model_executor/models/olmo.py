@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only OLMo model compatible with HuggingFace weights."""
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional, Union
 
 import torch
@@ -280,7 +281,7 @@ class OlmoModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
 
         # Apply blocks one-by-one.
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             # shape: (batch_size, seq_len, d_model)
             hidden_states = layer(positions, hidden_states)
 

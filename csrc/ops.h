@@ -130,6 +130,14 @@ void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
                         torch::Tensor& scale);
 
+#if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
+    (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
+void silu_and_mul_nvfp4_quant(torch::Tensor& out,
+                              torch::Tensor& output_block_scale,
+                              torch::Tensor& input,
+                              torch::Tensor& input_global_scale);
+#endif
+
 void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);

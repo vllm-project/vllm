@@ -657,7 +657,7 @@ class Scheduler:
                 `budget.num_batched_tokens` has not enough capacity to schedule
                 all tokens.
             partial_prefill_metadata: information about the partial prefills
-            that are currently running
+                that are currently running
 
         Returns:
             SchedulerRunningOutputs.
@@ -1591,7 +1591,6 @@ class Scheduler:
                     encoder_seq_data=encoder_seq_data,
                     cross_block_table=cross_block_table,
                     state=seq_group.state,
-                    token_type_ids=seq_group.token_type_ids,
                     # `multi_modal_data` will only be present for the 1st comm
                     # between engine and worker.
                     # the subsequent comms can still use delta, but

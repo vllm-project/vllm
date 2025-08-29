@@ -16,14 +16,6 @@ MODEL_NAME = "jason9693/Qwen2.5-1.5B-apeach"
 prompts = ["The chef prepared a delicious meal."]
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
-
-
 @pytest.fixture(scope="module")
 def llm():
     # pytest caches the fixture so we use weakref.proxy to
@@ -70,3 +62,9 @@ def test_encode_api(llm: LLM):
     err_msg = "pooling_task must be one of.+"
     with pytest.raises(ValueError, match=err_msg):
         llm.encode(prompts, use_tqdm=False)
+
+
+def test_score_api(llm: LLM):
+    err_msg = "Score API is only enabled for num_labels == 1."
+    with pytest.raises(ValueError, match=err_msg):
+        llm.score("ping", "pong", use_tqdm=False)
