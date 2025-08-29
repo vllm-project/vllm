@@ -167,6 +167,7 @@ class EagleProposer:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
+
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
             target_hidden_states = self.model.combine_hidden_states(
@@ -225,6 +226,7 @@ class EagleProposer:
             inputs_embeds = self.inputs_embeds[:num_input_tokens]
             input_ids = None
         else:
+            inputs_embeds = None
             input_ids = self.input_ids[:num_input_tokens]
 
         with set_forward_context(per_layer_attn_metadata,
