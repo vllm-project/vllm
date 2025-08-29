@@ -26,16 +26,14 @@ def test_fast_inc_detok_invalid_utf8_err_case():
     prompt_token_ids = [107, 4606, 236787, 107]
     params = SamplingParams(skip_special_tokens=True)
     request = EngineCoreRequest(
-        "test",
-        prompt_token_ids,
-        None,
-        None,
-        None,
-        params,
-        None,
-        None,
-        0.0,
-        None,
+        request_id="test",
+        prompt_token_ids=prompt_token_ids,
+        mm_features=None,
+        sampling_params=params,
+        pooling_params=None,
+        eos_token_id=None,
+        arrival_time=0.0,
+        lora_request=None,
         cache_salt=None,
         data_parallel_rank=None,
     )
