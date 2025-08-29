@@ -15,6 +15,7 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.envs import VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 from vllm.inputs import PromptType
 from vllm.inputs.preprocess import InputPreprocessor
@@ -348,6 +349,15 @@ class AsyncLLM(EngineClient):
             # to handle startup failure gracefully in the OpenAI server.
             self._run_output_handler()
 
+            tokenization_kwargs: dict[str, Any] = {}
+            truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
+
+            _validate_truncation_size(
+                self.model_config.max_model_len,
+                truncate_prompt_tokens,
+                tokenization_kwargs,
+            )
+
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -355,6 +365,7 @@ class AsyncLLM(EngineClient):
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
+                tokenization_kwargs=tokenization_kwargs,
                 data_parallel_rank=data_parallel_rank,
             )
 
@@ -481,6 +492,7 @@ class AsyncLLM(EngineClient):
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
+        truncate_prompt_tokens: Optional[int] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
@@ -502,6 +514,14 @@ class AsyncLLM(EngineClient):
             # we can call __init__ before the event loop, which enables us
             # to handle startup failure gracefully in the OpenAI server.
             self._run_output_handler()
+
+            if tokenization_kwargs is None:
+                tokenization_kwargs = dict[str, Any]()
+            _validate_truncation_size(
+                self.model_config.max_model_len,
+                truncate_prompt_tokens,
+                tokenization_kwargs,
+            )
 
             q = await self.add_request(
                 request_id,
