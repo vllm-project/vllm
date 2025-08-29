@@ -435,7 +435,7 @@ class EngineArgs:
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str = LoadConfig.pt_load_map_location
 
-    video_pruning_rate: float = ModelConfig.video_pruning_rate
+    video_pruning_rate: float = MultiModalConfig.video_pruning_rate
 
     # DEPRECATED
     enable_multimodal_encoder_data_parallel: bool = False
