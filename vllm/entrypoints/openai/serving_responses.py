@@ -758,17 +758,16 @@ class OpenAIServingResponses(OpenAIServing):
         *args,
         **kwargs,
     ):
-        event_deque = deque()
+        event_deque: deque[str] = deque()
         new_event_signal = asyncio.Event()
         self.event_store[request.request_id] = (event_deque, new_event_signal)
-
+        response = None
         try:
-            response = self.responses_stream_generator(request, *args,
-                                                       **kwargs)
-            async for event in response:
+            generator = self.responses_stream_generator(
+                request, *args, **kwargs)
+            async for event in generator:
                 event_deque.append(event)
                 new_event_signal.set()  # Signal new event available
-                new_event_signal.clear()  # Reset for next event
         except Exception as e:
             logger.exception("Background request failed for %s",
                              request.request_id)
@@ -778,7 +777,7 @@ class OpenAIServingResponses(OpenAIServing):
             event_deque.append("__STREAM_END__")
             new_event_signal.set()
 
-        if isinstance(response, ErrorResponse):
+        if response is not None and isinstance(response, ErrorResponse):
             # If the request has failed, update the status to "failed".
             response_id = request.request_id
             async with self.response_store_lock:
@@ -831,6 +830,8 @@ class OpenAIServingResponses(OpenAIServing):
                 yield event
                 current_index += 1
 
+            # Clear the event before waiting for new ones
+            new_event_signal.clear()
             # Wait for new events
             await new_event_signal.wait()
 
