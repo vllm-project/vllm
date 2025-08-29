@@ -227,7 +227,6 @@ class FlashAttentionMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
-        cp_local_token_cnt: Optional[int] = None,
     ) -> FlashAttentionMetadata:
         """
         fast_build disables AOT scheduling, used when there will be few 
