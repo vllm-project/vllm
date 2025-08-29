@@ -27,6 +27,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLoRA,
                               QKVParallelLinearWithLoRA,
                               ReplicatedLinearWithLoRA,
+                              MergedReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -50,6 +51,7 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     MergedQKVParallelLinearWithLoRA,
     RowParallelLinearWithLoRA,
     ReplicatedLinearWithLoRA,
+    MergedReplicatedLinearWithLoRA,
     LogitsProcessorWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
     QKVParallelLinearWithShardedLoRA,
