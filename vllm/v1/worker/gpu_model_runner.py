@@ -1157,23 +1157,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 device=self.device,
                 pin_memory=self.pin_memory,
         ):
-            encoder_outputs_for_modality = []
             # (ekhvedchenia): Temporary hack to limit peak memory usage when
             # processing multimodal data.This solves the issue with scheduler
             # putting too many video samples into a single batch. Scheduler
             # uses pruned vision tokens count to compare it versus compute
             # budget which is incorrect (Either input media size or non-pruned
             # output vision tokens count should be considered)
+            curr_group_outputs = []
+
             if self.is_multimodal_pruning_enabled and modality == "video":
                 micro_batch_size = 1
-            else:
-                # If pruning is disabled, process all media as usual
-                micro_batch_size = num_items
+                for i in range(0, num_items, micro_batch_size):
+                    micro_batch_mm_inputs = dict(
+                        (k, v[i:i + micro_batch_size])
+                        for k, v in mm_kwargs_group.items())
 
-            for i in range(0, num_items, micro_batch_size):
-                micro_batch_mm_inputs = dict(
-                    (k, v[i:i + micro_batch_size])
-                    for k, v in mm_kwargs_group.items())
+                    micro_batch_outputs = self.model.get_multimodal_embeddings(
+                        **micro_batch_mm_inputs)
+
+                    curr_group_outputs.extend(micro_batch_outputs)
+            else:
                 # Run the encoder.
                 # `curr_group_outputs` is either of the following:
                 # 1. A tensor of shape (num_items, feature_size, hidden_size)
@@ -1182,15 +1185,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
                 curr_group_outputs = self.model.get_multimodal_embeddings(
-                    **micro_batch_mm_inputs)
-
-                encoder_outputs_for_modality.extend(curr_group_outputs)
+                    **mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
-                encoder_outputs_for_modality,
+                curr_group_outputs,
                 expected_num_items=num_items,
             )
-            encoder_outputs.extend(encoder_outputs_for_modality)
+            encoder_outputs.extend(curr_group_outputs)
 
         # Cache the encoder outputs by mm_hash
         for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
