@@ -59,13 +59,12 @@ __device__ uint32_t silu_and_cvt_warp_fp16_to_fp4(PackedVec<Type>& vec,
                                                   PackedVec<Type>& vec2,
                                                   float SFScaleVal,
                                                   uint8_t* SFout) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   PackedVec<Type> out_silu = compute_silu(vec, vec2);
   // Get absolute maximum values among the local 8 values.
   auto localMax = __habs2(out_silu.elts[0]);
 
-  // Local maximum value.
-  #pragma unroll
+// Local maximum value.
+#pragma unroll
   for (int i = 1; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
     localMax = __hmax2(localMax, __habs2(out_silu.elts[i]));
   }
@@ -112,7 +111,7 @@ __device__ uint32_t silu_and_cvt_warp_fp16_to_fp4(PackedVec<Type>& vec,
   // Convert the input to float.
   float2 fp2Vals[CVT_FP4_ELTS_PER_THREAD / 2];
 
-  #pragma unroll
+#pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; i++) {
     if constexpr (std::is_same_v<Type, half>) {
       fp2Vals[i] = __half22float2(out_silu.elts[i]);
@@ -128,22 +127,14 @@ __device__ uint32_t silu_and_cvt_warp_fp16_to_fp4(PackedVec<Type>& vec,
 
   // Write the e2m1 values to global memory.
   return e2m1Vec;
-#else
-  return 0;
-#endif
 }
 
 // Use UE4M3 by default.
 template <class Type, bool UE8M0_SF = false>
-__global__ void
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-__launch_bounds__(1024, 4) silu_and_cvt_fp16_to_fp4(
-#else
-silu_and_cvt_fp16_to_fp4(
-#endif
-    int32_t numRows, int32_t numCols, Type const* in, float const* SFScale,
-    uint32_t* out, uint32_t* SFout) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+__global__ void __launch_bounds__(1024, 4)
+    silu_and_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, Type const* in,
+                             float const* SFScale, uint32_t* out,
+                             uint32_t* SFout) {
   using PackedVec = PackedVec<Type>;
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
       (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
@@ -181,7 +172,6 @@ silu_and_cvt_fp16_to_fp4(
           in_vec, in_vec2, SFScaleVal, sf_out);
     }
   }
-#endif
 }
 
 }  // namespace vllm

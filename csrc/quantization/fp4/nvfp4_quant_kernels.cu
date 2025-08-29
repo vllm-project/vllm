@@ -32,15 +32,9 @@ namespace vllm {
 
 // Use UE4M3 by default.
 template <class Type, bool UE8M0_SF = false>
-__global__ void
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-__launch_bounds__(512, 4) cvt_fp16_to_fp4(
-#else
-cvt_fp16_to_fp4(
-#endif
-    int32_t numRows, int32_t numCols, Type const* in, float const* SFScale,
-    uint32_t* out, uint32_t* SFout) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+__global__ void __launch_bounds__(512, 4)
+    cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, Type const* in,
+                    float const* SFScale, uint32_t* out, uint32_t* SFout) {
   using PackedVec = PackedVec<Type>;
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
       (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
@@ -72,7 +66,6 @@ cvt_fp16_to_fp4(
           cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(in_vec, SFScaleVal, sf_out);
     }
   }
-#endif
 }
 
 template <typename T>

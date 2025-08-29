@@ -31,16 +31,12 @@ namespace vllm {
 
 // Use UE4M3 by default.
 template <class Type, bool UE8M0_SF = false, bool SMALL_NUM_EXPERTS = false>
-__global__ void
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-__launch_bounds__(512, 4) cvt_fp16_to_fp4(
-#else
-cvt_fp16_to_fp4(
-#endif
-    int32_t numRows, int32_t numCols, Type const* in, float const* SFScale,
-    uint32_t* out, uint32_t* SFout, uint32_t* input_offset_by_experts,
-    uint32_t* output_scale_offset_by_experts, int n_experts, bool low_latency) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+__global__ void __launch_bounds__(512, 4)
+    cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, Type const* in,
+                    float const* SFScale, uint32_t* out, uint32_t* SFout,
+                    uint32_t* input_offset_by_experts,
+                    uint32_t* output_scale_offset_by_experts, int n_experts,
+                    bool low_latency) {
   using PackedVec = PackedVec<Type>;
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
       (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
@@ -98,8 +94,8 @@ cvt_fp16_to_fp4(
                 &input_offset_by_experts[chunk_start + 12]));
         local_offsets[16] = __ldca(&input_offset_by_experts[chunk_start + 16]);
 
-  // Check against the 16 loaded offsets
-  #pragma unroll
+// Check against the 16 loaded offsets
+#pragma unroll
         for (int i = 0; i < 16; i++) {
           if (rowIdx >= local_offsets[i] && rowIdx < local_offsets[i + 1]) {
             rowIdx_in_expert = rowIdx - local_offsets[i];
@@ -129,21 +125,15 @@ cvt_fp16_to_fp4(
 
     out_pos = cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(in_vec, SFScaleVal, sf_out);
   }
-#endif
 }
 
 // Kernel for LARGE_M_TOPK = true (large m_topk optimized version)
 template <class Type, bool UE8M0_SF = false, bool SMALL_NUM_EXPERTS = false>
-__global__ void
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
-__launch_bounds__(1024, 4) cvt_fp16_to_fp4(
-#else
-cvt_fp16_to_fp4(
-#endif
-    int32_t numRows, int32_t numCols, Type const* in, float const* SFScale,
-    uint32_t* out, uint32_t* SFout, uint32_t* input_offset_by_experts,
-    uint32_t* output_scale_offset_by_experts, int n_experts) {
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+__global__ void __launch_bounds__(1024, 4)
+    cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, Type const* in,
+                    float const* SFScale, uint32_t* out, uint32_t* SFout,
+                    uint32_t* input_offset_by_experts,
+                    uint32_t* output_scale_offset_by_experts, int n_experts) {
   using PackedVec = PackedVec<Type>;
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
       (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
@@ -224,7 +214,6 @@ cvt_fp16_to_fp4(
 
     out_pos = cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(in_vec, SFScaleVal, sf_out);
   }
-#endif
 }
 
 template <typename T>
