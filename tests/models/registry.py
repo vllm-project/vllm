@@ -6,10 +6,11 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Optional
 
 import pytest
+import torch
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
 
-from vllm.config import TokenizerMode
+from vllm.config import ModelDType, TokenizerMode
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,23 @@ class _HfExamplesInfo:
     transformers_version_reason: Optional[str] = None
     """
     The reason for the minimum/maximum version requirement.
+    """
+
+    skip_tokenizer_init: bool = False
+    """
+    If true, skip initialization of tokenizer and detokenizer. 
+    """
+
+    dtype: ModelDType = "auto",
+    """
+    The data type for the model weights and activations.
+    """
+
+    enforce_eager: bool = False,
+    """
+    Whether to enforce eager execution. If True, we will
+    disable CUDA graph and always execute the model in eager mode.
+    If False, we will use CUDA graph and eager execution in hybrid.
     """
 
     is_available_online: bool = True
@@ -359,9 +377,13 @@ _EMBEDDING_EXAMPLE_MODELS = {
                                          trust_remote_code=True),
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1"), # noqa: E501
     "PrithviGeoSpatialMAE": _HfExamplesInfo("mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11", # noqa: E501
+                                            dtype=torch.float16,
+                                            enforce_eager=True,
                                             is_available_online=False),  # noqa: E501
     "Terratorch": _HfExamplesInfo("mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
-                                   is_available_online=False),  # noqa: E501
+                                  dtype=torch.float16,
+                                  enforce_eager=True,
+                                  skip_tokenizer_init=True),  # noqa: E501
 }
 
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
