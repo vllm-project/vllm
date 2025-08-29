@@ -12,9 +12,9 @@ from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, LRUCache
 from vllm.utils.jsontree import json_map_leaves, json_reduce_leaves
 
-from .inputs import (MultiModalFieldElem, MultiModalKwargs,
-                     MultiModalKwargsItem, MultiModalKwargsItems,
-                     NestedTensors)
+from .inputs import (MultiModalFeatureSpec, MultiModalFieldElem,
+                     MultiModalKwargs, MultiModalKwargsItem,
+                     MultiModalKwargsItems, NestedTensors)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -417,6 +417,16 @@ class BaseMultiModalReceiverCache(
         BaseMultiModalCache[Optional[MultiModalKwargsItem],
                             MultiModalKwargsItem]):
     """The required interface for caches on P1."""
+
+    def get_and_update_features(
+        self,
+        mm_features: list["MultiModalFeatureSpec"],
+    ) -> list["MultiModalFeatureSpec"]:
+        """Update multimodal features with cached encoder outputs."""
+        for feature in mm_features:
+            feature.data = self.get_and_update_item(feature.data,
+                                                    feature.identifier)
+        return mm_features
 
 
 class MultiModalReceiverCache(BaseMultiModalReceiverCache):

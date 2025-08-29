@@ -35,9 +35,7 @@ def make_request() -> EngineCoreRequest:
     return EngineCoreRequest(
         request_id=str(uuid.uuid4()),
         prompt_token_ids=PROMPT_TOKENS,
-        mm_kwargs=None,
-        mm_hashes=None,
-        mm_placeholders=None,
+        mm_features=None,
         sampling_params=SamplingParams(),
         pooling_params=None,
         eos_token_id=None,
