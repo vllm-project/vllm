@@ -607,7 +607,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 hidden_size,
                 intermediate_size_per_partition,
                 dtype=params_dtype),
-                                          requires_grad=False)
+                                           requires_grad=False)
             layer.register_parameter("w2_weight", w2_weight)
             set_weight_attrs(w2_weight, extra_weight_attrs)
 
