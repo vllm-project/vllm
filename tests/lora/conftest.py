@@ -3,15 +3,13 @@
 
 import tempfile
 from collections import OrderedDict
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 import torch.nn as nn
 from huggingface_hub import snapshot_download
 
-import vllm
-from vllm.config import LoRAConfig
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
@@ -21,7 +19,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import SupportsLoRA
 from vllm.platforms import current_platform
 
@@ -104,6 +101,7 @@ def dummy_model() -> nn.Module:
         ]))
     model.config = MagicMock()
     model.embedding_modules = {"lm_head": "lm_head"}
+    model.unpadded_vocab_size = 32000
     return model
 
 
@@ -137,6 +135,8 @@ def dummy_model_gate_up() -> nn.Module:
         ],
     }
     model.embedding_modules = {"lm_head": "lm_head"}
+    model.unpadded_vocab_size = 32000
+
     return model
 
 
