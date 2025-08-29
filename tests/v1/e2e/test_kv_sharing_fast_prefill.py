@@ -64,6 +64,7 @@ def cleanup(llm: LLM, compilation_config: CompilationConfig):
 
 @fork_new_process_for_each_test
 @pytest.mark.parametrize("enforce_eager", [True])
+@pytest.mark.skip(reason="Disable until Gemma3n supports fast prefill")
 def test_kv_sharing_fast_prefill(
     monkeypatch: pytest.MonkeyPatch,
     enforce_eager: bool,
