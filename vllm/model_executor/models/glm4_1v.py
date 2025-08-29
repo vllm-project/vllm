@@ -420,7 +420,7 @@ class Glm4vVisionBlock(nn.Module):
             max_seqlen: Optional[int] = None,  # Only used for Flash Attention
             seqlens: Optional[list[int]] = None,  # Only used for xFormers
     ) -> torch.Tensor:
-        x = x + self.attn(
+        x += self.attn(
             self.norm1(x),
             cu_seqlens=cu_seqlens,
             rotary_pos_emb=rotary_pos_emb,
@@ -428,7 +428,7 @@ class Glm4vVisionBlock(nn.Module):
             seqlens=seqlens,
         )
 
-        x = x + self.mlp(self.norm2(x))
+        x += self.mlp(self.norm2(x))
         return x
 
 
@@ -624,7 +624,7 @@ class Glm4vVisionEmbeddings(nn.Module):
                 pos_embed_weight.dtype).to(embeddings.device)
 
         # Add adapted position encoding to embeddings
-        embeddings = embeddings + adapted_pos_embed
+        embeddings += adapted_pos_embed
         return embeddings
 
 

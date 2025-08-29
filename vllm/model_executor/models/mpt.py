@@ -202,10 +202,10 @@ class MPTBlock(nn.Module):
             position_ids=position_ids,
             hidden_states=x,
         )
-        hidden_states = hidden_states + x
+        hidden_states += x
         x = self.norm_2(hidden_states)
         x = self.ffn(x)
-        hidden_states = hidden_states + x
+        hidden_states += x
         return hidden_states
 
 

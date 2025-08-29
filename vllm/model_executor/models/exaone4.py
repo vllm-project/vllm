@@ -275,7 +275,7 @@ class Exaone4DecoderLayer(nn.Module):
 
         # Use post-LN
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         residual = hidden_states
 
@@ -284,7 +284,7 @@ class Exaone4DecoderLayer(nn.Module):
 
         # Use post-LN
         hidden_states = self.post_feedforward_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         return hidden_states, residual
 

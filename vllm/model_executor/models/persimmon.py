@@ -200,14 +200,14 @@ class PersimmonDecoderLayer(nn.Module):
             position_ids=position_ids,
             hidden_states=hidden_states,
         )
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
 
-        hidden_states = hidden_states + residual
+        hidden_states += residual
 
         outputs = hidden_states
         return outputs

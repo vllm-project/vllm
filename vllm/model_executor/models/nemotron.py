@@ -87,7 +87,7 @@ class NemotronLayerNorm1P(nn.LayerNorm):
         residual: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if residual is not None:
-            x = x + residual
+            x += residual
             residual = x
         args = _cast_if_autocast_enabled(x, self.normalized_shape,
                                          self.weight + 1, self.bias, self.eps)

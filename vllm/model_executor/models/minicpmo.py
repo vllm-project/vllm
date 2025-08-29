@@ -429,7 +429,7 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
         hidden_states = nn.functional.dropout(hidden_states,
                                               p=self.dropout,
                                               training=self.training)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
@@ -441,7 +441,7 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
         hidden_states = nn.functional.dropout(hidden_states,
                                               p=self.dropout,
                                               training=self.training)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         if hidden_states.dtype == torch.float16:
             hidden_states = cast_overflow_tensors(hidden_states)

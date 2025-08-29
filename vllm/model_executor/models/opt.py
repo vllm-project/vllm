@@ -171,7 +171,7 @@ class OPTDecoderLayer(nn.Module):
         if self.do_layer_norm_before:
             hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states = self.self_attn(hidden_states=hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         # 350m applies layer norm AFTER attention
         if not self.do_layer_norm_before:
             hidden_states = self.self_attn_layer_norm(hidden_states)
@@ -184,7 +184,7 @@ class OPTDecoderLayer(nn.Module):
         hidden_states, _ = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
         hidden_states, _ = self.fc2(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         # 350m applies layer norm AFTER attention
         if not self.do_layer_norm_before:
             hidden_states = self.final_layer_norm(hidden_states)

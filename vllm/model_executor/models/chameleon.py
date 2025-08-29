@@ -458,13 +458,13 @@ class ChameleonSwinDecoderLayer(nn.Module):
         )
 
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = hidden_states + residual
+        hidden_states += residual
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_attention_layernorm(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         return hidden_states, residual
 
@@ -647,7 +647,7 @@ class ChameleonVQVAEEncoderAttnBlock(nn.Module):
                                             height * width).permute(0, 2, 1)
         key_states = key_states.reshape(batch_size, channels, height * width)
         attn_weights = torch.bmm(query_states, key_states)
-        attn_weights = attn_weights * (int(channels)**(-0.5))
+        attn_weights *= int(channels)**(-0.5)
         attn_weights = F.softmax(attn_weights, dim=2)
 
         # attend to values

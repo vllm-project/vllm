@@ -408,7 +408,7 @@ class BartEncoderLayer(nn.Module):
         residual = hidden_states
         hidden_states = self.self_attn(hidden_states=hidden_states)
 
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         hidden_states = self.self_attn_layer_norm(hidden_states)
 
         residual = hidden_states
@@ -417,7 +417,7 @@ class BartEncoderLayer(nn.Module):
 
         hidden_states, _ = self.fc2(hidden_states)
 
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         hidden_states = self.final_layer_norm(hidden_states)
 
         if hidden_states.dtype == torch.float16 and (
@@ -501,7 +501,7 @@ class BartDecoderLayer(nn.Module):
         # Self Attention
         hidden_states = self.self_attn(hidden_states=decoder_hidden_states)
 
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         hidden_states = self.self_attn_layer_norm(hidden_states)
 
         # Cross-Attention Block
@@ -513,7 +513,7 @@ class BartDecoderLayer(nn.Module):
             encoder_hidden_states=encoder_hidden_states,
         )
 
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         hidden_states = self.encoder_attn_layer_norm(hidden_states)
 
         # Fully Connected
@@ -523,7 +523,7 @@ class BartDecoderLayer(nn.Module):
 
         hidden_states, _ = self.fc2(hidden_states)
 
-        hidden_states = residual + hidden_states
+        hidden_states += residual
         hidden_states = self.final_layer_norm(hidden_states)
 
         return hidden_states
@@ -920,7 +920,7 @@ class MBartEncoderLayer(BartEncoderLayer):
         hidden_states = self.self_attn_layer_norm(hidden_states)
         hidden_states = self.self_attn(hidden_states=hidden_states)
 
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         residual = hidden_states
         hidden_states = self.final_layer_norm(hidden_states)
@@ -929,7 +929,7 @@ class MBartEncoderLayer(BartEncoderLayer):
 
         hidden_states, _ = self.fc2(hidden_states)
 
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         if hidden_states.dtype == torch.float16 and (
                 torch.isinf(hidden_states).any()
@@ -952,7 +952,7 @@ class MBartDecoderLayer(BartDecoderLayer):
         # Self Attention
         hidden_states = self.self_attn(hidden_states=hidden_states)
 
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         # Cross-Attention Block
 
@@ -964,7 +964,7 @@ class MBartDecoderLayer(BartDecoderLayer):
             encoder_hidden_states=encoder_hidden_states,
         )
 
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         # Fully Connected
         residual = hidden_states
@@ -974,7 +974,7 @@ class MBartDecoderLayer(BartDecoderLayer):
 
         hidden_states, _ = self.fc2(hidden_states)
 
-        hidden_states = residual + hidden_states
+        hidden_states += residual
 
         return hidden_states
 

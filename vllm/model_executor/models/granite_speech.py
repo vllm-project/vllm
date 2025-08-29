@@ -450,11 +450,11 @@ class GraniteSpeechConformerBlock(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor,
                 attention_dists: torch.Tensor) -> torch.Tensor:
-        hidden_states = 0.5 * self.ff1(hidden_states) + hidden_states
-        hidden_states = self.attn(
-            hidden_states, attention_dists=attention_dists) + hidden_states
-        hidden_states = self.conv(hidden_states) + hidden_states
-        hidden_states = 0.5 * self.ff2(hidden_states) + hidden_states
+        hidden_states += 0.5 * self.ff1(hidden_states)
+        hidden_states += self.attn(hidden_states,
+                                   attention_dists=attention_dists)
+        hidden_states += self.conv(hidden_states)
+        hidden_states += 0.5 * self.ff2(hidden_states)
         hidden_states = self.post_norm(hidden_states)
         return hidden_states
 
