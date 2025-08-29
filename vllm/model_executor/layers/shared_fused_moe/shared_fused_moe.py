@@ -4,6 +4,7 @@ from typing import Optional
 
 import torch
 
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
 
@@ -36,6 +37,13 @@ class SharedFusedMoE(FusedMoE):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not self.use_overlapped:
             shared_out = self._shared_experts(hidden_states)
+
+            # Reduce outputs if necessary, since the MLP should
+            # have been created with reduce_results=False.
+            if (self.reduce_results and self.tp_size > 1
+                    and self.must_reduce_shared_expert_outputs()):
+                shared_out = tensor_model_parallel_all_reduce(shared_out)
+
             fused_out = super().forward(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
