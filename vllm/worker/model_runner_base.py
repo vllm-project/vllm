@@ -13,10 +13,9 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.interfaces import supports_transcription
-from vllm.model_executor.models.interfaces_base import (
-    is_pooling_model, is_text_generation_model)
+from vllm.model_executor.models.interfaces_base import is_text_generation_model
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
-from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
+from vllm.tasks import GenerationTask, SupportedTask
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
@@ -241,20 +240,11 @@ class ModelRunnerBase(ABC, Generic[T]):
 
         return supported_tasks
 
-    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
-        model = self.get_model()
-        if not is_pooling_model(model):
-            return []
-
-        return list(model.pooler.get_supported_tasks())
-
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         tasks = list[SupportedTask]()
 
         if self.model_config.runner_type == "generate":
             tasks.extend(self.get_supported_generation_tasks())
-        if self.model_config.runner_type == "pooling":
-            tasks.extend(self.get_supported_pooling_tasks())
 
         return tuple(tasks)
 

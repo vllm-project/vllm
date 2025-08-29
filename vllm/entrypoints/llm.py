@@ -1156,8 +1156,7 @@ class LLM:
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-            if envs.VLLM_USE_V1 and (token_type_ids := engine_prompt.pop(
-                    "token_type_ids", None)):
+            if (token_type_ids := engine_prompt.pop("token_type_ids", None)):
                 params = pooling_params.clone()
                 compressed = compress_token_type_ids(token_type_ids)
                 params.extra_kwargs = {"compressed_token_type_ids": compressed}
