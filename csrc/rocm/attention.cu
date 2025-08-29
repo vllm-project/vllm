@@ -3525,15 +3525,14 @@ void paged_attention_custom_launcher_navi(
                                     OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE>( \
         out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
         num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
-        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale,         \
-        mfma_option);                                                       \
+        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);        \
   } else {                                                                  \
     paged_attention_custom_launcher_navi<                                   \
         T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT, PSIZE, ALIBI_ENABLED,  \
         MFMA_TYPE>(                                                         \
         out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
         num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
-        max_seq_len, alibi_slopes, k_scale, v_scale, mfma_option);          \
+        max_seq_len, alibi_slopes, k_scale, v_scale);                       \
   }
 
 #define CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
