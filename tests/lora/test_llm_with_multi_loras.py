@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Script to test multi loras service with tp >= 2
+This script contains:
+1. test multi loras service with tp >= 2
+2. test multi loras request
 """
+import pytest
+
 from tests.utils import multi_gpu_test
 from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
@@ -156,3 +160,34 @@ def test_multi_loras_with_tp_sync():
 
         output_text = call_llm_get_outputs(prompt, "Alice")
         check_outputs(output_text, expected_output)
+
+
+def test_multiple_lora_requests():
+    llm = LLM(
+        model=MODEL_PATH,
+        enable_lora=True,
+        max_loras=4,
+        max_lora_rank=LORA_RANK,
+        max_model_len=512,
+        gpu_memory_utilization=0.5,
+        enforce_eager=True,
+    )
+    PROMPTS = ["Hello, my name is"] * 2
+    LORA_NAME = "Alice"
+    lora_request = [
+        LoRARequest(LORA_NAME + str(idx), idx + 1,
+                    LORA_NAME_PATH_MAP[LORA_NAME])
+        for idx in range(len(PROMPTS))
+    ]
+    # Multiple SamplingParams should be matched with each prompt
+    outputs = llm.generate(PROMPTS, lora_request=lora_request)
+    assert len(PROMPTS) == len(outputs)
+
+    # Exception raised, if the size of params does not match the size of prompts
+    with pytest.raises(ValueError):
+        outputs = llm.generate(PROMPTS, lora_request=lora_request[:1])
+
+    # Single LoRARequest should be applied to every prompt
+    single_lora_request = lora_request[0]
+    outputs = llm.generate(PROMPTS, lora_request=single_lora_request)
+    assert len(PROMPTS) == len(outputs)

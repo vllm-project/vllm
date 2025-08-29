@@ -109,10 +109,9 @@ steps:
   - tests/entrypoints/offline_mode
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_collective_rpc.py
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
-  - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
   - VLLM_USE_V1=0 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
 - label: Entrypoints Test (API Server) # 40min
@@ -326,7 +325,7 @@ steps:
   source_file_dependencies:
   - vllm/lora
   - tests/lora
-  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py
+  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py
   parallelism: 4
 
 - label: PyTorch Compilation Unit Tests
@@ -807,13 +806,13 @@ steps:
     # requires multi-GPU testing for validation.
     - pytest -v -s -x lora/test_chatglm3_tp.py
     - pytest -v -s -x lora/test_llama_tp.py
-    - pytest -v -s -x lora/test_multi_loras_with_tp.py
+    - pytest -v -s -x lora/test_llm_with_multi_loras.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2
+  num_gpus: 2 
   optional: true
   source_file_dependencies:
   - vllm/
