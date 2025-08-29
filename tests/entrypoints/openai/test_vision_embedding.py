@@ -49,9 +49,11 @@ def server():
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image() -> dict[str, str]:
+def base64_encoded_image(local_asset_server_base_url) -> dict[str, str]:
     return {
-        image_url: encode_image_base64(fetch_image(image_url))
+        image_url:
+        encode_image_base64(
+            fetch_image(f"{local_asset_server_base_url}/{image_url}"))
         for image_url in TEST_IMAGE_URLS
     }
 
@@ -70,7 +72,7 @@ def get_hf_prompt_tokens(model_name, content, image_url):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS, indirect=True)
 async def test_image_embedding(server: RemoteOpenAIServer, model_name: str,
                                image_url: str):
     content_text = "Represent the given image."

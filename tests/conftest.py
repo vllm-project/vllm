@@ -1278,7 +1278,7 @@ class AssetHandler(http.server.BaseHTTPRequestHandler):
         try:
             data = ImageAsset(base).pil_image(ext=ext)
         except Exception as e:
-            self.send_error(500, f"Failed to load asset: {e}")
+            self.send_error(500, f"Failed to load asset: {ext} {base} {e} ")
             return
 
         ctype, _ = mimetypes.guess_type(filename)
@@ -1314,3 +1314,10 @@ def local_asset_server_base_url() -> str:
     finally:
         server.shutdown()
         thread.join()
+
+
+@pytest.fixture
+def image_url(request, local_asset_server_base_url) -> str:
+    # request.param is one of the IMAGE_URLS filenames
+    name = request.param
+    return f"{local_asset_server_base_url}/{name}"

@@ -52,16 +52,18 @@ async def client(image_server):
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image() -> dict[str, str]:
+def base64_encoded_image(local_asset_server_base_url) -> dict[str, str]:
     return {
-        image_url: encode_image_base64(fetch_image(image_url))
+        image_url:
+        encode_image_base64(
+            fetch_image(f"{local_asset_server_base_url}/{image_url}"))
         for image_url in TEST_IMAGE_URLS
     }
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS, indirect=True)
 async def test_single_chat_session_image(client: openai.AsyncOpenAI,
                                          model_name: str, image_url: str):
     content_text = "What's in this image?"
@@ -91,7 +93,7 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS, indirect=True)
 async def test_single_chat_session_image_base64encoded(
     client: openai.AsyncOpenAI,
     model_name: str,

@@ -45,11 +45,12 @@ TEST_VIDEO_URLS = [
 
 
 @pytest.fixture(scope="module")
-def url_images() -> dict[str, Image.Image]:
+def url_images(local_asset_server_base_url) -> dict[str, Image.Image]:
     connector = MediaConnector()
 
     return {
-        image_url: connector.fetch_image(image_url)
+        image_url:
+        connector.fetch_image(f"{local_asset_server_base_url}/{image_url}")
         for image_url in TEST_IMAGE_URLS
     }
 
@@ -69,7 +70,7 @@ def _image_equals(a: Image.Image, b: Image.Image) -> bool:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS, indirect=True)
 async def test_fetch_image_http(image_url: str):
     connector = MediaConnector()
 
@@ -79,7 +80,7 @@ async def test_fetch_image_http(image_url: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS, indirect=True)
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
 async def test_fetch_image_base64(url_images: dict[str, Image.Image],
                                   image_url: str, suffix: str):
@@ -117,7 +118,7 @@ async def test_fetch_image_base64(url_images: dict[str, Image.Image],
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS, indirect=True)
 async def test_fetch_image_local_files(image_url: str):
     connector = MediaConnector()
 
