@@ -913,9 +913,6 @@ class MultiModalInputs(TypedDict):
     prompt_token_ids: list[int]
     """The processed token IDs which includes placeholder tokens."""
 
-    token_type_ids: NotRequired[list[int]]
-    """The token type IDs of the prompt."""
-
     mm_kwargs: MultiModalKwargsOptionalItems
     """Keyword arguments to be directly passed to the model after batching."""
 
@@ -946,6 +943,3 @@ class MultiModalEncDecInputs(MultiModalInputs):
 
     encoder_prompt_token_ids: list[int]
     """The processed token IDs of the encoder prompt."""
-
-    encoder_token_type_ids: NotRequired[list[int]]
-    """The token type IDs of the encoder prompt."""

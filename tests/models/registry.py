@@ -323,8 +323,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
-    "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5", v0_only=True),
-    "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2", v0_only=True),  # noqa: E501
+    "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
+    "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),  # noqa: E501
     "GritLM": _HfExamplesInfo("parasail-ai/GritLM-7B-vllm"),
     "GteModel": _HfExamplesInfo("Snowflake/snowflake-arctic-embed-m-v2.0",
                                                trust_remote_code=True),
@@ -337,9 +337,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "ModernBertModel": _HfExamplesInfo("Alibaba-NLP/gte-modernbert-base",
-                                trust_remote_code=True, v0_only=True),
+                                trust_remote_code=True),
     "NomicBertModel": _HfExamplesInfo("nomic-ai/nomic-embed-text-v2-moe",
-                                               trust_remote_code=True, v0_only=True),  # noqa: E501
+                                               trust_remote_code=True),  # noqa: E501
     "Qwen2Model": _HfExamplesInfo("ssmits/Qwen2-7B-Instruct-embed-base"),
     "Qwen2ForRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-RM-72B",
                                            max_transformers_version="4.53",
@@ -347,9 +347,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "Qwen2ForProcessRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-PRM-7B",
                                                   max_transformers_version="4.53",
                                                   transformers_version_reason="HF model uses remote code that is not compatible with latest Transformers"),  # noqa: E501
-    "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2", v0_only=True),  # noqa: E501
-    "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1", v0_only=True),  # noqa: E501
-    "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small", v0_only=True),  # noqa: E501
+    "RobertaModel": _HfExamplesInfo("sentence-transformers/stsb-roberta-base-v2"),  # noqa: E501
+    "RobertaForMaskedLM": _HfExamplesInfo("sentence-transformers/all-roberta-large-v1"),  # noqa: E501
+    "XLMRobertaModel": _HfExamplesInfo("intfloat/multilingual-e5-small"),  # noqa: E501
     # [Multimodal]
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
     "Phi3VForCausalLM": _HfExamplesInfo("TIGER-Lab/VLM2Vec-Full",
@@ -364,20 +364,19 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     "GPT2ForSequenceClassification": _HfExamplesInfo("nie3e/sentiment-polish-gpt2-small"),  # noqa: E501
 
     # [Cross-encoder]
-    "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2", v0_only=True),  # noqa: E501
+    "BertForSequenceClassification": _HfExamplesInfo("cross-encoder/ms-marco-MiniLM-L-6-v2"),  # noqa: E501
     "GteNewForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-multilingual-reranker-base",  # noqa: E501
                                                        trust_remote_code=True,
                                                        hf_overrides={
                                                            "architectures": ["GteNewForSequenceClassification"]}),# noqa: E501
-    "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base", v0_only=True), # noqa: E501
-    "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base", v0_only=True),  # noqa: E501
-    "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3", v0_only=True),  # noqa: E501
+    "ModernBertForSequenceClassification": _HfExamplesInfo("Alibaba-NLP/gte-reranker-modernbert-base"), # noqa: E501
+    "RobertaForSequenceClassification": _HfExamplesInfo("cross-encoder/quora-roberta-base"),  # noqa: E501
+    "XLMRobertaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-m3"),  # noqa: E501
 }
 
 _AUTOMATIC_CONVERTED_MODELS = {
     # Use as_seq_cls_model for automatic conversion
     "GemmaForSequenceClassification": _HfExamplesInfo("BAAI/bge-reranker-v2-gemma",  # noqa: E501
-                                                      v0_only=True,
                                                       hf_overrides={"architectures": ["GemmaForSequenceClassification"], # noqa: E501
                                                                     "classifier_from_token": ["Yes"],  # noqa: E501
                                                                     "method": "no_post_processing"}),  # noqa: E501

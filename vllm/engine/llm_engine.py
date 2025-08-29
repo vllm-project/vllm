@@ -40,12 +40,11 @@ from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
-from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
-                           PoolingSequenceGroupOutput, Sequence, SequenceGroup,
-                           SequenceGroupBase, SequenceGroupMetadata,
-                           SequenceGroupOutput, SequenceStatus)
+                           Sequence, SequenceGroup, SequenceGroupBase,
+                           SequenceGroupMetadata, SequenceGroupOutput,
+                           SequenceStatus)
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.detokenizer import Detokenizer
@@ -93,8 +92,7 @@ class SchedulerContext:
 
     def __init__(self) -> None:
         self.output_queue: Deque[OutputData] = deque()
-        self.request_outputs: List[Union[RequestOutput,
-                                         PoolingRequestOutput]] = []
+        self.request_outputs: List[RequestOutput] = []
         self.seq_group_metadata_list: Optional[
             List[SequenceGroupMetadata]] = None
         self.scheduler_outputs: Optional[SchedulerOutputs] = None
@@ -261,8 +259,7 @@ class LLMEngine:
 
         self.model_executor = executor_class(vllm_config=vllm_config)
 
-        if self.model_config.runner_type != "pooling":
-            self._initialize_kv_caches()
+        self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
@@ -541,7 +538,7 @@ class LLMEngine:
         self,
         request_id: str,
         processed_inputs: ProcessorInputs,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams,
         arrival_time: float,
         lora_request: Optional[LoRARequest],
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -577,7 +574,7 @@ class LLMEngine:
         encoder_seq = (None if encoder_inputs is None else Sequence(
             seq_id, encoder_inputs, block_size, eos_token_id, lora_request))
 
-        # Create a SequenceGroup based on SamplingParams or PoolingParams
+        # Create a SequenceGroup based on SamplingParams
         if isinstance(params, SamplingParams):
             seq_group = self._create_sequence_group_with_sampling(
                 request_id,
@@ -588,18 +585,8 @@ class LLMEngine:
                 trace_headers=trace_headers,
                 encoder_seq=encoder_seq,
                 priority=priority)
-        elif isinstance(params, PoolingParams):
-            seq_group = self._create_sequence_group_with_pooling(
-                request_id,
-                seq,
-                params,
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-                encoder_seq=encoder_seq,
-                priority=priority)
         else:
-            raise ValueError(
-                "Either SamplingParams or PoolingParams must be provided.")
+            raise ValueError("SamplingParams must be provided.")
 
         # Add the sequence group to the scheduler with least unfinished seqs.
         costs = [
@@ -618,7 +605,7 @@ class LLMEngine:
         self,
         request_id: str,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
@@ -636,9 +623,8 @@ class LLMEngine:
             prompt: The prompt to the LLM. See
                 [PromptType][vllm.inputs.PromptType]
                 for more details about the format of each input.
-            params: Parameters for sampling or pooling.
+            params: Parameters for sampling.
                 [SamplingParams][vllm.SamplingParams] for text generation.
-                [PoolingParams][vllm.PoolingParams] for pooling.
             arrival_time: The arrival time of the request. If None, we use
                 the current monotonic time.
             lora_request: The LoRA request to add.
@@ -760,29 +746,6 @@ class LLMEngine:
 
         return seq_group
 
-    def _create_sequence_group_with_pooling(
-        self,
-        request_id: str,
-        seq: Sequence,
-        pooling_params: PoolingParams,
-        arrival_time: float,
-        lora_request: Optional[LoRARequest],
-        encoder_seq: Optional[Sequence] = None,
-        priority: int = 0,
-    ) -> SequenceGroup:
-        """Creates a SequenceGroup with PoolingParams."""
-        # Defensive copy of PoolingParams, which are used by the pooler
-        pooling_params = pooling_params.clone()
-        # Create the sequence group.
-        seq_group = SequenceGroup(request_id=request_id,
-                                  seqs=[seq],
-                                  arrival_time=arrival_time,
-                                  lora_request=lora_request,
-                                  pooling_params=pooling_params,
-                                  encoder_seq=encoder_seq,
-                                  priority=priority)
-        return seq_group
-
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         """Aborts a request(s) with the given ID.
 
@@ -855,18 +818,6 @@ class LLMEngine:
         for scheduler in self.scheduler:
             success = success and scheduler.reset_prefix_cache(device)
         return success
-
-    @staticmethod
-    def _process_sequence_group_outputs(
-        seq_group: SequenceGroup,
-        outputs: List[PoolingSequenceGroupOutput],
-    ) -> None:
-        seq_group.pooled_data = outputs[0].data
-
-        for seq in seq_group.get_seqs():
-            seq.status = SequenceStatus.FINISHED_STOPPED
-
-        return
 
     def _process_model_outputs(self,
                                ctx: SchedulerContext,
@@ -962,13 +913,10 @@ class LLMEngine:
                             seq_group.metrics.model_execute_time = (
                                 o.model_execute_time)
 
-            if self.model_config.runner_type == "pooling":
-                self._process_sequence_group_outputs(seq_group, output)
-            else:
-                self.output_processor.process_prompt_logprob(seq_group, output)
-                if seq_group_meta.do_sample:
-                    self.output_processor.process_outputs(
-                        seq_group, output, is_async)
+            self.output_processor.process_prompt_logprob(seq_group, output)
+            if seq_group_meta.do_sample:
+                self.output_processor.process_outputs(seq_group, output,
+                                                      is_async)
 
             if seq_group.is_finished():
                 finished_now.append(i)
@@ -1090,7 +1038,7 @@ class LLMEngine:
                 seq.append_token_id(sample.output_token, sample.logprobs,
                                     sample.output_embed)
 
-    def step(self) -> List[Union[RequestOutput, PoolingRequestOutput]]:
+    def step(self) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
 
         <figure markdown="span">

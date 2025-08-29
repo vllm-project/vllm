@@ -13,17 +13,12 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, PoolerConfig
-from vllm.model_executor.pooling_metadata import (  # noqa: E501
-    PoolingMetadata as V0PoolingMetadata)
-from vllm.model_executor.pooling_metadata import PoolingTensors
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
 from vllm.tasks import PoolingTask
 from vllm.utils import current_stream, resolve_obj_by_qualname
-from vllm.v1.pool.metadata import PoolingCursor
-from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
+from vllm.v1.pool.metadata import PoolingCursor, PoolingMetadata
 
-PoolingMetadata = Union[V0PoolingMetadata, V1PoolingMetadata]
 PoolingFn = Callable[
     [Union[torch.Tensor, list[torch.Tensor]], PoolingMetadata],
     Union[torch.Tensor, list[torch.Tensor]]]
@@ -127,36 +122,23 @@ def get_prompt_lens(
     hidden_states: Union[torch.Tensor, list[torch.Tensor]],
     pooling_metadata: PoolingMetadata,
 ) -> torch.Tensor:
-    if isinstance(pooling_metadata, V1PoolingMetadata):
-        return pooling_metadata.prompt_lens
-
-    return PoolingTensors.from_pooling_metadata(
-        pooling_metadata, hidden_states[0].device).prompt_lens
+    return pooling_metadata.prompt_lens
 
 
 def get_prompt_token_ids(
         pooling_metadata: PoolingMetadata) -> list[torch.Tensor]:
-    if isinstance(pooling_metadata, V1PoolingMetadata):
-        assert pooling_metadata.prompt_token_ids is not None, (
-            "Please set `requires_token_ids=True` in `get_pooling_updates`")
-
-        return [
-            pooling_metadata.prompt_token_ids[i, :num]
-            for i, num in enumerate(pooling_metadata.prompt_lens)
-        ]
+    assert pooling_metadata.prompt_token_ids is not None, (
+        "Please set `requires_token_ids=True` in `get_pooling_updates`")
 
     return [
-        torch.tensor(seq_data_i.prompt_token_ids)
-        for seq_data_i in pooling_metadata.seq_data.values()
+        pooling_metadata.prompt_token_ids[i, :num]
+        for i, num in enumerate(pooling_metadata.prompt_lens)
     ]
 
 
 def get_pooling_params(
         pooling_metadata: PoolingMetadata) -> list[PoolingParams]:
-    if isinstance(pooling_metadata, V0PoolingMetadata):
-        pooling_params = [p for _, p in pooling_metadata.seq_groups]
-    else:
-        pooling_params = pooling_metadata.pooling_params
+    pooling_params = pooling_metadata.pooling_params
     return pooling_params
 
 

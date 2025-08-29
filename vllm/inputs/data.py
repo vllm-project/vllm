@@ -174,9 +174,6 @@ class TokenInputs(TypedDict):
     prompt_token_ids: list[int]
     """The token IDs of the prompt."""
 
-    token_type_ids: NotRequired[list[int]]
-    """The token type IDs of the prompt."""
-
     prompt: NotRequired[str]
     """
     The original prompt text corresponding to the token IDs, if available.
@@ -190,7 +187,6 @@ class TokenInputs(TypedDict):
 
 def token_inputs(
     prompt_token_ids: list[int],
-    token_type_ids: Optional[list[int]] = None,
     prompt: Optional[str] = None,
     cache_salt: Optional[str] = None,
 ) -> TokenInputs:
@@ -200,8 +196,6 @@ def token_inputs(
 
     if prompt is not None:
         inputs["prompt"] = prompt
-    if token_type_ids is not None:
-        inputs["token_type_ids"] = token_type_ids
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
 

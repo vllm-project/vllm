@@ -509,12 +509,6 @@ class Sequence:
         return self.inputs["prompt_token_ids"]
 
     @property
-    def token_type_ids(self) -> list[int]:
-        if self.inputs["type"] == "embeds":
-            return []
-        return self.inputs.get("token_type_ids", [])
-
-    @property
     def multi_modal_data(self) -> MultiModalKwargs:
         if self.inputs["type"] == "multimodal":
             return self.inputs["mm_kwargs"].get_data()
@@ -766,10 +760,6 @@ class SequenceGroup:
                 if self.encoder_seq is not None else None)
 
     @property
-    def token_type_ids(self) -> Optional[list[int]]:
-        return self.first_seq.token_type_ids
-
-    @property
     def multi_modal_data(self) -> MultiModalKwargs:
         if self.first_seq.multi_modal_data:
             return self.first_seq.multi_modal_data
@@ -972,7 +962,6 @@ class SequenceGroupMetadata(
     computed_block_nums: Optional[list[int]] = None
     state: Optional[SequenceGroupState] = msgspec.field(
         default_factory=lambda: SequenceGroupState())
-    token_type_ids: Optional[list[int]] = None
     multi_modal_data: Optional[MultiModalKwargs] = None
     multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     encoder_seq_data: Optional[SequenceData] = None
