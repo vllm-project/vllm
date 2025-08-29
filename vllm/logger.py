@@ -220,7 +220,7 @@ def enable_trace_function_call(log_file_path: str,
     logger.warning(
         "VLLM_TRACE_FUNCTION is enabled. It will record every"
         " function executed by Python. This will slow down the code. It "
-        "is suggested to be used for debugging hang or crashes only.")
+        "is suggested to be used for debugging hang or crashes only, dude!")
     logger.info("Trace frame log is saved to %s", log_file_path)
     if root_dir is None:
         # by default, this is the vllm root directory
