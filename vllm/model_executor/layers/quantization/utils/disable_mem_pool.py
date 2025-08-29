@@ -1,10 +1,14 @@
-from vllm.device_allocator.cumem import CuMemAllocator
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+# Adopted from
+# https://github.com/vllm-project/vllm/issues/19855
+"""Utility helpers for native fp8 support in sleep_mode"""
 from contextlib import contextmanager
+from torch._C import (_cuda_beginAllocateToPool,
+                      _cuda_endAllocateCurrentStreamToPool)
 from torch.cuda.memory import MemPoolContext
-from torch._C import (
-_cuda_beginAllocateToPool,
-_cuda_endAllocateCurrentStreamToPool,
-)
+from vllm.device_allocator.cumem import CuMemAllocator
 
 @contextmanager
 def disable_mem_pool(disable=False):
