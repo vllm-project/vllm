@@ -14,6 +14,19 @@
   #include <hipcub/hipcub.hpp>
 #endif
 
+#if defined(CCCL_MAJOR_VERSION) && (CCCL_MAJOR_VERSION >= 3)
+  #include <cuda/std/functional>
+  #include <cuda/functional>
+  using Sum_fix = cuda::std::plus<>;
+  using Max_fix = cuda::maximum<>;
+  using Min_fix = cuda::minimum<>;
+#else
+  #include <cub/cub.cuh>
+  using Sum_fix = cub::Sum;
+  using Max_fix = cub::Max;
+  using Min_fix = cub::Min;
+#endif
+
 namespace vllm {
 
 // has_residual must be true, if residual is not a nullptr
@@ -36,7 +49,7 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  ss = BlockReduce(reduceStore).Reduce(ss, cub::Sum{}, blockDim.x);
+  ss = BlockReduce(reduceStore).Reduce(ss, Sum_fix{}, blockDim.x);
 
   __shared__ float s_rms;
   if (threadIdx.x == 0) {
@@ -73,7 +86,7 @@ __device__ void compute_dynamic_per_token_scales(
   __shared__ typename BlockReduce::TempStorage reduceStore;
   block_absmax_val_maybe =
       BlockReduce(reduceStore)
-          .Reduce(block_absmax_val_maybe, cub::Max{}, blockDim.x);
+          .Reduce(block_absmax_val_maybe, Max_fix{}, blockDim.x);
 
   __shared__ float s_token_scale;
   if (threadIdx.x == 0) {
@@ -169,7 +182,7 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  ss = BlockReduce(reduceStore).Reduce(ss, cub::Sum{}, blockDim.x);
+  ss = BlockReduce(reduceStore).Reduce(ss, Sum_fix{}, blockDim.x);
 
   __shared__ float s_rms;
   if (threadIdx.x == 0) {
@@ -240,7 +253,7 @@ __device__ void compute_dynamic_per_token_scales(
   __shared__ typename BlockReduce::TempStorage reduceStore;
   block_absmax_val_maybe =
       BlockReduce(reduceStore)
-          .Reduce(block_absmax_val_maybe, cub::Max{}, blockDim.x);
+          .Reduce(block_absmax_val_maybe, Max_fix{}, blockDim.x);
 
   __shared__ float s_token_scale;
   if (threadIdx.x == 0) {
