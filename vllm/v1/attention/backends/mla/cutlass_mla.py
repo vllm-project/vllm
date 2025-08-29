@@ -109,12 +109,6 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
                                       "are not implemented for "
                                       "CutlassMLAImpl")
 
-        self._use_old_cutlass_mla = False
-        force_old_cutlass = os.environ.get("FORCE_OLD_CUTLASS_MLA", None)
-        if force_old_cutlass:
-            logger.warning_once("Forcing old cutlass mla kernel")
-            self._use_old_cutlass_mla = True
-
         # TODO: Currently, num_kv_splits is limited to 16 to avoid hanging
         #       issues. In case the code hangs, use:
         #       FORCE_NUM_KV_SPLITS=1
