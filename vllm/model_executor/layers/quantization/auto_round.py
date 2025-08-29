@@ -378,7 +378,7 @@ class AutoRoundConfig(QuantizationConfig):
             return None
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
-        if prefix:
+        if prefix and self.extra_config:
             for layer_name in self.extra_config:
                 if layer_name == prefix or layer_name.endswith(prefix):
                     if self.extra_config[layer_name]['bits'] >= 16:
