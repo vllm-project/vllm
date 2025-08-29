@@ -294,6 +294,8 @@ def build_model_context(
         limit_mm_per_prompt=limit_mm_per_prompt,
         mm_processor_cache_gb=mm_processor_cache_gb,
         hf_overrides=model_info.hf_overrides,
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
         **model_config_kwargs,
     )
     return InputContext(model_config)
