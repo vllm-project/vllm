@@ -77,7 +77,7 @@ def bench(
 
 
 if __name__ == "__main__":
-    parser = FlexibleArgumentParser(description="Benchmark the layernorm kernel.")
+    parser = FlexibleArgumentParser(description="Benchmark the custom activation op.")
     parser.add_argument(
         "--func-name",
         type=str,
