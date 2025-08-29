@@ -300,22 +300,7 @@ class EngineCore:
             # Take the draft token ids.
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
-                try:
-                    # Log head of proposed drafts for debugging alignment
-                    head = []
-                    for ids in draft_token_ids.draft_token_ids[:1]:
-                        head = ids[:8]
-                        break
-                    logger.info(
-                        "[EAGLE3 dbg] engine take_draft head=%s lens=%s",  # noqa: G004
-                        head,
-                        [len(x) for x in draft_token_ids.draft_token_ids])
-                except Exception:
-                    pass
                 self.scheduler.update_draft_token_ids(draft_token_ids)
-        print(
-            "split line II ========================================================"
-        )
 
     def step_with_batch_queue(
             self) -> tuple[Optional[dict[int, EngineCoreOutputs]], bool]:

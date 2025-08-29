@@ -857,7 +857,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 causal=True,
             )
 
-            if self.speculative_config and self.drafter.attn_layer_names[0] in kv_cache_group_spec.layer_names and \
+            if self.speculative_config and hasattr(self.drafter, 'attn_layer_names') and \
+                self.drafter.attn_layer_names[0] in kv_cache_group_spec.layer_names and \
                 spec_decode_common_attn_metadata is None:
                 spec_decode_common_attn_metadata = common_attn_metadata
 

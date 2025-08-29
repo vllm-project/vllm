@@ -227,7 +227,6 @@ class GptOssModel(nn.Module):
         x = self.embedding(input_ids)
         aux_hidden_states: list[torch.Tensor] = []
         for idx, layer in enumerate(self.layers):
-            # For pre-norm architecture, capture states before layer processing
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(x)
             x = layer(x, positions)
