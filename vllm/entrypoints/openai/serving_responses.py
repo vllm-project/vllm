@@ -339,7 +339,6 @@ class OpenAIServingResponses(OpenAIServing):
                     ),
                     name=f"create_{request.request_id}",
                 )
-                yield response
                 return await task
             else:
                 task = asyncio.create_task(
@@ -755,11 +754,16 @@ class OpenAIServingResponses(OpenAIServing):
         *args,
         **kwargs,
     ):
-        self.event_store.setdefault(request.request_id, [])
-        response = self.responses_stream_generator(request, *args, **kwargs)
-        async for event in response:
-            self.event_store[request.request_id].append(event)
-            yield event
+
+        async def event_generator():
+            self.event_store.setdefault(request.request_id, [])
+            response = self.responses_stream_generator(request, *args,
+                                                       **kwargs)
+            async for event in response:
+                self.event_store[request.request_id].append(event)
+                yield event
+
+        return event_generator()
 
     async def _run_background_request(
         self,
