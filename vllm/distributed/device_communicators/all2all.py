@@ -321,21 +321,16 @@ class FlashInferAllToAllManager(All2AllManagerBase):
 
         from vllm.distributed.device_communicators.mnnvl_compat import (
             CustomCommunicator)
-
-        def get_vllm_mnnvl_config() -> MnnvlConfig:
-            """Ready-to-use config for vLLM"""
-            return MnnvlConfig(
-                comm_backend=CustomCommunicator(get_dp_group()),
-                fabric_page_size=1 << 29,  # 512MB
-                allocation_granularity=0  # Auto-detect
-            )
-
-        self.dp_config = get_vllm_mnnvl_config()
+        dp_config = MnnvlConfig(
+            comm_backend=CustomCommunicator(get_dp_group().cpu_group),
+            fabric_page_size=1 << 29,  # 512MB
+            allocation_granularity=0  # Auto-detect
+        )
 
         self.workspace_tensor = MnnvlMoe.get_moe_workspaces(
-            self.mapping, self.dp_config)
+            self.mapping, dp_config)
         self.prepare_workspace = MnnvlMoe.get_moe_prepare_workspace(
-            self.mapping, self.dp_config)
+            self.mapping, dp_config)
 
         self.world_size = world_size
         self.rank = rank

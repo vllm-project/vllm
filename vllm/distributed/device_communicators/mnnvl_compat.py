@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # from vllm.distributed import get_dp_group
 import torch
+import torch.distributed as dist
 from flashinfer.comm.mnnvl import CommBackend as CommBackend
 
 from vllm.utils.flashinfer import has_flashinfer_all2all
@@ -20,21 +21,10 @@ class CustomCommunicator(CommBackend):
     def Get_size(self) -> int:
         return self._group.world_size
 
-    def allgather(self, data: int | bytes):
-        device = f"cuda:{torch.cuda.current_device()}"
-
-        if isinstance(data, int):
-            local_tensor = torch.tensor([data],
-                                        device=device,
-                                        dtype=torch.int32)
-            gathered = self._group.all_gather(local_tensor)
-            return [int(x.item()) for x in gathered]
-        elif isinstance(data, bytes):
-            local_tensor = torch.ByteTensor(list(data)).unsqueeze(0).to(device)
-            gathered = self._group.all_gather(local_tensor, dim=0)
-            return [bytes(gathered[i].cpu().tolist()) for i in range(self.Get_size())]
-        else:
-            raise TypeError(f"Unsupported type for allgather: {type(data)}")
+    def allgather(self, data: int):
+        gathered = [None] * self.Get_size()
+        dist.all_gather_object(gathered, data, group=self._group)
+        return gathered
 
     def Split(self, color: int, key: int) -> 'CustomCommunicator':
         return self
