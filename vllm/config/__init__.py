@@ -1855,7 +1855,6 @@ class LoadConfig:
         return hash_str
 
     def __post_init__(self):
-
         self.load_format = self.load_format.lower()
         if self.ignore_patterns is not None and len(self.ignore_patterns) > 0:
             logger.info(
@@ -2078,6 +2077,7 @@ class SpeculativeConfig:
         return hf_config
 
     def __post_init__(self):
+
         # Note: "method" is a new parameter that helps to extend the
         # configuration of non-model-based proposers, and the "model" parameter
         # will be used to set the draft model, eagle head, or additional weight
