@@ -8,9 +8,9 @@ from packaging import version
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._ipex_ops import ipex_ops as ops
-from vllm.model_executor.layers.fused_moe import FusedMoeWeightScaleSupported
+from vllm.model_executor.layers.fused_moe import (FusedMoEMethodBase,
+                                                  FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -19,8 +19,7 @@ from vllm.model_executor.layers.quantization.awq import (AWQLinearMethod,
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.fp8 import (Fp8Config,
-                                                         Fp8LinearMethod,
-                                                         Fp8MoEMethod)
+                                                         Fp8LinearMethod)
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -265,10 +264,7 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
 class XPUFp8LinearMethod(Fp8LinearMethod):
 
     def __init__(self, quant_config: Fp8Config):
-        self.quant_config = quant_config
-        self.out_dtype = torch.get_default_dtype()
-        self.use_marlin = False
-        self.block_quant = self.quant_config.weight_block_size is not None
+        super().__init__(quant_config)
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # If checkpoint not serialized fp8, quantize the weights.
@@ -291,20 +287,11 @@ class XPUFp8LinearMethod(Fp8LinearMethod):
         return output
 
 
-class XPUFp8MoEMethod(Fp8MoEMethod):
+class XPUFp8MoEMethod(FusedMoEMethodBase):
 
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
-        self.moe = layer.moe_config
-        self.topk_indices_dtype = None
-        self.layer = layer
+        super().__init__(layer.moe_config)
         self.quant_config = quant_config
-        self.block_quant = self.quant_config.weight_block_size is not None
-        self.fused_experts: Optional[
-            mk.FusedMoEModularKernel] = None  # type: ignore
-        self.use_marlin = False
-
-        # Check for DeepGemm support.
-        self.allow_deep_gemm = False
 
     def create_weights(self, layer: Module, num_experts: int, hidden_size: int,
                        intermediate_size_per_partition: int,
@@ -381,10 +368,8 @@ class XPUFp8MoEMethod(Fp8MoEMethod):
         layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
             layer.w13_weight,
             layer.w2_weight,
-            w1_scale_inv=(layer.w13_weight_scale_inv
-                          if self.block_quant else layer.w13_weight_scale),
-            w2_scale_inv=(layer.w2_weight_scale_inv
-                          if self.block_quant else layer.w2_weight_scale),
+            w1_scale_inv=layer.w13_weight_scale,
+            w2_scale_inv=layer.w2_weight_scale,
             a1_scale_inv=layer.w13_input_scale,
             a2_scale_inv=layer.w2_input_scale,
             use_prepack=True,
