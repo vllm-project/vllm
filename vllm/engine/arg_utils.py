@@ -306,6 +306,7 @@ class EngineArgs:
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
+    context_parallel_size: int = ParallelConfig.context_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: Optional[int] = None
     data_parallel_start_rank: Optional[int] = None
@@ -633,6 +634,8 @@ class EngineArgs:
             **parallel_kwargs["pipeline_parallel_size"])
         parallel_group.add_argument("--tensor-parallel-size", "-tp",
                                     **parallel_kwargs["tensor_parallel_size"])
+        parallel_group.add_argument("--context-parallel-size", "-cp",
+                                    **parallel_kwargs["context_parallel_size"])
         parallel_group.add_argument("--data-parallel-size", "-dp",
                                     **parallel_kwargs["data_parallel_size"])
         parallel_group.add_argument(
@@ -1152,6 +1155,14 @@ class EngineArgs:
             # global layers in interleaved sliding window models.
             sliding_window = model_config.get_sliding_window()
 
+        # Note(hc): In the current implementation of decode context
+        # parallel, tp_size needs to be divisible by tp_size,
+        # because the world size does not change by cp, it simply
+        # reuse the GPUs of TP group, and split one TP group into
+        # tp_size//cp_size CP groups.
+        assert self.tensor_parallel_size % self.context_parallel_size == 0, \
+            "cp_size must not exceed tp_size now."
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1302,6 +1313,7 @@ class EngineArgs:
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
+            context_parallel_size=self.context_parallel_size,
         )
 
         speculative_config = self.create_speculative_config(

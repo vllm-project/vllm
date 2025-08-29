@@ -97,7 +97,9 @@ class FixFunctionalizationPass(VllmInductorPass):
                                      node,
                                      mutated_args,
                                      args=('result', 'input', 'scale'))
-            elif at_target == torch.ops._C.silu_and_mul_nvfp4_quant.default:
+            elif current_platform.has_device_capability(
+                    100
+            ) and at_target == torch.ops._C.silu_and_mul_nvfp4_quant.default:
                 mutated_args = {1: 'result', 2: 'result_block_scale'}
                 self.defunctionalize(graph,
                                      node,

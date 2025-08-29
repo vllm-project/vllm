@@ -3,7 +3,7 @@
 """Attention layer with XFormersAttention."""
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
@@ -210,8 +210,10 @@ class XFormersAttentionMetadataBuilder(
         self._num_decodes = 0
         self._num_decode_tokens = 0
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
+    def reorder_batch(
+            self, input_batch: "InputBatch",
+            scheduler_output: "SchedulerOutput"
+    ) -> Union[bool, tuple[bool, int]]:
         return reorder_batch_to_split_decodes_and_prefills(input_batch,
                                                            scheduler_output,
                                                            decode_threshold=1)

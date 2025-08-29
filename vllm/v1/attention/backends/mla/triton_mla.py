@@ -138,6 +138,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         B = q_nope.shape[0]
 
         q = torch.cat([q_nope, q_pe], dim=-1)
+
         o = torch.zeros(B,
                         self.num_heads,
                         self.kv_lora_rank,
