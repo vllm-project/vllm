@@ -511,6 +511,14 @@ class Platform:
         return False
 
     @classmethod
+    def opaque_attention_op(cls) -> bool:
+        """
+        Returns True if we register attention as one giant opaque custom op
+        on the current platform
+        """
+        return False
+
+    @classmethod
     def validate_request(
         cls,
         prompt: PromptType,
@@ -572,6 +580,13 @@ class Platform:
         Returns if the kv_cache_dtype is supported by the current platform.
         """
         return False
+
+    @classmethod
+    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+        """
+        Check if the dtype is supported by the current platform.
+        """
+        raise NotImplementedError
 
 
 class UnspecifiedPlatform(Platform):

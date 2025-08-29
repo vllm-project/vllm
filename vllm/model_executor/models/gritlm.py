@@ -20,7 +20,7 @@ from vllm.sequence import PoolerOutput
 from vllm.tasks import PoolingTask
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
-from .interfaces import default_pooling_type
+from .interfaces_base import default_pooling_type
 
 logger = init_logger(__name__)
 
