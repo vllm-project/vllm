@@ -34,17 +34,6 @@ HYBRID_MODELS = [
     "LiquidAI/LFM2-1.2B",
 ]
 
-HF_UNSUPPORTED_MODELS = [
-    # The HF transformers implementation of
-    # Mamba2 is buggy for Codestral as it doesn't handle n_groups, so the test
-    # doesn't compare vLLM output with HF output.
-    # See https://github.com/huggingface/transformers/pull/35943
-    "yujiepan/mamba2-codestral-v0.1-tiny-random",
-    # transformers 4.55 is still producing garbage for this model
-    # TODO(tdoublep): follow-up on transformers side
-    "ibm-granite/granite-4.0-tiny-preview"
-]
-
 V1_SUPPORTED_MODELS = [
     "state-spaces/mamba-130m-hf",
     "ai21labs/Jamba-tiny-dev",
@@ -94,7 +83,7 @@ def test_models(
         print(f"Skipping transformers comparison because: {hf_version_check}")
 
     with hf_runner(model) as hf_model:
-        if model not in HF_UNSUPPORTED_MODELS and hf_version_check is None:
+        if hf_version_check is None:
             hf_outputs = hf_model.generate_greedy_logprobs_limit(
                 example_prompts, max_tokens, num_logprobs)
         else:
@@ -397,11 +386,8 @@ def test_full_cuda_graph(
         pass
 
     with hf_runner(model) as hf_model:
-        if model not in HF_UNSUPPORTED_MODELS:
-            hf_outputs = hf_model.generate_greedy_logprobs_limit(
-                example_prompts, max_tokens, num_logprobs)
-        else:
-            hf_outputs = None
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            example_prompts, max_tokens, num_logprobs)
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "0")
@@ -455,11 +441,8 @@ def test_fp32_state(
         pass
 
     with hf_runner(model) as hf_model:
-        if model not in HF_UNSUPPORTED_MODELS:
-            hf_outputs = hf_model.generate_greedy_logprobs_limit(
-                example_prompts, max_tokens, num_logprobs)
-        else:
-            hf_outputs = None
+        hf_outputs = hf_model.generate_greedy_logprobs_limit(
+            example_prompts, max_tokens, num_logprobs)
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "0")
