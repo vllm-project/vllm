@@ -47,8 +47,9 @@ from vllm.transformers_utils.config import (
     is_interleaved, maybe_override_with_speculators_target_model,
     try_get_generation_config, try_get_safetensors_metadata,
     try_get_tokenizer_config, uses_mrope)
-from vllm.transformers_utils.s3_utils import S3Model
-from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
+from vllm.transformers_utils.runai_utils import (ObjectStorageModel,
+                                                 is_runai_obj_uri)
+from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         STR_DUAL_CHUNK_FLASH_ATTN_VAL, LayerBlockType,
                         LazyLoader, common_broadcastable_dtype, random_uuid)
@@ -598,7 +599,7 @@ class ModelConfig:
                 f"'Please instead use `--hf-overrides '{hf_overrides_str}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
-        self.maybe_pull_model_tokenizer_for_s3(self.model, self.tokenizer)
+        self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
         if self.runner != "draft":
             # If we're not running the draft model, check for speculators config
@@ -840,41 +841,42 @@ class ModelConfig:
         """The architecture vllm actually used."""
         return self._architecture
 
-    def maybe_pull_model_tokenizer_for_s3(self, model: str,
-                                          tokenizer: str) -> None:
-        """Pull model/tokenizer from S3 to temporary directory when needed.
+    def maybe_pull_model_tokenizer_for_runai(self, model: str,
+                                             tokenizer: str) -> None:
+        """Pull model/tokenizer from Object Storage to temporary
+        directory when needed.
 
         Args:
             model: Model name or path
             tokenizer: Tokenizer name or path
         """
-        if not (is_s3(model) or is_s3(tokenizer)):
+        if not (is_runai_obj_uri(model) or is_runai_obj_uri(tokenizer)):
             return
 
-        if is_s3(model):
-            s3_model = S3Model()
-            s3_model.pull_files(model,
-                                allow_pattern=["*.model", "*.py", "*.json"])
+        if is_runai_obj_uri(model):
+            object_storage_model = ObjectStorageModel()
+            object_storage_model.pull_files(
+                model, allow_pattern=["*.model", "*.py", "*.json"])
             self.model_weights = model
-            self.model = s3_model.dir
+            self.model = object_storage_model.dir
 
             # If tokenizer is same as model, download to same directory
             if model == tokenizer:
-                s3_model.pull_files(model,
-                                    ignore_pattern=[
-                                        "*.pt", "*.safetensors", "*.bin",
-                                        "*.tensors"
-                                    ])
-                self.tokenizer = s3_model.dir
+                object_storage_model.pull_files(model,
+                                                ignore_pattern=[
+                                                    "*.pt", "*.safetensors",
+                                                    "*.bin", "*.tensors"
+                                                ])
+                self.tokenizer = object_storage_model.dir
                 return
 
         # Only download tokenizer if needed and not already handled
-        if is_s3(tokenizer):
-            s3_tokenizer = S3Model()
-            s3_tokenizer.pull_files(
+        if is_runai_obj_uri(tokenizer):
+            object_storage_tokenizer = ObjectStorageModel()
+            object_storage_tokenizer.pull_files(
                 model,
                 ignore_pattern=["*.pt", "*.safetensors", "*.bin", "*.tensors"])
-            self.tokenizer = s3_tokenizer.dir
+            self.tokenizer = object_storage_tokenizer.dir
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self._model_info.supports_multimodal:
