@@ -68,14 +68,14 @@ class AudioURL(TypedDict, total=False):
 
 
 class ChatCompletionContentPartAudioParam(TypedDict, total=False):
-    audio_url: Required[AudioURL]
+    audio_url: Optional[AudioURL]
 
     type: Required[Literal["audio_url"]]
     """The type of the content part."""
 
 
 class ChatCompletionContentPartImageEmbedsParam(TypedDict, total=False):
-    image_embeds: Required[Union[str, dict[str, str]]]
+    image_embeds: Optional[Union[str, dict[str, str]]]
     """
     The image embeddings. It can be either:
     - A single base64 string.
@@ -93,7 +93,7 @@ class VideoURL(TypedDict, total=False):
 
 
 class ChatCompletionContentPartVideoParam(TypedDict, total=False):
-    video_url: Required[VideoURL]
+    video_url: Optional[VideoURL]
 
     type: Required[Literal["video_url"]]
     """The type of the content part."""
@@ -115,7 +115,7 @@ class CustomChatCompletionContentPILImageParam(TypedDict, total=False):
         "image_pil": ImageAsset('cherry_blossom').pil_image
     }
     """
-    image_pil: Required[PILImage]
+    image_pil: Optional[PILImage]
 
 
 class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
@@ -127,7 +127,7 @@ class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
         "image_url": "https://example.com/image.jpg"
     }
     """
-    image_url: Required[str]
+    image_url: Optional[str]
 
 
 class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
@@ -138,7 +138,7 @@ class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
         "audio_url": "https://example.com/audio.mp3"
     }
     """
-    audio_url: Required[str]
+    audio_url: Optional[str]
 
 
 class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
@@ -149,7 +149,7 @@ class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
         "video_url": "https://example.com/video.mp4"
     }
     """
-    video_url: Required[str]
+    video_url: Optional[str]
 
 
 class CustomThinkCompletionContentParam(TypedDict, total=False):
@@ -530,7 +530,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         self._model_config = model_config
         self._tokenizer = tokenizer
 
-        self._items_by_modality = defaultdict[str, list[_T]](list)
+        self._items_by_modality = defaultdict[str, list[Optional[_T]]](list)
 
     @property
     def model_config(self) -> ModelConfig:
@@ -554,7 +554,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
     def mm_processor(self):
         return self.mm_registry.create_processor(self.model_config)
 
-    def add(self, modality: ModalityStr, item: _T) -> Optional[str]:
+    def add(self, modality: ModalityStr, item: Optional[_T]) -> Optional[str]:
         """
         Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
@@ -608,10 +608,17 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
         if not self._items_by_modality:
             return None
         mm_inputs = {}
-        items_by_modality = {
-                modality: await asyncio.gather(*items)
-                for modality, items in self._items_by_modality.items()
-            }
+        items_by_modality = {}
+        for modality, items in self._items_by_modality.items():
+            coros = []
+            for item in items:
+                if item is not None:
+                    coros.append(item)
+                else:
+                    async def wrap_async_none() -> None:
+                        return None
+                    coros.append(wrap_async_none())
+            items_by_modality[modality] = await asyncio.gather(*coros)
 
         if "image" in items_by_modality and "image_embeds" in items_by_modality:
             raise ValueError(
@@ -658,28 +665,28 @@ class BaseMultiModalContentParser(ABC):
         return dict(self._placeholder_storage)
 
     @abstractmethod
-    def parse_image(self, image_url: str) -> None:
+    def parse_image(self, image_url: Optional[str]) -> None:
         raise NotImplementedError
 
     @abstractmethod
     def parse_image_embeds(self,
-                           image_embeds: Union[str, dict[str, str]]) -> None:
+                           image_embeds: Union[str, dict[str, str], None]) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def parse_image_pil(self, image_pil: Image.Image) -> None:
+    def parse_image_pil(self, image_pil: Optional[Image.Image]) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def parse_audio(self, audio_url: str) -> None:
+    def parse_audio(self, audio_url: Optional[str]) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def parse_input_audio(self, input_audio: InputAudio) -> None:
+    def parse_input_audio(self, input_audio: Optional[InputAudio]) -> None:
         raise NotImplementedError
 
     @abstractmethod
-    def parse_video(self, video_url: str) -> None:
+    def parse_video(self, video_url: Optional[str]) -> None:
         raise NotImplementedError
 
 
@@ -695,14 +702,14 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             allowed_local_media_path=tracker.allowed_local_media_path,
         )
 
-    def parse_image(self, image_url: str) -> None:
-        image = self._connector.fetch_image(image_url)
+    def parse_image(self, image_url: Optional[str]) -> None:
+        image = self._connector.fetch_image(image_url) if image_url else None
 
         placeholder = self._tracker.add("image", image)
         self._add_placeholder("image", placeholder)
 
     def parse_image_embeds(self,
-                           image_embeds: Union[str, dict[str, str]]) -> None:
+                           image_embeds: Union[str, dict[str, str], None]) -> None:
         if isinstance(image_embeds, dict):
             embeds = {
                 k: self._connector.fetch_image_embedding(v)
@@ -713,28 +720,34 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         if isinstance(image_embeds, str):
             embedding = self._connector.fetch_image_embedding(image_embeds)
             placeholder = self._tracker.add("image_embeds", embedding)
+        
+        if image_embeds is None:
+            placeholder = self._tracker.add("image_embeds", None)
 
         self._add_placeholder("image", placeholder)
 
-    def parse_image_pil(self, image_pil: Image.Image) -> None:
-        placeholder = self._tracker.add("image", image_pil)
+    def parse_image_pil(self, image_pil: Optional[Image.Image]) -> None:
+        placeholder = self._tracker.add("image", image_pil) if image_pil else None
         self._add_placeholder("image", placeholder)
 
-    def parse_audio(self, audio_url: str) -> None:
-        audio = self._connector.fetch_audio(audio_url)
+    def parse_audio(self, audio_url: Optional[str]) -> None:
+        audio = self._connector.fetch_audio(audio_url) if audio_url else None
 
         placeholder = self._tracker.add("audio", audio)
         self._add_placeholder("audio", placeholder)
 
-    def parse_input_audio(self, input_audio: InputAudio) -> None:
-        audio_data = input_audio.get("data", "")
-        audio_format = input_audio.get("format", "")
-        audio_url = f"data:audio/{audio_format};base64,{audio_data}"
+    def parse_input_audio(self, input_audio: Optional[InputAudio]) -> None:
+        if input_audio:
+            audio_data = input_audio.get("data", "")
+            audio_format = input_audio.get("format", "")
+            audio_url = f"data:audio/{audio_format};base64,{audio_data}"
+        else:
+            audio_url = None
 
         return self.parse_audio(audio_url)
 
-    def parse_video(self, video_url: str) -> None:
-        video = self._connector.fetch_video(video_url=video_url)
+    def parse_video(self, video_url: Optional[str]) -> None:
+        video = self._connector.fetch_video(video_url=video_url) if video_url else None
 
         placeholder = self._tracker.add("video", video)
         self._add_placeholder("video", placeholder)
@@ -751,15 +764,15 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             allowed_local_media_path=tracker.allowed_local_media_path
         )
 
-    def parse_image(self, image_url: str) -> None:
-        image_coro = self._connector.fetch_image_async(image_url)
+    def parse_image(self, image_url: Optional[str]) -> None:
+        image_coro = self._connector.fetch_image_async(image_url) if image_url else None
 
         placeholder = self._tracker.add("image", image_coro)
         self._add_placeholder("image", placeholder)
 
     def parse_image_embeds(self,
-                           image_embeds: Union[str, dict[str, str]]) -> None:
-        future: asyncio.Future[Union[str, dict[str, str]]] = asyncio.Future()
+                           image_embeds: Union[str, dict[str, str], None]) -> None:
+        future: asyncio.Future[Union[str, dict[str, str], None]] = asyncio.Future()
 
         if isinstance(image_embeds, dict):
             embeds = {
@@ -773,31 +786,40 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
                 fetch_image_embedding(image_embeds)
             future.set_result(embedding)
 
+        if image_embeds is None:
+            future.set_result(None)
+
         placeholder = self._tracker.add("image_embeds", future)
         self._add_placeholder("image", placeholder)
 
-    def parse_image_pil(self, image_pil: Image.Image) -> None:
-        future: asyncio.Future[Image.Image] = asyncio.Future()
-        future.set_result(image_pil)
+    def parse_image_pil(self, image_pil: Optional[Image.Image]) -> None:
+        future: asyncio.Future[Optional[Image.Image]] = asyncio.Future()
+        if image_pil:
+            future.set_result(image_pil)
+        else:
+            future.set_result(None)
 
         placeholder = self._tracker.add("image", future)
         self._add_placeholder("image", placeholder)
 
-    def parse_audio(self, audio_url: str) -> None:
-        audio_coro = self._connector.fetch_audio_async(audio_url)
+    def parse_audio(self, audio_url: Optional[str]) -> None:
+        audio_coro = self._connector.fetch_audio_async(audio_url) if audio_url else None
 
         placeholder = self._tracker.add("audio", audio_coro)
         self._add_placeholder("audio", placeholder)
 
-    def parse_input_audio(self, input_audio: InputAudio) -> None:
-        audio_data = input_audio.get("data", "")
-        audio_format = input_audio.get("format", "")
-        audio_url = f"data:audio/{audio_format};base64,{audio_data}"
+    def parse_input_audio(self, input_audio: Optional[InputAudio]) -> None:
+        if input_audio:
+            audio_data = input_audio.get("data", "")
+            audio_format = input_audio.get("format", "")
+            audio_url = f"data:audio/{audio_format};base64,{audio_data}"
+        else:
+            audio_url = None
 
         return self.parse_audio(audio_url)
 
-    def parse_video(self, video_url: str) -> None:
-        video = self._connector.fetch_video_async(video_url=video_url)
+    def parse_video(self, video_url: Optional[str]) -> None:
+        video = self._connector.fetch_video_async(video_url=video_url) if video_url else None
 
         placeholder = self._tracker.add("video", video)
         self._add_placeholder("video", placeholder)
