@@ -169,7 +169,7 @@ class TPUWorker:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
 
-    def determine_available_memory(self) -> int:
+    def determine_kv_cache_available_memory(self) -> int:
         kv_caches: dict[str, torch.Tensor] = {}
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         for layer_name, layer_spec in kv_cache_spec.items():

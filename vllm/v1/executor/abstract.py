@@ -81,8 +81,8 @@ class Executor(ExecutorBase):
         """
         pass
 
-    def determine_available_memory(self) -> list[int]:  # in bytes
-        return self.collective_rpc("determine_available_memory")
+    def determine_kv_cache_available_memory(self) -> list[int]:  # in bytes
+        return self.collective_rpc("determine_kv_cache_available_memory")
 
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         return self.collective_rpc("get_kv_cache_spec")
@@ -126,10 +126,10 @@ class UniProcExecutor(UniProcExecutorV0, Executor):
 
 class ExecutorWithExternalLauncher(ExecutorWithExternalLauncherV0, Executor):
 
-    def determine_available_memory(self) -> list[int]:  # in bytes
+    def determine_kv_cache_available_memory(self) -> list[int]:  # in bytes
         # same as determine_num_available_blocks in v0,
         # we need to get the min across all ranks.
-        memory = super().determine_available_memory()
+        memory = super().determine_kv_cache_available_memory()
         from vllm.distributed.parallel_state import get_world_group
         cpu_group = get_world_group().cpu_group
         memory_tensor = torch.tensor([memory], device="cpu", dtype=torch.int64)

@@ -183,7 +183,7 @@ class EngineCore:
                 # Profiles the peak memory usage of the model to determine how
                 # much memory can be allocated for kv cache.
                 available_gpu_memory = (
-                    self.model_executor.determine_available_memory())
+                    self.model_executor.determine_kv_cache_available_memory())
                 self.available_gpu_memory_for_kv_cache = \
                     available_gpu_memory[0]
         else:

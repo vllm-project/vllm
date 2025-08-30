@@ -246,7 +246,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
                 "fused output quantization is not yet supported"
                 " for PallasAttentionBackendImpl")
 
-        # For determine_available_memory case.
+        # For determine_kv_cache_available_memory case.
         if kv_cache.numel() == 0:
             if output is None:
                 output = torch.ones_like(query)

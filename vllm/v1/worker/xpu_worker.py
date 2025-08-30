@@ -80,7 +80,7 @@ class XPUWorker(Worker):
             return free_gpu_memory, total_gpu_memory
 
     @torch.inference_mode()
-    def determine_available_memory(self) -> int:
+    def determine_kv_cache_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
         The engine will first conduct a profiling of the existing memory usage.
