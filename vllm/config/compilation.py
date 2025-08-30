@@ -459,7 +459,11 @@ class CompilationConfig:
                                  "since full_cuda_graph is deprecated.")
             self.cudagraph_mode = CUDAGraphMode.FULL
 
-    def init_backend(self, vllm_config: "VllmConfig") -> Union[str, Callable]:
+    def init_backend(
+        self,
+        vllm_config: "VllmConfig",
+        no_weak_ref_output: bool = False,
+    ) -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
             raise ValueError("No compilation level is set.")
 
@@ -479,7 +483,7 @@ class CompilationConfig:
         assert self.level == CompilationLevel.PIECEWISE
 
         from vllm.compilation.backends import VllmBackend
-        return VllmBackend(vllm_config)
+        return VllmBackend(vllm_config, no_weak_ref_output)
 
     def init_with_cudagraph_sizes(self,
                                   cudagraph_capture_sizes: list[int]) -> None:
