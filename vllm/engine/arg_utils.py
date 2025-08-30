@@ -9,6 +9,7 @@ import functools
 import json
 import sys
 from dataclasses import MISSING, dataclass, fields, is_dataclass
+from enum import Enum
 from itertools import permutations
 from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
                     Literal, Optional, Type, TypeVar, Union, cast, get_args,
@@ -22,17 +23,17 @@ from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
 from vllm.config import (BlockSize, CacheConfig, CacheDType, CompilationConfig,
-                         ConfigFormat, ConfigType, ConvertOption,
-                         DecodingConfig, DetailedTraceModules, Device,
-                         DeviceConfig, DistributedExecutorBackend, EPLBConfig,
+                         ConfigType, ConvertOption, DecodingConfig,
+                         DetailedTraceModules, Device, DeviceConfig,
+                         DistributedExecutorBackend, EPLBConfig,
                          GuidedDecodingBackend, HfOverrides, KVEventsConfig,
                          KVTransferConfig, LoadConfig, LogprobsMode,
                          LoRAConfig, MambaDType, MMEncoderTPMode, ModelConfig,
-                         ModelDType, ModelImpl, MultiModalConfig,
-                         ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PrefixCachingHashAlgo, RunnerOption, SchedulerConfig,
-                         SchedulerPolicy, SpeculativeConfig, TaskOption,
-                         TokenizerMode, VllmConfig, get_attr_docs, get_field)
+                         ModelDType, MultiModalConfig, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PrefixCachingHashAlgo,
+                         RunnerOption, SchedulerConfig, SchedulerPolicy,
+                         SpeculativeConfig, TaskOption, TokenizerMode,
+                         VllmConfig, get_attr_docs, get_field)
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -97,7 +98,10 @@ def union_dict_and_str(val: str) -> Optional[Union[str, dict[str, str]]]:
 
 def is_type(type_hint: TypeHint, type: TypeHintT) -> TypeIs[TypeHintT]:
     """Check if the type hint is a specific type."""
-    return type_hint is type or get_origin(type_hint) is type
+    is_enum = lambda cls: any("Enum" in base.__name__
+                              for base in getattr(cls, "__mro__", []))
+    return (type_hint is type or get_origin(type_hint) is type
+            or (is_enum(type) and is_enum(type_hint)))
 
 
 def contains_type(type_hints: set[TypeHint], type: TypeHintT) -> bool:
@@ -124,6 +128,20 @@ def literal_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
             f"Got {options} with types {[type(c) for c in options]}")
     kwarg = "metavar" if contains_type(type_hints, str) else "choices"
     return {"type": option_type, kwarg: sorted(options)}
+
+
+def enum_to_kwargs(type_hints: set[TypeHint]) -> dict[str, Any]:
+    """Get the `type` and `choices` from a `Enum` type hint in `type_hints`.
+
+    If `type_hints` also contains `str`, we use `metavar` instead of `choices`
+    and `str` instead of constructing the `Enum` member.
+    """
+    type_hint = get_type(type_hints, Enum)
+    options = [f.value for f in type_hint]
+    could_be_string = contains_type(type_hints, str)
+    kwarg = "metavar" if could_be_string else "choices"
+    type = str if could_be_string else type_hint
+    return {"type": type, kwarg: sorted(options)}
 
 
 def is_not_builtin(type_hint: TypeHint) -> bool:
@@ -205,6 +223,8 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
             kwargs[name]["action"] = argparse.BooleanOptionalAction
         elif contains_type(type_hints, Literal):
             kwargs[name].update(literal_to_kwargs(type_hints))
+        elif contains_type(type_hints, Enum):
+            kwargs[name].update(enum_to_kwargs(type_hints))
         elif contains_type(type_hints, tuple):
             type_hint = get_type(type_hints, tuple)
             types = get_args(type_hint)
@@ -525,7 +545,6 @@ class EngineArgs:
         model_group.add_argument("--max-logprobs",
                                  **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode",
-                                 choices=[f.value for f in LogprobsMode],
                                  **model_kwargs["logprobs_mode"])
         model_group.add_argument("--disable-sliding-window",
                                  **model_kwargs["disable_sliding_window"])
@@ -546,7 +565,6 @@ class EngineArgs:
             help="Disable async output processing. This may result in "
             "lower performance.")
         model_group.add_argument("--config-format",
-                                 choices=[f.value for f in ConfigFormat],
                                  **model_kwargs["config_format"])
         # This one is a special case because it can bool
         # or str. TODO: Handle this in get_kwargs
@@ -570,9 +588,7 @@ class EngineArgs:
                                  **model_kwargs["override_generation_config"])
         model_group.add_argument("--enable-sleep-mode",
                                  **model_kwargs["enable_sleep_mode"])
-        model_group.add_argument("--model-impl",
-                                 choices=[f.value for f in ModelImpl],
-                                 **model_kwargs["model_impl"])
+        model_group.add_argument("--model-impl", **model_kwargs["model_impl"])
         model_group.add_argument("--override-attention-dtype",
                                  **model_kwargs["override_attention_dtype"])
         model_group.add_argument("--logits-processors",
