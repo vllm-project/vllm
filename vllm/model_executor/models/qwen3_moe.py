@@ -691,7 +691,7 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
         try:
             loader = AutoWeightsLoader(self)
             return loader.load_weights(weights_list)
-        except Exception:
+        except KeyError:
             logger.warning("Detected quantized MoE gate layers. "
                            "Proceeding with automatic "
                            "gate layer adjustment "
