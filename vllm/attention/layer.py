@@ -423,7 +423,6 @@ class MultiHeadAttention(nn.Module):
         elif self.attn_backend == _Backend.FLEX_ATTENTION:
             # FlexAttention requires specific tensor format
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
-            from vllm.attention.backends.flex_attention import FlexAttentionBackend
             # Use a simple fallback to torch SDPA for now
             out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
             out = out.transpose(1, 2)
