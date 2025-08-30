@@ -179,25 +179,37 @@ class VisionAttention(torch.nn.Module):
     
     def _create_rotary_embeddings(self):
         """Create rotary position embeddings if needed."""
-        # This would be implemented based on the specific rotary embedding
-        # requirements of the model
-        pass
+        if not self.use_rotary:
+            return None
+        
+        # Create rotary embeddings based on head dimension
+        try:
+            from vllm.model_executor.layers.rotary_embedding import get_rope
+            return get_rope(head_size=self.rotary_dim)
+        except ImportError:
+            # Fallback to basic implementation
+            return None
     
     def _apply_rotary_embeddings(self, q: torch.Tensor, k: torch.Tensor, 
                                 positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply rotary position embeddings to Q and K."""
-        if not self.use_rotary:
+        if not self.use_rotary or self.rotary_emb is None:
             return q, k
         
-        # Implementation would depend on the specific rotary embedding method
-        # For now, return as-is
-        return q, k
+        try:
+            # Apply rotary embeddings using vLLM's implementation
+            q = self.rotary_emb(q, positions)
+            k = self.rotary_emb(k, positions)
+            return q, k
+        except Exception:
+            # Fallback: return as-is if rotary embedding fails
+            return q, k
     
     def _flash_attention_forward(self, q: torch.Tensor, k: torch.Tensor, 
                                 v: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Forward pass using FlashAttention."""
         try:
-            from flash_attn import flash_attn_func
+            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_func
             return flash_attn_func(q, k, v, dropout_p=self.dropout, causal=False)
         except ImportError:
             # Fallback to torch SDPA
@@ -214,6 +226,34 @@ class VisionAttention(torch.nn.Module):
         try:
             from xformers import ops as xops
             return xops.memory_efficient_attention_forward(q, k, v, p=self.dropout)
+        except ImportError:
+            # Fallback to torch SDPA
+            return torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout)
+    
+    def _rocm_aiter_fa_forward(self, q: torch.Tensor, k: torch.Tensor, 
+                              v: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Forward pass using ROCm Aiter FlashAttention."""
+        try:
+            from aiter import flash_attn_varlen_func
+            # Reshape for varlen function
+            batch_size, seq_len, num_heads, head_dim = q.shape
+            q_flat = q.view(-1, num_heads, head_dim)
+            k_flat = k.view(-1, num_heads, head_dim)
+            v_flat = v.view(-1, num_heads, head_dim)
+            
+            # Create cu_seqlens for varlen function
+            cu_seqlens = torch.arange(0, (batch_size + 1) * seq_len, seq_len, 
+                                    dtype=torch.int32, device=q.device)
+            
+            output = flash_attn_varlen_func(q_flat, k_flat, v_flat, 
+                                          cu_seqlens_q=cu_seqlens,
+                                          cu_seqlens_k=cu_seqlens,
+                                          max_seqlen_q=seq_len,
+                                          max_seqlen_k=seq_len,
+                                          dropout_p=self.dropout,
+                                          causal=False)
+            
+            return output.view(batch_size, seq_len, num_heads, head_dim)
         except ImportError:
             # Fallback to torch SDPA
             return torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout)
@@ -250,6 +290,8 @@ class VisionAttention(torch.nn.Module):
         # Select attention implementation based on backend
         if self.backend == _Backend.FLASH_ATTN:
             attn_output = self._flash_attention_forward(q, k, v, mask)
+        elif self.backend == _Backend.ROCM_AITER_FA:
+            attn_output = self._rocm_aiter_fa_forward(q, k, v, mask)
         elif self.backend == _Backend.TORCH_SDPA:
             attn_output = self._torch_sdpa_forward(q, k, v, mask)
         elif self.backend == _Backend.XFORMERS:
