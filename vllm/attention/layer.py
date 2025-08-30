@@ -366,7 +366,7 @@ class MultiHeadAttention(nn.Module):
         else:
             self.attn_backend = backend if backend in {
                 _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1,
-                _Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1, _Backend.ROCM_AITER_FA, _Backend.FLEX_ATTENTION
+                _Backend.ROCM_AITER_FA, _Backend.FLEX_ATTENTION
             } else _Backend.TORCH_SDPA
 
         if (self.attn_backend == _Backend.XFORMERS
@@ -414,12 +414,11 @@ class MultiHeadAttention(nn.Module):
             from torch_xla.experimental.custom_kernel import flash_attention
             out = flash_attention(query, key, value, sm_scale=self.scale)
             out = out.transpose(1, 2)
-        elif self.attn_backend == _Backend.FLASH_ATTN:
-            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
-            out = flash_attn_varlen_func(query, key, value, softmax_scale=self.scale)
-        elif self.attn_backend == _Backend.FLASH_ATTN_VLLM_V1:
-            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
-            out = flash_attn_varlen_func(query, key, value, softmax_scale=self.scale)
+        elif self.attn_backend in (_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1):
+            # Flash Attention for ViT is not essential, fallback to PyTorch SDPA
+            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+            out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
+            out = out.transpose(1, 2)
         elif self.attn_backend == _Backend.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
             out = flash_attn_varlen_func(query, key, value, softmax_scale=self.scale)
