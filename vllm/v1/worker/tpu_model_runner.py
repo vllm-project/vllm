@@ -3,7 +3,7 @@
 import bisect
 import gc
 import time
-from typing import TYPE_CHECKING, Any, Literal, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Optional, cast
 from unittest.mock import patch
 
 import numpy as np
@@ -23,6 +23,7 @@ from vllm.config import (ParallelConfig, VllmConfig,
                          get_layers_from_vllm_config, update_config)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.lora.layers import BaseLayerWithLoRA
@@ -1885,75 +1886,6 @@ def _get_padded_token_len(paddings: list[int], x: int) -> int:
     index = bisect.bisect_left(paddings, x)
     assert index < len(paddings)
     return paddings[index]
-
-
-def _make_src_and_dst_indices(
-    src_block_ids: list[int],
-    dst_block_ids: list[int],
-    src_device: Union[torch.device, str],
-    dst_device: Union[torch.device, str],
-) -> tuple[torch.Tensor, torch.Tensor]:
-    src_indices = torch.tensor(src_block_ids,
-                               device=src_device,
-                               dtype=torch.int64)
-    dst_indices = torch.tensor(dst_block_ids,
-                               device=dst_device,
-                               dtype=torch.int64)
-    return src_indices, dst_indices
-
-
-@torch.compile(backend="openxla")
-def _insert_blocks_to_tpu(
-    cpu_cache: torch.Tensor,
-    tpu_cache: torch.Tensor,
-    cpu_block_indices: torch.Tensor,
-    tpu_block_indices: torch.Tensor,
-) -> None:
-    torch.ops.xla.dynamo_set_buffer_donor_(tpu_cache, True)
-    tpu_cache[tpu_block_indices] = cpu_cache[cpu_block_indices].to(
-        tpu_cache.device)
-
-
-@torch.compile(backend="openxla")
-def _swap_out_tpu_blocks(
-    tpu_cache: torch.Tensor,
-    cpu_cache: torch.Tensor,
-    tpu_block_indices: torch.Tensor,
-    cpu_block_indices: torch.Tensor,
-) -> None:
-    """ tpu blocks to cpu blocks"""
-    torch.ops.xla.dynamo_set_buffer_donor_(tpu_cache, True)
-    cpu_cache[cpu_block_indices] = tpu_cache[tpu_block_indices].cpu()
-
-
-def copy_kv_blocks(
-    src_kv_caches: dict[str, torch.Tensor],
-    dst_kv_caches: dict[str, torch.Tensor],
-    src_block_ids: list[int],
-    dst_block_ids: list[int],
-    direction: Literal["h2d", "d2h"],
-) -> None:
-    """Copy kv blocks between different buffers."""
-    if not src_kv_caches or not dst_kv_caches or \
-       not src_block_ids or not dst_block_ids or \
-       len(src_block_ids) != len(dst_block_ids):
-        return
-
-    src_device = next(iter(src_kv_caches.values())).device
-    dst_device = next(iter(dst_kv_caches.values())).device
-
-    src_indices, dst_indices = _make_src_and_dst_indices(
-        src_block_ids=src_block_ids,
-        dst_block_ids=dst_block_ids,
-        src_device=src_device,
-        dst_device=dst_device)
-
-    _copy_fn = _insert_blocks_to_tpu if direction == "h2d" else \
-               _swap_out_tpu_blocks
-    for layer_name in src_kv_caches:
-        src_tensor = src_kv_caches[layer_name]
-        dst_tensor = dst_kv_caches[layer_name]
-        _copy_fn(src_tensor, dst_tensor, src_indices, dst_indices)
 
 
 def _get_padded_num_kv_cache_update_slices(num_tokens: int, max_num_reqs: int,
