@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
-from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -69,8 +69,8 @@ class DPMetadata:
     local_sizes: Optional[list[int]] = None
 
     @staticmethod
-    def num_tokens_across_dp(num_tokens: int, dp_size: int,
-                             dp_rank: int) -> torch.Tensor:
+    def num_tokens_across_dp(num_tokens: int, dp_size: int, dp_rank: int,
+                             vllm_config: VllmConfig) -> torch.Tensor:
         """
         Gather the num_tokens across all DP ranks and return results in a
         CPU tensor of size dp_size.
@@ -81,17 +81,22 @@ class DPMetadata:
                                          device="cpu",
                                          dtype=torch.int32)
         from vllm.distributed.parallel_state import get_dp_group
-        dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
+        from vllm.model_executor.layers.fused_moe.utils import (
+            needs_gloo_all_reduce)
+
+        if needs_gloo_all_reduce(vllm_config, num_tokens):
+            dist.all_reduce(num_tokens_tensor, group=get_dp_group().cpu_group)
         return num_tokens_tensor
 
     @staticmethod
     def make(
-            parallel_config: ParallelConfig,
+            vllm_config: VllmConfig,
             attn_metadata: Any,
             num_tokens: int,
             num_tokens_across_dp: Optional[torch.Tensor] = None
     ) -> "DPMetadata":
 
+        parallel_config = vllm_config.parallel_config
         assert parallel_config.data_parallel_size > 1
         dp_size = parallel_config.data_parallel_size
         dp_rank = parallel_config.data_parallel_rank
@@ -108,9 +113,10 @@ class DPMetadata:
         # Otherwise, num_tokens_across_dp[dp_rank] should be equal to batchsize
         assert (num_tokens_across_dp is None
                 or num_tokens_across_dp[dp_rank] == batchsize)
+
         if num_tokens_across_dp is None:
             num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
-                batchsize, dp_size, dp_rank)
+                batchsize, dp_size, dp_rank, vllm_config)
         max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp)
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_across_dp, dim=0)
         return DPMetadata(max_tokens_across_dp_cpu, cu_tokens_across_dp_cpu)
@@ -215,9 +221,8 @@ def set_forward_context(
     dp_metadata: Optional[DPMetadata] = None
     if vllm_config.parallel_config.data_parallel_size > 1 and (
             attn_metadata is not None or num_tokens is not None):
-        dp_metadata = DPMetadata.make(vllm_config.parallel_config,
-                                      attn_metadata, num_tokens or 0,
-                                      num_tokens_across_dp)
+        dp_metadata = DPMetadata.make(vllm_config, attn_metadata, num_tokens
+                                      or 0, num_tokens_across_dp)
 
     global _forward_context
     prev_context = _forward_context
