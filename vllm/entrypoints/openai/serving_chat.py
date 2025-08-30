@@ -717,6 +717,7 @@ class OpenAIServingChat(OpenAIServing):
                                     previous_token_ids,
                                     current_token_ids,
                                     output.token_ids,
+                                    request,
                                 ))
                             # When encountering think end id in delta_token_ids
                             # or think end id in prompt_token_ids
@@ -806,6 +807,7 @@ class OpenAIServingChat(OpenAIServing):
                                     previous_token_ids,
                                     current_token_ids,
                                     output_token_ids,
+                                    request,
                                 ))
                             # When encountering think end id in prompt_token_ids
                             # i.e {"enable_thinking": False},
@@ -883,6 +885,7 @@ class OpenAIServingChat(OpenAIServing):
                                              previous_token_ids,
                                              current_token_ids,
                                              output.token_ids,
+                                             request,
                                          ))
                     # handle streaming just a content delta
                     else:
