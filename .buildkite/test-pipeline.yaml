@@ -43,6 +43,7 @@ steps:
 
 - label: Async Engine, Inputs, Utils, Worker Test # 24min
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/mq_llm_engine
@@ -65,6 +66,7 @@ steps:
 
 - label: Python-only Installation Test
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   - setup.py
@@ -75,6 +77,7 @@ steps:
   mirror_hardwares: [amdexperimental]
   fast_check: true
   torch_nightly: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/test_basic_correctness
@@ -87,10 +90,12 @@ steps:
   - pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
   - VLLM_TEST_ENABLE_ARTIFICIAL_PREEMPT=1 pytest -v -s basic_correctness/test_preemption.py
+  - echo "This command will fail on purpose to test cancel_on_build_failing" && exit 1
 
 - label: Core Test # 10min
   mirror_hardwares: [amdexperimental]
   fast_check: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/core
   - vllm/distributed
@@ -103,6 +108,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/llm
@@ -119,6 +125,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/openai
@@ -133,6 +140,7 @@ steps:
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/distributed/
   - vllm/core/
@@ -174,6 +182,7 @@ steps:
 
 - label: EPLB Algorithm Test
   working_dir: "/vllm-workspace/tests"
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_algo.py
@@ -183,6 +192,7 @@ steps:
 - label: EPLB Execution Test # 5min
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_execute.py
@@ -192,6 +202,7 @@ steps:
 - label: Metrics, Tracing Test # 10min
   mirror_hardwares: [amdexperimental]
   num_gpus: 2
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/metrics
@@ -210,6 +221,7 @@ steps:
 
 - label: Regression Test # 5min
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/test_regression
@@ -220,6 +232,7 @@ steps:
 
 - label: Engine Test # 10min
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/engine
@@ -254,6 +267,7 @@ steps:
 
 - label: V1 Test others
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -279,6 +293,7 @@ steps:
 - label: Examples Test # 25min
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/examples"
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/entrypoints
   - examples/
@@ -303,6 +318,7 @@ steps:
 
 - label: Platform Tests (CUDA)
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/cuda
@@ -311,6 +327,7 @@ steps:
 
 - label: Samplers Test # 36min
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
@@ -322,6 +339,7 @@ steps:
 
 - label: LoRA Test %N # 15min each
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -331,6 +349,7 @@ steps:
 - label: PyTorch Compilation Unit Tests
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
+  cancel_on_build_failing: true
   source_file_dependencies:
     - vllm/
     - tests/compile
@@ -347,6 +366,7 @@ steps:
 - label: PyTorch Fullgraph Smoke Test # 9min
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -361,6 +381,7 @@ steps:
 - label: PyTorch Fullgraph Test # 18min
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/compile
@@ -369,6 +390,7 @@ steps:
 
 - label: Kernels Core Operation Test
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
@@ -377,6 +399,7 @@ steps:
 
 - label: Kernels Attention Test %N
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - csrc/attention/
   - vllm/attention
@@ -388,6 +411,7 @@ steps:
 
 - label: Kernels Quantization Test %N
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
@@ -398,6 +422,7 @@ steps:
 
 - label: Kernels MoE Test %N
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
@@ -410,6 +435,7 @@ steps:
 
 - label: Kernels Mamba Test
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
@@ -418,6 +444,7 @@ steps:
 
 - label: Tensorizer Test # 11min
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/model_executor/model_loader
   - tests/tensorizer_loader
@@ -430,6 +457,7 @@ steps:
 
 - label: Model Executor Test
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/model_executor
   - tests/model_executor
@@ -441,6 +469,7 @@ steps:
 - label: Benchmarks # 9min
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/.buildkite"
+  cancel_on_build_failing: true
   source_file_dependencies:
   - benchmarks/
   commands:
@@ -448,6 +477,7 @@ steps:
 
 - label: Benchmarks CLI Test # 10min
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/benchmarks/
@@ -456,6 +486,7 @@ steps:
 
 - label: Quantization Test
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -468,6 +499,7 @@ steps:
 
 - label: LM Eval Small Models # 53min
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -476,6 +508,7 @@ steps:
 
 - label: OpenAI API correctness
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - csrc/
   - vllm/entrypoints/openai/
@@ -485,6 +518,7 @@ steps:
 
 - label: Encoder Decoder tests # 5min
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/encoder_decoder
@@ -494,6 +528,7 @@ steps:
 - label: OpenAI-Compatible Tool Use # 20 min
   mirror_hardwares: [amdexperimental]
   fast_check: false
+  cancel_on_build_failing: true
   source_file_dependencies:
     - vllm/
     - tests/tool_use
@@ -507,6 +542,7 @@ steps:
 - label: Basic Models Test # 24min
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/models
@@ -520,6 +556,7 @@ steps:
 - label: Language Models Test (Standard)
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/models/language
@@ -530,6 +567,7 @@ steps:
 - label: Language Models Test (Hybrid) # 35 min
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
@@ -543,6 +581,7 @@ steps:
 - label: Language Models Test (Extended Generation) # 1hr20min
   mirror_hardwares: [amdexperimental]
   optional: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
@@ -554,6 +593,7 @@ steps:
 - label: Language Models Test (Extended Pooling)  # 36min
   mirror_hardwares: [amdexperimental]
   optional: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/pooling
@@ -561,6 +601,7 @@ steps:
     - pytest -v -s models/language/pooling -m 'not core_model'
 
 - label: Multi-Modal Processor Test
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -572,6 +613,7 @@ steps:
 - label: Multi-Modal Models Test (Standard)
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -584,6 +626,7 @@ steps:
 - label: Multi-Modal Models Test (Extended) 1
   mirror_hardwares: [amdexperimental]
   optional: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -594,6 +637,7 @@ steps:
 - label: Multi-Modal Models Test (Extended) 2
   mirror_hardwares: [amdexperimental]
   optional: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -604,6 +648,7 @@ steps:
 - label: Multi-Modal Models Test (Extended) 3
   mirror_hardwares: [amdexperimental]
   optional: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -613,6 +658,7 @@ steps:
 
 - label: Quantized Models Test
   mirror_hardwares: [amdexperimental]
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
   - tests/models/quantization
@@ -623,6 +669,7 @@ steps:
 - label: Custom Models Test
   mirror_hardwares: [amdexperimental]
   optional: true
+  cancel_on_build_failing: true
   commands:
     - echo 'Testing custom models...'
     # PR authors can temporarily add commands below to test individual models
@@ -632,6 +679,7 @@ steps:
 - label: Transformers Nightly Models Test
   working_dir: "/vllm-workspace/"
   optional: true
+  cancel_on_build_failing: true
   commands:
     - pip install --upgrade git+https://github.com/huggingface/transformers
     - pytest -v -s tests/models/test_initialization.py
@@ -645,6 +693,7 @@ steps:
   working_dir: "/vllm-workspace/"
   gpu: b200
   # optional: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - csrc/quantization/fp4/
   - csrc/attention/mla/
@@ -686,6 +735,7 @@ steps:
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/distributed
   - tests/distributed
@@ -698,6 +748,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   num_nodes: 2
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
@@ -721,6 +772,7 @@ steps:
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
@@ -761,6 +813,7 @@ steps:
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/plugins/
   - tests/plugins/
@@ -782,6 +835,7 @@ steps:
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
@@ -795,6 +849,7 @@ steps:
 - label: LoRA TP Test (Distributed)
   mirror_hardwares: [amdexperimental]
   num_gpus: 4
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -814,6 +869,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2 
   optional: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/weight_loading
@@ -826,6 +882,7 @@ steps:
   num_gpus: 2
   gpu: a100
   optional: true
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   - tests/weight_loading
@@ -840,6 +897,7 @@ steps:
   gpu: a100
   optional: true
   num_gpus: 4
+  cancel_on_build_failing: true
   source_file_dependencies:
   - vllm/
   commands:
@@ -855,6 +913,7 @@ steps:
   optional: true
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  cancel_on_build_failing: true
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -866,5 +925,6 @@ steps:
   gpu: h200
   optional: true
   num_gpus: 2
+  cancel_on_build_failing: true
   commands:
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 /vllm-workspace/examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
