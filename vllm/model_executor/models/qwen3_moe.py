@@ -150,11 +150,11 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             config.hidden_size,
             config.num_experts,
             bias=False,
-            quant_config=self.maybe_not_quantization(quant_config),
+            quant_config=self._maybe_not_quantization(quant_config),
             prefix=f"{prefix}.gate")
 
-    def maybe_not_quantization(self,
-                               quant_config: Optional[QuantizationConfig]):
+    def _maybe_not_quantization(self,
+                                quant_config: Optional[QuantizationConfig]):
         if os.environ.get("VLLM_QUANTIZATION_FROM_AUTOROUND_GPTQ") == "1":
             return quant_config
         if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
