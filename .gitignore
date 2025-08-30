@@ -3,6 +3,7 @@
 
 # vllm-flash-attn built from source
 vllm/vllm_flash_attn/*
+kernels/vllm_kernels/vllm_flash_attn/*
 
 # triton jit 
 .triton
@@ -36,7 +37,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-/.deps/
+.deps/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
@@ -210,3 +211,6 @@ csrc/moe/marlin_moe_wna16/kernel_*
 
 # Ignore ep_kernels_workspace folder
 ep_kernels_workspace/
+
+# uv lock file
+uv.lock

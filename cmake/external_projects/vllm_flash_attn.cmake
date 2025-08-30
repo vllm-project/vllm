@@ -46,17 +46,17 @@ else()
 endif()
 
 
-# Ensure the vllm/vllm_flash_attn directory exists before installation
-install(CODE "file(MAKE_DIRECTORY \"\${CMAKE_INSTALL_PREFIX}/vllm/vllm_flash_attn\")" ALL_COMPONENTS)
+# Ensure the ${BUILD_DESTINATION}/vllm_flash_attn directory exists before installation
+install(CODE "file(MAKE_DIRECTORY \"\${CMAKE_INSTALL_PREFIX}/${BUILD_DESTINATION}/vllm_flash_attn\")" ALL_COMPONENTS)
 
-# Make sure vllm-flash-attn install rules are nested under vllm/
+# Make sure vllm-flash-attn install rules are nested under ${BUILD_DESTINATION}/
 # This is here to support installing all components under the same prefix with cmake --install.
 # setup.py installs every component separately but uses the same prefix for all.
 # ALL_COMPONENTS is used to avoid duplication for FA2 and FA3,
 # and these statements don't hurt when installing neither component.
 install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY FALSE)" ALL_COMPONENTS)
 install(CODE "set(OLD_CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}\")" ALL_COMPONENTS)
-install(CODE "set(CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}/vllm/\")" ALL_COMPONENTS)
+install(CODE "set(CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}/${BUILD_DESTINATION}/\")" ALL_COMPONENTS)
 
 # Fetch the vllm-flash-attn library
 FetchContent_MakeAvailable(vllm-flash-attn)
@@ -70,14 +70,14 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 # case only one is built, in the case both are built redundant work is done)
 install(
   DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
-  DESTINATION vllm/vllm_flash_attn
+  DESTINATION ${BUILD_DESTINATION}/vllm_flash_attn
   COMPONENT _vllm_fa2_C
   FILES_MATCHING PATTERN "*.py"
 )
 
 install(
   DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
-  DESTINATION vllm/vllm_flash_attn
+  DESTINATION ${BUILD_DESTINATION}/vllm_flash_attn
   COMPONENT _vllm_fa3_C
   FILES_MATCHING PATTERN "*.py"
 )

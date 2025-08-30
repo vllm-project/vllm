@@ -290,7 +290,7 @@ message(STATUS "CPU extension source files: ${VLLM_EXT_SRC}")
 
 define_gpu_extension_target(
     _C
-    DESTINATION vllm
+    DESTINATION ${BUILD_DESTINATION}
     LANGUAGE CXX
     SOURCES ${VLLM_EXT_SRC}
     LIBRARIES ${LIBS}
