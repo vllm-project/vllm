@@ -665,11 +665,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> tuple[dict[str, Any], torch.Tensor, Optional[SpecDecodeMetadata],
-               np.ndarray, Optional[CommonAttentionMetadata], int]:
+               np.ndarray, Optional[CommonAttentionMetadata], int, bool]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
-            logits_indices, spec_decode_metadata
+            logits_indices, spec_decode_metadata,
+            num_scheduled_tokens, spec_decode_common_attn_metadata,
+            max_num_scheduled_tokens, use_cascade_attn
         ]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -796,7 +798,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logits_indices[-1].item())
             if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
                     and num_logits <= self.cudagraph_batch_sizes[-1]):
-                # Use piecewise CUDA graphs.
+                # Use CUDA graphs.
                 # Add padding to the batch size.
                 num_logits_padded = self.vllm_config.pad_for_cudagraph(
                     num_logits)
@@ -807,6 +809,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         attn_metadata: dict[str, Any] = {}
+        use_cascade_attn = False
 
         # Used in the below loop.
         query_start_loc_cpu = self.query_start_loc.cpu[:num_reqs + 1]
@@ -885,7 +888,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     common_prefix_len=common_prefix_len,
                     common_attn_metadata=common_attn_metadata,
                 ))
-
+                use_cascade_attn |= getattr(attn_metadata_i, "use_cascade",
+                                            False)
+                
                 for layer_name in attn_group.layer_names:
                     attn_metadata[layer_name] = attn_metadata_i
 
@@ -895,7 +900,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return (attn_metadata, logits_indices, spec_decode_metadata,
                 num_scheduled_tokens, spec_decode_common_attn_metadata,
-                max_num_scheduled_tokens)
+                max_num_scheduled_tokens, use_cascade_attn)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1481,7 +1486,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Prepare the decoder inputs.
         (attn_metadata, logits_indices, spec_decode_metadata,
          num_scheduled_tokens_np, spec_decode_common_attn_metadata,
-         max_query_len) = self._prepare_inputs(scheduler_output)
+         max_query_len,
+         use_cascade_attn) = self._prepare_inputs(scheduler_output)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -1558,7 +1564,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
                                            uniform_decode=uniform_decode)
         cudagraph_runtime_mode, batch_descriptor = \
-            self.cudagraph_dispatcher.dispatch(batch_descriptor)
+            self.cudagraph_dispatcher.dispatch(batch_descriptor,
+                                                use_cascade_attn)
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
@@ -2020,16 +2027,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             "Cannot reload weights before model is loaded."
         model_loader = get_model_loader(self.load_config)
         logger.info("Reloading weights inplace...")
-        model = self.get_model()
-        model_loader.load_weights(model, model_config=self.model_config)
+        model_loader.load_weights(self.get_model(),
+                                  model_config=self.model_config)
 
     def save_tensorized_model(
         self,
         tensorizer_config: "TensorizerConfig",
     ) -> None:
-        model = self.get_model()
         TensorizerLoader.save_model(
-            model,
+            self.get_model(),
             tensorizer_config=tensorizer_config,
             model_config=self.model_config,
         )
@@ -2233,9 +2239,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             is_profile: If True, this is a profile run.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
         """
-        assert cudagraph_runtime_mode in {
-            CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
-        }
+        assert cudagraph_runtime_mode.valid_runtime_modes()
 
         # Padding for DP
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_tokens)
@@ -2684,9 +2688,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _capture_cudagraphs(self, compilation_cases: list[int],
                             cudagraph_runtime_mode: CUDAGraphMode,
                             uniform_decode: bool):
-        assert cudagraph_runtime_mode != CUDAGraphMode.NONE and \
-            cudagraph_runtime_mode in [CUDAGraphMode.FULL,
-                                        CUDAGraphMode.PIECEWISE]
+        assert cudagraph_runtime_mode in [CUDAGraphMode.FULL,
+                                         CUDAGraphMode.PIECEWISE],\
+            f"Invalid cudagraph runtime mode: {cudagraph_runtime_mode}"
 
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
@@ -2785,6 +2789,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.calculate_reorder_batch_threshold()
 
     def initialize_cudagraph_capture(self) -> None:
+        """
+        Resolve the cudagraph_mode when there are multiple attention 
+        backends with potential conflicting CUDA graph support.
+        Then initialize the cudagraph_dispatcher based on the resolved
+        cudagraph_mode.
+        """
         min_cg_support = AttentionCGSupport.ALWAYS
         min_cg_builder_name = None
 

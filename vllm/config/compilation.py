@@ -62,8 +62,16 @@ class CUDAGraphMode(enum.Enum):
     def has_full_cudagraphs(self) -> bool:
         return self.max_cudagraph_mode() == CUDAGraphMode.FULL
 
+    def has_piecewise_cudagraphs(self) -> bool:
+        return self.requires_piecewise_compilation()
+
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
+
+    def valid_runtime_modes(self) -> bool:
+        return self in [
+            CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
+        ]
 
 
 @config
@@ -249,7 +257,7 @@ class CompilationConfig:
     
     FULL_AND_PIECEWISE mode: Capture full cudagraph for decode batches and
     piecewise cudagraph for prefill and mixed prefill-decode batches.
-    This is like the most performant mode for most models.
+    This is generally the most performant mode for most models.
 
     Currently, the cudagraph mode is only used for the v1 engine.
     Note that the cudagraph logic is generally orthogonal to the 
@@ -271,7 +279,8 @@ class CompilationConfig:
     Note that this is orthogonal to the cudagraph capture logic
     outside of compilation.
     Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode instead.
+    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=PIECEWISE
+    instead.
     """
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
@@ -296,7 +305,8 @@ class CompilationConfig:
     flag cannot be used together with splitting_ops. This may provide
     performance benefits for smaller models.
     Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode instead.
+    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=FULL
+    instead.
     """
 
     pass_config: PassConfig = field(default_factory=PassConfig)
@@ -444,7 +454,8 @@ class CompilationConfig:
         if not self.use_cudagraph:
             logger.warning("use_cudagraph is deprecated, use "
                            "cudagraph_mode=NONE instead.")
-            if self.cudagraph_mode is not None:
+            if self.cudagraph_mode is not None and \
+                self.cudagraph_mode != CUDAGraphMode.NONE:
                 raise ValueError(
                     "use_cudagraph and cudagraph_mode are mutually"
                     " exclusive, prefer cudagraph_mode since "
@@ -453,7 +464,8 @@ class CompilationConfig:
         if self.full_cuda_graph:
             logger.warning("full_cuda_graph is deprecated, use "
                            "cudagraph_mode=FULL instead.")
-            if self.cudagraph_mode is not None:
+            if self.cudagraph_mode is not None and \
+                not self.cudagraph_mode.has_full_cudagraphs():
                 raise ValueError("full_cuda_graph and cudagraph_mode are "
                                  "mutually exclusive, prefer cudagraph_mode "
                                  "since full_cuda_graph is deprecated.")
@@ -545,20 +557,43 @@ class CompilationConfig:
             # full cudagraph outside the fx graph. This reduces some cpu
             # overhead when the runtime batch_size is not cudagraph captured.
             # see https://github.com/vllm-project/vllm/pull/20059 for details.
-            self.splitting_ops = self._attention_ops
+            if self.pass_config.enable_attn_fusion:
+                self.splitting_ops = []
+                if self.cudagraph_mode.has_piecewise_cudagraphs():
+                    logger.warning_once(
+                        "When enable_attn_fusion, splitting_ops will be set "
+                        "to empty list, and cudagraph_mode containing "
+                        "PIECEWISE will be treated as FULL cudagraph_mode. "
+                        "Please ensure you are using attention backends that "
+                        "support cudagraph or set cudagraph_mode to NONE "
+                        "explicitly if encountering any problems.")
+                    self.cudagraph_mode = CUDAGraphMode.FULL
+            else:
+                self.splitting_ops = self._attention_ops
         elif len(self.splitting_ops) == 0:
-            logger.warning_once("Using piecewise compilation with empty "
-                                "splitting_ops.")
+            logger.info_once("Using piecewise compilation with empty "
+                             "splitting_ops.")
             if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
                 logger.warning_once(
-                    "When compilation level is piecewise with empty "
-                    "splitting_ops, PIECEWISE cudagraph_mode will be "
-                    "treated as FULL cudagraph_mode. Please ensure you are "
-                    "using attention backends that support cudagraph or set "
-                    "cudagraph_mode to NONE explicitly if encountering "
-                    "any problems.")
+                    "Piecewise compilation with empty splitting_ops do not" \
+                    "contains piecewise cudagraph. Setting cudagraph_"
+                    "mode to NONE. Hint: If you are using attention backends "
+                    "that support cudagraph, consider manually setting "
+                    "cudagraph_mode to FULL or FULL_DECODE_ONLY to enable "
+                    "full cudagraphs.")
+                self.cudagraph_mode = CUDAGraphMode.NONE
+            elif self.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+                logger.warning_once(
+                    "Piecewise compilation with empty splitting_ops do not "
+                    "contains piecewise cudagraph. Setting cudagraph_mode "
+                    "to FULL.")
                 self.cudagraph_mode = CUDAGraphMode.FULL
             self.splitting_ops = []
+        else:  # len(self.splitting_ops) > 0:
+            assert not self.pass_config.enable_attn_fusion or \
+                not self.splitting_ops_contain_attention(), (
+                "attention ops should not be in splitting_ops "
+                "when enable_attn_fusion is True")
 
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and all(
