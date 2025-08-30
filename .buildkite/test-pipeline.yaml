@@ -22,6 +22,12 @@
 # working_dir(str): specify the place where command should execute, default to /vllm-workspace/tests
 # source_file_dependencies(list): the list of prefix to opt-in the test for, if empty, the test will always run.
 
+# Environment variables
+# Force HuggingFace Hub to work offline
+# This avoids unnecessary revision checks that can cause timeouts and improves performance since most of the models used in tests are cached.
+env:
+  HF_HUB_OFFLINE: 1
+
 # When adding a test
 # - If the test belong to an existing group, add it there
 # - If the test is short, add to any existing step
