@@ -39,7 +39,7 @@ def test_loading_engine_with_wrong_plugin():
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_prithvi_mae_plugin_offline(model_name: str):
+def test_prithvi_mae_plugin_offline(vllm_runner, model_name: str):
 
     img_prompt = dict(
         data=image_url,
@@ -48,22 +48,23 @@ def test_prithvi_mae_plugin_offline(model_name: str):
         out_data_format="b64_json",
     )
 
-    llm = LLM(
-        model=model_name,
-        skip_tokenizer_init=True,
-        trust_remote_code=True,
-        enforce_eager=True,
-        # Limit the maximum number of parallel requests
-        # to avoid the model going OOM in CI.
-        max_num_seqs=32,
-        io_processor_plugin="prithvi_to_tiff_valencia",
-    )
-
     pooling_params = PoolingParams(task="encode", softmax=False)
-    pooler_output = llm.encode(
-        img_prompt,
-        pooling_params=pooling_params,
-    )
+
+    with vllm_runner(
+            model_name,
+            runner="pooling",
+            skip_tokenizer_init=True,
+            trust_remote_code=True,
+            enforce_eager=True,
+            # Limit the maximum number of parallel requests
+            # to avoid the model going OOM in CI.
+            max_num_seqs=1,
+            io_processor_plugin="prithvi_to_tiff_valencia",
+    ) as llm_runner:
+        pooler_output = llm_runner.get_llm().encode(
+            img_prompt,
+            pooling_params=pooling_params,
+        )
     output = pooler_output[0].outputs
 
     # verify the output is formatted as expected for this plugin
