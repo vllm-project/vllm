@@ -116,7 +116,7 @@ class CoreEngineProcManager:
             local_dp_ranks.append(local_index)
             self.processes.append(
                 context.Process(target=target_fn,
-                                name=f"EngineCore_{global_index}",
+                                name=f"EngineCore_DP{global_index}",
                                 kwargs=common_kwargs | {
                                     "dp_rank": global_index,
                                     "local_dp_rank": local_index,
