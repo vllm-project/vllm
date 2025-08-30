@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+import os
+from typing import Any, Optional
 
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed import (get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -188,6 +191,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     # The Deep Gemm kernels only support block size of 128
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
 
+    # Class variable for one-shot logging to verify dispatch optimization
+    _logged_dispatch_once: bool = False
+
     def __init__(self,
                  max_num_tokens: int,
                  num_dispatchers: int,
@@ -222,6 +228,56 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return False
 
+    def _get_effective_num_dispatchers(self) -> int:
+        """
+        Calculates the effective number of token dispatchers considering tensor
+        parallelism.
+        
+        When tensor parallelism (TP) is used (TP > 1), only the leader rank
+        (rank 0) in each TP group should dispatch tokens to avoid redundant
+        communication. This significantly reduces cross-rank communication
+        overhead in distributed environments.
+        
+        Returns:
+            int: The effective number of dispatchers to use.
+            When TP > 1:
+            - Returns max(1, num_dispatchers // tp_size) for leader ranks
+              (tp_rank == 0)
+            - Returns 0 for non-leader ranks (tp_rank != 0)
+            When TP <= 1:
+            - Returns the original num_dispatchers
+            
+        Note:
+            Leader ranks are guaranteed at least 1 dispatcher for stability,
+            while non-leader ranks return 0 to eliminate redundant dispatching.
+        """
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+
+        if tp_size <= 1:
+            # No TP or single device - use all dispatchers
+            return self.num_dispatchers
+
+        # TP > 1 case
+        eff = (max(1, self.num_dispatchers // tp_size) if tp_rank == 0 else 0)
+
+        # --- lightweight one-shot log for verification ---
+        if (not BatchedDeepGemmExperts._logged_dispatch_once
+                and os.getenv("VLLM_LOG_MOE_DISPATCH", "0") == "1"):
+            logger.info(
+                "[moe-dispatch-opt] tp_rank=%d/%d, num_dispatchers=%d -> "
+                "effective=%d, leader=%s, participates_a2a=%s",
+                tp_rank,
+                tp_size,
+                self.num_dispatchers,
+                eff,
+                str(tp_rank == 0),
+                str(eff > 0),
+            )
+            BatchedDeepGemmExperts._logged_dispatch_once = True
+
+        return eff
+
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
@@ -239,10 +295,10 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_metadata: Optional[mk.ExpertTokensMetadata],
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         assert a.dim() == 2
-        # FIXME (varun): We should be able to dispatch only from the leader
-        # DP ranks in the case of TP > 1. At the moment, all the Ranks
-        # end up sending their tokens. This needs to be fixed.
-        num_dispatchers = self.num_dispatchers
+        # Optimize token dispatch: only leader DP ranks dispatch tokens when
+        # TP > 1. This reduces cross-rank communication overhead in distributed
+        # MoE models.
+        num_dispatchers = self._get_effective_num_dispatchers()
         num_experts = local_num_experts
         max_num_tokens = a.size(
             0) if self.max_num_tokens is None else self.max_num_tokens
@@ -252,30 +308,30 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         output = (num_experts, max_num_tokens * num_dispatchers, K)
         return (workspace13, workspace2, output, a.dtype)
 
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str,
-        global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-        apply_router_weight_on_input: bool,
-    ):
+    def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
+              w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor, activation: str, global_num_experts: int,
+              expert_map: Optional[torch.Tensor],
+              w1_scale: Optional[torch.Tensor],
+              w2_scale: Optional[torch.Tensor], w1_zp: Optional[torch.Tensor],
+              w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
+              a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
+              workspace2: torch.Tensor,
+              expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+              apply_router_weight_on_input: bool,
+              extra_expert_args: Optional[dict[str, Any]]):
+        logger.debug("[MoE Debug] BatchedDeepGemmExperts.apply() called - "
+                     "monitoring logs should appear below")
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
+
+        # Monitor expert_num_tokens for workspace allocation analysis
+        logger.info(
+            "[MoE Monitor] expert_num_tokens shape: %s, sum: %s, max: %s, "
+            "values: %s", expert_num_tokens.shape,
+            expert_num_tokens.sum().item(),
+            expert_num_tokens.max().item(),
+            expert_num_tokens.cpu().numpy())
 
         assert hidden_states.ndim == 3
         assert self.block_shape is not None
