@@ -23,6 +23,7 @@ from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import receiver_cache_from_config
+from vllm.separated_encode.sched.encoder_scheduler import EncoderScheduler
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -112,6 +113,9 @@ class EngineCore:
                 "This scheduler interface is not public and "
                 "compatibility may not be maintained.",
                 vllm_config.scheduler_config.scheduler_cls)
+        
+        if vllm_config.epd_disagg_config.instance_type == "encode":
+            Scheduler = EncoderScheduler
 
         if len(kv_cache_config.kv_cache_groups) == 0:
             # Encoder models without KV cache don't support

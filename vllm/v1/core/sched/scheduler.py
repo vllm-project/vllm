@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import itertools
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Iterable
@@ -17,6 +18,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.separated_encode.sched.encoder_cache_preallocator import (
+    SyncEncoderCachePreallocator
+)
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
                                                 compute_encoder_budget)
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -59,6 +63,7 @@ class Scheduler(SchedulerInterface):
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
+        self.epd_disagg_config = vllm_config.epd_disagg_config
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -142,7 +147,7 @@ class Scheduler(SchedulerInterface):
         # the encoder cache will not be initialized because cache size is 0
         # for these models.
         self.encoder_cache_manager = EncoderCacheManager(
-            cache_size=encoder_cache_size)
+            cache_size=encoder_cache_size*10)
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
@@ -163,6 +168,20 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        self.separated_encode: bool = False
+
+        if (
+            self.epd_disagg_config.instance_type == "prefill+decode"
+            or self.epd_disagg_config.instance_type == "prefill"  
+        ):
+            # Set max_num_encoder_input_tokens to avoid
+            # encoder execution on PD or P instance.
+            self.ec_preallocator: SyncEncoderCachePreallocator
+            self.max_num_encoder_input_tokens = 0
+            self.separated_encode = True            
+            self.ec_preallocator = SyncEncoderCachePreallocator(
+                vllm_config, self._perform_preallocations)
+            self.mutex = threading.Lock()
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -222,7 +241,6 @@ class Scheduler(SchedulerInterface):
                  ) = self._try_schedule_encoder_inputs(
                      request, request.num_computed_tokens, num_new_tokens,
                      encoder_compute_budget)
-
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
                 # reasons:
@@ -615,6 +633,9 @@ class Scheduler(SchedulerInterface):
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
 
+            if self.separated_encode:
+                self.ec_preallocator.update_mm_inputs_done(request)
+
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
             # may be updated again in _update_from_output for speculative
             # decoding. However, it is safe to call the method here because
@@ -622,6 +643,10 @@ class Scheduler(SchedulerInterface):
             # and thus are unaffected by speculative decoding.
             if request.has_encoder_inputs:
                 self._free_encoder_inputs(request)
+
+        if self.separated_encode:
+            # Finalize allocations or get rid of them
+            self._perform_preallocations()
 
         # Clear the finished request IDs.
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
@@ -788,7 +813,6 @@ class Scheduler(SchedulerInterface):
             encoder_compute_budget -= num_encoder_tokens
             mm_hashes_to_schedule.add(request.mm_hashes[i])
             encoder_inputs_to_schedule.append(i)
-
         return (
             encoder_inputs_to_schedule,
             num_new_tokens,
@@ -836,6 +860,16 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
+        injected_mm_data = model_runner_output.injected_mm_data
+        
+        if self.separated_encode:
+            for (req_id, input_id, mm_hash) in injected_mm_data:
+                is_skipped = not (self.ec_preallocator.mm_inputs_done[req_id] <= input_id) 
+                self.encoder_cache_manager.finalize_allocation(
+                    req_id, input_id, mm_hash, is_skipped 
+                )
+            # Finalize allocations or get rid of them
+            self._perform_preallocations()
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
@@ -1052,6 +1086,8 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
+        if self.separated_encode:
+            self.ec_preallocator.add_request(request)
         self.waiting.add_request(request)
         self.requests[request.request_id] = request
         if self.log_stats:
@@ -1103,7 +1139,8 @@ class Scheduler(SchedulerInterface):
 
     def _free_request(self, request: Request) -> Optional[dict[str, Any]]:
         assert request.is_finished()
-
+        if self.separated_encode:
+            self.ec_preallocator.finish_request(request)
         delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
@@ -1243,3 +1280,43 @@ class Scheduler(SchedulerInterface):
         for req_id in (kv_connector_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
+
+    ########################################################################
+    # Encoder Cache related methods
+    ########################################################################
+
+    def _perform_preallocations(self, ):
+        if self.mutex.locked():
+            return
+        with self.mutex:
+            while not self.ec_preallocator.is_empty():
+                prealloc, candidate = self.ec_preallocator.get_prealloc_candidate(
+                    self.encoder_cache_manager.num_free_slots, fill_next = True)         
+                if not prealloc: # can't preallocate
+                    return
+                if candidate is not None:
+                    self.encoder_cache_manager.can_allocate_tokens(candidate[2])
+                    is_receiving_required = self.encoder_cache_manager.preallocate(
+                        *candidate
+                    )
+                    self.ec_preallocator.send_prealloc_notification(
+                        candidate[0],
+                        candidate[1],
+                        is_receiving_required,
+                        candidate[3],
+                    )
+            # last element
+            
+            prealloc, candidate = self.ec_preallocator.get_prealloc_candidate(
+                self.encoder_cache_manager.num_free_slots, fill_next = False)
+            if (candidate is not None):
+                self.encoder_cache_manager.can_allocate_tokens(candidate[2])                
+                is_receiving_required = self.encoder_cache_manager.preallocate(
+                    *candidate
+                )
+                self.ec_preallocator.send_prealloc_notification(
+                    candidate[0],
+                    candidate[1],
+                    is_receiving_required,
+                    candidate[3],
+                )
