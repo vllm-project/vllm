@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
@@ -22,6 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen3MoE model compatible with HuggingFace weights."""
+import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -112,28 +112,23 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
-
         self.ep_group = get_ep_group().device_group
         self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
-
         if self.tp_size > config.num_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {config.num_experts}.")
 
-        # Load balancing settings.
         vllm_config = get_current_vllm_config()
         eplb_config = vllm_config.parallel_config.eplb_config
         self.enable_eplb = enable_eplb
-
         self.n_logical_experts = self.n_routed_experts
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_physical_experts = (self.n_logical_experts +
                                    self.n_redundant_experts)
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-
         self.physical_expert_start = (self.ep_rank *
                                       self.n_local_physical_experts)
         self.physical_expert_end = (self.physical_expert_start +
@@ -149,33 +144,28 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                                 prefix=f"{prefix}.experts",
                                 enable_eplb=self.enable_eplb,
                                 num_redundant_experts=self.n_redundant_experts)
-
         self.gate = ReplicatedLinear(
             config.hidden_size,
             config.num_experts,
             bias=False,
-            quant_config=self._maybe_ignore_quant_config(quant_config),
+            quant_config=self.maybe_not_quantization(quant_config),
             prefix=f"{prefix}.gate")
 
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
-        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
-        # seems to avoid gate quantization.
-        # See: https://huggingface.co/Qwen/Qwen3-30B-A3B-GPTQ-Int4
+    def maybe_not_quantization(self,
+                               quant_config: Optional[QuantizationConfig]):
+        if os.environ.get("VLLM_QUANTIZATION_FROM_AUTOROUND_GPTQ") == "1":
+            return quant_config
         if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
             return None
         return quant_config
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # NOTE: hidden_states can have either 1D or 2D shape.
         orig_shape = hidden_states.shape
         hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
-
-        # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         final_hidden_states = self.experts(hidden_states=hidden_states,
                                            router_logits=router_logits)
-
         return final_hidden_states.view(orig_shape)
 
 
@@ -228,7 +218,6 @@ class Qwen3MoeAttention(nn.Module):
                                           bias=qkv_bias,
                                           quant_config=quant_config,
                                           prefix=f"{prefix}.qkv_proj")
-
         self.o_proj = RowParallelLinear(self.total_num_heads * self.head_dim,
                                         hidden_size,
                                         bias=False,
@@ -267,16 +256,16 @@ class Qwen3MoeAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        # Add qk-norm
+
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
                            self.head_dim)
         q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
-
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
                            self.head_dim)
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
+
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -302,6 +291,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         dual_chunk_attention_config = getattr(config,
                                               "dual_chunk_attention_config",
                                               None)
+
         self.self_attn = Qwen3MoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -318,13 +308,12 @@ class Qwen3MoeDecoderLayer(nn.Module):
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
 
-        # `mlp_only_layers` in the config.
         layer_idx = extract_layer_index(prefix)
         mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
                            config.mlp_only_layers)
         if (layer_idx not in mlp_only_layers) and (
-                config.num_experts > 0 and
-            (layer_idx + 1) % config.decoder_sparse_step == 0):
+            config.num_experts > 0 and
+                (layer_idx + 1) % config.decoder_sparse_step == 0):
             self.mlp = Qwen3MoeSparseMoeBlock(config=config,
                                               quant_config=quant_config,
                                               prefix=f"{prefix}.mlp",
@@ -346,19 +335,17 @@ class Qwen3MoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
-
-        # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
@@ -370,11 +357,11 @@ class Qwen3MoeModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
+
         enable_eplb = parallel_config.enable_eplb
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
@@ -382,6 +369,7 @@ class Qwen3MoeModel(nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.config = config
+
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
@@ -397,6 +385,7 @@ class Qwen3MoeModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
@@ -421,19 +410,20 @@ class Qwen3MoeModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
+
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
                 "residual": residual
             })
+
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
         return FusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -444,7 +434,6 @@ class Qwen3MoeModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
@@ -452,38 +441,30 @@ class Qwen3MoeModel(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
-        # Skip loading extra parameters for GPTQ/modelopt models.
         ignore_suffixes = (".bias", "_bias", ".k_scale", "_k_scale",
                            ".v_scale", "_v_scale", ".weight_scale",
                            "_weight_scale", ".input_scale", "_input_scale")
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+
         expert_params_mapping = self.get_expert_mapping()
+
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
-                # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue
-                # We have mlp.experts[0].gate_proj in the checkpoint.
-                # Since we handle the experts below in expert_params_mapping,
-                # we need to skip here BEFORE we update the name, otherwise
-                # name will be updated to mlp.experts[0].gate_up_proj, which
-                # will then be updated below in expert_params_mapping
-                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if "mlp.experts" in name:
                     continue
                 name = name.replace(weight_name, param_name)
 
-                # Skip loading extra parameters for GPTQ/modelopt models.
                 if name.endswith(ignore_suffixes) and name not in params_dict:
                     continue
 
-                # Skip layers on other devices.
                 if is_pp_missing_parameter(name, self):
                     continue
+
                 if name.endswith("scale"):
-                    # Remapping the name of FP8 kv-scale.
                     name = maybe_remap_kv_scale_name(name, params_dict)
                     if name is None:
                         continue
@@ -504,28 +485,16 @@ class Qwen3MoeModel(nn.Module):
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
-
-                    # Anyway, this is an expert weight and should not be
-                    # attempted to load as other weights later
                     is_expert_weight = True
-
-                    # Do not modify `name` since the loop may continue here
-                    # Instead, create a new variable
                     name_mapped = name.replace(weight_name, param_name)
-
                     if is_pp_missing_parameter(name_mapped, self):
                         continue
-
-                    # Skip loading extra parameters for GPTQ/modelopt models.
                     if name_mapped.endswith(
                             ignore_suffixes
                     ) and name_mapped not in params_dict:
                         continue
 
                     param = params_dict[name_mapped]
-                    # We should ask the weight loader to return success or not
-                    # here since otherwise we may skip experts with other
-                    # available replicas.
                     weight_loader = typing.cast(Callable[..., bool],
                                                 param.weight_loader)
                     success = weight_loader(param,
@@ -539,19 +508,14 @@ class Qwen3MoeModel(nn.Module):
                         break
                 else:
                     if is_expert_weight:
-                        # We've checked that this is an expert weight
-                        # However it's not mapped locally to this rank
-                        # So we simply skip it
                         continue
-
-                    # Skip loading extra parameters for GPTQ/modelopt models.
                     if name.endswith(
                             ignore_suffixes) and name not in params_dict:
                         continue
-                    # Skip layers on other devices.
+
                     if is_pp_missing_parameter(name, self):
                         continue
-                    # Remapping the name of FP8 kv-scale.
+
                     if name.endswith("kv_scale"):
                         remapped_kv_scale_name = name.replace(
                             ".kv_scale", ".attn.kv_scale")
@@ -568,6 +532,7 @@ class Qwen3MoeModel(nn.Module):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
+
             loaded_params.add(name)
         return loaded_params
 
@@ -585,7 +550,6 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
             "up_proj",
         ],
     }
-
     fall_back_to_pt_during_load = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -604,24 +568,18 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-
-        # Set MoE hyperparameters
         self.expert_weights = []
-
         self.moe_layers: list[FusedMoE] = []
         example_layer = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
-
             assert isinstance(layer, Qwen3MoeDecoderLayer)
             if isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
                 example_layer = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
-
         if example_layer is None:
-            raise RuntimeError("No Qwen3MoE layer found in the model.layers.")
-
+            raise RuntimeError("No Qwen3Moe layer found in the model.layers.")
         self.num_moe_layers = len(self.moe_layers)
         self.num_expert_groups = 1
         self.num_shared_experts = 0
@@ -638,7 +596,6 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
         logical_replica_count: torch.Tensor,
     ) -> None:
         for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
             self.expert_weights.append(layer.get_expert_weights())
             layer.set_eplb_state(
                 moe_layer_idx=layer_idx,
@@ -690,8 +647,37 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        weights_list = list(weights)
+        try:
+            loader = AutoWeightsLoader(self)
+            return loader.load_weights(weights_list)
+        except Exception:
+            logger.warning("Detected quantized MoE gate layers. "
+                           "Proceeding with automatic"
+                           "gate layer adjustment"
+                           "for compatibility.")
+            for layer in self.model.layers:
+                if isinstance(layer, PPMissingLayer):
+                    continue
+                if hasattr(layer, "mlp") and isinstance(
+                        layer.mlp, Qwen3MoeSparseMoeBlock):
+                    moe_block = layer.mlp
+                    original_gate = moe_block.gate
+
+                    new_gate = ReplicatedLinear(
+                        self.config.hidden_size,
+                        self.config.num_experts,
+                        bias=False,
+                        quant_config=self.quant_config,
+                    ).to(device=original_gate.weight.device,
+                         dtype=original_gate.weight.dtype)
+
+                    moe_block.gate = new_gate
+
+            logger.info("MoE gate layers adjusted successfully."
+                        " Continuing with weight loading.")
+            loader = AutoWeightsLoader(self)
+            return loader.load_weights(weights_list)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
