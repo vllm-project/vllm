@@ -6,7 +6,7 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
@@ -2603,6 +2603,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.encoder_cache.clear()
         gc.collect()
 
+    def _maybe_get_memory_pool_context(self,
+                                       tag: str) -> AbstractContextManager:
+        if self.vllm_config.model_config.enable_sleep_mode:
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            allocator = CuMemAllocator.get_instance()
+            if tag == "weights":
+                assert allocator.get_current_usage() == 0, (
+                    "Sleep mode can only be "
+                    "used for one instance per process.")
+            context = allocator.use_memory_pool(tag=tag)
+        else:
+            context = nullcontext()
+        return context
+
     def capture_model(self) -> None:
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
@@ -2709,10 +2724,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                 force_attention=force_attention,
                                 uniform_decode=uniform_decode,
                                 skip_eplb=True)
-            self._dummy_run(num_tokens,
-                            cudagraph_runtime_mode=cudagraph_runtime_mode,
-                            uniform_decode=uniform_decode,
-                            skip_eplb=True)
+            with self._maybe_get_memory_pool_context("cuda_graph"):
+                self._dummy_run(num_tokens,
+                                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                                uniform_decode=uniform_decode,
+                                skip_eplb=True)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """

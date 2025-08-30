@@ -44,10 +44,10 @@ class CUDAGraphWrapper:
 
     The workflow of this wrapper in the cudagraph dispatching is as follows:
     1. At initialization, a runtime mode is assigned to the wrapper (FULL or
-    PIECEWISE). 
-    2. At runtime, the wrapper receives a runtime_mode and a 
+    PIECEWISE).
+    2. At runtime, the wrapper receives a runtime_mode and a
     batch_descriptor(key) from the forward context and blindly trust them
-    for cudagraph dispatching. 
+    for cudagraph dispatching.
     3. If runtime_mode is NONE or runtime_mode does not match the mode of the
     wrapper, just call the runnable directly.
     4. Otherwise, i.e., the runtime_mode matches the mode of the wrapper,
@@ -56,9 +56,9 @@ class CUDAGraphWrapper:
 
     Note: CUDAGraphWrapper does not store persistent buffers or copy any
     runtime inputs into that buffers for replay. We assume implementing them
-    is done outside of the wrapper. That is because we do not make any 
+    is done outside of the wrapper. That is because we do not make any
     assumption on the dynamic shape (batch size) of the runtime inputs, as a
-    trade-off for staying orthogonal to compilation logic. Nevertheless, 
+    trade-off for staying orthogonal to compilation logic. Nevertheless,
     tracing and checking the input addresses to be consistent during replay is
     guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
     """
@@ -82,7 +82,8 @@ class CUDAGraphWrapper:
         # TODO: in the future, if we want to use multiple
         # streams, it might not be safe to share a global pool.
         # only investigate this when we use multiple streams
-        self.graph_pool = current_platform.get_global_graph_pool()
+        self.graph_pool = current_platform.get_global_graph_pool(
+            vllm_config.model_config.enable_sleep_mode)
 
         if cudagraph_options is None:
             cudagraph_options = CUDAGraphOptions()
@@ -107,6 +108,7 @@ class CUDAGraphWrapper:
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
         cudagraph_runtime_mode = forward_context.cudagraph_runtime_mode
+        logger.info(f"CUDAGraphWrapper call {cudagraph_runtime_mode=}")
 
         if cudagraph_runtime_mode == CUDAGraphMode.NONE or \
                             cudagraph_runtime_mode != self.runtime_mode:
@@ -189,5 +191,7 @@ class CUDAGraphWrapper:
                 f"during replay. Expected {entry.input_addresses}, "
                 f"got {new_input_addresses}")
 
+        logger.info(
+            f"CUDAGraphWrapper replay cuda graph {entry.cudagraph.pool()=}")
         entry.cudagraph.replay()
         return entry.output

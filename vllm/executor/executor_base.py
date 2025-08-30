@@ -30,7 +30,7 @@ class ExecutorBase(ABC):
     """Base class for all executors.
 
     An executor is responsible for executing the model on one device,
-    or it can be a distributed executor 
+    or it can be a distributed executor
     that can execute the model on multiple devices.
     """
 
@@ -82,7 +82,7 @@ class ExecutorBase(ABC):
 
         Returns:
             A list containing the results from each worker.
-        
+
         Note:
             It is recommended to use this API to only pass control messages,
             and set up data-plane communication to pass data.
@@ -183,7 +183,7 @@ class ExecutorBase(ABC):
         time_before_sleep = time.perf_counter()
         self.collective_rpc("sleep", kwargs=dict(level=level))
         time_after_sleep = time.perf_counter()
-        self.sleeping_tags = {"weights", "kv_cache"}
+        self.sleeping_tags = {"weights", "kv_cache", "cuda_graph"}
         self.is_sleeping = True
         logger.info("It took %.6f seconds to fall asleep.",
                     time_after_sleep - time_before_sleep)
@@ -324,7 +324,7 @@ class DistributedExecutorBase(ExecutorBase):
                 run only in the remote TP workers, not the driver worker.
                 It will also be run asynchronously and return a list of futures
                 rather than blocking on the results.
-        
+
         # TODO: simplify and merge with collective_rpc
         """
         raise NotImplementedError

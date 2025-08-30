@@ -31,7 +31,7 @@ class PiecewiseBackend:
                  vllm_backend: VllmBackend):
         """
         The backend for piecewise compilation.
-        It mainly handles the compilation of static shapes and 
+        It mainly handles the compilation of static shapes and
         dispatching based on runtime shape.
 
         We will compile `self.graph` once for the general shape,
@@ -84,6 +84,7 @@ class PiecewiseBackend:
             end_monitoring_torch_compile(self.vllm_config)
 
     def __call__(self, *args) -> Any:
+        logger.info("Running piecewise backend")
         if not self.first_run_finished:
             self.first_run_finished = True
             self.check_for_ending_compilation()

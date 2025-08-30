@@ -162,6 +162,7 @@ class CuMemAllocator:
         """
         Internal method to store the allocation data
         when memory is allocated in the memory pool."""
+        print(f"_python_malloc_callback {self.current_tag=}")
         py_d_mem = allocation_handle[2]
         self.pointer_to_data[py_d_mem] = AllocationData(
             allocation_handle, self.current_tag)
@@ -196,6 +197,7 @@ class CuMemAllocator:
             offload_tags = (offload_tags, )
 
         assert isinstance(offload_tags, tuple)
+        print("Sleeping allocator with tags: %s", offload_tags)
 
         for ptr, data in self.pointer_to_data.items():
             handle = data.handle
@@ -254,15 +256,17 @@ class CuMemAllocator:
 
         old_tag = self.current_tag
         self.current_tag = tag
-        with use_memory_pool_with_allocator(self.python_malloc_callback,
-                                            self.python_free_callback) as data:
+        with use_memory_pool_with_allocator(
+                self.python_malloc_callback,
+                self.python_free_callback) as (mem_pool, allocator):
             # start to hit another PyTorch bug in PyTorch 2.6,
             # possibly because of gc-related issue w.r.t. the allocator and
             # the memory pool.
             # to avoid the issue, we keep a reference of the data.
             # see https://github.com/pytorch/pytorch/issues/146431 .
-            self.allocator_and_pools[tag] = data
-            yield
+            print(f"Using memory pool {mem_pool.id=} with {tag=}")
+            self.allocator_and_pools[tag] = (mem_pool, allocator)
+            yield mem_pool
             # PyTorch's bug, calling torch.cuda.empty_cache() will error
             # when using pluggable allocator, see
             # https://github.com/pytorch/pytorch/issues/145168 .
@@ -284,3 +288,26 @@ class CuMemAllocator:
             handle = data.handle
             sum_bytes += handle[1]
         return sum_bytes
+
+    def get_current_usage_by_tag(self, tag: str) -> int:
+        """
+        Get the total number of bytes allocated in the memory pool
+        with the specified tag.
+        """
+        sum_bytes: int = 0
+        for ptr, data in self.pointer_to_data.items():
+            if data.tag == tag:
+                handle = data.handle
+                sum_bytes += handle[1]
+        return sum_bytes
+
+    def get_current_items_by_tag(self, tag: str) -> int:
+        """
+        Get the total number of pointers allocated in the memory pool
+        with the specified tag.
+        """
+        count: int = 0
+        for ptr, data in self.pointer_to_data.items():
+            if data.tag == tag:
+                count += 1
+        return count
