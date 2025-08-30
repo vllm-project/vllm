@@ -352,8 +352,6 @@ class LiteWhisperMLP(nn.Module):
 
 class LiteWhisperEncoder(WhisperEncoder):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", is_standalone_encoder: bool = False):
-        # Don't call super().__init__() to avoid duplicate layer creation
-        # Instead, initialize manually with LiteWhisperEncoderLayer
         nn.Module.__init__(self)  # Call nn.Module.__init__ directly
         
         config = vllm_config.model_config.hf_config
@@ -458,22 +456,6 @@ class LiteWhisperModel(WhisperModel):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         
-        # Debug: Print a few parameter names to understand the structure
-        # print("Sample model parameters:")
-        # for i, (param_name, _) in enumerate(params_dict.items()):
-        #     if i < 20 or "proj_out" in param_name:  # Print first 20 and any proj_out
-        #         print(f"  {param_name}")
-        #     elif i == 20:
-        #         print(f"  ... and {len(params_dict) - 20} more")
-        
-        # Check for proj_out specifically
-        has_proj_out = "proj_out.weight" in params_dict or "model.proj_out.weight" in params_dict
-        print(f"Model has proj_out.weight: {has_proj_out}")
-        if not has_proj_out:
-            # Check if it has a different name
-            proj_variants = [name for name in params_dict.keys() if "proj_out" in name]
-            print(f"Proj_out variants: {proj_variants}")
-        
         for name, loaded_weight in weights:
             # Skip proj_out weights (they're tied to embed_tokens)
             if name.startswith("proj_out.") or name == "proj_out.weight":
@@ -538,8 +520,7 @@ class LiteWhisperModel(WhisperModel):
                             if weight_loader and callable(weight_loader):
                                 weight_loader(param, loaded_weight, shard_id)
                                 loaded_params.add(name)
-                                loaded_params.add(vllm_name)  # Mark the actual param name as loaded
-                                # print(f"  Loaded QKV: {name} -> {vllm_name} ({shard_id})")
+                                loaded_params.add(vllm_name)
                             else:
                                 print(f"  Warning: No weight_loader for stacked param: {vllm_name}")
                             processed = True
@@ -548,9 +529,6 @@ class LiteWhisperModel(WhisperModel):
                             print(f"  Warning: Stacked param not found: {vllm_name}")
                             processed = True
                             break
-            else:
-                # print(f"  Debug: Non-decoder weight: {name}")
-                pass
             
             if processed:
                 continue
