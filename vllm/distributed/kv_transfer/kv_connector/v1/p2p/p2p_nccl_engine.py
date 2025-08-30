@@ -232,16 +232,16 @@ class P2pNcclEngine:
                         tensor_id, tensor_size, self.buffer_size_threshold,
                         remote_address, self.rank)
                     return False
-                oldest_tenser_id = next(iter(self.send_store))
-                oldest_tenser = self.send_store.pop(oldest_tenser_id)
-                oldest_tenser_size = oldest_tenser.element_size(
-                ) * oldest_tenser.numel()
-                self.buffer_size -= oldest_tenser_size
+                oldest_tensor_id = next(iter(self.send_store))
+                oldest_tensor = self.send_store.pop(oldest_tensor_id)
+                oldest_tensor_size = oldest_tensor.element_size(
+                ) * oldest_tensor.numel()
+                self.buffer_size -= oldest_tensor_size
                 logger.info(
                     "⛔[GET]Send to %s, tensor_id:%s, tensor_size:%d,"
-                    " buffer_size:%d, oldest_tenser_size:%d, rank:%d",
+                    " buffer_size:%d, oldest_tensor_size:%d, rank:%d",
                     remote_address, tensor_id, tensor_size, self.buffer_size,
-                    oldest_tenser_size, self.rank)
+                    oldest_tensor_size, self.rank)
 
             self.send_store[tensor_id] = tensor
             self.buffer_size += tensor_size
