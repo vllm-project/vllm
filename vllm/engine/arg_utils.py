@@ -152,9 +152,17 @@ def is_online_quantization(quantization: Any) -> bool:
     return quantization in ["inc"]
 
 
+NEEDS_HELP = (
+    "--help" in (argv := sys.argv)  # vllm SUBCOMMAND --help
+    or (argv0 := argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
+    or argv0.endswith("mkdocs/__main__.py")  # python -m mkdocs SUBCOMMAND
+)
+
+
 @functools.lru_cache(maxsize=30)
 def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
-    cls_docs = get_attr_docs(cls)
+    # Save time only getting attr docs if we're generating help text
+    cls_docs = get_attr_docs(cls) if NEEDS_HELP else {}
     kwargs = {}
     for field in fields(cls):
         # Get the set of possible types for the field
@@ -172,7 +180,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
 
         # Get the help text for the field
         name = field.name
-        help = cls_docs[name].strip()
+        help = cls_docs.get(name, "").strip()
         # Escape % for argparse
         help = help.replace("%", "%%")
 
@@ -253,6 +261,9 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
 
 def get_kwargs(cls: ConfigType) -> dict[str, Any]:
     """Return argparse kwargs for the given Config dataclass.
+
+    If `--help` or `mkdocs` are not present in the command line command, the
+    attribute documentation will not be included in the help output.
 
     The heavy computation is cached via functools.lru_cache, and a deep copy
     is returned so callers can mutate the dictionary without affecting the
@@ -1042,7 +1053,7 @@ class EngineArgs:
                                    self.trust_remote_code, self.revision,
                                    self.code_revision, self.config_format)
 
-            # if loading a SpeculatorsConfig, load the specualtive_config
+            # if loading a SpeculatorsConfig, load the speculative_config
             # details from the config directly
             # no user input required / expected
             if isinstance(hf_config, SpeculatorsConfig):
@@ -1452,11 +1463,6 @@ class EngineArgs:
                                recommend_to_remove=False)
             return False
 
-        # V1 mamba models are unoptimized.
-        if model_config.has_inner_state and _warn_or_fallback(
-                feature_name="Mamba"):
-            return False
-
         # No Concurrent Partial Prefills so far.
         if (self.max_num_partial_prefills
                 != SchedulerConfig.max_num_partial_prefills
@@ -1560,8 +1566,7 @@ class EngineArgs:
                 use_spec_decode = self.speculative_config is not None
 
                 if (is_gpu and not use_sliding_window and not use_spec_decode
-                        and not self.enable_lora
-                        and model_config.runner_type != "pooling"):
+                        and not self.enable_lora):
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models "
@@ -1579,10 +1584,6 @@ class EngineArgs:
                 "OOM during the initial memory profiling phase, or result "
                 "in low performance due to small KV cache size. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
-        elif (self.enable_chunked_prefill
-              and model_config.runner_type == "pooling"):
-            msg = "Chunked prefill is not supported for pooling models"
-            raise ValueError(msg)
 
         # if using prefix caching, we must set a hash algo
         if self.enable_prefix_caching:
