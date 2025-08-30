@@ -949,7 +949,7 @@ class LLM:
             validated_prompt = self.io_processor.parse_request(prompts)
 
             # obtain the actual model prompts from the pre-processor
-            prompts = (self.io_processor.pre_process(prompt=validated_prompt))
+            prompts = self.io_processor.pre_process(prompt=validated_prompt)
 
         self._validate_and_add_requests(
             prompts=prompts,

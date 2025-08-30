@@ -23,12 +23,15 @@ from vllm.config import VllmConfig
 from vllm.entrypoints.openai.protocol import (IOProcessorRequest,
                                               IOProcessorResponse)
 from vllm.inputs.data import PromptType
+from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors.interface import (IOProcessor,
                                                   IOProcessorInput,
                                                   IOProcessorOutput)
 
 from .types import DataModuleConfig, ImagePrompt, ImageRequestOutput
+
+logger = init_logger(__name__)
 
 NO_DATA = -9999
 NO_DATA_FLOAT = 0.0001
@@ -220,7 +223,8 @@ def load_image(
                         julian_day, "%m%d").timetuple().tm_yday)
                 temporal_coords.append([year, julian_day])
         except Exception as e:
-            print(f"Could not extract timestamp for {file} ({e})")
+            logger.exception("Could not extract timestamp for %s (%s)", file,
+                             str(e))
 
     imgs = np.stack(imgs, axis=0)  # num_frames, H, W, C
     imgs = np.moveaxis(imgs, -1, 0).astype("float32")  # C, num_frames, H, W
