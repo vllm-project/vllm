@@ -589,7 +589,7 @@ class FlashInferFusedAllReduceParams:
 
 class AllReduceRMSNormPattern(BasePattern):
     """
-    This pattern replaces the allreduce + rms norm (without residual) 
+    This pattern replaces the allreduce + rms norm (without residual)
     with fused flashinfer implementation.
     Applies to allreduce + rmsnorm before attn in the first Transformer block.
     """
@@ -654,7 +654,7 @@ class AllReduceRMSNormPattern(BasePattern):
 
 class AllReduceFusedAddRMSNormPattern(BasePattern):
     """
-    This pattern replaces the allreduce + rms norm (with residual) 
+    This pattern replaces the allreduce + rms norm (with residual)
     with fused flashinfer implementation.
     Applies to o_proj + rmsnorm after attn and mlp + rmsnorm before attn.
     """
@@ -719,9 +719,9 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
 
 class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
     """
-    This pattern replaces the allreduce + rms norm (without residual) 
+    This pattern replaces the allreduce + rms norm (without residual)
     + static fp8 quant with fused flashinfer implementation.
-    Applies to allreduce + rmsnorm + quant before attn 
+    Applies to allreduce + rmsnorm + quant before attn
     in the first Transformer block.
     """
 
@@ -800,7 +800,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
     """
     This pattern replaces the allreduce + rms norm (with residual)
     + static fp8 quant with fused flashinfer implementation.
-    Applies to o_proj + rmsnorm after attn + quant and 
+    Applies to o_proj + rmsnorm after attn + quant and
     mlp + rmsnorm + quant before attn.
     """
 
@@ -886,9 +886,9 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
 
 class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
     """
-    This pattern replaces the allreduce + rms norm (without residual) 
+    This pattern replaces the allreduce + rms norm (without residual)
     + static nvfp4 quant with fused flashinfer implementation.
-    Applies to allreduce + rmsnorm + quant before attn 
+    Applies to allreduce + rmsnorm + quant before attn
     in the first Transformer block.
     """
 
@@ -980,7 +980,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
     """
     This pattern replaces the allreduce + rms norm (with residual)
     + static nvfp4 quant with fused flashinfer implementation.
-    Applies to o_proj + rmsnorm after attn + quant and 
+    Applies to o_proj + rmsnorm after attn + quant and
     mlp + rmsnorm + quant before attn.
     """
 
@@ -1069,6 +1069,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
 
 
 class AllReduceFusionPass(VllmInductorPass):
+    disabled = True
 
     def __init__(self, config: VllmConfig):
         super().__init__(config)
