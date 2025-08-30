@@ -350,12 +350,16 @@ class MultiHeadAttention(nn.Module):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(head_size,
-                                        dtype,
-                                        kv_cache_dtype=None,
-                                        block_size=16,
-                                        is_attention_free=False)
-        backend = backend_name_to_enum(attn_backend.get_name())
+        try:
+            attn_backend = get_attn_backend(head_size,
+                                            dtype,
+                                            kv_cache_dtype=None,
+                                            block_size=16,
+                                            is_attention_free=False)
+            backend = backend_name_to_enum(attn_backend.get_name())
+        except (ValueError, AttributeError):
+            # Fallback to TORCH_SDPA if backend detection fails
+            backend = _Backend.TORCH_SDPA
         if current_platform.is_rocm():
             # currently, only torch_sdpa is supported on rocm
             self.attn_backend = _Backend.TORCH_SDPA
