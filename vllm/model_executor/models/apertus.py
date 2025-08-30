@@ -25,11 +25,13 @@
 # limitations under the License.
 """Inference-only Apertus model compatible with HuggingFace weights."""
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 from torch import nn
-from transformers import ApertusConfig
+
+if TYPE_CHECKING:
+    from transformers import ApertusConfig
 
 from vllm.attention import Attention, AttentionType
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
@@ -102,7 +104,7 @@ class ApertusAttention(nn.Module):
 
     def __init__(
         self,
-        config: ApertusConfig,
+        config: 'ApertusConfig',
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -207,7 +209,7 @@ class ApertusAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
-    def _init_rotary_emb(self, config: ApertusConfig,
+    def _init_rotary_emb(self, config: 'ApertusConfig',
                          rope_scaling: Optional[dict[str, Any]],
                          quant_config: Optional[QuantizationConfig]) -> None:
         is_neox_style = True
@@ -230,7 +232,7 @@ class ApertusDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: ApertusConfig,
+        config: 'ApertusConfig',
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",

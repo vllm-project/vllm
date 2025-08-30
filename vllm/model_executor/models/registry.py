@@ -10,6 +10,7 @@ import pickle
 import subprocess
 import sys
 import tempfile
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Set
 from dataclasses import dataclass, field
@@ -407,10 +408,31 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
     module_name: str
     class_name: str
 
-    # Performed in another process to avoid initializing CUDA
     def inspect_model_cls(self) -> _ModelInfo:
-        return _run_in_subprocess(
+        try:
+            from vllm.model_executor.models._model_info import _MODEL_INFO
+        except Exception:
+            _MODEL_INFO = {}
+            logger.exception(
+                "Error loading _ModelInfo properties, load model instead.")
+
+        start_time = time.perf_counter()
+        model_info_dict = _MODEL_INFO.get(self.class_name)
+        if model_info_dict is not None:
+            mi = _ModelInfo(**model_info_dict["modelinfo"])
+            elapsed_time = time.perf_counter() - start_time
+            logger.info(
+                "Retrieving model info properties for class %s took %.7f secs",
+                self.class_name, elapsed_time)
+            return mi
+
+        # Performed in another process to avoid initializing CUDA
+        mi = _run_in_subprocess(
             lambda: _ModelInfo.from_model_cls(self.load_model_cls()))
+        elapsed_time = time.perf_counter() - start_time
+        logger.info("Loading model info for class %s took %.7f secs",
+                    self.class_name, elapsed_time)
+        return mi
 
     def load_model_cls(self) -> type[nn.Module]:
         mod = importlib.import_module(self.module_name)
