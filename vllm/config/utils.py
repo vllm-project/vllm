@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import enum
+import hashlib
+import pathlib
+from collections.abc import Mapping, Sequence, Set
+from contextlib import suppress
 from typing import TYPE_CHECKING, Callable, TypeVar
 
 from vllm.logger import init_logger
@@ -33,19 +38,12 @@ def config(cls: ConfigT) -> ConfigT:
     return cls
 
 
-# Canonicalize common value types used in config hashing.
-# Keeps imports light at module load; heavier bits are imported inside.
 def canon_value(x):
     """Return a stable, JSON-serializable canonical form for hashing.
 
     Order: primitives, special types (Enum, callable, torch.dtype, Path), then
     generic containers (Mapping/Set/Sequence) with recursion.
     """
-    import enum
-    import pathlib
-    from collections.abc import Mapping, Sequence, Set
-    from contextlib import suppress
-
     # Fast path
     if x is None or isinstance(x, (bool, int, float, str)):
         return x
@@ -114,8 +112,6 @@ def build_opt_out_items(cfg, exclude: set[str]) -> list[tuple[str, object]]:
     - Includes declared fields not in `exclude`.
     - Skips non-canonicalizable values.
     """
-    from contextlib import suppress
-
     items: list[tuple[str, object]] = []
     for key in sorted(get_declared_field_names(cfg)):
         if key in exclude:
@@ -134,8 +130,6 @@ def build_opt_out_items(cfg, exclude: set[str]) -> list[tuple[str, object]]:
 
 def hash_items_sha256(items: list[tuple[str, object]]) -> str:
     """Return a SHA-256 hex digest of the canonical items structure."""
-    import hashlib
-
     return hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
 
 
@@ -150,8 +144,6 @@ def build_opt_items_override(
     - For keys in `overrides`, call the override to produce a stable value.
     - Skips values that cannot be canonicalized.
     """
-    from contextlib import suppress
-
     items: list[tuple[str, object]] = []
     for key in sorted(get_declared_field_names(cfg)):
         if key in exclude:
