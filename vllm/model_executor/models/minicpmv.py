@@ -977,6 +977,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     instantiated.
     """
 
+    supports_encoder_tp_data = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
@@ -1237,6 +1239,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
 
 class MiniCPMV2_0(MiniCPMVBaseModel):
+
+    supports_encoder_tp_data = False
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -1527,8 +1531,6 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
             "up_proj",
         ],
     }
-
-    supports_encoder_tp_data = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
