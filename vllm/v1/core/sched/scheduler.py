@@ -542,9 +542,18 @@ class Scheduler(SchedulerInterface):
             self.kv_cache_config.kv_cache_groups)
         if self.running:
             any_request = self.running[0]
+            running_request_ids = {req.request_id for req in self.running}
+
+            # Include requests in KV transfer state for common prefix calc
+            transferring_request_ids = [
+                req_id for req_id, request in self.requests.items()
+                if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS and
+                any(self.kv_cache_manager.get_blocks(req_id).get_block_ids())
+            ]
             num_common_prefix_blocks = (
                 self.kv_cache_manager.get_num_common_prefix_blocks(
-                    any_request, len(self.running)))
+                    any_request.request_id, len(running_request_ids),
+                    transferring_request_ids))
 
         # Construct the scheduler output.
         new_reqs_data = [
