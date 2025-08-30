@@ -519,8 +519,7 @@ class ModelConfig:
         from typing import Any
 
         # Shared helpers for canonicalization and field enumeration
-        from vllm.config.utils import build_opt_out_items as _build_items
-        from vllm.config.utils import hash_items_sha256 as _hash_sha256
+        from vllm.config.utils import build_opt_out_items, hash_items_sha256
 
         # Default-include; exclude only fields that don't change the compiled
         # graph or are unstable. See RFC #16501.
@@ -542,8 +541,9 @@ class ModelConfig:
             "hf_config_path",
         }
         # Build base items from declared fields using the shared utility
-        items: list[tuple[str, Any]] = _build_items(self,
-                                                    MODEL_EXCLUDE_FROM_HASH)
+        items: list[tuple[str,
+                          Any]] = build_opt_out_items(self,
+                                                      MODEL_EXCLUDE_FROM_HASH)
         # Hash hf_config by content; if JSON export is unavailable, include a
         # minimal stable subset.
         hf = getattr(self, "hf_config", None)
@@ -558,7 +558,7 @@ class ModelConfig:
                         "architectures": getattr(hf, "architectures", None),
                     },
                 ))
-        return _hash_sha256(items)
+        return hash_items_sha256(items)
 
     def __post_init__(self) -> None:
         # Set the default seed to 0 in V1.
