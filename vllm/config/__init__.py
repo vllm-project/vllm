@@ -1166,6 +1166,9 @@ class ModelConfig:
                 "modelopt",
                 "modelopt_fp4",
                 "petit_nvfp4",
+                # Ensure heavy backends are probed last to avoid unnecessary
+                # imports during override detection (e.g., MXFP4 imports Triton)
+                "mxfp4",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
@@ -2439,7 +2442,7 @@ class LoRAConfig:
     lora_dtype: Union[torch.dtype, LoRADType] = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
     lora_extra_vocab_size: int = 256
-    """(Deprecated) Maximum size of extra vocabulary that can be present in a 
+    """(Deprecated) Maximum size of extra vocabulary that can be present in a
     LoRA adapter. Will be removed in v0.12.0."""
     lora_vocab_padding_size: ClassVar[int] = current_platform\
         .get_lora_vocab_padding_size()
