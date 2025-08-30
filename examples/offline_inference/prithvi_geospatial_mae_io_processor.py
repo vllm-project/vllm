@@ -40,11 +40,11 @@ def main():
     )
 
     pooling_params = PoolingParams(task="encode", softmax=False)
-
-    output = llm.encode_with_io_processor(
+    pooler_output = llm.encode(
         img_prompt,
         pooling_params=pooling_params,
     )
+    output = pooler_output[0].outputs
 
     print(output)
     decoded_data = base64.b64decode(output.data)
