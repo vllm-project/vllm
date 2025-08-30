@@ -17,6 +17,7 @@ from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.utils import (enable_trace_function_call_for_thread,
                         resolve_obj_by_qualname, run_method,
@@ -531,7 +532,7 @@ class WorkerWrapperBase:
     def update_environment_variables(self, envs_list: List[Dict[str,
                                                                 str]]) -> None:
         envs = envs_list[self.rpc_rank]
-        key = 'CUDA_VISIBLE_DEVICES'
+        key = current_platform.device_control_env_var
         if key in envs and key in os.environ:
             # overwriting CUDA_VISIBLE_DEVICES is desired behavior
             # suppress the warning in `update_environment_variables`
