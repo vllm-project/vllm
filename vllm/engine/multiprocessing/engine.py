@@ -347,7 +347,7 @@ class MQLLMEngine:
 
     def _handle_load_adapter_request(self, request: RPCLoadAdapterRequest):
         try:
-            self.engine.add_lora(request.lora_request)
+            lora_loaded = self.engine.add_lora(request.lora_request)
         except BaseException as e:
             # Send back an error if the adater fails to load
             rpc_err = RPCError(request_id=request.request_id,
@@ -357,7 +357,8 @@ class MQLLMEngine:
             return
         # Otherwise, send back the successful load message
         self._send_outputs(
-            RPCAdapterLoadedResponse(request_id=request.request_id))
+            RPCAdapterLoadedResponse(request_id=request.request_id,
+                                     lora_loaded=lora_loaded))
 
     def _handle_is_sleeping_request(self, request: RPCIsSleepingRequest):
         is_sleeping = self.is_sleeping()
