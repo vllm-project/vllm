@@ -9,7 +9,7 @@
 #include "quantization/fp8/common.cuh"
 #include "dispatch_utils.h"
 
-#include "cuda_compact.h"
+#include "cuda_compat.h"
 
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
