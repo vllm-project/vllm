@@ -349,7 +349,10 @@ class Processor:
             # Otherwise, use user-provided uuids as multimodal hash overrides
             # if provided.
             self._validate_multi_modal_uuids(prompt)
-            mm_hash_overrides = prompt.get("multi_modal_uuids")
+            if isinstance(prompt, dict):
+                mm_hash_overrides = prompt.get("multi_modal_uuids")
+            else:
+                mm_hash_overrides = None
 
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
