@@ -38,9 +38,12 @@ from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
 
+from vllm.compilation.backends import set_model_tag
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
@@ -433,6 +436,10 @@ class Qwen2_5_VisionBlock(nn.Module):
         return x
 
 
+@set_model_tag("Qwen2_5_VisionPatchEmbed")
+@support_torch_compile(dynamic_arg_dims={
+    "x": 0,
+})
 class Qwen2_5_VisionPatchEmbed(nn.Module):
 
     def __init__(
@@ -462,6 +469,10 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
         return x
 
 
+@set_model_tag("Qwen2_5_VisionPatchMerger")
+@support_torch_compile(dynamic_arg_dims={
+    "x": 0,
+})
 class Qwen2_5_VisionPatchMerger(nn.Module):
 
     def __init__(
@@ -886,12 +897,13 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.config = config
+        self.vllm_config = vllm_config
         self.multimodal_config = multimodal_config
 
         if multimodal_config.get_limit_per_prompt("image") or \
             multimodal_config.get_limit_per_prompt("video"):
             self.visual = Qwen2_5_VisionTransformer(
-                config.vision_config,
+                vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self._maybe_ignore_quant_config(
                     self.quant_config),
@@ -1024,8 +1036,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 return run_dp_sharded_mrope_vision_model(
                     self.visual, pixel_values, grid_thw_list)
             else:
-                image_embeds = self.visual(pixel_values,
-                                           grid_thw=grid_thw_list)
+                with set_forward_context(None, self.vllm_config):
+                    image_embeds = self.visual(pixel_values,
+                                               grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
         # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
@@ -1051,8 +1064,9 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 return run_dp_sharded_mrope_vision_model(
                     self.visual, pixel_values_videos, grid_thw_list)
             else:
-                video_embeds = self.visual(pixel_values_videos,
-                                           grid_thw=grid_thw_list)
+                with set_forward_context(None, self.vllm_config):
+                    video_embeds = self.visual(pixel_values_videos,
+                                               grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
