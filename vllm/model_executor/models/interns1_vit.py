@@ -22,6 +22,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.vision import get_vit_attn_backend
+from vllm.platforms import _Backend
 
 NORM2FN = {
     'rms_norm': RMSNorm,
@@ -205,6 +207,17 @@ class InternSdpaAttention(nn.Module):
                                   var_hidden_size=self.embed_dim)
 
         self.projection_layer = nn.Linear(self.dummy_dim, self.embed_dim)
+        
+        # Detect attention backend at initialization time
+        self.attn_backend = get_vit_attn_backend(support_fa=True)
+        
+        # Validate supported backends
+        if self.attn_backend not in {
+            _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.ROCM_AITER_FA
+        }:
+            raise RuntimeError(
+                f"Vision attention does not support {self.attn_backend} backend now."
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, C = x.shape
@@ -221,12 +234,30 @@ class InternSdpaAttention(nn.Module):
             B_, N_, H_, D_ = q.shape
             q = self.q_norm(q.flatten(-2, -1)).view(B_, N_, H_, D_)
             k = self.k_norm(k.flatten(-2, -1)).view(B_, N_, H_, D_)
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
-        x = x.transpose(1, 2).reshape(B, N, -1)
+        
+        # Apply attention using the pre-selected backend
+        if self.attn_backend == _Backend.FLASH_ATTN:
+            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_func
+            # Flash Attention expects (batch, seq, heads, head_dim)
+            x = flash_attn_func(q, k, v, softmax_scale=self.scale)
+            x = x.reshape(B, N, -1)
+        elif self.attn_backend == _Backend.XFORMERS:
+            from xformers import ops as xops
+            # xFormers expects (batch, seq, heads, head_dim)
+            x = xops.memory_efficient_attention_forward(q, k, v, scale=self.scale)
+            x = x.reshape(B, N, -1)
+        elif self.attn_backend == _Backend.ROCM_AITER_FA:
+            from aiter import flash_attn_varlen_func
+            # ROCm Flash Attention expects (batch, seq, heads, head_dim)
+            x = flash_attn_varlen_func(q, k, v, softmax_scale=self.scale)
+            x = x.reshape(B, N, -1)
+        else:
+            # PyTorch SDPA (default and fallback)
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            x = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
+            x = x.transpose(1, 2).reshape(B, N, -1)
 
         x = self.projection_layer(x)
         return x
