@@ -22,7 +22,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen3MoE model compatible with HuggingFace weights."""
-import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -47,9 +46,6 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.gptq import GPTQConfig
-from vllm.model_executor.layers.quantization.gptq_marlin import (
-    GPTQMarlinConfig)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
@@ -122,6 +118,16 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {config.num_experts}.")
 
+        from_autoround_gptq = False
+        if hasattr(config, "quantization_config"):
+            q_config = config.quantization_config
+            if (isinstance(q_config, dict)
+                    and q_config.get("quant_method") == "gptq"
+                    and "autoround_version" in q_config):
+                from_autoround_gptq = True
+
+        gate_quant_config = quant_config if from_autoround_gptq else None
+
         # Load balancing settings.
         vllm_config = get_current_vllm_config()
         eplb_config = vllm_config.parallel_config.eplb_config
@@ -146,20 +152,11 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                                 prefix=f"{prefix}.experts",
                                 enable_eplb=self.enable_eplb,
                                 num_redundant_experts=self.n_redundant_experts)
-        self.gate = ReplicatedLinear(
-            config.hidden_size,
-            config.num_experts,
-            bias=False,
-            quant_config=self._maybe_not_quantization(quant_config),
-            prefix=f"{prefix}.gate")
-
-    def _maybe_not_quantization(self,
-                                quant_config: Optional[QuantizationConfig]):
-        if os.environ.get("VLLM_QUANTIZATION_FROM_AUTOROUND_GPTQ") == "1":
-            return quant_config
-        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
-            return None
-        return quant_config
+        self.gate = ReplicatedLinear(config.hidden_size,
+                                     config.num_experts,
+                                     bias=False,
+                                     quant_config=gate_quant_config,
+                                     prefix=f"{prefix}.gate")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
@@ -688,40 +685,8 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         weights_list = list(weights)
-        try:
-            loader = AutoWeightsLoader(self)
-            return loader.load_weights(weights_list)
-        except KeyError:
-            logger.warning("Detected quantized MoE gate layers. "
-                           "Proceeding with automatic "
-                           "gate layer adjustment "
-                           "for compatibility. "
-                           "Please use the env variable: "
-                           "VLLM_QUANTIZATION_FROM_AUTOROUND_GPTQ=1 "
-                           "to avoid the adjustment and the WARNING: "
-                           "Current vLLM config is not set.")
-            for layer in self.model.layers:
-                if isinstance(layer, PPMissingLayer):
-                    continue
-                if hasattr(layer, "mlp") and isinstance(
-                        layer.mlp, Qwen3MoeSparseMoeBlock):
-                    moe_block = layer.mlp
-                    original_gate = moe_block.gate
-
-                    new_gate = ReplicatedLinear(
-                        self.config.hidden_size,
-                        self.config.num_experts,
-                        bias=False,
-                        quant_config=self.quant_config,
-                    ).to(device=original_gate.weight.device,
-                         dtype=original_gate.weight.dtype)
-
-                    moe_block.gate = new_gate
-
-            logger.info("MoE gate layers adjusted successfully."
-                        " Continuing with weight loading.")
-            loader = AutoWeightsLoader(self)
-            return loader.load_weights(weights_list)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights_list)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
