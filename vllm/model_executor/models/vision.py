@@ -206,7 +206,7 @@ class VisionAttention(torch.nn.Module):
         positions: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Forward pass using unified MultiHeadAttention.
+拉取        Forward pass using unified MultiHeadAttention.
         
         Args:
             x: Input tensor of shape (batch_size, seq_len, embed_dim)
@@ -228,8 +228,13 @@ class VisionAttention(torch.nn.Module):
         if positions is not None:
             q, k = self._apply_rotary_embeddings(q, k, positions)
         
+        # Reshape for MultiHeadAttention: (batch, seq, hidden_size)
+        q_reshaped = q.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        k_reshaped = k.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        v_reshaped = v.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        
         # Use unified MultiHeadAttention
-        attn_output = self.attn(q, k, v)
+        attn_output = self.attn(q_reshaped, k_reshaped, v_reshaped)
         
         # Project output
         attn_output = attn_output.transpose(1, 2).contiguous()
