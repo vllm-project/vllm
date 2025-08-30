@@ -23,6 +23,8 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -124,8 +126,6 @@ class MultiprocExecutor(Executor):
 
         self.output_rank = self._get_output_rank()
         self.has_connector = self.vllm_config.kv_transfer_config is not None
-        self.kv_output_aggregator = KVOutputAggregator(
-            self.parallel_config.world_size)
 
     def start_worker_monitor(self):
         workers = self.workers
@@ -334,6 +334,14 @@ class MultiprocExecutor(Executor):
         # so world_size - tp_size = 32 - 8 = 24 should be PP rank = -1 (i.e. 3)
         return self.world_size - self.parallel_config.tensor_parallel_size
 
+    def init_kv_output_aggregator(self) -> None:
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            self.kv_output_aggregator = KVOutputAggregator(
+                kv_connector.get_finished_count() or self.parallel_config.world_size)
+        else:
+            self.kv_output_aggregator = KVOutputAggregator(
+                self.parallel_config.world_size)
 
 @dataclass
 class UnreadyWorkerProcHandle:
