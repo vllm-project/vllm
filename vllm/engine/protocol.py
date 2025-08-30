@@ -230,19 +230,6 @@ class EngineClient(ABC):
         """Generate outputs for a request from a pooling model."""
         ...
 
-    async def encode_with_io_processor(
-        self,
-        prompt: Any,
-        pooling_params: PoolingParams,
-        request_id: str,
-        trace_headers: Optional[Mapping[str, str]] = None,
-        priority: int = 0,
-    ) -> Any:
-        """
-        Perform an encode request using the IOProcessor plugin
-        """
-        raise NotImplementedError
-
     @abstractmethod
     async def abort(self, request_id: Union[str, Iterable[str]]) -> None:
         """Abort a request.

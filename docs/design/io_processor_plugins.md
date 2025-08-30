@@ -63,7 +63,6 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
 The `parse_request` method is used for validating the user prompt and converting it into the input expected by the `pre_process`/`pre_process_async` methods.
 The `pre_process*` methods take the validated plugin input to generate vLLM's model prompts for regular inference.
 The `post_process*` methods take `PoolingRequestOutput` objects as input and generate a custom plugin output.
-An implementation of the `encode_with_io_processor` method is available [here](../../vllm/entrypoints/llm.py) and [here](../../vllm/v1/engine/async_llm.py).
 
 The `output_to_response` method is used only for online serving and converts the plugin output to the `IOProcessorResponse` type that is then returned by the API Server. The implementation of the `/io_processor_pooling` serving endpoint is [here](../../vllm/entrypoints/openai/serving_pooling_with_io_plugin.py).
 
