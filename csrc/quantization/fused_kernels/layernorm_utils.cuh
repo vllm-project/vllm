@@ -8,6 +8,8 @@
 #include "quantization/utils.cuh"
 #include "quant_conversions.cuh"
 
+#include "../../cuda_compat.h"
+
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
 #else
