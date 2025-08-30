@@ -329,10 +329,10 @@ Benchmark Cutlass GEMM.
     )
     parser.add_argument(
         "--kernels",
-        nargs="+",
-        type=str,
+        type=lambda s: [k.strip() for k in s.split(",") if k.strip()],
         default=None,
-        help="Exact names of the kernels to benchmark. If not set, runs all kernels.",
+        help="Comma-separated list of the kernels to benchmark."
+        + " If not set, runs all kernels.",
     )
 
     subparsers = parser.add_subparsers(dest="cmd")
