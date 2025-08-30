@@ -52,6 +52,18 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
+    supports_multimodal_raw_input_only: ClassVar[bool] = False
+    """
+    A flag that indicates this model supports multi-modal inputs and processes
+    them in their raw form and not embeddings.
+    """
+
+    supports_encoder_tp_data: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `multimodal_config.mm_encoder_tp_mode="data"`.
+    """
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         """
@@ -137,38 +149,14 @@ def supports_multimodal(
     return getattr(model, "supports_multimodal", False)
 
 
-@runtime_checkable
-class SupportsMultiModalWithRawInput(SupportsMultiModal, Protocol):
-    """The interface required for all multi-modal models."""
-
-    supports_multimodal_raw_input: ClassVar[Literal[True]] = True
-    """
-    A flag that indicates this model supports multi-modal inputs and processes
-    them in their raw form and not embeddings.
-
-    Note:
-        There is no need to redefine this flag if this class is in the
-        MRO of your model class.
-    """
+def supports_multimodal_raw_input_only(
+        model: Union[type[object], object]) -> bool:
+    return getattr(model, "supports_multimodal_raw_input_only", False)
 
 
-@overload
-def supports_multimodal_raw_input(
-        model: object) -> TypeIs[SupportsMultiModalWithRawInput]:
-    ...
-
-
-@overload
-def supports_multimodal_raw_input(
-        model: type[object]) -> TypeIs[type[SupportsMultiModalWithRawInput]]:
-    ...
-
-
-def supports_multimodal_raw_input(
-    model: Union[type[object], object]
-) -> Union[TypeIs[type[SupportsMultiModalWithRawInput]],
-           TypeIs[SupportsMultiModalWithRawInput]]:
-    return getattr(model, "supports_multimodal_raw_input", False)
+def supports_multimodal_encoder_tp_data(
+        model: Union[type[object], object]) -> bool:
+    return getattr(model, "supports_encoder_tp_data", False)
 
 
 @runtime_checkable
