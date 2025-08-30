@@ -21,8 +21,8 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher, hash_block_tokens, init_none_hash,
     is_kv_cache_type_uniform)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec, KVCacheTensor,
-                                        SlidingWindowSpec)
+                                        KVCacheGroupSpec, KVCacheSpec,
+                                        KVCacheTensor, SlidingWindowSpec)
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
 
@@ -1230,7 +1230,7 @@ def test_get_kv_cache_config_one_worker():
 
 
 def test_get_kv_cache_configs_attention_free():
-    kv_cache_specs = {}
+    kv_cache_specs: dict[str, KVCacheSpec] = {}
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=16))
     kv_cache_configs = get_kv_cache_configs(vllm_config, [kv_cache_specs], [0])
     assert kv_cache_configs == [
