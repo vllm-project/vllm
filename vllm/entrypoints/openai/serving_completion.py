@@ -137,7 +137,6 @@ class OpenAIServingCompletion(OpenAIServing):
                 request,
                 tokenizer,
                 request.prompt,
-                truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
         except ValueError as e:

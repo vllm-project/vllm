@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Optional
 
 import msgspec
 
@@ -27,6 +27,11 @@ class PoolingParams(
                     the classification outputs.
         softmax: Whether to apply softmax to the reward outputs.
     """
+    truncate_prompt_tokens: Optional[Annotated[int,
+                                               msgspec.Meta(ge=-1)]] = None
+    """If set to -1, will use the truncation size supported by the model. If
+    set to an integer k, will use only the last k tokens from the prompt
+    (i.e., left truncation). If set to `None`, truncation is disabled."""
 
     ## for embeddings models
     dimensions: Optional[int] = None

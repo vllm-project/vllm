@@ -237,7 +237,6 @@ class OpenAIServingChat(OpenAIServing):
                     documents=request.documents,
                     chat_template_kwargs=request.chat_template_kwargs,
                     tool_parser=tool_parser,
-                    truncate_prompt_tokens=request.truncate_prompt_tokens,
                     add_special_tokens=request.add_special_tokens,
                 )
             else:

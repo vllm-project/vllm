@@ -23,6 +23,7 @@ class TokenizerGroup:
         self.tokenizer_config = tokenizer_config
         self.enable_lora = enable_lora
         self.max_input_length = max_input_length
+        self.truncation_side = tokenizer_config.get("truncation_side", "left")
         self.tokenizer = get_tokenizer(self.tokenizer_id, **tokenizer_config)
         max_loras = tokenizer_config.get("max_loras", 0)
         self.lora_tokenizers = LRUCache[int, AnyTokenizer](
