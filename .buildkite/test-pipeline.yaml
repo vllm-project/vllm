@@ -502,6 +502,19 @@ steps:
     - pytest -v -s tool_use
     - pytest -v -s mistral_tool_use
 
+- label: vllm-kernels and vllm without kernels packages integration test
+  mirror_hardwares: [amdexperimental]
+  # temp value to validate the test in pipeline, will be set to false after if it works on PR.
+  fast_check: true
+  source_file_dependencies:
+  - csrc/
+  - cmake/
+  - kernels/
+  - CMakeLists.txt
+  - setup.py
+  commands:
+  - bash standalone_tests/vllm_and_vllm_kernels_integration_test.sh
+
 #####  models test  #####
 
 - label: Basic Models Test # 24min
