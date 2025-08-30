@@ -3,9 +3,7 @@
 
 import fnmatch
 import os
-import shutil
 import signal
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -95,6 +93,17 @@ def list_files(
     return bucket_name, prefix, paths
 
 
+# define global single instance
+_s3 = None
+
+
+def get_s3():
+    global _s3
+    if _s3 is None:
+        _s3 = S3Model()
+    return _s3
+
+
 class S3Model:
     """
     A class representing a S3 model mirrored into a temporary directory.
@@ -106,26 +115,18 @@ class S3Model:
     Methods:
         pull_files(): Pull model from S3 to the temporary directory.
     """
+    _s3 = None
 
     def __init__(self) -> None:
         self.s3 = boto3.client('s3')
         for sig in (signal.SIGINT, signal.SIGTERM):
             existing_handler = signal.getsignal(sig)
             signal.signal(sig, self._close_by_signal(existing_handler))
-
-        self.dir = tempfile.mkdtemp()
-
-    def __del__(self):
-        self._close()
-
-    def _close(self) -> None:
-        if os.path.exists(self.dir):
-            shutil.rmtree(self.dir)
+        self.dir = "/tmp/s3/model"
 
     def _close_by_signal(self, existing_handler=None):
 
         def new_handler(signum, frame):
-            self._close()
             if existing_handler:
                 existing_handler(signum, frame)
 
@@ -154,9 +155,39 @@ class S3Model:
             return
 
         for file in files:
-            destination_file = os.path.join(
-                self.dir,
-                file.removeprefix(base_dir).lstrip("/"))
+            destination_file = os.path.join(self.dir, file)
             local_dir = Path(destination_file).parent
             os.makedirs(local_dir, exist_ok=True)
+            if os.path.exists(destination_file):
+                continue
             self.s3.download_file(bucket_name, file, destination_file)
+
+    def pull_file_name(self,
+                       s3_model_path: str = "",
+                       file_name: str = "") -> str:
+        if not s3_model_path.endswith("/"):
+            s3_model_path = s3_model_path + "/"
+
+        bucket_name, base_dir, files = list_files(self.s3, s3_model_path, None,
+                                                  None)
+        destination_file = os.path.join(self.dir, base_dir, file_name)
+        local_dir = Path(destination_file).parent
+        os.makedirs(local_dir, exist_ok=True)
+        if os.path.exists(destination_file):
+            return destination_file
+        self.s3.download_file(bucket_name, file_name, destination_file)
+        return destination_file
+
+    def get_model_path(self, repo_id: str):
+        parts = repo_id.removeprefix('s3://').split('/')
+        base_dir = '/'.join(parts[1:])
+        destination_file = os.path.join(self.dir, base_dir)
+        return destination_file
+
+    def try_to_load_from_cache(self, repo_id: str, filename: str):
+        parts = repo_id.removeprefix('s3://').split('/')
+        base_dir = '/'.join(parts[1:])
+        destination_file = os.path.join(self.dir, base_dir, filename)
+        if os.path.exists(destination_file):
+            return destination_file
+        return None
