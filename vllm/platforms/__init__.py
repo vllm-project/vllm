@@ -158,10 +158,23 @@ def cpu_platform_plugin() -> Optional[str]:
                          " vLLM is built with CPU.")
         if not is_cpu:
             import sys
-            is_cpu = sys.platform.startswith("darwin")
-            if is_cpu:
-                logger.debug("Confirmed CPU platform is available"
-                             " because the machine is MacOS.")
+            if sys.platform.startswith("darwin"):
+                # On macOS, prefer MPS over CPU if available
+                try:
+                    import torch
+                    if torch.backends.mps.is_available() and torch.backends.mps.is_built():
+                        logger.debug("MPS is available on macOS, skipping CPU platform")
+                        is_cpu = False
+                    else:
+                        is_cpu = True
+                        logger.debug("Confirmed CPU platform is available"
+                                     " because the machine is MacOS and MPS is not available.")
+                except Exception:
+                    is_cpu = True
+                    logger.debug("Confirmed CPU platform is available"
+                                 " because the machine is MacOS.")
+            else:
+                is_cpu = False
 
     except Exception as e:
         logger.debug("CPU platform is not available because: %s", str(e))
@@ -192,6 +205,19 @@ def neuron_platform_plugin() -> Optional[str]:
     is_neuron = tnx_installed or nxd_installed
     return "vllm.platforms.neuron.NeuronPlatform" if is_neuron else None
 
+def mps_platform_plugin() -> Optional[str]:  
+    logger.debug("Checking if MPS platform is available.")  
+    try:  
+        import torch  
+        if torch.backends.mps.is_available() and torch.backends.mps.is_built():  
+            logger.debug("Confirmed MPS platform is available.")  
+            return "vllm.platforms.mps.MpsPlatform"  
+        else:  
+            logger.debug("MPS platform is not available.")  
+            return None  
+    except Exception as e:  
+        logger.debug("MPS platform is not available because: %s", str(e))  
+        return None
 
 builtin_platform_plugins = {
     'tpu': tpu_platform_plugin,
@@ -200,6 +226,7 @@ builtin_platform_plugins = {
     'xpu': xpu_platform_plugin,
     'cpu': cpu_platform_plugin,
     'neuron': neuron_platform_plugin,
+    'mps': mps_platform_plugin,
 }
 
 
