@@ -98,13 +98,19 @@ def select_experts(
                             e_score_correction_bias=e_score_correction_bias)
     elif custom_routing_function is None:
         assert scoring_func == "softmax"
-        topk_weights = torch.nn.functional.softmax(router_logits,
-                                                   dim=1,
-                                                   dtype=torch.float32)
-        topk_weights, topk_ids = torch.topk(topk_weights, top_k, dim=-1)
+        topk_logit_vals, topk_idx = torch.topk(router_logits,
+                                               k=top_k,
+                                               dim=-1,
+                                               sorted=False)
         if renormalize:
-            topk_weights /= topk_weights.sum(dim=-1, keepdim=True)
-        return topk_weights, topk_ids.to(torch.int32)
+            sel = topk_logit_vals - topk_logit_vals.max(dim=-1,
+                                                        keepdim=True).values
+            topk_vals = sel.exp()
+            topk_vals = topk_vals / topk_vals.sum(dim=-1, keepdim=True)
+        else:
+            logZ = torch.logsumexp(router_logits, dim=-1, keepdim=True)
+            topk_vals = (topk_logit_vals - logZ).exp()
+        return topk_vals.to(torch.float32), topk_idx.to(torch.int32)
     else:
         return custom_routing_function(hidden_states=hidden_states,
                                        gating_output=router_logits,
