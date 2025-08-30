@@ -502,6 +502,12 @@ class ModelConfig:
     """One or more logits processors' fully-qualified class names or class
     definitions"""
 
+    video_pruning_rate: Optional[float] = None
+    """Sets pruning rate for video pruning via Efficient Video Sampling.
+    Value sits in range [0;1) and determines fraction of media tokens
+    from each video to be pruned.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -887,6 +893,7 @@ class ModelConfig:
                 mm_encoder_tp_mode=self.mm_encoder_tp_mode,
                 interleave_mm_strings=self.interleave_mm_strings,
                 skip_mm_profiling=self.skip_mm_profiling,
+                video_pruning_rate=self.video_pruning_rate,
             )
 
         return None
@@ -2594,6 +2601,12 @@ class MultiModalConfig:
     embedding cache.
     """
 
+    video_pruning_rate: Optional[float] = None
+    """Sets pruning rate for video pruning via Efficient Video Sampling.
+    Value sits in range [0;1) and determines fraction of media tokens
+    from each video to be pruned.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -2633,6 +2646,10 @@ class MultiModalConfig:
         """
         kwargs = self.mm_processor_kwargs or {}
         return kwargs | dict(inference_kwargs)
+
+    def is_multimodal_pruning_enabled(self):
+        return (self.video_pruning_rate is not None
+                and self.video_pruning_rate > 0)
 
 
 @config
