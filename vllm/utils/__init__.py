@@ -1974,15 +1974,18 @@ class FlexibleArgumentParser(ArgumentParser):
 
         file_path = args[index + 1]
 
-        config_args = self._load_config_file(file_path)
+        config_args = self.load_config_file(file_path)
 
-        # 0th index is for {serve,chat,complete}
+        # 0th index might be the sub command {serve,chat,complete,...}
         # optionally followed by model_tag (only for serve)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
-        if args[0] == "serve":
+        if args[0].startswith('-'):
+            # No sub command (e.g., api_server entry point)
+            args = config_args + args[0:index] + args[index + 2:]
+        elif args[0] == "serve":
             model_in_cli = len(args) > 1 and not args[1].startswith('-')
             model_in_config = any(arg == '--model' for arg in config_args)
 
@@ -2005,7 +2008,7 @@ class FlexibleArgumentParser(ArgumentParser):
 
         return args
 
-    def _load_config_file(self, file_path: str) -> list[str]:
+    def load_config_file(self, file_path: str) -> list[str]:
         """Loads a yaml file and returns the key value pairs as a
         flattened list with argparse like pattern
         ```yaml
@@ -2046,6 +2049,11 @@ class FlexibleArgumentParser(ArgumentParser):
             if isinstance(value, bool) and key not in store_boolean_arguments:
                 if value:
                     processed_args.append('--' + key)
+            elif isinstance(value, list):
+                if value:
+                    processed_args.append('--' + key)
+                    for item in value:
+                        processed_args.append(str(item))
             else:
                 processed_args.append('--' + key)
                 processed_args.append(str(value))
