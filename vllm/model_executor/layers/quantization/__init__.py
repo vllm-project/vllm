@@ -86,6 +86,14 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     # lazy import to avoid triggering `torch.compile` too early
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
+    # Avoid importing heavy/optional backends unless explicitly requested.
+    # In particular, importing MXFP4 triggers Triton kernel imports which may
+    # not be available on all systems. Gate this to the specific request.
+    if quantization == "mxfp4":
+        from .mxfp4 import Mxfp4Config
+        return Mxfp4Config
+
+    from .aqlm import AQLMConfig
     from .auto_round import AutoRoundConfig
     from .awq import AWQConfig
     from .awq_marlin import AWQMarlinConfig
@@ -107,7 +115,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .ipex_quant import IPEXConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
-    from .mxfp4 import Mxfp4Config
     from .neuron_quant import NeuronQuantConfig
     from .petit import PetitNvFp4Config
     from .ptpc_fp8 import PTPCFp8Config
