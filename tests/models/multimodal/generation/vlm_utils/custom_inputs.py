@@ -115,6 +115,7 @@ def different_patch_input_cases_internvl():
 
 
 def windows_attention_image_qwen2_5_vl():
+
     # image from regression issue: https://github.com/vllm-project/vllm/issues/15122 # noqa: E501
     image = ImageAsset("hato").pil_image
 
