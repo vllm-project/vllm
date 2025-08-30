@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import suppress
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Optional
@@ -47,6 +46,7 @@ class MockModelConfig:
     allowed_local_media_path: str = ""
     encoder_config = None
     generation_config: str = "auto"
+    skip_tokenizer_init: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -125,16 +125,11 @@ async def test_serving_completion_with_lora_resolver(mock_serving_setup,
         prompt="Generate with LoRA",
     )
 
-    # Suppress potential errors during the mocked generate call,
-    # as we are primarily checking for add_lora and generate calls
-    with suppress(Exception):
-        await serving_completion.create_completion(req_found)
-
+    await serving_completion.create_completion(req_found)
     mock_engine.add_lora.assert_called_once()
     called_lora_request = mock_engine.add_lora.call_args[0][0]
     assert isinstance(called_lora_request, LoRARequest)
     assert called_lora_request.lora_name == lora_model_name
-
     mock_engine.generate.assert_called_once()
     called_lora_request = mock_engine.generate.call_args[1]['lora_request']
     assert isinstance(called_lora_request, LoRARequest)
