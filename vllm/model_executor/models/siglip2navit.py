@@ -1001,8 +1001,11 @@ class Siglip2TextModel(Siglip2PreTrainedModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def get_input_embeddings(self) -> nn.Module:
-        return self.text_model.embeddings.token_embedding
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.text_model.embeddings.token_embedding(input_ids)
 
     def set_input_embeddings(self, value):
         self.text_model.embeddings.token_embedding = value
