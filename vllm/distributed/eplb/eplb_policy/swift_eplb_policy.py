@@ -13,8 +13,11 @@ class DynamicTable:
 
 
 class SwiftBalancer(EplbPolicy):
+<<<<<<< HEAD
     def __init__(self):
         self.deployment = None
+=======
+>>>>>>> 233623c37 (eplb update)
 
     @staticmethod
     def safe_divide(a, b):
@@ -1194,8 +1197,11 @@ class SwiftBalancer(EplbPolicy):
             info.placement_table, global_deployment
             )
 
+<<<<<<< HEAD
         self.deployment = new_global_deployment
 
+=======
+>>>>>>> 233623c37 (eplb update)
         # Construct the output based on the
         # newly generated deployment.
         (

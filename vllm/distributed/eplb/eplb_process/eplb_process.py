@@ -1,7 +1,6 @@
 from queue import Queue, Empty
 from typing import Optional, Any, Callable,List
 from contextlib import suppress
-import multiprocessing as mp
 import threading
 
 from vllm.logger import logger

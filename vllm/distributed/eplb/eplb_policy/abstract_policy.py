@@ -1,7 +1,10 @@
 from abc import abstractmethod
 
+<<<<<<< HEAD
 import torch
 
+=======
+>>>>>>> 233623c37 (eplb update)
 
 class EplbPolicy:
 
@@ -29,6 +32,7 @@ class EplbPolicy:
             expert_count: [layers, num_logical_experts], number of
             physical replicas for each logical expert
         """
+<<<<<<< HEAD
         pass
 
     @staticmethod
@@ -44,3 +48,6 @@ class EplbPolicy:
     @staticmethod
     def convert_table(current_expert_table, num_layer):
         return current_expert_table.reshape(num_layer, -1)
+=======
+        pass
+>>>>>>> 233623c37 (eplb update)
