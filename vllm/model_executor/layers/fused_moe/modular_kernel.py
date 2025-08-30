@@ -795,4 +795,4 @@ class FusedMoEModularKernel(torch.nn.Module):
             self.fused_experts.finalize_weight_and_reduce_impl(),
         )
 
-        return output
+        return output, expert_tokens_meta
