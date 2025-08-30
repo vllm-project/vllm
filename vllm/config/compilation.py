@@ -358,7 +358,7 @@ class CompilationConfig:
         # normalize types; keep SHA-256. For nested opaque configs, include a
         # stable identifier (e.g., pass_config.uuid()) instead of object id.
 
-        EXCLUDE_FROM_HASH = {
+        exclude_from_hash = {
             # Paths/dirs and runtime/metrics that don’t affect compiled graph
             "debug_dump_path",
             "cache_dir",
@@ -372,7 +372,7 @@ class CompilationConfig:
         from vllm.config.utils import build_opt_items_override
         items = build_opt_items_override(
             self,
-            EXCLUDE_FROM_HASH,
+            exclude_from_hash,
             overrides={
                 "pass_config": lambda _: self.pass_config.uuid(),
             },

@@ -134,7 +134,7 @@ class CacheConfig:
         # Opt-out: default-include declared fields; keep a tiny exclude list;
         # normalize types for deterministic hashing; keep MD5 for compatibility.
 
-        EXCLUDE_FROM_HASH = {
+        exclude_from_hash = {
             # Runtime/derived knobs that don't affect compiled graph shape
             "gpu_memory_utilization",
             "swap_space",
@@ -154,7 +154,7 @@ class CacheConfig:
         }
 
         from vllm.config.utils import build_opt_out_items as _build_items
-        items = _build_items(self, EXCLUDE_FROM_HASH)
+        items = _build_items(self, exclude_from_hash)
 
         hash_str = hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
         return hash_str

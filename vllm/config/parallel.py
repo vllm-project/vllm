@@ -265,7 +265,7 @@ class ParallelConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        EXCLUDE_FROM_HASH = {
+        exclude_from_hash = {
             # Derived/runtime topology, networking, or launch details
             "data_parallel_rank",
             "data_parallel_rank_local",
@@ -287,7 +287,7 @@ class ParallelConfig:
         }
 
         from vllm.config.utils import build_opt_out_items as _build_items
-        items = _build_items(self, EXCLUDE_FROM_HASH)
+        items = _build_items(self, exclude_from_hash)
 
         # Explicitly include backend affecting env factor as before
         items.append(("VLLM_ALL2ALL_BACKEND", str(envs.VLLM_ALL2ALL_BACKEND)))

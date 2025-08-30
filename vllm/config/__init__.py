@@ -523,7 +523,7 @@ class ModelConfig:
 
         # Default-include; exclude only fields that don't change the compiled
         # graph or are unstable. See RFC #16501.
-        MODEL_EXCLUDE_FROM_HASH = {
+        model_exclude_from_hash = {
             "tokenizer",
             "hf_config",  # hash content via JSON below
             "hf_text_config",
@@ -543,7 +543,7 @@ class ModelConfig:
         # Build base items from declared fields using the shared utility
         items: list[tuple[str,
                           Any]] = build_opt_out_items(self,
-                                                      MODEL_EXCLUDE_FROM_HASH)
+                                                      model_exclude_from_hash)
         # Hash hf_config by content; if JSON export is unavailable, include a
         # minimal stable subset.
         hf = getattr(self, "hf_config", None)
@@ -2499,11 +2499,11 @@ class LoRAConfig:
         """
         from vllm.config.utils import build_opt_out_items as _build_items
 
-        EXCLUDE_FROM_HASH = {
+        exclude_from_hash: set[str] = {
             # (none at present, placeholder to keep policy explicit)
         }
 
-        items = _build_items(self, EXCLUDE_FROM_HASH)
+        items = _build_items(self, exclude_from_hash)
 
         import hashlib
         hash_str = hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
