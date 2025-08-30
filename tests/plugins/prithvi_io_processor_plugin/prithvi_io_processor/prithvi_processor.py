@@ -222,9 +222,8 @@ def load_image(
                     julian_day = (datetime.datetime.strptime(
                         julian_day, "%m%d").timetuple().tm_yday)
                 temporal_coords.append([year, julian_day])
-        except Exception as e:
-            logger.exception("Could not extract timestamp for %s (%s)", file,
-                             str(e))
+        except Exception:
+            logger.exception("Could not extract timestamp for %s", file)
 
     imgs = np.stack(imgs, axis=0)  # num_frames, H, W, C
     imgs = np.moveaxis(imgs, -1, 0).astype("float32")  # C, num_frames, H, W
