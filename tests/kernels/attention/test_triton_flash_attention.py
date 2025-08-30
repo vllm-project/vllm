@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the triton_flash_attention kernel
-
-Run `pytest tests/kernels/test_triton_flash_attention.py`.
-"""
+"""Tests for the triton_flash_attention kernel"""
 import pytest
 import torch
 
