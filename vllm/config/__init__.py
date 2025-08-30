@@ -36,7 +36,7 @@ from vllm.config.compilation import (CompilationConfig, CompilationLevel,
 from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
                                   ParallelConfig)
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
-from vllm.config.utils import ConfigType, config
+from vllm.config.utils import ConfigType, config, getattr_iter
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.platforms import current_platform
@@ -809,13 +809,27 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
+        architecture_family = "moe" if self.get_num_experts() > 1 else "dense"
+        transformers_backend_cls_map = {
+            "dense": {
+                "model": "TransformersModel",
+                "for_causal_lm": "TransformersForCausalLM",
+                "for_multimodal_lm": "TransformersForMultimodalLM",
+            },
+            "moe": {
+                "model": "TransformersMoEModel",
+                "for_causal_lm": "TransformersMoEForCausalLM",
+                "for_multimodal_lm": "TransformersMoEForMultimodalLM",
+            },
+        }.get(architecture_family)
+
         if getattr(self, "runner_type", self.runner) == "pooling":
-            return "TransformersModel"
+            return transformers_backend_cls_map["model"]
         if self.hf_config != self.hf_text_config:
             # If 'hf_text_config' is the same as 'hf_config'. If not, it is
             # probably a composite config, i.e. multimodal
-            return "TransformersForMultimodalLM"
-        return "TransformersForCausalLM"
+            return transformers_backend_cls_map["for_multimodal_lm"]
+        return transformers_backend_cls_map["for_causal_lm"]
 
     def using_transformers_backend(self) -> bool:
         """Check if the model is using the Transformers backend class."""
@@ -1269,17 +1283,7 @@ class ModelConfig:
             self.enforce_eager = True
 
     def _verify_with_expert_parallelism(self) -> None:
-        num_expert_names = [
-            "moe_num_experts",  # Dbrx
-            "num_experts",  # Jamba
-            "n_routed_experts",  # DeepSeek
-            "num_local_experts",  # Mixtral
-        ]
-        num_experts = 0
-        for name in num_expert_names:
-            num_experts = getattr(self.hf_text_config, name, 0)
-            if num_experts > 0:
-                break
+        num_experts = self.get_num_experts()
         if num_experts < 1:
             raise ValueError(
                 "Number of experts in the model must be greater than 0 "
@@ -1492,6 +1496,19 @@ class ModelConfig:
                                 parallel_config: "ParallelConfig") -> int:
         num_heads = getattr(self.hf_text_config, "num_attention_heads", 0)
         return num_heads // parallel_config.tensor_parallel_size
+
+    # TODO: Remove once https://github.com/huggingface/transformers/pull/40156
+    # is released. Attribute mapping will allow us to simply read
+    # self.hf_text_config.num_experts
+    def get_num_experts(self) -> int:
+        """Returns the number of experts in the model."""
+        num_expert_names = [
+            "num_experts",  # Jamba
+            "moe_num_experts",  # Dbrx
+            "n_routed_experts",  # DeepSeek
+            "num_local_experts",  # Mixtral
+        ]
+        return getattr_iter(self.hf_text_config, num_expert_names, 0)
 
     def get_layers_start_end_indices(
             self, parallel_config: "ParallelConfig") -> tuple[int, int]:

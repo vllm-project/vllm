@@ -31,9 +31,11 @@ from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
                          ParallelConfig, VllmConfig)
+from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -466,6 +468,7 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             )
 
         self.pipeline_parallel()
+        self.fused_moe()
         self.tensor_parallel()
 
         # Input embeddings
@@ -541,6 +544,13 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
             # Modules that should be on last rank
             if not self.pp_group.is_last_rank:
                 setattr(self.model, name, PPMissingLayer())
+
+    def fused_moe(self):
+        """
+        Substitute the model's MoE layers with vLLM's FusedMoE.
+        To be overridden by child classes if they support MoE.
+        """
+        pass
 
     def tensor_parallel(self):
         """
@@ -688,6 +698,120 @@ class TransformersBase(nn.Module, SupportsQuant, SupportsLoRA, SupportsPP):
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
+class TransformersMoEBase(TransformersBase):
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        """
+        Params for weights, fp8 weight scales, fp8 activation scales
+        (param_name, weight_name, expert_id, shard_id)
+        """
+        ckpt_names = [
+            # (ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name)
+            ("gate_proj", "down_proj", "up_proj"),  # Most common MoE style
+            ("w1", "w2", "w3"),  # Granite, Mixtral, Phi MoE style
+            ("linear", "linear_1", "linear_v"),  # Grok1 style
+        ]
+        expert_mapping = []
+        for gate_proj, down_proj, up_proj in ckpt_names:
+            expert_mapping.extend(
+                FusedMoE.make_expert_params_mapping(
+                    ckpt_gate_proj_name=gate_proj,
+                    ckpt_down_proj_name=down_proj,
+                    ckpt_up_proj_name=up_proj,
+                    num_experts=self.model_config.get_num_experts(),
+                    num_redundant_experts=0,  # TODO: enable EPLB
+                ))
+        return expert_mapping
+
+    def fused_moe(self):
+
+        text_config = self.text_config
+
+        # Positional arguments
+        num_experts = self.model_config.get_num_experts()
+        top_k = text_config.num_experts_per_tok
+        hidden_size = text_config.hidden_size
+        names = ["moe_intermediate_size", "intermediate_size"]
+        intermediate_size = getattr_iter(text_config, names, None)
+
+        # Reduction kwargs
+        reduce_results = getattr(text_config, "num_experts_shared", 0) == 0
+        renormalize = getattr(text_config, "norm_topk_prob", top_k > 1)
+
+        def reduce_results_hook(module, _, output):
+            """Forward hook that performs all-reduce on a nn.Module's output if
+            tensor parallel or expert parallel is enabled. This is used for
+            models with shared experts where the all reduce happens after any
+            shared experts have been added to the hidden state."""
+            if (experts := module.experts).tp_size > 1 or experts.ep_size > 1:
+                return experts.maybe_all_reduce_tensor_model_parallel(output)
+
+        # Grouped topk kwargs. If either config is set, enable grouped topk
+        # and let FusedMoE handle any errors from misconfiguration
+        num_expert_group = getattr(text_config, "n_group", None)
+        topk_group = getattr(text_config, "topk_group", None)
+        use_grouped_topk = bool(num_expert_group or topk_group)
+
+        # Expert parallel load balancing kwargs
+        parallel_config = self.parallel_config
+        eplb_config = parallel_config.eplb_config
+
+        enable_eplb = parallel_config.enable_eplb
+        num_redundant_experts = eplb_config.num_redundant_experts
+
+        # Recursively fuse MoE layers
+        def _fused_moe(module: nn.Module, prefix: str = ""):
+            for child_name, child_module in module.named_children():
+                qual_name = maybe_prefix(prefix, child_name)
+                if (child_name == "experts"
+                        and isinstance(child_module, nn.ModuleList)):
+                    # Get e_score_correction_bias if present
+                    gate = getattr(module, "gate", None)
+                    e_score_correction_bias = getattr(
+                        gate, "e_score_correction_bias", None)
+                    # Replace experts module with FusedMoE
+                    new_module = FusedMoE(
+                        num_experts=num_experts,
+                        top_k=top_k,
+                        hidden_size=hidden_size,
+                        intermediate_size=intermediate_size,
+                        reduce_results=reduce_results,
+                        renormalize=renormalize,
+                        use_grouped_topk=use_grouped_topk,
+                        num_expert_group=num_expert_group,
+                        topk_group=topk_group,
+                        quant_config=self.quant_config,
+                        prefix=qual_name,
+                        # TODO: custom_routing_function - llama4, phimoe
+                        # TODO: scoring_func - deepseek_v2, dots1, glm4_moe
+                        e_score_correction_bias=e_score_correction_bias,
+                        # TODO: apply_router_weight_on_input - llama4
+                        # TODO: activation - grok1, gpt-oss
+                        enable_eplb=enable_eplb,
+                        num_redundant_experts=num_redundant_experts,
+                        # TODO: has_bias - gpt-oss
+                    )
+                    setattr(module, child_name, new_module)
+                    log_replacement(qual_name, child_module, new_module)
+                    # If results are not all-reduced in FusedMoE, ensure they
+                    # are all-reduced at the end of module.forward()
+                    if not reduce_results:
+                        module.register_forward_hook(reduce_results_hook)
+                else:
+                    _fused_moe(child_module, prefix=qual_name)
+
+        _fused_moe(self.model)
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self, skip_prefixes=self.skip_prefixes)
+        return loader.load_weights(
+            weights,
+            mapper=self.hf_to_vllm_mapper,
+            expert_mapping=self.get_expert_mapping(),
+        )
+
+
 @support_torch_compile(enable_if=can_enable_torch_compile)
 class TransformersModel(TransformersBase):
     hf_to_vllm_mapper = WeightsMapper(
@@ -698,6 +822,11 @@ class TransformersModel(TransformersBase):
             "model.model.": "model.",
             "model.score": "score",
         })
+
+
+@support_torch_compile(enable_if=can_enable_torch_compile)
+class TransformersMoEModel(TransformersMoEBase, TransformersModel):
+    pass
 
 
 @support_torch_compile(enable_if=can_enable_torch_compile)
@@ -738,6 +867,11 @@ class TransformersForCausalLM(TransformersBase):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
+
+
+@support_torch_compile(enable_if=can_enable_torch_compile)
+class TransformersMoEForCausalLM(TransformersMoEBase, TransformersForCausalLM):
+    pass
 
 
 def flatten_and_concat(x: list[torch.Tensor]) -> torch.Tensor:
@@ -881,3 +1015,17 @@ class TransformersForMultimodalLM(TransformersForCausalLM, SupportsMultiModal):
             inputs_embeds = inputs_embeds.masked_scatter(
                 mask, multimodal_embeddings)
         return inputs_embeds
+
+
+@support_torch_compile(
+    # set `positions` to last dim to support Qwen-mrope
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    },
+    enable_if=can_enable_torch_compile)
+class TransformersMoEForMultimodalLM(TransformersMoEForCausalLM,
+                                     TransformersForMultimodalLM):
+    pass
