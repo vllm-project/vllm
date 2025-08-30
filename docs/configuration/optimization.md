@@ -178,6 +178,7 @@ Known supported models:
 - MiniCPM-V-4 (<gh-pr:23327>)
 - Qwen2.5-VL (<gh-pr:22742>)
 - Step3 (<gh-pr:22697>)
+- Kimi (<gh-pr:23817>)
 
 ## Input Processing
 

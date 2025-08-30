@@ -404,7 +404,8 @@ class MLP2(nn.Module):
                                     prefix=maybe_prefix(prefix, "linear_2"))
         self.activation = activation
         for m in [self.fc0, self.fc1]:
-            nn.init.trunc_normal_(m.weight, std=math.sqrt(2 / m.weight.shape[1]))
+            nn.init.trunc_normal_(m.weight,
+                                  std=math.sqrt(2 / m.weight.shape[1]))
             if m.bias is not None:
                 nn.init.zeros_(m.bias)
 
@@ -538,10 +539,9 @@ class MoonVitEncoder(nn.Module):
         rope_freqs_cis = self.rope_2d.get_freqs_cis_by_seqlens(
             grid_hws=grid_hw)
 
-        lengths = torch.cat((
-            torch.zeros(1, device=hidden_states.device, dtype=grid_hw.dtype),
-            (grid_hw[:, 0] * grid_hw[:, 1]).to(hidden_states.device)
-        ))
+        lengths = torch.cat(
+            (torch.zeros(1, device=hidden_states.device, dtype=grid_hw.dtype),
+             (grid_hw[:, 0] * grid_hw[:, 1]).to(hidden_states.device)))
         cu_seqlens = lengths.cumsum(dim=0, dtype=torch.int32)
 
         for _, block in enumerate(self.blocks):

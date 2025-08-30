@@ -394,8 +394,9 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         pixel_values = inputs["pixel_values"]
         image_grid_hws = inputs["image_grid_hws"]
         if self.use_data_parallel:
-            return run_dp_sharded_mrope_vision_model(
-                self.vision_tower, pixel_values, image_grid_hws.tolist())
+            return run_dp_sharded_mrope_vision_model(self.vision_tower,
+                                                     pixel_values,
+                                                     image_grid_hws.tolist())
         else:
             return self.vision_tower(pixel_values, image_grid_hws)
 

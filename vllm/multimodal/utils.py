@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, TypeVar, Union
 from urllib.parse import ParseResult, urlparse
 from urllib.request import url2pathname
 
@@ -541,7 +541,7 @@ def run_dp_sharded_mrope_vision_model(
     vision_model: torch.nn.Module,
     pixel_values: torch.Tensor,
     grid_thw_list: list[list[int]],
-) -> Optional[Union[tuple[torch.Tensor, ...], list[torch.Tensor]]]:
+) -> Optional[Union[Tuple[torch.Tensor, ...], List[torch.Tensor]]]:
     """Run a vision model with data parallelism (DP) sharding. 
     The function will shard the input image tensor on the 
     first dimension and run the vision model.
@@ -607,10 +607,10 @@ def run_dp_sharded_mrope_vision_model(
     # embed_dim_reduction_factor = 2 * 2
     if vision_model_name == "MoonVitPretrainedModel":
         embed_dim_reduction_factor = (vision_model.merge_kernel_size[0] *
-                                  vision_model.merge_kernel_size[1])
+                                      vision_model.merge_kernel_size[1])
     else:
         embed_dim_reduction_factor = (vision_model.spatial_merge_size *
-                                    vision_model.spatial_merge_size)
+                                      vision_model.spatial_merge_size)
 
     # Find the max length across all ranks
     # The output embedding of every DP rank has to be
@@ -623,8 +623,8 @@ def run_dp_sharded_mrope_vision_model(
     # Run the vision model on the local pixel_values_local
     if vision_model_name == "MoonVitPretrainedModel":
         if pixel_values_local.shape[0] > 0:
-            image_embeds_local = vision_model(pixel_values_local,
-                                            torch.tensor(local_grid_thw_list))
+            image_embeds_local = vision_model(
+                pixel_values_local, torch.tensor(local_grid_thw_list))
             if isinstance(image_embeds_local, list):
                 image_embeds_local = torch.cat(image_embeds_local, dim=0)
         else:
@@ -636,12 +636,12 @@ def run_dp_sharded_mrope_vision_model(
     else:
         if pixel_values_local.shape[0] > 0:
             image_embeds_local = vision_model(pixel_values_local,
-                                            local_grid_thw_list)
+                                              local_grid_thw_list)
         else:
             # Handle empty case
             image_embeds_local = torch.empty((0, vision_model.out_hidden_size),
-                                                device=pixel_values.device,
-                                                dtype=pixel_values.dtype)
+                                             device=pixel_values.device,
+                                             dtype=pixel_values.dtype)
 
     # Pad the output based on max_len_per_rank
     # for tensor_model_parallel_all_gather to work
@@ -650,13 +650,13 @@ def run_dp_sharded_mrope_vision_model(
         padding_size = max_len_per_rank - current_len
         if vision_model_name == "MoonVitPretrainedModel":
             padding = torch.empty((padding_size, image_embeds_local.shape[1],
-                               image_embeds_local.shape[2]),
-                              dtype=image_embeds_local.dtype,
-                              device=image_embeds_local.device)
+                                   image_embeds_local.shape[2]),
+                                  dtype=image_embeds_local.dtype,
+                                  device=image_embeds_local.device)
         else:
             padding = torch.empty((padding_size, image_embeds_local.shape[1]),
-                                dtype=image_embeds_local.dtype,
-                                device=image_embeds_local.device)
+                                  dtype=image_embeds_local.dtype,
+                                  device=image_embeds_local.device)
         image_embeds_local_padded = torch.cat([image_embeds_local, padding],
                                               dim=0)
     else:
@@ -699,11 +699,11 @@ def run_dp_sharded_mrope_vision_model(
             current_idx += count
     if vision_model_name == "MoonVitPretrainedModel":
         out_embeddings = [
-        embed for embed in original_order_embeddings if embed is not None
+            embed for embed in original_order_embeddings if embed is not None
         ]
     else:
         out_embeddings = tuple(embed for embed in original_order_embeddings
-                            if embed is not None)
+                               if embed is not None)
     assert len(out_embeddings) == len(
         original_order_embeddings), "Found unassigned embeddings"
     return out_embeddings
