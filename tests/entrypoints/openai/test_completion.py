@@ -80,6 +80,8 @@ def default_server_args(zephyr_lora_files, zephyr_lora_added_tokens_files):
 def server(default_server_args, request):
     if request.param:
         default_server_args.append(request.param)
+    if marker := request.node.get_closest_marker("extra_server_args"):
+        default_server_args.append(marker.args[0])
 
     original_value = os.environ.get('VLLM_USE_V1')
     os.environ['VLLM_USE_V1'] = '0'
@@ -510,6 +512,32 @@ async def test_completion_stream_options(client: openai.AsyncOpenAI,
             temperature=0.0,
             stream=False,
             stream_options={"continuous_usage_stats": True})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME, "zephyr-lora"],
+)
+@pytest.mark.extra_server_args(['--enable-force-include-usage'])
+async def test_completion_with_enable_force_include_usage(
+        client: openai.AsyncOpenAI, model_name: str):
+    prompt = "What is the capital of France?"
+
+    stream = await client.completions.create(model=model_name,
+                                             prompt=prompt,
+                                             max_tokens=5,
+                                             temperature=0.0,
+                                             stream=True)
+    async for chunk in stream:
+        if not len(chunk.choices):
+            assert chunk.usage is not None
+            assert chunk.usage.prompt_tokens > 0
+            assert chunk.usage.completion_tokens > 0
+            assert chunk.usage.total_tokens == (chunk.usage.prompt_tokens +
+                                                chunk.usage.completion_tokens)
+        else:
+            assert chunk.usage is None
 
 
 @pytest.mark.asyncio
