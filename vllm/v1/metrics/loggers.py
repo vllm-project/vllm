@@ -202,6 +202,13 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_scheduler_waiting = make_per_engine(gauge_scheduler_waiting,
                                                        engine_indexes,
                                                        model_name)
+        gauge_num_tokens_waiting = self._gauge_cls(
+            name="vllm:num_tokens_waiting",
+            documentation=
+            "Total number of tokens currently waiting in the queue",
+            labelnames=labelnames)
+        self.gauge_num_tokens_waiting = make_per_engine(
+            gauge_num_tokens_waiting, engine_indexes, model_name)
 
         #
         # GPU cache
@@ -215,6 +222,7 @@ class PrometheusStatLogger(StatLoggerBase):
                 "DEPRECATED: Use vllm:kv_cache_usage_perc instead."),
             multiprocess_mode="mostrecent",
             labelnames=labelnames)
+
         self.gauge_gpu_cache_usage = make_per_engine(gauge_gpu_cache_usage,
                                                      engine_indexes,
                                                      model_name)
@@ -497,6 +505,8 @@ class PrometheusStatLogger(StatLoggerBase):
                 scheduler_stats.num_running_reqs)
             self.gauge_scheduler_waiting[engine_idx].set(
                 scheduler_stats.num_waiting_reqs)
+            self.gauge_num_tokens_waiting[engine_idx].set(
+                scheduler_stats.num_tokens_waiting)
 
             self.gauge_gpu_cache_usage[engine_idx].set(
                 scheduler_stats.kv_cache_usage)
