@@ -56,23 +56,29 @@ class LiteWhisperEncoderLayer(WhisperEncoderLayer):
         low_rank_config = low_rank_config or {}
 
         # Replace k_proj/v_proj/q_proj/out_proj with low-rank linear if configured
-        if "k_proj" in low_rank_config:
-            self.self_attn.k_proj = LinearLowRank(
+        # if "k_proj" in low_rank_config:
+        #     self.self_attn.k_proj = LinearLowRank(
+        #         in_features=self.embed_dim,
+        #         out_features=self.embed_dim,
+        #         low_rank_features=low_rank_config["k_proj"]
+        #     )
+        # if "v_proj" in low_rank_config:
+        #     self.self_attn.v_proj = LinearLowRank(
+        #         in_features=self.embed_dim,
+        #         out_features=self.embed_dim,
+        #         low_rank_features=low_rank_config["v_proj"]
+        #     )
+        # if "q_proj" in low_rank_config:
+        #     self.self_attn.q_proj = LinearLowRank(
+        #         in_features=self.embed_dim,
+        #         out_features=self.embed_dim,
+        #         low_rank_features=low_rank_config["q_proj"]
+        #     )
+        if "qkv_proj" in low_rank_config:
+            self.self_attn.qkv_proj = LinearLowRank(
                 in_features=self.embed_dim,
-                out_features=self.embed_dim,
-                low_rank_features=low_rank_config["k_proj"]
-            )
-        if "v_proj" in low_rank_config:
-            self.self_attn.v_proj = LinearLowRank(
-                in_features=self.embed_dim,
-                out_features=self.embed_dim,
-                low_rank_features=low_rank_config["v_proj"]
-            )
-        if "q_proj" in low_rank_config:
-            self.self_attn.q_proj = LinearLowRank(
-                in_features=self.embed_dim,
-                out_features=self.embed_dim,
-                low_rank_features=low_rank_config["q_proj"]
+                out_features=3 * self.embed_dim,  # 合并 q/k/v
+                low_rank_features=low_rank_config["qkv_proj"]
             )
         if "out_proj" in low_rank_config:
             self.self_attn.out_proj = LinearLowRank(
@@ -82,17 +88,18 @@ class LiteWhisperEncoderLayer(WhisperEncoderLayer):
             )
 
         if "fc1" in low_rank_config:
-            self.fc1 = LinearLowRank(
+            self.mlp.fc1 = LinearLowRank(
                 in_features=self.embed_dim,
                 out_features=config.encoder_ffn_dim,
                 low_rank_features=low_rank_config["fc1"]
             )
         if "fc2" in low_rank_config:
-            self.fc2 = LinearLowRank(
+            self.mlp.fc2 = LinearLowRank(
                 in_features=config.encoder_ffn_dim,
                 out_features=self.embed_dim,
                 low_rank_features=low_rank_config["fc2"]
             )
+
 
 class LiteWhisperEncoder(WhisperEncoder):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", is_standalone_encoder: bool = False):
