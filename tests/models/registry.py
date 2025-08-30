@@ -154,7 +154,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "BailingMoeForCausalLM": _HfExamplesInfo("inclusionAI/Ling-lite-1.5",
                                          trust_remote_code=True),
     "BambaForCausalLM": _HfExamplesInfo("ibm-ai-platform/Bamba-9B-v1",
-                                        min_transformers_version="4.56.0",
+                                        min_transformers_version="4.55.3",
                                         extras={"tiny": "hmellor/tiny-random-BambaForCausalLM"}),  # noqa: E501
     "BloomForCausalLM": _HfExamplesInfo("bigscience/bloom-560m",
                                         {"1b": "bigscience/bloomz-1b1"}),
@@ -208,7 +208,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GptOssForCausalLM": _HfExamplesInfo("lmsys/gpt-oss-20b-bf16"),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
-    "GraniteMoeHybridForCausalLM": _HfExamplesInfo("ibm-granite/granite-4.0-tiny-preview"),  # noqa: E501
+    "GraniteMoeHybridForCausalLM": _HfExamplesInfo("ibm-granite/granite-4.0-tiny-preview", # noqa: E501
+                                                   min_transformers_version="4.55.3"),
     "GraniteMoeSharedForCausalLM": _HfExamplesInfo("ibm-research/moe-7b-1b-active-shared-experts"),  # noqa: E501
     "Grok1ModelForCausalLM": _HfExamplesInfo("hpcai-tech/grok-1",
                                              trust_remote_code=True),
@@ -228,7 +229,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
                                             trust_remote_code=True),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini",
-                                        min_transformers_version="4.56.0",
+                                        min_transformers_version="4.55.3",
                                         extras={
                                             "tiny": "ai21labs/Jamba-tiny-dev",
                                             "random": "ai21labs/Jamba-tiny-random",  # noqa: E501
@@ -244,7 +245,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Llama4ForCausalLM": _HfExamplesInfo("meta-llama/Llama-4-Scout-17B-16E-Instruct", # noqa: E501
                                          is_available_online=False),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
-    "Mamba2ForCausalLM": _HfExamplesInfo("mistralai/Mamba-Codestral-7B-v0.1"),
+    "Mamba2ForCausalLM": _HfExamplesInfo("mistralai/Mamba-Codestral-7B-v0.1",
+                                         min_transformers_version="4.55.3",
+                                         extras={
+                                            "random": "yujiepan/mamba2-codestral-v0.1-tiny-random", # noqa: E501
+                                         }),
     "FalconMambaForCausalLM": _HfExamplesInfo("tiiuae/falcon-mamba-7b-instruct"),  # noqa: E501
     "MiniCPMForCausalLM": _HfExamplesInfo("openbmb/MiniCPM-2B-sft-bf16",
                                          trust_remote_code=True),
