@@ -86,6 +86,10 @@ class Executor(ExecutorBase):
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         return self.collective_rpc("get_kv_cache_spec")
 
+    def get_kv_connector_handshake_metadata(
+            self) -> list[dict[int, dict[int, dict]]]:
+        return self.collective_rpc("get_kv_connector_handshake_metadata")
+
     def execute_model(
         self,
         scheduler_output,
