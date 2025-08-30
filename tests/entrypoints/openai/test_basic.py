@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import socket
 from http import HTTPStatus
 
 import openai
@@ -9,11 +10,12 @@ import pytest
 import pytest_asyncio
 import requests
 
+from vllm.utils import is_valid_ipv4_address, is_valid_ipv6_address
 from vllm.version import __version__ as VLLM_VERSION
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "facebook/opt-125m"
 
 
 @pytest.fixture(scope='module')
@@ -59,7 +61,7 @@ def server(server_args):
         "--dtype",
         "bfloat16",
         "--max-model-len",
-        "8192",
+        "2048",
         "--enforce-eager",
         "--max-num-seqs",
         "128",
@@ -112,11 +114,9 @@ async def test_check_health(server: RemoteOpenAIServer):
 @pytest.mark.parametrize(
     "server_args",
     [
-        pytest.param(["--max-model-len", "10100"],
-                     id="default-frontend-multiprocessing"),
-        pytest.param(
-            ["--disable-frontend-multiprocessing", "--max-model-len", "10100"],
-            id="disable-frontend-multiprocessing")
+        pytest.param([], id="default-frontend-multiprocessing"),
+        pytest.param(["--disable-frontend-multiprocessing"],
+                     id="disable-frontend-multiprocessing")
     ],
     indirect=True,
 )
@@ -125,16 +125,16 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
     # clunky test: send an ungodly amount of load in with short timeouts
     # then ensure that it still responds quickly afterwards
 
-    chat_input = [{"role": "user", "content": "Write a long story"}]
+    input = "Write a long story"
     client = server.get_async_client(timeout=0.5)
     tasks = []
     # Request about 2 million tokens
-    for _ in range(200):
+    for _ in range(1000):
         task = asyncio.create_task(
-            client.chat.completions.create(messages=chat_input,
-                                           model=MODEL_NAME,
-                                           max_tokens=10000,
-                                           extra_body={"min_tokens": 10000}))
+            client.completions.create(prompt=input,
+                                      model=MODEL_NAME,
+                                      max_tokens=2000,
+                                      extra_body={"min_tokens": 2000}))
         tasks.append(task)
 
     done, pending = await asyncio.wait(tasks,
@@ -151,10 +151,9 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
     # If the server had not cancelled all the other requests, then it would not
     # be able to respond to this one within the timeout
     client = server.get_async_client(timeout=5)
-    response = await client.chat.completions.create(messages=chat_input,
-                                                    model=MODEL_NAME,
-                                                    max_tokens=10)
-
+    response = await client.completions.create(prompt=input,
+                                               model=MODEL_NAME,
+                                               max_tokens=10)
     assert len(response.choices) == 1
 
 

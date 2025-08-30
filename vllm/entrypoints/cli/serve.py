@@ -146,7 +146,7 @@ def run_multi_api_server(args: argparse.Namespace):
         # Not compatible with API server scale-out
         args.mm_processor_cache_gb = 0
 
-    listen_address, sock = setup_server(args)
+    listen_address, sockets = setup_server(args)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
     usage_context = UsageContext.OPENAI_API_SERVER
@@ -184,7 +184,7 @@ def run_multi_api_server(args: argparse.Namespace):
         api_server_manager_kwargs = dict(
             target_server_fn=run_api_server_worker_proc,
             listen_address=listen_address,
-            sock=sock,
+            sockets=sockets,
             args=args,
             num_servers=num_api_servers,
             input_addresses=addresses.inputs,
@@ -216,7 +216,7 @@ def run_multi_api_server(args: argparse.Namespace):
 
 
 def run_api_server_worker_proc(listen_address,
-                               sock,
+                               sockets,
                                args,
                                client_config=None,
                                **uvicorn_kwargs) -> None:
@@ -228,5 +228,5 @@ def run_api_server_worker_proc(listen_address,
     decorate_logs()
 
     uvloop.run(
-        run_server_worker(listen_address, sock, args, client_config,
+        run_server_worker(listen_address, sockets, args, client_config,
                           **uvicorn_kwargs))
