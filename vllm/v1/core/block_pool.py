@@ -221,21 +221,20 @@ class BlockPool:
                 BlockRemoved(block_hashes=[block_hash.get_hash_value()]))
         return True
 
-    def touch(self, blocks: tuple[list[KVCacheBlock], ...]) -> None:
+    def touch(self, blocks: list[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
 
         Args:
-            blocks: A list of blocks to touch.
+            blocks: A list of block.
         """
-        for blocks_per_group in blocks:
-            for block in blocks_per_group:
-                # ref_cnt=0 means this block is in the free list (i.e. eviction
-                # candidate), so remove it.
-                if block.ref_cnt == 0 and not block.is_null:
-                    self.free_block_queue.remove(block)
-                block.ref_cnt += 1
+        for block in blocks:
+            # ref_cnt=0 means this block is in the free list (i.e. eviction
+            # candidate), so remove it.
+            if block.ref_cnt == 0 and not block.is_null:
+                self.free_block_queue.remove(block)
+            block.ref_cnt += 1
 
     def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
         """Free a list of blocks. The blocks should be ordered by their
