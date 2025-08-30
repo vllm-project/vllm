@@ -653,9 +653,13 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA,
             return loader.load_weights(weights_list)
         except Exception:
             logger.warning("Detected quantized MoE gate layers. "
-                           "Proceeding with automatic"
-                           "gate layer adjustment"
-                           "for compatibility.")
+                           "Proceeding with automatic "
+                           "gate layer adjustment "
+                           "for compatibility. "
+                           "Please use the env variable: "
+                           "VLLM_QUANTIZATION_FROM_AUTOROUND_GPTQ=1 "
+                           "to avoid the adjustment and the WARNING: "
+                           "Current vLLM config is not set.")
             for layer in self.model.layers:
                 if isinstance(layer, PPMissingLayer):
                     continue
