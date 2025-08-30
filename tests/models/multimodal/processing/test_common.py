@@ -293,6 +293,7 @@ def _test_processing_correctness_one(
     "OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview",
     "OpenGVLab/InternVL3_5-30B-A3B",
     "Kwai-Keye/Keye-VL-8B-Preview",
+    "Kwai-Keye/Keye-VL-1_5-8B",
     "moonshotai/Kimi-VL-A3B-Instruct",
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     "llava-hf/llava-1.5-7b-hf",
@@ -346,6 +347,9 @@ def test_processing_correctness(
 ):
     if model_id == "google/gemma-3n-E2B-it":
         pytest.skip("Skipping gemma-3n-E2B-it due to transformers #39911 bug.")
+    elif model_id == "Kwai-Keye/Keye-VL-1_5-8B":
+        pytest.skip("Skipping Kwai-Keye/Keye-VL-1_5-8B due to unsupport.")
+
     _test_processing_correctness(
         model_id,
         hit_rate=hit_rate,
