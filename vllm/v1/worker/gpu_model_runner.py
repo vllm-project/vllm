@@ -1029,7 +1029,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                           dtype=torch.int32,
                                                           device="cpu")
                 # NOTE - using max_encoder_len is whisper specific
-                total_num_scheduled_tokens_arg = self.max_encoder_len
+                total_num_scheduled_tokens_arg = num_encoder_tokens
                 max_num_scheduled_tokens_arg = self.max_encoder_len
                 max_seq_len_arg = self.max_encoder_len
             elif isinstance(kv_cache_group_spec.kv_cache_spec,
