@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
 from urllib.parse import ParseResult, urlparse
 from urllib.request import url2pathname
 
@@ -541,7 +541,7 @@ def run_dp_sharded_mrope_vision_model(
     vision_model: torch.nn.Module,
     pixel_values: torch.Tensor,
     grid_thw_list: list[list[int]],
-) -> Optional[Union[Tuple[torch.Tensor, ...], List[torch.Tensor]]]:
+) -> Union[tuple[torch.Tensor, ...], list[torch.Tensor]]:
     """Run a vision model with data parallelism (DP) sharding. 
     The function will shard the input image tensor on the 
     first dimension and run the vision model.
@@ -698,15 +698,18 @@ def run_dp_sharded_mrope_vision_model(
                 embed_start += img_patches
             current_idx += count
     if vision_model_name == "MoonVitPretrainedModel":
-        out_embeddings = [
+        out_embeddings_list = [
             embed for embed in original_order_embeddings if embed is not None
         ]
+        assert len(out_embeddings_list) == len(
+            original_order_embeddings), "Found unassigned embeddings"
+        return out_embeddings_list
     else:
         out_embeddings = tuple(embed for embed in original_order_embeddings
                                if embed is not None)
-    assert len(out_embeddings) == len(
-        original_order_embeddings), "Found unassigned embeddings"
-    return out_embeddings
+        assert len(out_embeddings) == len(
+            original_order_embeddings), "Found unassigned embeddings"
+        return out_embeddings
 
 
 def fetch_audio(
