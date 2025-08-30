@@ -510,6 +510,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # Check for DeepGemm support.
         self.allow_deep_gemm = False
+        logger.debug(
+            "[MoE Debug] VLLM_USE_DEEP_GEMM=%s, block_quant=%s, "
+            "weight_block_size=%s", envs.VLLM_USE_DEEP_GEMM, self.block_quant,
+            self.quant_config.weight_block_size)
+
         if envs.VLLM_USE_DEEP_GEMM:
             if not has_deep_gemm():
                 logger.warning_once("Failed to import DeepGemm kernels.")
@@ -522,6 +527,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             else:
                 logger.warning_once(
                     "DeepGemm not supported on the current platform.")
+
+        logger.debug("[MoE Debug] Final allow_deep_gemm=%s",
+                     self.allow_deep_gemm)
 
         # Check for CutlassBlockScaledGroupedGemm support.
         self.allow_cutlass_block_scaled_grouped_gemm = False

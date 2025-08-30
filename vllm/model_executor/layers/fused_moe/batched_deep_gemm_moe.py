@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+import os
+from typing import Any, Optional
 
 import torch
 
@@ -190,6 +191,9 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     # The Deep Gemm kernels only support block size of 128
     DEEPGEMM_BLOCK_SHAPE: list[int] = [128, 128]
 
+    # Class variable for one-shot logging to verify dispatch optimization
+    _logged_dispatch_once: bool = False
+
     def __init__(self,
                  max_num_tokens: int,
                  num_dispatchers: int,
@@ -255,13 +259,24 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             return self.num_dispatchers
 
         # TP > 1 case
-        if tp_rank == 0:
-            # Leader rank gets a proportional share of dispatchers
-            dispatchers_per_group = max(1, self.num_dispatchers // tp_size)
-            return dispatchers_per_group
+        eff = (max(1, self.num_dispatchers // tp_size) if tp_rank == 0 else 0)
 
-        # Non-leader ranks don't dispatch
-        return 0
+        # --- lightweight one-shot log for verification ---
+        if (not BatchedDeepGemmExperts._logged_dispatch_once
+                and os.getenv("VLLM_LOG_MOE_DISPATCH", "0") == "1"):
+            logger.info(
+                "[moe-dispatch-opt] tp_rank=%d/%d, num_dispatchers=%d -> "
+                "effective=%d, leader=%s, participates_a2a=%s",
+                tp_rank,
+                tp_size,
+                self.num_dispatchers,
+                eff,
+                str(tp_rank == 0),
+                str(eff > 0),
+            )
+            BatchedDeepGemmExperts._logged_dispatch_once = True
+
+        return eff
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
@@ -293,28 +308,20 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         output = (num_experts, max_num_tokens * num_dispatchers, K)
         return (workspace13, workspace2, output, a.dtype)
 
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: str,
-        global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        w1_scale: Optional[torch.Tensor],
-        w2_scale: Optional[torch.Tensor],
-        w1_zp: Optional[torch.Tensor],
-        w2_zp: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-        apply_router_weight_on_input: bool,
-    ):
+    def apply(self, output: torch.Tensor, hidden_states: torch.Tensor,
+              w1: torch.Tensor, w2: torch.Tensor, topk_weights: torch.Tensor,
+              topk_ids: torch.Tensor, activation: str, global_num_experts: int,
+              expert_map: Optional[torch.Tensor],
+              w1_scale: Optional[torch.Tensor],
+              w2_scale: Optional[torch.Tensor], w1_zp: Optional[torch.Tensor],
+              w2_zp: Optional[torch.Tensor], a1q_scale: Optional[torch.Tensor],
+              a2_scale: Optional[torch.Tensor], workspace13: torch.Tensor,
+              workspace2: torch.Tensor,
+              expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+              apply_router_weight_on_input: bool,
+              extra_expert_args: Optional[dict[str, Any]]):
+        logger.debug("[MoE Debug] BatchedDeepGemmExperts.apply() called - "
+                     "monitoring logs should appear below")
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
