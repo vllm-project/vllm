@@ -345,7 +345,13 @@ class ModelConfig:
     format. Examples:\n
     - 1k -> 1000\n
     - 1K -> 1024\n
-    - 25.6k -> 25,600"""
+    - 25.6k -> 25,600\n
+
+    Pass ``-1`` to automatically choose the largest length that fits
+    in available GPU memory."""
+    auto_max_model_len: bool = False
+    """Automatically determine the maximum model length that fits in GPU
+    memory. Enabled when ``--max-model-len`` is ``-1``."""
     spec_target_max_model_len: Optional[int] = None
     """Specify the maximum length for spec decoding draft models."""
     quantization: SkipValidation[Optional[QuantizationMethods]] = None

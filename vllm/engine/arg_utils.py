@@ -227,7 +227,9 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
         elif contains_type(type_hints, int):
             kwargs[name]["type"] = int
             # Special case for large integers
-            if name in {"max_model_len", "max_num_batched_tokens"}:
+            if name == "max_model_len":
+                kwargs[name]["type"] = human_readable_int
+            elif name == "max_num_batched_tokens":
                 kwargs[name]["type"] = human_readable_int
         elif contains_type(type_hints, float):
             kwargs[name]["type"] = float
@@ -945,6 +947,12 @@ class EngineArgs:
 
             self.mm_encoder_tp_mode = "data"
 
+        max_model_len = self.max_model_len
+        auto_max_model_len = False
+        if max_model_len is not None and max_model_len < 0:
+            auto_max_model_len = True
+            max_model_len = None
+
         return ModelConfig(
             model=self.model,
             hf_config_path=self.hf_config_path,
@@ -964,7 +972,8 @@ class EngineArgs:
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
             tokenizer_revision=self.tokenizer_revision,
-            max_model_len=self.max_model_len,
+            max_model_len=max_model_len,
+            auto_max_model_len=auto_max_model_len,
             quantization=self.quantization,
             enforce_eager=self.enforce_eager,
             max_seq_len_to_capture=self.max_seq_len_to_capture,
@@ -1847,3 +1856,4 @@ def human_readable_int(value):
 
     # Regular plain number.
     return int(value)
+
