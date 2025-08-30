@@ -225,6 +225,13 @@ class P2pNcclEngine:
             tensor_size = tensor.element_size() * tensor.numel()
             while (self.buffer_size + tensor_size
                    > self.buffer_size_threshold):
+                if len(self.send_store) == 0:
+                    logger.info(
+                        "❗[GET]tensor_id:%s, tensor_size:%d, is greater than"
+                        "buffer size threshold :%d, skip send to %s, rank:%d",
+                        tensor_id, tensor_size, self.buffer_size_threshold,
+                        remote_address, self.rank)
+                    return False
                 oldest_tenser_id = next(iter(self.send_store))
                 oldest_tenser = self.send_store.pop(oldest_tenser_id)
                 oldest_tenser_size = oldest_tenser.element_size(
