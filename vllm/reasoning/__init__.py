@@ -9,6 +9,7 @@ from .granite_reasoning_parser import GraniteReasoningParser
 from .hunyuan_a13b_reasoning_parser import HunyuanA13BReasoningParser
 from .mistral_reasoning_parser import MistralReasoningParser
 from .qwen3_reasoning_parser import Qwen3ReasoningParser
+from .seed_oss_reasoning_parser import SeedOssReasoningParser
 from .step3_reasoning_parser import Step3ReasoningParser
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "MistralReasoningParser",
     "Step3ReasoningParser",
     "GptOssReasoningParser",
+    "SeedOssReasoningParser",
 ]
