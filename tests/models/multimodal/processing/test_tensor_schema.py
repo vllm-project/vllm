@@ -178,7 +178,9 @@ def test_model_tensor_schema(model_arch: str, model_id: str,
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         hf_overrides=model_info.hf_overrides,
-    )
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype)
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
 
@@ -225,18 +227,18 @@ def test_model_tensor_schema(model_arch: str, model_id: str,
         # TODO(Isotr0py): Can we avoid initializing engine?
         with (
                 set_default_torch_num_threads(1),
-                vllm_runner(
-                    model_id,
-                    tokenizer_name=model_info.tokenizer,
-                    tokenizer_mode=model_info.tokenizer_mode,
-                    revision=model_info.revision,
-                    trust_remote_code=model_info.trust_remote_code,
-                    max_model_len=model_info.max_model_len,
-                    load_format="dummy",
-                    hf_overrides=hf_overrides_fn,
-                    limit_mm_per_prompt=limit_mm_per_prompt,
-                    enforce_eager=True,
-                ) as vllm_model,
+                vllm_runner(model_id,
+                            tokenizer_name=model_info.tokenizer,
+                            tokenizer_mode=model_info.tokenizer_mode,
+                            revision=model_info.revision,
+                            trust_remote_code=model_info.trust_remote_code,
+                            max_model_len=model_info.max_model_len,
+                            load_format="dummy",
+                            hf_overrides=hf_overrides_fn,
+                            limit_mm_per_prompt=limit_mm_per_prompt,
+                            enforce_eager=True,
+                            skip_tokenizer_init=model_info.skip_tokenizer_init)
+                as vllm_model,
         ):
             model_config = vllm_model.llm.llm_engine.model_config
             llm_engine = vllm_model.llm.llm_engine

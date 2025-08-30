@@ -66,7 +66,9 @@ def _test_processing_correctness(
         hf_overrides=model_info.hf_overrides,
         # Ensure that the cache can fit all of the data
         mm_processor_cache_gb=2048,
-    )
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype)
 
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
