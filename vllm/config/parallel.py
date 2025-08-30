@@ -127,6 +127,17 @@ class ParallelConfig:
     disable_custom_all_reduce: bool = False
     """Disable the custom all-reduce kernel and fall back to NCCL."""
 
+    enable_microbatching: bool = False
+    """Enable microbatching for the model executor."""
+
+    microbatching_token_threshold: int = 32
+    """The threshold for microbatching. If the number of tokens in the
+    request is greater than this threshold, microbatching will be used.
+    Otherwise, the request will be processed in a single batch."""
+
+    enable_async_comms: bool = False
+    """enable async comms"""
+
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 

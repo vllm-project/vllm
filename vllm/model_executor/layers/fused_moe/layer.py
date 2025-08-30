@@ -37,6 +37,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import (direct_register_custom_op, has_deep_ep, has_pplx,
                         round_up)
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -141,10 +142,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 all_to_all_args[
                     "group_name"] = all2all_manager.cpu_group.group_name
 
-            handle = all2all_manager.get_handle(all_to_all_args)
+            handles = all2all_manager.get_handles(all_to_all_args)
 
             prepare_finalize = PplxPrepareAndFinalize(
-                handle,
+                handles,
                 max_num_tokens=moe.max_num_tokens,
                 num_local_experts=moe.num_local_experts,
                 num_dispatchers=num_dispatchers,
@@ -170,7 +171,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 num_global_experts=moe.num_experts,
                 num_local_experts=moe.num_experts //
                 all2all_manager.world_size)
-            handle = all2all_manager.get_handle(all_to_all_args)
+            handles = all2all_manager.get_handles(all_to_all_args)
 
             # Note : We may want to use FP8 dispatch even otherwise just to
             # reduce datamovement
@@ -181,7 +182,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                                 == DEEPEP_QUANT_BLOCK_SHAPE)
 
             prepare_finalize = DeepEPLLPrepareAndFinalize(
-                handle,
+                handles,
                 max_tokens_per_rank=moe.max_num_tokens,
                 num_dispatchers=all2all_manager.world_size,
                 use_fp8_dispatch=use_fp8_dispatch,
@@ -938,13 +939,13 @@ class FusedMoE(CustomOp):
                 or self.moe_parallel_config.use_deepep_ll_kernels
                 or self.moe_config.use_flashinfer_cutlass_kernels):
             self.batched_hidden_states = torch.zeros(
-                (moe.max_num_tokens, self.hidden_size),
+                (2, moe.max_num_tokens, self.hidden_size),
                 dtype=moe.in_dtype,
                 device=torch.cuda.current_device())
 
             # Note here we use `num_experts` which is logical expert count
             self.batched_router_logits = torch.zeros(
-                (moe.max_num_tokens, num_experts),
+                (2, moe.max_num_tokens, num_experts),
                 dtype=moe.in_dtype,
                 device=torch.cuda.current_device())
 
@@ -1618,14 +1619,23 @@ class FusedMoE(CustomOp):
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
 
-            assert (self.batched_hidden_states.size(0)  # type: ignore
+            batch_buffer_idx = dbo_current_ubatch_id()
+
+            assert self.batched_hidden_states is not None
+            assert self.batched_router_logits is not None
+            batched_hidden_states = self.batched_hidden_states[
+                batch_buffer_idx, :]
+            batched_router_logits = self.batched_router_logits[
+                batch_buffer_idx, :]
+
+            assert (batched_hidden_states.size(0)  # type: ignore
                     >= chunk_size)
-            assert (self.batched_router_logits.size(0)  # type: ignore
+            assert (batched_router_logits.size(0)  # type: ignore 
                     >= chunk_size)
-            staged_hidden_states = self.batched_hidden_states[:
-                                                              chunk_size, :]  # type: ignore
-            staged_router_logits = self.batched_router_logits[:
-                                                              chunk_size, :]  # type: ignore
+            staged_hidden_states = batched_hidden_states[:
+                                                         chunk_size, :]  # type: ignore
+            staged_router_logits = batched_router_logits[:
+                                                         chunk_size, :]  # type: ignore
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
 

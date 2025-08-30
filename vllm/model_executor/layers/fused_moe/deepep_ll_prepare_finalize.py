@@ -11,6 +11,11 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate)
 from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input, normalize_batched_scales_shape)
+from vllm.v1.worker.ubatching import (dbo_enabled,
+                                      dbo_current_ubatch_id,
+                                      dbo_yield,
+                                      dbo_maybe_run_recv_hook,
+                                      dbo_register_recv_hook)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -43,19 +48,19 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     SUPPORTED_HIDDEN_SIZES = [2048, 2560, 4096, 5120, 6144, 7168]
 
     def __init__(self,
-                 buffer: deep_ep.Buffer,
+                 buffers: list[deep_ep.Buffer],
                  max_tokens_per_rank: int,
                  num_dispatchers: int,
                  use_fp8_dispatch: bool = False):
         super().__init__()
 
-        self.buffer = buffer
+        self.buffers = buffers
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
         # The dispatch function returns a handle that the combine function
         # requires. We store the handle here so it is available to the
         # combine function.
-        self.handle = None
+        self.handles: list[Optional[tuple]] = [None, None]
         self.num_dispatchers_ = num_dispatchers
 
     def num_dispatchers(self) -> int:
@@ -126,9 +131,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                Optional[torch.Tensor]]:
 
         hidden_size = a1.size(1)
-        assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, \
-            (f"Hidden Size {hidden_size} not in supported list of hidden sizes"
-            f"{self.SUPPORTED_HIDDEN_SIZES}")
+        a2a_idx = dbo_current_ubatch_id()
+        do_recv_hook = dbo_enabled()
 
         if self.use_fp8_dispatch:
             assert hidden_size % 128 == 0, \
@@ -148,14 +152,19 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * topk_weights.to(a1.dtype)
 
         # Dispatch
-        expert_x, expert_num_tokens, self.handle, event, hook = \
-                self.buffer.low_latency_dispatch(a1,
+        dbo_maybe_run_recv_hook()
+        expert_x, expert_num_tokens, handle, _, recv_hook= \
+                self.buffers[a2a_idx].low_latency_dispatch(a1,
                                                 topk_ids,
                                                 self.max_tokens_per_rank,
                                                 num_experts,
                                                 use_fp8=self.use_fp8_dispatch,
                                                 async_finish=False,
-                                                return_recv_hook=False)
+                                                return_recv_hook=do_recv_hook)
+        self.handles[a2a_idx] = handle
+        if recv_hook is not None:
+            dbo_register_recv_hook(recv_hook)            
+        dbo_yield()
 
         expert_x, expert_x_scale = self._do_quant(
             expert_x, a1_scale, a2_scale, a1.dtype, quant_config.quant_dtype,
@@ -178,7 +187,11 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         assert isinstance(
             weight_and_reduce_impl, TopKWeightAndReduceDelegate
         ), ("Weight application and reduction happens in the combine kernel.")
-        assert self.handle is not None
+
+        a2a_idx = dbo_current_ubatch_id()
+        do_recv_hook = dbo_enabled()
+        handle = self.handles[a2a_idx]
+        assert handle is not None
 
         combine_topk_weights = topk_weights
         if apply_router_weight_on_input:
@@ -186,12 +199,15 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             combine_topk_weights = torch.ones_like(topk_weights)
 
         # TODO (varun) : Enable zero copy mode
-        _, event, hook = self.buffer.low_latency_combine(
-            fused_expert_output,
-            topk_ids,
-            combine_topk_weights,
-            self.handle,
-            async_finish=False,
-            zero_copy=False,
-            return_recv_hook=False,
-            out=output)
+        dbo_maybe_run_recv_hook()
+        _, _, recv_hook = self.buffers[a2a_idx].low_latency_combine(fused_expert_output,
+                                                      topk_ids,
+                                                      combine_topk_weights,
+                                                      handle,
+                                                      async_finish=False,
+                                                      zero_copy=False,
+                                                      return_recv_hook=do_recv_hook,
+                                                      out=output)
+        if recv_hook is not None:
+            dbo_register_recv_hook(recv_hook)            
+        dbo_yield()

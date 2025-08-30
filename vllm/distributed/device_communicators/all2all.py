@@ -101,13 +101,24 @@ class PPLXAll2AllManager(All2AllManagerBase):
             logger.debug("PPLX NVSHMEM UID = %s", uid)
             nvshmem_init(uid, self.rank, self.world_size)
 
-        self.handle_cache = Cache()
+        # self.handle_cache = Cache()
+        self.handle_caches = [Cache(), Cache()]
 
     def get_handle(self, kwargs):
         import pplx_kernels as pplx
-        return self.handle_cache.get_or_create(
+        return self.handle_caches[0].get_or_create(
             kwargs, pplx.AllToAll.internode
             if self.internode else pplx.AllToAll.intranode)
+
+    def get_handles(self, kwargs):
+        import pplx_kernels as pplx
+        first_handle = self.handle_caches[0].get_or_create(
+            kwargs, pplx.AllToAll.internode
+            if self.internode else pplx.AllToAll.intranode)
+        second_handle = self.handle_caches[1].get_or_create(
+            kwargs, pplx.AllToAll.internode
+            if self.internode else pplx.AllToAll.intranode)
+        return [first_handle, second_handle]
 
     def dispatch(self, hidden_states: torch.Tensor,
                  router_logits: torch.Tensor):
@@ -117,9 +128,10 @@ class PPLXAll2AllManager(All2AllManagerBase):
         raise NotImplementedError
 
     def destroy(self):
-        with self.handle_cache._lock:
-            for _, handle in self.handle_cache._cache.items():
-                handle.destroy()
+        for handle_cache in self.handle_caches:
+            with handle_cache._lock:
+                for _, handle in handle_cache._cache.items():
+                    handle.destroy()
 
         if self.internode:
             from pplx_kernels.nvshmem import nvshmem_finalize
@@ -136,7 +148,7 @@ class DeepEPAll2AllManagerBase(All2AllManagerBase):
         assert has_deep_ep(
         ), "DeepEP kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md to install DeepEP kernels."  # noqa
         super().__init__(cpu_group)
-        self.handle_cache = Cache()
+        self.handle_caches = [Cache(), Cache()]
 
         # This is the DeepEP default. Stick to it till we can establish
         # reasonable defaults based on profiling.
@@ -163,6 +175,7 @@ class DeepEPHTAll2AllManager(DeepEPAll2AllManagerBase):
 
     def __init__(self, cpu_group):
         super().__init__(cpu_group)
+        self.handle_cache = self.handle_caches[0]
 
     def _make_all2all_kwargs(self) -> dict[Any, Any]:
         # Defaults for internode and intranode are taken from DeepEP tests.
@@ -211,6 +224,7 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
 
     def __init__(self, cpu_group):
         super().__init__(cpu_group)
+        self.handle_cache = self.handle_caches[0]
 
     def _make_all2all_kwargs(
         self,
@@ -256,9 +270,9 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         logger.debug("DeepEP all2all args %s", buffer_kwargs)
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer)
-        # It is dangerous to set num sms outside this function. num_sms is not
-        # a part of the hash-key that identifies this object. If we are in a
-        # situation where we make objects with different num_sms, the hash key
-        # in get_or_create must be updated.
-        handle.set_num_sms(self.num_sms)
         return handle
+
+    def get_handles(self, kwargs):
+        handle = self.get_handle(kwargs)
+        # For DeepEP we use the same handle for microbatching
+        return [handle, handle]
