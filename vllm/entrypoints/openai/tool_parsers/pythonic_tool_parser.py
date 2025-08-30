@@ -45,6 +45,8 @@ class PythonicToolParser(ToolParser):
         r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s*)?\)\s*)+\]",
         re.DOTALL)
 
+    _DELIM_RE = re.compile(r"(?:<\|python_tag\|>|\n)\s*\[")
+
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
 
@@ -56,6 +58,24 @@ class PythonicToolParser(ToolParser):
     @current_tool_index.setter
     def current_tool_index(self, value: int) -> None:
         self.current_tool_id = value
+
+    def _split_prefix_and_tools(self, text: str) -> tuple[str, str | None]:
+        """Return (prefix, tools_section).
+
+        tools_section is None when the text does not yet contain a
+        valid list of tool calls starting after one of the supported
+        delimiters or at position 0.
+        """
+        if text.startswith("["):
+            return "", text  # tools start at the very beginning
+
+        m = self._DELIM_RE.search(text)
+        if not m:
+            return text, None  # only regular text so far
+
+        # Locate the first square bracket that belongs to the tool list.
+        start_idx = text.find("[", m.start())
+        return text[:start_idx], text[start_idx:]
 
     def extract_tool_calls(
             self, model_output: str,
@@ -112,11 +132,15 @@ class PythonicToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> Union[DeltaMessage, None]:
 
-        if not current_text.startswith("["):
+        prefix, tools_section = self._split_prefix_and_tools(current_text)
+
+
+        if tools_section is None:
             return DeltaMessage(content=delta_text)
 
         try:
-            valid_and_added_text = _make_valid_python(current_text)
+            valid_and_added_text = _make_valid_python(tools_section)
+
             if valid_and_added_text is None:
                 return None
             valid_text, added_text = valid_and_added_text
