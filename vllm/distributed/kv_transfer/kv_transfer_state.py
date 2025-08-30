@@ -64,3 +64,10 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
                 config=vllm_config, role=KVConnectorRole.WORKER)
         else:
             raise ValueError("V0 is no longer supported")
+
+
+def ensure_kv_transfer_shutdown() -> None:
+    global _KV_CONNECTOR_AGENT
+    if _KV_CONNECTOR_AGENT is not None:
+        _KV_CONNECTOR_AGENT.shutdown()
+        _KV_CONNECTOR_AGENT = None
