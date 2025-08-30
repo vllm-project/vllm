@@ -72,10 +72,11 @@ class BasevLLMParameter(Parameter):
                 or self._is_1d_and_scalar(loaded_weight))
         self.data.copy_(loaded_weight)
 
-    def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
+    def load_column_parallel_weight(self, loaded_weight: torch.Tensor,
+                                    **kwargs):
         self._assert_and_load(loaded_weight)
 
-    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+    def load_row_parallel_weight(self, loaded_weight: torch.Tensor, **kwargs):
         self._assert_and_load(loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
@@ -115,8 +116,9 @@ class _ColumnvLLMParameter(BasevLLMParameter):
     def output_dim(self):
         return self._output_dim
 
-    def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
-        tp_rank = get_tensor_model_parallel_rank()
+    def load_column_parallel_weight(self, loaded_weight: torch.Tensor,
+                                    **kwargs):
+        tp_rank = kwargs.get("tp_rank", get_tensor_model_parallel_rank())
         shard_size = self.data.shape[self.output_dim]
         loaded_weight = loaded_weight.narrow(self.output_dim,
                                              tp_rank * shard_size, shard_size)
@@ -127,6 +129,8 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
         shard_offset = kwargs.get("shard_offset")
         shard_size = kwargs.get("shard_size")
+        tp_rank = kwargs.get("tp_rank", get_tensor_model_parallel_rank())
+
         # TODO: move these to PackedColumnParameter and PackedvLLMParameter
         if isinstance(
                 self,
@@ -137,7 +141,6 @@ class _ColumnvLLMParameter(BasevLLMParameter):
 
         param_data = self.data
 
-        tp_rank = get_tensor_model_parallel_rank()
         param_data = param_data.narrow(self.output_dim, shard_offset,
                                        shard_size)
         loaded_weight = loaded_weight.narrow(self.output_dim,
@@ -151,6 +154,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         shard_size = kwargs.get("shard_size")
         shard_id = kwargs.get("shard_id")
         num_heads = kwargs.get("num_heads")
+        tp_rank = kwargs.get("tp_rank", get_tensor_model_parallel_rank())
 
         # TODO: move these to PackedColumnParameter and PackedvLLMParameter
         if isinstance(
@@ -161,7 +165,6 @@ class _ColumnvLLMParameter(BasevLLMParameter):
                 shard_offset=shard_offset, shard_size=shard_size)
 
         param_data = self.data
-        tp_rank = get_tensor_model_parallel_rank()
         shard_id = tp_rank if shard_id == "q" else tp_rank // num_heads
         param_data = param_data.narrow(self.output_dim, shard_offset,
                                        shard_size)
@@ -188,8 +191,8 @@ class RowvLLMParameter(BasevLLMParameter):
     def input_dim(self):
         return self._input_dim
 
-    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
-        tp_rank = get_tensor_model_parallel_rank()
+    def load_row_parallel_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        tp_rank = kwargs.get("tp_rank", get_tensor_model_parallel_rank())
         shard_size = self.data.shape[self.input_dim]
         loaded_weight = loaded_weight.narrow(self.input_dim,
                                              tp_rank * shard_size, shard_size)
