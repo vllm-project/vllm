@@ -556,6 +556,19 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                     expert_map=expert_map,
                     apply_router_weight_on_input=apply_router_weight_on_input,
                 )
+        elif self.fused_experts is not None:
+            return self.fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                inplace=False,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
         from vllm.model_executor.layers.fused_moe.fused_moe import (
             fused_experts)
         return fused_experts(
