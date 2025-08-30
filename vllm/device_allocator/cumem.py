@@ -55,7 +55,7 @@ try:
     libcudart = CudaRTLibrary()
     cumem_available = True
 except ModuleNotFoundError:
-    # rocm platform does not support cumem allocator
+    # only cuda and rocm platforms support cumem allocator
     init_module = None
     python_create_and_map = None
     python_unmap_and_release = None
@@ -100,7 +100,9 @@ def use_memory_pool_with_allocator(
     new_alloc = get_pluggable_allocator(python_malloc_fn, python_free_func)
     mem_pool = torch.cuda.memory.MemPool(new_alloc._allocator)
     with torch.cuda.memory.use_mem_pool(mem_pool):
-        yield mem_pool, new_alloc
+        # Force the allocator to have longer lifetime than mempool
+        yield
+    del mem_pool
 
 
 class CuMemAllocator:
