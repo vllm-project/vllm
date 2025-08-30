@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from lmcache.integration.vllm.vllm_v1_adapter import LMCacheConnectorV1Impl
+from lmcache.utils import _lmcache_nvtx_annotate
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -25,6 +28,37 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config=vllm_config, role=role)
         self._lmcache_engine = LMCacheConnectorV1Impl(vllm_config, role, self)
+
+        self._lookup_executor: ThreadPoolExecutor = ThreadPoolExecutor(1)
+        self._lookup_results: dict[str, Future] = {}
+
+    @_lmcache_nvtx_annotate
+    def _submit_lookup_job(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+    ) -> None:
+        future = self._lookup_executor.submit(
+            self._lmcache_engine.get_num_new_matched_tokens, request,
+            num_computed_tokens)
+        self._lookup_results[request.request_id] = future
+
+    @_lmcache_nvtx_annotate
+    def _get_lookup_result(
+        self,
+        request_id: str,
+    ) -> Optional[int]:
+        time.sleep(0.0002)  # Avoid busy loop
+        future = self._lookup_results.get(request_id, None)
+        assert future is not None, \
+            f"Future for request {request_id} not found."
+
+        if future.done():
+            ret = future.result()
+            del self._lookup_results[request_id]
+            return ret
+        else:
+            return None
 
     # ==============================
     # Worker-side methods
@@ -106,6 +140,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     # ==============================
     # Scheduler-side methods
     # ==============================
+    @_lmcache_nvtx_annotate
     def get_num_new_matched_tokens(
         self,
         request: "Request",
@@ -124,8 +159,9 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             the number of tokens that can be loaded from the 
             external KV cache beyond what is already computed.
         """
-        return self._lmcache_engine.get_num_new_matched_tokens(
-            request, num_computed_tokens), False
+        if request.request_id not in self._lookup_results:
+            self._submit_lookup_job(request, num_computed_tokens)
+        return self._get_lookup_result(request.request_id), False
 
     def update_state_after_alloc(self, request: "Request",
                                  blocks: "KVCacheBlocks",
