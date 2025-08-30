@@ -516,7 +516,6 @@ class ModelConfig:
         """
         # Opt-out: default-include declared fields so new options aren't missed;
         # keep a tiny exclude list; normalize types for stable hashes.
-        from typing import Any
 
         # Shared helpers for canonicalization and field enumeration
         from vllm.config.utils import build_opt_out_items, hash_items_sha256
