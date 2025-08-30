@@ -1032,6 +1032,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # all2all backend for vllm's expert parallel communication
     # Available options:
     # - "naive": naive all2all implementation using all-reduce
+    # - "allgather_reducescatter": all2all implementation based on allgather and
+    #  reducescatter
     # - "pplx": use pplx kernels
     # - "deepep_high_throughput", use deepep high-throughput kernels
     # - "deepep_low_latency", use deepep low-latency kernels
