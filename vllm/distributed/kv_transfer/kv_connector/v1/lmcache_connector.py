@@ -152,7 +152,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
     def request_finished(
         self,
         request: "Request",
-        block_ids: list[int],
+        blocks: "KVCacheBlocks",
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.
@@ -164,4 +164,4 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
-        return self._lmcache_engine.request_finished(request, block_ids)
+        return self._lmcache_engine.request_finished(request, blocks)

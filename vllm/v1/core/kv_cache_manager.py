@@ -293,6 +293,106 @@ class KVCacheManager:
 
         return KVCacheBlocks(new_blocks)
 
+    def allocate_slots_and_remove_unnecessary_blocks(
+        self,
+        request: "Request",
+        num_new_tokens: int,
+        num_new_computed_tokens: int = 0,
+        new_computed_blocks: Optional["KVCacheBlocks"] = None,
+        delay_cache_blocks: bool = False,
+        chunk_size: int = 1024,
+    ) -> Optional["KVCacheBlocks"]:
+        """
+        Allocate slots, and then remove unnecessary blocks immediately.
+
+        Why we need this function:
+
+        `allocate_slots` will NOT immediately evict allocated blocks,
+        it will evict them in future allocations.
+
+        As a result, if we have a long external prefix cache hit, using 
+        `allocate_slots` will require us to allocate all prefix tokens
+        for all layers (including sliding window layer).
+
+        This makes vLLM unable to allocate for long request, even when
+        they can fit into the GPU memory after evicting tokens outside
+        the sliding window.
+        
+        This function provides a workaround:
+        It allocates the blocks chunk-by-chunk, and then after each 
+        chunk, it will remove unnecessary blocks immediately.
+        In this way, the number of tokens allocated for this request but
+        outside the sliding window is always less than `chunk_size`.
+
+        NOTE(Kuntai):
+        - `num_new_computed_tokens` and `new_computed_blocks` are applied 
+          only to the first chunk.
+        - Returns None if any chunked allocation fails.
+
+        FIXME(Kuntai):
+        - Need to include a rollback logic when only part of the chunks
+          are successfully allocated.
+
+        Args:
+            request: The request to allocate slots for.
+            num_new_tokens: Total number of new tokens to allocate 
+                (will be chunked).
+            num_new_computed_tokens: Forwarded once on the first chunk only.
+            new_computed_blocks: Forwarded once on the first chunk only.
+            delay_cache_blocks: Forwarded to each chunk call.
+            chunk_size: Size of each chunk (must be > 0).
+
+        Returns:
+            KVCacheBlocks containing concatenation of all chunk 
+            allocations, or None if any chunked allocation fails.
+        """
+        if num_new_tokens <= 0:
+            raise ValueError("num_new_tokens must be greater than 0")
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than 0")
+
+        tokens_remaining = num_new_tokens
+        tokens_allocating = 0
+        is_first_chunk = True
+        accumulated: Optional[KVCacheBlocks] = None
+        cached_tokens_in_vllm = request.num_computed_tokens \
+            + num_new_computed_tokens
+
+        while tokens_remaining > 0:
+            this_chunk = min(chunk_size, tokens_remaining)
+            tokens_remaining -= this_chunk
+            tokens_allocating += this_chunk
+
+            # Apply computed blocks-only once, on the first chunk
+            if is_first_chunk:
+                this_new_computed_tokens = num_new_computed_tokens
+                this_new_computed_blocks = new_computed_blocks
+                is_first_chunk = False
+            else:
+                this_new_computed_tokens = 0
+                this_new_computed_blocks = None
+
+            chunk_blocks = self.allocate_slots(
+                request=request,
+                num_new_tokens=tokens_allocating,
+                num_new_computed_tokens=this_new_computed_tokens,
+                new_computed_blocks=this_new_computed_blocks,
+                delay_cache_blocks=delay_cache_blocks,
+            )
+
+            # remove unnecessary blocks by
+            self.coordinator.remove_skipped_blocks(
+                request.request_id, cached_tokens_in_vllm + tokens_allocating)
+
+            if chunk_blocks is None:
+                # TODO: add a rollback logic to remove the allocated blocks.
+                return None
+
+            accumulated = chunk_blocks if accumulated is None else (
+                accumulated + chunk_blocks)
+
+        return accumulated
+
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
         We free the blocks in reverse order so that the tail blocks are evicted

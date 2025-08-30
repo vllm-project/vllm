@@ -60,6 +60,11 @@ class Scheduler(SchedulerInterface):
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
 
+        # NOTE(Kuntai): stuff kv_cache_config into vllm_config, so that
+        # KV cache connector can see the kv_cache_config and figure out
+        # which layer belongs to which kv_cache_group.
+        self.vllm_config.kv_cache_config = kv_cache_config
+
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
         # by update_from_outputs(). This is currently used in the multi-engine
@@ -81,9 +86,6 @@ class Scheduler(SchedulerInterface):
         # KV Connector pushes/pull of remote KVs for P/D and offloading.
         self.connector = None
         if self.vllm_config.kv_transfer_config is not None:
-            assert len(self.kv_cache_config.kv_cache_groups) == 1, (
-                "Multiple KV cache groups are not currently supported "
-                "with KV connectors")
             assert not self.is_encoder_decoder, (
                 "Encoder-decoder models are not currently supported "
                 "with KV connectors")
@@ -453,19 +455,81 @@ class Scheduler(SchedulerInterface):
                 else:
                     num_encoder_tokens = 0
 
-                new_blocks = self.kv_cache_manager.allocate_slots(
-                    request,
-                    num_new_tokens + num_external_computed_tokens,
-                    num_new_local_computed_tokens,
-                    new_computed_blocks,
-                    num_lookahead_tokens=effective_lookahead_tokens,
-                    delay_cache_blocks=load_kv_async,
-                    num_encoder_tokens=num_encoder_tokens,
-                )
+                # NOTE(Kuntai): Since the number of cache hit tokens from
+                # connector (`num_external_computed_tokens`) can be very
+                # large, we want to only allocate tokens inside the sliding
+                # window when  This is done by
+                # `allocate_slots_and_remove_unnecessary_blocks`.
+                if all([
+                        self.connector is not None,
+                        # NOTE(Kuntai): the current implementation of
+                        # `allocate_slots_and_remove_unnecessary_blocks` is not
+                        # tested with encoder-decoder models.
+                        # So we fall back to default code path when
+                        # `num_encoder_tokens > 0`.
+                        num_external_computed_tokens > 0,
+                        num_encoder_tokens == 0,
+                ]):
+                    # Allocate for prefix-cached tokens (and remove tokens
+                    # outside the sliding window)
+                    manager = self.kv_cache_manager
+                    ret = (
+                        manager.allocate_slots_and_remove_unnecessary_blocks(
+                            request,
+                            num_external_computed_tokens,
+                            num_new_local_computed_tokens,
+                            new_computed_blocks,
+                            delay_cache_blocks=load_kv_async,
+                            # see the docstring of
+                            # `allocate_slots_and_remove_unnecessary_blocks`
+                            # for the meaning of `chunk_size`.
+                            chunk_size=self.max_num_scheduled_tokens,
+                        ))
 
-                if new_blocks is None:
-                    # The request cannot be scheduled.
-                    break
+                    # FIXME(Kuntai): need to handle rollback when allocation
+                    # fails.
+                    if ret is None:
+                        # The request cannot be scheduled.
+                        break
+
+                    # Then allocate for new tokens.
+                    # NOTE(Kuntai): in this allocation, we cannot remove
+                    # tokens outside the sliding window, because the generation
+                    # of new tokens depends on these tokens,
+                    # so we need to use the old `allocate_slots` api.
+                    ret = self.kv_cache_manager.allocate_slots(
+                        request,
+                        # NOTE(Kuntai): `allocate_slots(request, x)` means
+                        # that we allocate x more tokens besides the
+                        # already-computed tokens.
+                        # As a result, even if we already allocated for
+                        # num_external_computed_tokens and we only want to
+                        # allocate for num_new_tokens, we still have to
+                        # pass `num_new_tokens + num_external_computed_tokens`
+                        # to `allocate_slots` since
+                        # `num_external_computed_tokens` is not treated as
+                        # computed tokens yet.
+                        num_new_tokens + num_external_computed_tokens,
+                        num_lookahead_tokens=effective_lookahead_tokens,
+                        delay_cache_blocks=load_kv_async,
+                    )
+                    if ret is None:
+                        # The request cannot be scheduled.
+                        break
+
+                else:
+                    ret = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens + num_external_computed_tokens,
+                        num_new_local_computed_tokens,
+                        new_computed_blocks,
+                        num_lookahead_tokens=effective_lookahead_tokens,
+                        delay_cache_blocks=load_kv_async,
+                        num_encoder_tokens=num_encoder_tokens,
+                    )
+                    if ret is None:
+                        # The request cannot be scheduled.
+                        break
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -474,7 +538,7 @@ class Scheduler(SchedulerInterface):
                 if self.connector is not None:
                     self.connector.update_state_after_alloc(
                         request,
-                        new_computed_blocks + new_blocks,
+                        self.kv_cache_manager.get_blocks(request.request_id),
                         num_external_computed_tokens,
                     )
 
@@ -1185,8 +1249,9 @@ class Scheduler(SchedulerInterface):
         if self.connector is None:
             return False, None
 
-        (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
-        return self.connector.request_finished(request, block_ids)
+        blocks = self.kv_cache_manager.coordinator.get_blocks(
+            request.request_id)
+        return self.connector.request_finished(request, blocks)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """
