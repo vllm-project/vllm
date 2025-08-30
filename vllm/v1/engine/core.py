@@ -363,6 +363,8 @@ class EngineCore:
             return {}, False
         engine_core_outputs = {}
         scheduler_output = self.scheduler.schedule()
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            self.batch_queue.put(scheduler_output)
         model_output = self.execute_model_with_error_logging(
             self.model_executor.execute_model,  # type: ignore
             scheduler_output)
@@ -370,8 +372,9 @@ class EngineCore:
         # notify it's time to make  scheduleing of next step.
         # so in this situation, we don't need to call update_from_output.
         if isinstance(model_output, ModelRunnerOutput):
+            pre_scheduler_output = self.batch_queue.get()
             engine_core_outputs = self.scheduler.update_from_output(
-                scheduler_output, model_output)  # type: ignore
+                pre_scheduler_output, model_output)  # type: ignore
 
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
