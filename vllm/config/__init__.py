@@ -2497,13 +2497,13 @@ class LoRAConfig:
         Opt-out: default-include declared fields; keep a tiny exclude set;
         normalize types; use SHA-256.
         """
-        from vllm.config.utils import build_opt_out_items as _build_items
+        from vllm.config.utils import build_opt_out_items
 
         exclude_from_hash: set[str] = {
             # (none at present, placeholder to keep policy explicit)
         }
 
-        items = _build_items(self, exclude_from_hash)
+        items = build_opt_out_items(self, exclude_from_hash)
 
         import hashlib
         hash_str = hashlib.sha256(repr(tuple(items)).encode()).hexdigest()

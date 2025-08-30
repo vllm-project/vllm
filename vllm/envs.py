@@ -1246,7 +1246,7 @@ def compute_hash() -> str:
     """
 
     # Minimal exclude list: logging/diagnostics and service port.
-    EXCLUDE_ENV_VARS = {
+    exclude_env_vars = {
         "VLLM_LOGGING_LEVEL",
         "VLLM_TORCH_PROFILER_DIR",
         "VLLM_PORT",
@@ -1257,7 +1257,7 @@ def compute_hash() -> str:
 
     items = []
     for name in sorted(environment_variables.keys()):
-        if name in EXCLUDE_ENV_VARS:
+        if name in exclude_env_vars:
             continue
         try:
             value = environment_variables[name]()

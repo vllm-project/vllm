@@ -286,8 +286,8 @@ class ParallelConfig:
             "worker_extension_cls",
         }
 
-        from vllm.config.utils import build_opt_out_items as _build_items
-        items = _build_items(self, exclude_from_hash)
+        from vllm.config.utils import build_opt_out_items
+        items = build_opt_out_items(self, exclude_from_hash)
 
         # Explicitly include backend affecting env factor as before
         items.append(("VLLM_ALL2ALL_BACKEND", str(envs.VLLM_ALL2ALL_BACKEND)))

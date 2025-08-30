@@ -153,8 +153,8 @@ class CacheConfig:
             "kv_sharing_fast_prefill",
         }
 
-        from vllm.config.utils import build_opt_out_items as _build_items
-        items = _build_items(self, exclude_from_hash)
+        from vllm.config.utils import build_opt_out_items
+        items = build_opt_out_items(self, exclude_from_hash)
 
         hash_str = hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
         return hash_str
