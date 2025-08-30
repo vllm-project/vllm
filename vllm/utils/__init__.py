@@ -1328,6 +1328,12 @@ def as_list(maybe_list: Iterable[T]) -> list[T]:
     return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
 
 
+def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
+    if isinstance(obj, str) or not isinstance(obj, Iterable):
+        obj = [obj]
+    return obj
+
+
 # `collections` helpers
 def is_list_of(
     value: object,
