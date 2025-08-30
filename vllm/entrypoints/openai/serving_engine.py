@@ -523,8 +523,8 @@ class OpenAIServing:
     async def _normalize_prompt_text_to_input(
         self,
         request: AnyRequest,
-        tokenizer: AnyTokenizer,
         prompt: str,
+        tokenizer: AnyTokenizer,
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
         async_tokenizer = self._get_async_tokenizer(tokenizer)
@@ -562,11 +562,9 @@ class OpenAIServing:
     async def _normalize_prompt_tokens_to_input(
         self,
         request: AnyRequest,
-        tokenizer: AnyTokenizer,
         prompt_ids: list[int],
+        tokenizer: Optional[AnyTokenizer],
     ) -> TextTokensPrompt:
-        async_tokenizer = self._get_async_tokenizer(tokenizer)
-
         truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens",
                                          None)
 
@@ -577,7 +575,11 @@ class OpenAIServing:
         else:
             input_ids = prompt_ids[-truncate_prompt_tokens:]
 
-        input_text = await async_tokenizer.decode(input_ids)
+        if tokenizer is None:
+            input_text = ""
+        else:
+            async_tokenizer = self._get_async_tokenizer(tokenizer)
+            input_text = await async_tokenizer.decode(input_ids)
 
         return self._validate_input(request, input_ids, input_text)
 
@@ -679,25 +681,25 @@ class OpenAIServing:
         [`_tokenize_prompt_input_or_inputs`][vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs]
         that assumes multiple inputs.
         """
-        for text in prompt_inputs:
-            if isinstance(text, str):
+        for prompt in prompt_inputs:
+            if isinstance(prompt, str):
                 yield await self._normalize_prompt_text_to_input(
                     request,
-                    tokenizer,
-                    prompt=text,
+                    prompt=prompt,
+                    tokenizer=tokenizer,
                     add_special_tokens=add_special_tokens,
                 )
             else:
                 yield await self._normalize_prompt_tokens_to_input(
                     request,
-                    tokenizer,
-                    prompt_ids=text,
+                    prompt_ids=prompt,
+                    tokenizer=tokenizer,
                 )
 
     async def _tokenize_prompt_input_or_inputs_async(
         self,
         request: AnyRequest,
-        tokenizer: AnyTokenizer,
+        tokenizer: Optional[AnyTokenizer],
         input_or_inputs: Optional[Union[str, list[str], list[int],
                                         list[list[int]]]],
         add_special_tokens: bool = True,
@@ -741,14 +743,16 @@ class OpenAIServing:
         tasks = []
         for prompt_input in batch_inputs:
             if prompt_input["is_tokens"] is False:
+                assert tokenizer is not None, \
+                    "Tokenizer is required for text prompts"
                 task = self._normalize_prompt_text_to_input(
                     request,
-                    tokenizer,
                     prompt_input["content"],
+                    tokenizer=tokenizer,
                     add_special_tokens=add_special_tokens)
             else:
                 task = self._normalize_prompt_tokens_to_input(
-                    request, tokenizer, prompt_input["content"])
+                    request, prompt_input["content"], tokenizer=tokenizer)
             tasks.append(task)
 
         # Wait for all tokenization tasks to complete
@@ -763,7 +767,7 @@ class OpenAIServing:
         request: Union[DetokenizeRequest, EmbeddingCompletionRequest,
                        RerankRequest, ClassificationRequest, ScoreRequest,
                        TokenizeCompletionRequest],
-        tokenizer: AnyTokenizer,
+        tokenizer: Optional[AnyTokenizer],
         input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
         add_special_tokens: bool = ...,
     ) -> tuple[list[TextTokensPrompt], list[EngineTokensPrompt]]:
@@ -773,7 +777,7 @@ class OpenAIServing:
     async def _preprocess_completion(
         self,
         request: CompletionRequest,
-        tokenizer: AnyTokenizer,
+        tokenizer: Optional[AnyTokenizer],
         input_or_inputs: Optional[Union[str, list[str], list[int],
                                         list[list[int]]]],
         add_special_tokens: bool = ...,
@@ -784,7 +788,7 @@ class OpenAIServing:
     async def _preprocess_completion(
         self,
         request: CompletionLikeRequest,
-        tokenizer: AnyTokenizer,
+        tokenizer: Optional[AnyTokenizer],
         input_or_inputs: Optional[Union[str, list[str], list[int],
                                         list[list[int]]]],
         add_special_tokens: bool = True,
