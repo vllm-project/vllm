@@ -11,7 +11,7 @@ from .base import get_vllm_public_assets
 
 VLM_IMAGES_DIR = "vision_model_images"
 
-ImageAssetName = Literal["stop_sign", "cherry_blossom"]
+ImageAssetName = Literal["stop_sign", "cherry_blossom", "hato"]
 
 
 @dataclass(frozen=True)
