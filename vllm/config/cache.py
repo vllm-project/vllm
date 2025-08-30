@@ -131,13 +131,32 @@ class CacheConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.cache_dtype)
-        factors.append(self.mamba_cache_dtype)
-        factors.append(self.mamba_ssm_cache_dtype)
-        # `cpu_offload_gb` does not use `torch.compile` yet.
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
+        # Opt-out: default-include declared fields; keep a tiny exclude list;
+        # normalize types for deterministic hashing; keep MD5 for compatibility.
+
+        exclude_from_hash = {
+            # Runtime/derived knobs that don't affect compiled graph shape
+            "gpu_memory_utilization",
+            "swap_space",
+            "is_attention_free",
+            "num_gpu_blocks_override",
+            "enable_prefix_caching",
+            "prefix_caching_hash_algo",
+            "cpu_offload_gb",
+            "calculate_kv_scales",
+            "cpu_kvcache_space_bytes",
+            "mamba_page_size_padded",
+            # Post-init/derived counters
+            "num_gpu_blocks",
+            "num_cpu_blocks",
+            # WIP feature toggle not impacting compiled graph shape
+            "kv_sharing_fast_prefill",
+        }
+
+        from vllm.config.utils import build_opt_out_items
+        items = build_opt_out_items(self, exclude_from_hash)
+
+        hash_str = hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
         return hash_str
 
     def __post_init__(self) -> None:

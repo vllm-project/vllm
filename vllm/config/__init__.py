@@ -514,26 +514,50 @@ class ModelConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.model)
-        factors.append(self.dtype)
-        factors.append(self.quantization)
-        factors.append(self.revision)
-        factors.append(self.code_revision)
-        factors.append(self.max_model_len)
-        factors.append(self.max_logprobs)
-        factors.append(self.disable_sliding_window)
-        factors.append(self.trust_remote_code)
-        factors.append(self.generation_config)
-        factors.append(self.model_impl)
-        factors.append(self.override_generation_config)
-        factors.append(self.rope_scaling)
-        factors.append(self.rope_theta)
-        # hf_config can control how the model looks!
-        factors.append(self.hf_config.to_json_string())
-        str_factors = str(factors)
-        assert_hashable(str_factors)
-        return hashlib.sha256(str(factors).encode()).hexdigest()
+        # Opt-out: default-include declared fields so new options aren't missed;
+        # keep a tiny exclude list; normalize types for stable hashes.
+
+        # Shared helpers for canonicalization and field enumeration
+        from vllm.config.utils import build_opt_out_items, hash_items_sha256
+
+        # Default-include; exclude only fields that don't change the compiled
+        # graph or are unstable. See RFC #16501.
+        model_exclude_from_hash = {
+            "tokenizer",
+            "hf_config",  # hash content via JSON below
+            "hf_text_config",
+            "encoder_config",
+            "hf_image_processor_config",
+            "pooler_config",
+            "multimodal_config",
+            "hf_overrides",
+            # Internals / metadata
+            "_model_info",
+            "_architecture",
+            "seed",
+            "served_model_name",
+            "hf_token",
+            "hf_config_path",
+        }
+        # Build base items from declared fields using the shared utility
+        items: list[tuple[str,
+                          Any]] = build_opt_out_items(self,
+                                                      model_exclude_from_hash)
+        # Hash hf_config by content; if JSON export is unavailable, include a
+        # minimal stable subset.
+        hf = getattr(self, "hf_config", None)
+        if hf is not None:
+            try:
+                items.append(("hf_config_json", hf.to_json_string()))
+            except (AttributeError, TypeError, ValueError):
+                items.append((
+                    "hf_config_fallback",
+                    {
+                        "model_type": getattr(hf, "model_type", None),
+                        "architectures": getattr(hf, "architectures", None),
+                    },
+                ))
+        return hash_items_sha256(items)
 
     def __post_init__(self) -> None:
         # Set the default seed to 0 in V1.
@@ -2468,17 +2492,20 @@ class LoRAConfig:
         graph from input ids/embeddings to the final hidden states,
         excluding anything before input ids/embeddings and after
         the final hidden states.
+
+        Opt-out: default-include declared fields; keep a tiny exclude set;
+        normalize types; use SHA-256.
         """
-        factors: list[Any] = []
-        factors.append(self.max_lora_rank)
-        factors.append(self.max_loras)
-        factors.append(self.fully_sharded_loras)
-        factors.append(self.lora_dtype)
-        factors.append(self.lora_extra_vocab_size)
-        factors.append(self.lora_vocab_padding_size)
-        factors.append(self.bias_enabled)
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
+        from vllm.config.utils import build_opt_out_items
+
+        exclude_from_hash: set[str] = {
+            # (none at present, placeholder to keep policy explicit)
+        }
+
+        items = build_opt_out_items(self, exclude_from_hash)
+
+        import hashlib
+        hash_str = hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
         return hash_str
 
     def __post_init__(self):
@@ -3420,6 +3447,12 @@ class VllmConfig:
         from vllm import __version__
         vllm_factors.append(__version__)
         vllm_factors.append(envs.VLLM_USE_V1)
+        # Include environment hash (opt-out) so backend decisions
+        # driven by env vars are reflected in the cache key.
+        try:
+            vllm_factors.append(envs.compute_hash())
+        except Exception:
+            vllm_factors.append("env_hash_unavailable")
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
         else:

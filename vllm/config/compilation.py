@@ -354,16 +354,31 @@ class CompilationConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.level)
-        factors.append(self.backend)
-        factors.append(self.custom_ops)
-        factors.append(self.splitting_ops)
-        factors.append(self.use_inductor)
-        factors.append(self.inductor_compile_config)
-        factors.append(self.inductor_passes)
-        factors.append(self.pass_config.uuid())
-        return hashlib.sha256(str(factors).encode()).hexdigest()
+        # Opt-out: default-include declared fields; keep a tiny exclude set;
+        # normalize types; keep SHA-256. For nested opaque configs, include a
+        # stable identifier (e.g., pass_config.uuid()) instead of object id.
+
+        exclude_from_hash = {
+            # Paths/dirs and runtime/metrics that don’t affect compiled graph
+            "debug_dump_path",
+            "cache_dir",
+            "local_cache_dir",
+            "bs_to_padded_graph_size",
+            "traced_files",
+            "compilation_time",
+            "static_forward_context",
+        }
+
+        from vllm.config.utils import build_opt_items_override
+        items = build_opt_items_override(
+            self,
+            exclude_from_hash,
+            overrides={
+                "pass_config": lambda _: self.pass_config.uuid(),
+            },
+        )
+
+        return hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
 
     def __repr__(self) -> str:
         exclude = {

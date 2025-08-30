@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, TypeVar
+import enum
+import hashlib
+import pathlib
+from collections.abc import Mapping, Sequence, Set
+from contextlib import suppress
+from typing import TYPE_CHECKING, Callable, TypeVar
+
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -11,6 +18,8 @@ else:
     ConfigType = type
 
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
+
+logger = init_logger(__name__)
 
 
 def config(cls: ConfigT) -> ConfigT:
@@ -27,3 +36,129 @@ def config(cls: ConfigT) -> ConfigT:
     script, which is invoked during the pre-commit checks.
     """
     return cls
+
+
+def canon_value(x):
+    """Return a stable, JSON-serializable canonical form for hashing.
+
+    Order: primitives, special types (Enum, callable, torch.dtype, Path), then
+    generic containers (Mapping/Set/Sequence) with recursion.
+    """
+    # Fast path
+    if x is None or isinstance(x, (bool, int, float, str)):
+        return x
+
+    # Enums by value
+    if isinstance(x, enum.Enum):
+        return x.value
+
+    # Callable by qualified name
+    try:
+        if callable(x):
+            module = getattr(x, "__module__", "")
+            qual = getattr(x, "__qualname__", repr(x))
+            return f"{module}.{qual}" if module else qual
+    except Exception:
+        pass
+
+    # Torch dtype without hard dependency
+    try:
+        import torch
+        if isinstance(x, torch.dtype):
+            return str(x)
+    except Exception:
+        pass
+
+    # Paths
+    if isinstance(x, pathlib.Path):
+        return str(x)
+
+    # Containers (generic)
+    if isinstance(x, Mapping):
+        return tuple(sorted((str(k), canon_value(v)) for k, v in x.items()))
+    if isinstance(x, Set):
+        return tuple(sorted(repr(canon_value(v)) for v in x))
+    if isinstance(x, Sequence) and not isinstance(x, (str, bytes, bytearray)):
+        return tuple(canon_value(v) for v in x)
+
+    # Unsupported type
+    with suppress(Exception):
+        logger.debug("canon_value: unsupported type '%s'", type(x).__name__)
+    raise TypeError
+
+
+def get_declared_field_names(cfg) -> list[str]:
+    """Declared field names for a config instance.
+
+    Order: dataclass -> pydantic v2 -> __dict__.
+    """
+    # Dataclass
+    if hasattr(cfg, "__dataclass_fields__"):
+        # type: ignore[attr-defined]
+        return list(cfg.__dataclass_fields__.keys())
+    # Pydantic v2
+    if hasattr(cfg, "model_fields"):
+        try:
+            return list(cfg.model_fields.keys())  # type: ignore[attr-defined]
+        except (AttributeError, TypeError):
+            return list(getattr(cfg, "__dict__", {}).keys())
+    # Fallback
+    return list(getattr(cfg, "__dict__", {}).keys())
+
+
+def build_opt_out_items(cfg, exclude: set[str]) -> list[tuple[str, object]]:
+    """Default-include (opt-out) canonical (key, value) pairs for hashing.
+
+    - Includes declared fields not in `exclude`.
+    - Skips non-canonicalizable values.
+    """
+    items: list[tuple[str, object]] = []
+    for key in sorted(get_declared_field_names(cfg)):
+        if key in exclude:
+            continue
+        value = getattr(cfg, key, None)
+        try:
+            items.append((key, canon_value(value)))
+        except TypeError:
+            # Log once per key to surface potential under-hashing without
+            # spamming logs. The value will be skipped from the hash.
+            with suppress(Exception):
+                logger.debug("Hash skip: unsupported type for key '%s'", key)
+            continue
+    return items
+
+
+def hash_items_sha256(items: list[tuple[str, object]]) -> str:
+    """Return a SHA-256 hex digest of the canonical items structure."""
+    return hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
+
+
+def build_opt_items_override(
+    cfg,
+    exclude: set[str],
+    overrides: dict[str, Callable[[object], object]],
+) -> list[tuple[str, object]]:
+    """Opt-out items with targeted per-field overrides.
+
+    - Default path uses canon_value.
+    - For keys in `overrides`, call the override to produce a stable value.
+    - Skips values that cannot be canonicalized.
+    """
+    items: list[tuple[str, object]] = []
+    for key in sorted(get_declared_field_names(cfg)):
+        if key in exclude:
+            continue
+        value = getattr(cfg, key, None)
+        if key in overrides:
+            try:
+                items.append((key, overrides[key](value)))
+            except Exception:
+                continue
+            continue
+        try:
+            items.append((key, canon_value(value)))
+        except TypeError:
+            with suppress(Exception):
+                logger.debug("Hash skip: unsupported type for key '%s'", key)
+            continue
+    return items
