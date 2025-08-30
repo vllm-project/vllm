@@ -126,8 +126,8 @@ async def test_serving_completion_with_lora_resolver(mock_serving_setup,
         prompt="Generate with LoRA",
     )
 
-    # # Suppress potential errors during the mocked generate call,
-    # # as we are primarily checking for add_lora and generate calls
+    # Suppress potential errors during the mocked generate call,
+    # as we are primarily checking for add_lora and generate calls
     with suppress(Exception):
         await serving_completion.create_completion(req_found)
 
