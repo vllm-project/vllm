@@ -1152,6 +1152,10 @@ def get_kv_cache_configs(vllm_config: VllmConfig,
             kv_cache_groups_one_worker.append(
                 KVCacheGroupSpec(group_layer_names_one_worker,
                                  group.kv_cache_spec))
+        assert sum(
+            len(group.layer_names) for group in
+            kv_cache_groups_one_worker) == len(kv_cache_spec_one_worker), (
+                "Some layers are not assigned to any group.")
         kv_cache_configs.append(
             get_kv_cache_config_from_groups(vllm_config,
                                             kv_cache_groups_one_worker,
