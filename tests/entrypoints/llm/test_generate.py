@@ -88,7 +88,25 @@ def test_max_model_len():
     for output in outputs:
         num_total_tokens = len(output.prompt_token_ids) + len(
             output.outputs[0].token_ids)
-        # Total tokens must not exceed max_model_len.
+        # Total tokens must not exceed max_model_len+1.
         # It can be less if generation finishes due to other reasons (e.g., EOS)
         # before reaching the absolute model length limit.
-        assert num_total_tokens <= max_model_len
+        assert num_total_tokens <= max_model_len + 1
+
+
+def test_max_prompt():
+
+    model = LLM(model=MODEL_NAME, enforce_eager=True, max_model_len=16)
+    sampling_params = SamplingParams(
+        temperature=0,
+        truncate_prompt_tokens=16,
+        max_tokens=10,
+    )
+
+    outputs = model.generate(
+        "0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16",
+        sampling_params,
+        use_tqdm=False,
+    )
+    assert len(outputs[0].outputs[0].token_ids) == 1
+    assert outputs[0].outputs[0].finish_reason == 'length'
