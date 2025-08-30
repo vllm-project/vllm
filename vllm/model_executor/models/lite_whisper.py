@@ -1,8 +1,10 @@
 import torch
 from torch import nn
 import logging
+import math
 from collections.abc import Iterable
 from typing import Optional
+from contextlib import nullcontext
 
 from vllm.model_executor.models.whisper import (
     WhisperEncoderLayer,
@@ -14,6 +16,9 @@ from vllm.model_executor.models.whisper import (
     WhisperProcessingInfo,
     WhisperDecoder
 )
+from vllm.model_executor.layers.linear import RowParallelLinear
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.config import VllmConfig, CacheConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -314,7 +319,6 @@ class LiteWhisperMLP(nn.Module):
                 low_rank_features=low_rank_config["fc2"]
             )
         else:
-            from vllm.model_executor.layers.linear import RowParallelLinear
             self.fc2 = RowParallelLinear(
                 input_size=ffn_dim,
                 output_size=embed_dim,
@@ -337,9 +341,39 @@ class LiteWhisperMLP(nn.Module):
 
 class LiteWhisperEncoder(WhisperEncoder):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "", is_standalone_encoder: bool = False):
-        super().__init__(vllm_config=vllm_config, prefix=prefix, is_standalone_encoder=is_standalone_encoder)
-
+        # Don't call super().__init__() to avoid duplicate layer creation
+        # Instead, initialize manually with LiteWhisperEncoderLayer
+        nn.Module.__init__(self)  # Call nn.Module.__init__ directly
+        
         config = vllm_config.model_config.hf_config
+        embed_dim = config.d_model
+        self.is_standalone_encoder = is_standalone_encoder
+        self.num_mel_bins = config.num_mel_bins
+        self.max_source_positions = config.max_source_positions
+        self.embed_scale = (math.sqrt(embed_dim)
+                            if config.scale_embedding else 1.0)
+
+        # Copy conv layers and layer norm from WhisperEncoder
+        self.conv1 = nn.Conv1d(self.num_mel_bins,
+                               embed_dim,
+                               kernel_size=3,
+                               padding=1)
+        self.conv2 = nn.Conv1d(embed_dim,
+                               embed_dim,
+                               kernel_size=3,
+                               stride=2,
+                               padding=1)
+        self.layer_norm = nn.LayerNorm(config.d_model)
+
+        # Initialize positional embeddings like WhisperEncoder
+        from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+        from transformers.models.whisper.modeling_whisper import sinusoids
+        
+        maybe_fp32_init_ctx = set_default_torch_dtype(torch.float32) if False else nullcontext()
+        with (torch.no_grad(), maybe_fp32_init_ctx):
+            self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
+            self.embed_positions.weight.copy_(sinusoids(*self.embed_positions.weight.shape))
+
         # Get low_rank_config from config if it exists, else create default empty config for all layers
         low_rank_config_list = getattr(config, "low_rank_config", [])
         
@@ -354,7 +388,7 @@ class LiteWhisperEncoder(WhisperEncoder):
             
         low_rank_config_dict = {i: cfg for i, cfg in enumerate(low_rank_config_list)}
 
-        # Rebuild encoder layers using LiteWhisperEncoderLayer
+        # Create layers with make_layers using LiteWhisperEncoderLayer
         def create_layer(prefix: str):
             # Extract layer index from prefix (e.g., "layers.0" -> 0)
             try:
@@ -369,11 +403,11 @@ class LiteWhisperEncoder(WhisperEncoder):
                 is_standalone_encoder=is_standalone_encoder,
                 low_rank_config=low_rank_cfg
             )
-
+        
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.encoder_layers,
             create_layer,
-            prefix=f"{prefix}.layers" if prefix else "layers"
+            prefix=f"{prefix}.layers",
         )
 
 # try to use specialized loader instead of the default one
@@ -416,33 +450,37 @@ class LiteWhisperModel(WhisperModel):
         # Debug: Print a few parameter names to understand the structure
         print("Sample model parameters:")
         for i, (param_name, _) in enumerate(params_dict.items()):
-            if i < 20:  # Print first 20
+            if i < 20 or "proj_out" in param_name:  # Print first 20 and any proj_out
                 print(f"  {param_name}")
             elif i == 20:
                 print(f"  ... and {len(params_dict) - 20} more")
-                break
+        
+        # Check for proj_out specifically
+        has_proj_out = "proj_out.weight" in params_dict or "model.proj_out.weight" in params_dict
+        print(f"Model has proj_out.weight: {has_proj_out}")
+        if not has_proj_out:
+            # Check if it has a different name
+            proj_variants = [name for name in params_dict.keys() if "proj_out" in name]
+            print(f"Proj_out variants: {proj_variants}")
         
         for name, loaded_weight in weights:
-            # Handle proj_out.weight specially (no model. prefix)
-            if name == "proj_out.weight":
-                print(f"  Debug: Processing proj_out.weight")
-                if "proj_out.weight" in params_dict:
-                    param = params_dict["proj_out.weight"]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add(name)
-                    loaded_params.add("model.proj_out.weight")  # Also mark model. version as loaded
-                    print(f"  Loaded proj_out.weight successfully")
-                else:
-                    print(f"  Warning: proj_out.weight not found in params_dict")
+            # Skip proj_out weights (they're tied to embed_tokens)
+            if name.startswith("proj_out.") or name == "proj_out.weight":
+                loaded_params.add(name)
+                loaded_params.add(f"model.{name}")  # Also mark model. version as loaded
+                print(f"  Skipped proj_out weight: {name}")
                 continue
             
             # Handle encoder weights with low-rank decomposition
             # Check if this is a low-rank weight (weight1 or weight2)
             if ".weight1" in name or ".weight2" in name:
-                # Direct mapping for low-rank weights (no model. prefix needed)
-                if name in params_dict:
-                    param = params_dict[name]
+                # Try both with and without model. prefix
+                param_name = name
+                if param_name not in params_dict and f"model.{param_name}" in params_dict:
+                    param_name = f"model.{param_name}"
+                
+                if param_name in params_dict:
+                    param = params_dict[param_name]
                     if ".weight1" in name:
                         shard_id = "weight1"
                     else:  # .weight2
@@ -453,13 +491,13 @@ class LiteWhisperModel(WhisperModel):
                     if weight_loader and callable(weight_loader):
                         weight_loader(param, loaded_weight, shard_id)
                         loaded_params.add(name)
-                        loaded_params.add(f"model.{name}")  # Also mark model. version as loaded
+                        loaded_params.add(param_name)  # Mark the actual param name as loaded
                     else:
                         # Fallback to default loader
                         weight_loader = getattr(param, "weight_loader", default_weight_loader)
                         weight_loader(param, loaded_weight)
                         loaded_params.add(name)
-                        loaded_params.add(f"model.{name}")  # Also mark model. version as loaded
+                        loaded_params.add(param_name)  # Mark the actual param name as loaded
                 else:
                     print(f"  Warning: Low-rank param not found: {name}")
                 continue
@@ -472,7 +510,10 @@ class LiteWhisperModel(WhisperModel):
                     if weight_name in name:
                         # Transform name from HF format to vLLM format
                         vllm_name = name.replace(weight_name, param_name)
-                        # No need to remove 'model.' prefix since weights don't have it
+                        
+                        # Try both with and without model. prefix
+                        if vllm_name not in params_dict and f"model.{vllm_name}" in params_dict:
+                            vllm_name = f"model.{vllm_name}"
                         
                         # Skip loading extra bias for GPTQ models
                         if vllm_name.endswith(".bias") and vllm_name not in params_dict:
@@ -486,7 +527,7 @@ class LiteWhisperModel(WhisperModel):
                             if weight_loader and callable(weight_loader):
                                 weight_loader(param, loaded_weight, shard_id)
                                 loaded_params.add(name)
-                                loaded_params.add(f"model.{vllm_name}")  # Also mark model. version as loaded
+                                loaded_params.add(vllm_name)  # Mark the actual param name as loaded
                                 print(f"  Loaded QKV: {name} -> {vllm_name} ({shard_id})")
                             else:
                                 print(f"  Warning: No weight_loader for stacked param: {vllm_name}")
@@ -503,19 +544,22 @@ class LiteWhisperModel(WhisperModel):
                 continue
                 
             # Handle other weights (direct mapping)
-            # No need to remove 'model.' prefix since weights don't have it
+            param_name = name
+            # Try both with and without model. prefix
+            if param_name not in params_dict and f"model.{param_name}" in params_dict:
+                param_name = f"model.{param_name}"
             
             # Skip loading extra bias for GPTQ models
-            if name.endswith(".bias") and name not in params_dict:
-                print(f"  Skipping extra bias: {name}")
+            if param_name.endswith(".bias") and param_name not in params_dict:
+                print(f"  Skipping extra bias: {param_name}")
                 continue
             
-            if name in params_dict:
-                param = params_dict[name]
+            if param_name in params_dict:
+                param = params_dict[param_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
-                loaded_params.add(f"model.{name}")  # Also mark model. version as loaded
+                loaded_params.add(param_name)  # Mark the actual param name as loaded
             else:
                 print(f"  Warning: Unmatched weight: {name}")
                     
@@ -533,4 +577,18 @@ class LiteWhisperForConditionalGeneration(WhisperForConditionalGeneration):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         # Replace model with LiteWhisperModel
-        self.model = LiteWhisperModel(vllm_config=vllm_config, prefix=prefix)
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+        self.dtype = vllm_config.model_config.dtype
+
+        self.model = LiteWhisperModel(vllm_config=vllm_config, prefix=prefix) 
+        self.unpadded_vocab_size = config.vocab_size
+        self.proj_out = ParallelLMHead(config.vocab_size,
+                                       config.d_model,
+                                       quant_config=quant_config)
+        self.proj_out = self.proj_out.tie_weights(
+            self.model.decoder.embed_tokens)
+        logit_scale = getattr(config, "logit_scale", 1.0)
+        self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
+                                                config.vocab_size, logit_scale)
