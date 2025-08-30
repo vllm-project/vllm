@@ -26,7 +26,7 @@ class Phi4MiniJsonToolParser(ToolParser):
     Tool call parser for phi-4-mini models intended for use with the
     examples/tool_chat_template_llama.jinja template.
 
-    Used when --enable-auto-tool-choice --tool-call-parser phi4_mini_json  
+    Used when --enable-auto-tool-choice --tool-call-parser phi4_mini_json
     are all set
     """
 
@@ -43,8 +43,11 @@ class Phi4MiniJsonToolParser(ToolParser):
         self.bot_token: str = "functools"
 
     def extract_tool_calls(
-            self, model_output: str,
-            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+        token_ids: Optional[Sequence[int]] = None,
+    ) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
         """

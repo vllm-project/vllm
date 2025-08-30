@@ -3,7 +3,7 @@
 import ast
 import json
 from collections.abc import Sequence
-from typing import Any, Union
+from typing import Any, Optional, Union
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
@@ -55,8 +55,11 @@ class Llama4PythonicToolParser(ToolParser):
         self.current_tool_id = value
 
     def extract_tool_calls(
-            self, model_output: str,
-            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+        token_ids: Optional[Sequence[int]] = None,
+    ) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
         """

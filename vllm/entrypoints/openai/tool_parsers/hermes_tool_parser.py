@@ -3,7 +3,7 @@
 
 import json
 from collections.abc import Sequence
-from typing import Union
+from typing import Optional, Union
 
 import partial_json_parser
 import regex as re
@@ -102,6 +102,7 @@ class Hermes2ProToolParser(ToolParser):
         self,
         model_output: str,
         request: ChatCompletionRequest,
+        token_ids: Optional[Sequence[int]] = None,
     ) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing
