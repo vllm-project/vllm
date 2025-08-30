@@ -9,8 +9,6 @@ from contextlib import suppress
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
-# downloading lora to test lora requests
-from huggingface_hub import snapshot_download
 
 from ...utils import RemoteOpenAIServer
 
@@ -46,11 +44,6 @@ BADREQUEST_CASES = [
         "only supports modules_to_save being None",
     ),
 ]
-
-
-@pytest.fixture(scope="module")
-def zephyr_lora_files():
-    return snapshot_download(repo_id=LORA_NAME)
 
 
 @pytest.fixture(scope="module")
