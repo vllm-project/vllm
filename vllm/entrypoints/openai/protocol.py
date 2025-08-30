@@ -666,6 +666,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if (min_p := self.min_p) is None:
             min_p = default_sampling_params.get(
                 "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"])
+        stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
@@ -713,7 +714,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             min_p=min_p,
             seed=self.seed,
             stop=self.stop,
-            stop_token_ids=self.stop_token_ids,
+            stop_token_ids=stop_token_ids,
             logprobs=self.top_logprobs if self.logprobs else None,
             prompt_logprobs=prompt_logprobs,
             ignore_eos=self.ignore_eos,
