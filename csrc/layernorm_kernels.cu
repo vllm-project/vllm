@@ -1,7 +1,7 @@
 #include "type_convert.cuh"
 #include "dispatch_utils.h"
 
-#include "cuda_compact.h"
+#include "cuda_compat"
 
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
