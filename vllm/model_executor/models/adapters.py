@@ -34,9 +34,12 @@ def _load_st_projector(model_config: "ModelConfig") -> Optional[nn.Module]:
     """Load Sentence-Transformers Dense projection layers."""
 
     try:
+        # Only attempt to load ST projector for models that might be
+        # sentence-transformers models. Check if modules.json exists first.
         modules = get_hf_file_to_dict("modules.json", model_config.model,
                                       model_config.revision)
         if not modules:
+            # No modules.json means this is not a sentence-transformers model
             return None
 
         if isinstance(modules, dict):
@@ -69,8 +72,8 @@ def _load_st_projector(model_config: "ModelConfig") -> Optional[nn.Module]:
                 layers.append(get_act_fn(act_name))
             return nn.Sequential(*layers).to(dtype=torch.float32)
 
-    except Exception:
-        logger.exception("ST projector loading failed")
+    except Exception as e:
+        logger.debug("ST projector loading failed: %s", str(e))
 
     return None
 
@@ -113,8 +116,8 @@ def _load_dense_weights(linear: nn.Linear, folder: str,
                         bias_loader(linear.bias,
                                     state_dict[bias_key].to(torch.float32))
                     return True
-        except Exception:
-            logger.exception("Failed to load %s", filename)
+        except Exception as e:
+            logger.debug("Failed to load %s: %s", filename, str(e))
             continue
 
     return False
