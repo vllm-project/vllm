@@ -1,0 +1,33 @@
+name: CI Infra Test
+
+# Trigger the workflow on push to main branch and on pull requests
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  hello-world:
+    # Use the linux.2xlarge runner
+    runs-on: linux.2xlarge
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Say Hello World
+      run: |
+        echo "Hello World!"
+        echo "Running on: $(uname -a)"
+        echo "Current directory: $(pwd)"
+        echo "Available CPU cores: $(nproc)"
+        echo "Memory info:"
+        free -h
+        
+    - name: Display environment info
+      run: |
+        echo "GitHub Actor: ${{ github.actor }}"
+        echo "Repository: ${{ github.repository }}"
+        echo "Branch: ${{ github.ref_name }}"
+        echo "Commit SHA: ${{ github.sha }}"
