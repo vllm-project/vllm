@@ -9,6 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
+from vllm.attention.layer import MultiHeadAttention
 from vllm.attention.selector import get_env_variable_attn_backend
 from vllm.logger import init_logger
 from vllm.platforms import _Backend, current_platform
@@ -129,11 +130,10 @@ def resolve_visual_encoder_outputs(
 
 class VisionAttention(torch.nn.Module):
     """
-    Unified Vision Transformer attention module that automatically selects
-    the optimal backend based on hardware, compute capability, head size, etc.
+    Unified Vision Transformer attention module using MultiHeadAttention.
     
-    This allows model developers to focus on model architecture without
-    worrying about attention implementation details.
+    This simplified version uses the unified MultiHeadAttention implementation
+    while maintaining the same interface for backward compatibility.
     """
     
     def __init__(
@@ -156,26 +156,18 @@ class VisionAttention(torch.nn.Module):
         self.use_rotary = use_rotary
         self.rotary_dim = rotary_dim or self.head_dim
         
-        # Auto-select optimal backend
-        self.backend = self._select_backend()
-        
         # Initialize QKV projection
         self.qkv = torch.nn.Linear(embed_dim, embed_dim * 3, bias=bias)
         self.proj = torch.nn.Linear(embed_dim, embed_dim, bias=bias)
+        
+        # Use unified MultiHeadAttention with Flash Attention support
+        self.attn = MultiHeadAttention(num_heads, self.head_dim, self.head_dim**-0.5)
         
         # Rotary embeddings if needed
         if use_rotary:
             self.rotary_emb = self._create_rotary_embeddings()
     
-    def _select_backend(self) -> _Backend:
-        """Automatically select the optimal attention backend."""
-        # Check environment override first
-        env_backend = get_env_variable_attn_backend()
-        if env_backend is not None:
-            return env_backend
-        
-        # Use existing logic with support for FA
-        return get_vit_attn_backend(support_fa=True)
+
     
     def _create_rotary_embeddings(self):
         """Create rotary position embeddings if needed."""
@@ -205,58 +197,7 @@ class VisionAttention(torch.nn.Module):
             # Fallback: return as-is if rotary embedding fails
             return q, k
     
-    def _flash_attention_forward(self, q: torch.Tensor, k: torch.Tensor, 
-                                v: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Forward pass using FlashAttention."""
-        try:
-            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_func
-            return flash_attn_func(q, k, v, dropout_p=self.dropout, causal=False)
-        except ImportError:
-            # Fallback to torch SDPA
-            return torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout)
-    
-    def _torch_sdpa_forward(self, q: torch.Tensor, k: torch.Tensor, 
-                           v: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Forward pass using torch scaled_dot_product_attention."""
-        return torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout)
-    
-    def _xformers_forward(self, q: torch.Tensor, k: torch.Tensor, 
-                         v: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Forward pass using xFormers."""
-        try:
-            from xformers import ops as xops
-            return xops.memory_efficient_attention_forward(q, k, v, p=self.dropout)
-        except ImportError:
-            # Fallback to torch SDPA
-            return torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout)
-    
-    def _rocm_aiter_fa_forward(self, q: torch.Tensor, k: torch.Tensor, 
-                              v: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Forward pass using ROCm Aiter FlashAttention."""
-        try:
-            from aiter import flash_attn_varlen_func
-            # Reshape for varlen function
-            batch_size, seq_len, num_heads, head_dim = q.shape
-            q_flat = q.view(-1, num_heads, head_dim)
-            k_flat = k.view(-1, num_heads, head_dim)
-            v_flat = v.view(-1, num_heads, head_dim)
-            
-            # Create cu_seqlens for varlen function
-            cu_seqlens = torch.arange(0, (batch_size + 1) * seq_len, seq_len, 
-                                    dtype=torch.int32, device=q.device)
-            
-            output = flash_attn_varlen_func(q_flat, k_flat, v_flat, 
-                                          cu_seqlens_q=cu_seqlens,
-                                          cu_seqlens_k=cu_seqlens,
-                                          max_seqlen_q=seq_len,
-                                          max_seqlen_k=seq_len,
-                                          dropout_p=self.dropout,
-                                          causal=False)
-            
-            return output.view(batch_size, seq_len, num_heads, head_dim)
-        except ImportError:
-            # Fallback to torch SDPA
-            return torch.nn.functional.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout)
+
     
     def forward(
         self,
@@ -265,11 +206,11 @@ class VisionAttention(torch.nn.Module):
         positions: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Forward pass with automatic backend selection.
+        Forward pass using unified MultiHeadAttention.
         
         Args:
             x: Input tensor of shape (batch_size, seq_len, embed_dim)
-            mask: Optional attention mask
+            mask: Optional attention mask (not used in current implementation)
             positions: Optional position indices for rotary embeddings
             
         Returns:
@@ -287,18 +228,8 @@ class VisionAttention(torch.nn.Module):
         if positions is not None:
             q, k = self._apply_rotary_embeddings(q, k, positions)
         
-        # Select attention implementation based on backend
-        if self.backend == _Backend.FLASH_ATTN:
-            attn_output = self._flash_attention_forward(q, k, v, mask)
-        elif self.backend == _Backend.ROCM_AITER_FA:
-            attn_output = self._rocm_aiter_fa_forward(q, k, v, mask)
-        elif self.backend == _Backend.TORCH_SDPA:
-            attn_output = self._torch_sdpa_forward(q, k, v, mask)
-        elif self.backend == _Backend.XFORMERS:
-            attn_output = self._xformers_forward(q, k, v, mask)
-        else:
-            # Fallback to torch SDPA
-            attn_output = self._torch_sdpa_forward(q, k, v, mask)
+        # Use unified MultiHeadAttention
+        attn_output = self.attn(q, k, v)
         
         # Project output
         attn_output = attn_output.transpose(1, 2).contiguous()
