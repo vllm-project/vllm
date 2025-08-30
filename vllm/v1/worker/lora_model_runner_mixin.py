@@ -5,7 +5,7 @@ Define LoRA functionality mixin for model runners.
 """
 
 from contextlib import contextmanager
-from typing import Union
+from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -87,7 +87,9 @@ class LoRAModelRunnerMixin:
                                       lora_requests)
 
     @contextmanager
-    def maybe_setup_dummy_loras(self, lora_config):
+    def maybe_setup_dummy_loras(self,
+                                lora_config: Optional[LoRAConfig],
+                                remove_lora: bool = True):
         if lora_config is None:
             yield
         else:
@@ -114,10 +116,11 @@ class LoRAModelRunnerMixin:
                 yield
 
             # __exit__ code
-            self.lora_manager.remove_all_adapters()
+            if remove_lora:
+                self.lora_manager.remove_all_adapters()
 
     @contextmanager
-    def maybe_select_dummy_loras(self, lora_config: LoRAConfig,
+    def maybe_select_dummy_loras(self, lora_config: Optional[LoRAConfig],
                                  num_scheduled_tokens: np.ndarray):
         if lora_config is None:
             yield
@@ -151,12 +154,21 @@ class LoRAModelRunnerMixin:
             yield
 
     @contextmanager
-    def maybe_dummy_run_with_lora(self, lora_config: LoRAConfig,
-                                  num_scheduled_tokens: np.ndarray):
-        with self.maybe_setup_dummy_loras(
-                lora_config), self.maybe_select_dummy_loras(
-                    lora_config, num_scheduled_tokens):
+    def maybe_dummy_run_with_lora(self,
+                                  lora_config: Optional[LoRAConfig],
+                                  num_scheduled_tokens: np.ndarray,
+                                  remove_lora: bool = True):
+        with (
+                self.maybe_setup_dummy_loras(lora_config, remove_lora),
+                self.maybe_select_dummy_loras(lora_config,
+                                              num_scheduled_tokens),
+        ):
             yield
+
+    def maybe_remove_all_loras(self, lora_config: Optional[LoRAConfig]):
+        if lora_config is None:
+            return
+        self.lora_manager.remove_all_adapters()
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         if not self.lora_manager:
