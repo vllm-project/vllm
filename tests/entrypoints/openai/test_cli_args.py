@@ -27,6 +27,28 @@ def serve_parser():
     return make_arg_parser(parser)
 
 
+### Test config parsing
+def test_config_arg_parsing(serve_parser, cli_config_file):
+    args = serve_parser.parse_args([])
+    assert args.port == 8000
+    args = serve_parser.parse_args(['--config', cli_config_file])
+    assert args.port == 12312
+    args = serve_parser.parse_args([
+        '--config',
+        cli_config_file,
+        '--port',
+        '9000',
+    ])
+    assert args.port == 9000
+    args = serve_parser.parse_args([
+        '--port',
+        '9000',
+        '--config',
+        cli_config_file,
+    ])
+    assert args.port == 9000
+
+
 ### Tests for LoRA module parsing
 def test_valid_key_value_format(serve_parser):
     # Test old format: name=path
