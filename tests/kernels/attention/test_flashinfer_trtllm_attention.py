@@ -35,6 +35,7 @@ QUANT_DTYPES = [
     # (q_quant_dtype, kv_quant_dtype, o_quant_dtype)
     (None, None, None),
     (None, FP8_DTYPE, None),
+    (FP8_DTYPE, FP8_DTYPE, None),
     (FP8_DTYPE, FP8_DTYPE, FP8_DTYPE),
     (FP8_DTYPE, FP8_DTYPE, FP4_DTYPE),
 ]
@@ -390,6 +391,8 @@ def test_flashinfer_trtllm_prefill_with_baseline(
         rtol, atol = 4e-1, 1e0
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
         rtol, atol = 5e-2, 7e-2
+    elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == dtype:
+        rtol, atol = 4e-2, 6e-2
     else:
         rtol, atol = 1e-2, 1e-2
 
