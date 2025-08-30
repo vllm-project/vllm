@@ -77,7 +77,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model_tensor_Kimi
+from vllm.multimodal.utils import run_dp_sharded_mrope_vision_model
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
@@ -394,8 +394,8 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         pixel_values = inputs["pixel_values"]
         image_grid_hws = inputs["image_grid_hws"]
         if self.use_data_parallel:
-            return run_dp_sharded_mrope_vision_model_tensor_Kimi(
-                self.vision_tower, pixel_values, image_grid_hws)
+            return run_dp_sharded_mrope_vision_model(
+                self.vision_tower, pixel_values, image_grid_hws.tolist())
         else:
             return self.vision_tower(pixel_values, image_grid_hws)
 
