@@ -135,6 +135,7 @@ async def test_serving_completion_with_lora_resolver(mock_serving_setup,
     called_lora_request = mock_engine.add_lora.call_args[0][0]
     assert isinstance(called_lora_request, LoRARequest)
     assert called_lora_request.lora_name == lora_model_name
+    
     mock_engine.generate.assert_called_once()
     called_lora_request = mock_engine.generate.call_args[1]['lora_request']
     assert isinstance(called_lora_request, LoRARequest)
