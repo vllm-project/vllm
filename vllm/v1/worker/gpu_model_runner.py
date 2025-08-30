@@ -8,8 +8,8 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Optional, Union, cast
 from queue import Queue
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 import numpy as np
 import torch
@@ -1757,6 +1757,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         if self.output_queue is None:
             return output
+        # When using output_queue, deepcopy the req_ids and req_id_to_index
+        # incase the input_batch is modified before the output is consumed.
+        output.req_ids = deepcopy(self.input_batch.req_ids)
+        output.req_id_to_index = deepcopy(self.input_batch.req_id_to_index)
         self.output_queue.put(output)
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:

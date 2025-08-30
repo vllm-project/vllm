@@ -2,21 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-from threading import Thread
 from queue import Queue
+from threading import Thread
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm.distributed.parallel_state import get_world_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         run_method)
-from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
-from vllm.worker.worker_base import WorkerWrapperBase
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
+from vllm.v1.outputs import ModelRunnerOutput
+from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
@@ -40,8 +42,6 @@ class UniProcExecutor(ExecutorBase):
             local_rank = int(device_info[1])
         rank = 0
         is_driver_worker = True
-        self._input_queue = Queue()
-        self._output_queue = Queue()
         kwargs = dict(
             vllm_config=self.vllm_config,
             local_rank=local_rank,
@@ -49,17 +49,14 @@ class UniProcExecutor(ExecutorBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
-        if self.vllm_config.scheduler_config.async_scheduling:
-            self._execute_model_thread = Thread(
-                target=self._execute_model_loop,
-                daemon=True,
-                name="execute_model_loop",
-            )
-            self._execute_model_thread.start()
-            kwargs["output_queue"] = self._output_queue
+        self.init_execute_model_thread(kwargs)
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
+        if self.vllm_config.scheduler_config.async_scheduling:
+            # start the execute_model thread after initialize distributed
+            # environment.
+            self._execute_model_thread.start()
 
     def collective_rpc(self,
                        method: Union[str, Callable],
@@ -85,16 +82,48 @@ class UniProcExecutor(ExecutorBase):
         return
 
     def _execute_model_loop(self):
+        # we need to set the device for the new thread,
+        # or it just use the default device 0.
+        torch.cuda.set_device(get_world_group().local_rank)
         while True:
-            sheduler_output = self._input_queue.get()
-            super().execute_model(sheduler_output)
+            try:
+                sheduler_output = self._input_queue.get()
+                if sheduler_output is None:
+                    break
+                super().execute_model(sheduler_output)
+            except Exception as e:
+                self._output_queue.put(e)
 
     def execute_model(self, scheduler_output: SchedulerOutput):
         if self.vllm_config.scheduler_config.async_scheduling:
             self._input_queue.put(scheduler_output)
             output = self._output_queue.get()
+            if isinstance(output, ModelRunnerOutput):
+                # execute_model thread just finished a step, and get a new
+                # sheduler_output immediately. so we need to block here until
+                # the d2h copy flag is ready.
+                self._output_queue.get()
+            elif isinstance(output, Exception):
+                raise output
             return output
         return super().execute_model(scheduler_output)
+
+    def init_execute_model_thread(self, kwargs):
+        if self.vllm_config.scheduler_config.async_scheduling:
+            self._input_queue: Queue = Queue()
+            self._output_queue: Queue = Queue()
+            self._execute_model_thread = Thread(
+                target=self._execute_model_loop,
+                daemon=True,
+                name="execute_model_loop",
+            )
+            kwargs["output_queue"] = self._output_queue
+
+    @property
+    def max_concurrent_batches(self) -> int:
+        if self.vllm_config.scheduler_config.async_scheduling:
+            return 2
+        return 1
 
 
 UniProcExecutorAsync = UniProcExecutor
@@ -149,9 +178,14 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+        self.init_execute_model_thread(kwargs)
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
+        if self.vllm_config.scheduler_config.async_scheduling:
+            # start the execute_model thread after initialize distributed
+            # environment.
+            self._execute_model_thread.start()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """

@@ -243,7 +243,7 @@ class InprocClient(EngineCoreClient):
 
     def __init__(self, *args, **kwargs):
         self.engine_core = EngineCore(*args, **kwargs)
-        self.async_scehduling = self.engine_core.vllm_config.scheduler_config.async_scheduling
+        self.async_scehduling = self.engine_core.vllm_config.scheduler_config.async_scheduling  # noqa
 
     def get_output(self) -> EngineCoreOutputs:
         if self.async_scehduling:

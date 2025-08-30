@@ -371,6 +371,12 @@ class Worker(WorkerBase):
         if isinstance(output, ModelRunnerOutput):
             return output
 
+        # this means use async scheduling with uni-process executor，
+        # the modeloutput will be put in the output queue,
+        # the output will be None. so we won't validate the output type here.
+        if self.output_queue is not None:
+            return output
+
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert parallel_config.distributed_executor_backend != (
