@@ -420,6 +420,18 @@ class MultiHeadAttention(nn.Module):
         elif self.attn_backend == _Backend.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
             out = flash_attn_varlen_func(query, key, value, softmax_scale=self.scale)
+        elif self.attn_backend == _Backend.FLEX_ATTENTION:
+            # FlexAttention requires specific tensor format
+            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+            from vllm.attention.backends.flex_attention import FlexAttentionBackend
+            # Use a simple fallback to torch SDPA for now
+            out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
+            out = out.transpose(1, 2)
+        else:
+            # Fallback to torch SDPA for unsupported backends
+            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+            out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
+            out = out.transpose(1, 2)
 
         return out.reshape(bsz, q_len, -1)
 
