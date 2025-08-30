@@ -31,8 +31,8 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
     prepare_communication_buffer_for_model)
-from vllm.forward_context import (BatchDescriptor, DPMetadata,
-                                  set_forward_context)
+from vllm.forward_context import (ALoRAMetadata, BatchDescriptor, DPMetadata,
+                                  get_forward_context, set_forward_context)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.mamba.abstract import MambaBase
@@ -257,6 +257,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=self.device)
+        if self.lora_config and self.lora_config.activated_lora_enabled:
+            self.mask1d = torch.zeros(self.max_num_tokens,
+                                      dtype=torch.int64,
+                                      device=self.device)
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -665,7 +669,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> tuple[dict[str, Any], torch.Tensor, Optional[SpecDecodeMetadata],
-               np.ndarray, Optional[CommonAttentionMetadata], int]:
+                Optional[ALoRAMetadata], np.ndarray, Optional[CommonAttentionMetadata], int]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
@@ -893,8 +897,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
+        # Compute aLoRA metadata
+        if self.lora_config and self.lora_config.activated_lora_enabled:
+            invocation_start = np.empty(shape=(num_reqs, ), dtype=int)
+            for req_id in self.input_batch.req_ids:
+                req_index = self.input_batch.req_id_to_index[req_id]
+                cached_lora_request = self.requests[req_id].lora_request
+                if (cached_lora_request is not None
+                        and cached_lora_request.invocation_start is not None):
+                    invocation_start[
+                        req_index] = cached_lora_request.invocation_start
+                else:
+                    invocation_start[req_index] = len(
+                        self.requests[req_id].prompt_token_ids)
+            mask1d_cpu = torch.tensor(positions_np
+                                      < invocation_start[req_indices],
+                                      dtype=torch.bool,
+                                      device="cpu")
+            mask1d = self.mask1d[:total_num_scheduled_tokens]
+            mask1d.copy_(mask1d_cpu, non_blocking=True)
+            alora_metadata = ALoRAMetadata(mask1d=mask1d)
+        else:
+            alora_metadata = None
+
         return (attn_metadata, logits_indices, spec_decode_metadata,
-                num_scheduled_tokens, spec_decode_common_attn_metadata,
+                num_scheduled_tokens, spec_decode_common_attn_metadata, alora_metadata,
                 max_num_scheduled_tokens)
 
     def _compute_cascade_attn_prefix_len(
@@ -1479,7 +1506,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 "need prompt logprobs")
 
         # Prepare the decoder inputs.
-        (attn_metadata, logits_indices, spec_decode_metadata,
+        (attn_metadata, logits_indices, spec_decode_metadata, alora_metadata,
          num_scheduled_tokens_np, spec_decode_common_attn_metadata,
          max_query_len) = self._prepare_inputs(scheduler_output)
 
@@ -1568,6 +1595,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
+                alora_metadata=alora_metadata,
                 batch_descriptor=batch_descriptor,
         ), self.maybe_get_kv_connector_output(
                 scheduler_output) as kv_connector_output:
@@ -2362,11 +2390,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     f"Cudagraph runtime mode mismatch at dummy_run. "
                     f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}.")
 
+            alora_metadata = None
+            if self.lora_config and self.lora_config.activated_lora_enabled:
+                mask1d = self.mask1d[:num_tokens]
+                alora_metadata = ALoRAMetadata(mask1d=mask1d)
+                # needed to avoid guard failures
+                torch._dynamo.mark_dynamic(alora_metadata.mask1d, 0)
+
             with self.maybe_randomize_inputs(input_ids), set_forward_context(
                     attn_metadata,
                     self.vllm_config,
                     num_tokens=num_tokens,
                     num_tokens_across_dp=num_tokens_across_dp,
+                    alora_metadata=alora_metadata,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor):
                 outputs = self.model(

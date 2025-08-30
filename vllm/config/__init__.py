@@ -2456,6 +2456,8 @@ class LoRAConfig:
     in alphabetic order."""
     bias_enabled: bool = False
     """Enable bias for LoRA adapters."""
+    activated_lora_enabled: bool = False
+    """Enable Activated LoRA."""
 
     def compute_hash(self) -> str:
         """

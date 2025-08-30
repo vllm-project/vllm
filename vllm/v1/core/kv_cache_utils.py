@@ -588,6 +588,12 @@ def get_request_block_hasher(
             # MM and LoRA requests need extra keys for block-hash computation.
             extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
                 request, start_token_idx, end_token_idx, curr_mm_idx)
+            # Respect aLoRA behaviour
+            if (request.lora_request is not None
+                    and request.lora_request.invocation_start is not None
+                    and end_token_idx <= request.lora_request.invocation_start):
+                # cache is equivalent to base model cache
+                extra_keys = None
 
             # Compute the hash of the current block
             block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
