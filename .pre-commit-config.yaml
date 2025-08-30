@@ -21,7 +21,7 @@ repos:
   - id: ruff-format
     files: ^(.buildkite|benchmarks|examples)/.*
 - repo: https://github.com/crate-ci/typos
-  rev: v1.34.0
+  rev: v1.35.5
   hooks:
   - id: typos
 - repo: https://github.com/PyCQA/isort
@@ -38,8 +38,9 @@ repos:
 - repo: https://github.com/igorshubovych/markdownlint-cli
   rev: v0.45.0
   hooks:
-  - id: markdownlint-fix
+  - id: markdownlint
     exclude: '.*\.inc\.md'
+    stages: [manual] # Only run in CI
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:

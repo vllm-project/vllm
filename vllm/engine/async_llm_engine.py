@@ -15,7 +15,7 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
-from vllm.engine.llm_engine import LLMEngine, SchedulerOutputState
+from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.engine.protocol import EngineClient
 from vllm.executor.executor_base import ExecutorBase
@@ -30,7 +30,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device, weak_bind
+from vllm.utils import Device, deprecate_kwargs, weak_bind
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -72,8 +72,8 @@ STOP_ITERATION = Exception()  # Sentinel
 
 
 class AsyncStream:
-    """A stream of RequestOutputs or PoolingRequestOutputs for a request
-    that can be iterated over asynchronously via an async generator."""
+    """A stream of RequestOutputs for a request that can be iterated over
+    asynchronously via an async generator."""
 
     def __init__(self, request_id: str, cancel: Callable[[str], None]) -> None:
         self.request_id = request_id
@@ -81,8 +81,7 @@ class AsyncStream:
         self._queue: asyncio.Queue = asyncio.Queue()
         self._finished = False
 
-    def put(self, item: Union[RequestOutput, PoolingRequestOutput,
-                              Exception]) -> None:
+    def put(self, item: Union[RequestOutput, Exception]) -> None:
         if not self._finished:
             self._queue.put_nowait(item)
 
@@ -99,9 +98,7 @@ class AsyncStream:
     def finished(self) -> bool:
         return self._finished
 
-    async def generator(
-        self
-    ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
+    async def generator(self) -> AsyncGenerator[RequestOutput, None]:
         try:
             while True:
                 result = await self._queue.get()
@@ -151,8 +148,7 @@ class RequestTracker:
                 self.abort_request(rid, exception=exc)
 
     def process_request_output(self,
-                               request_output: Union[RequestOutput,
-                                                     PoolingRequestOutput],
+                               request_output: RequestOutput,
                                *,
                                verbose: bool = False) -> None:
         """Process a request output from the engine."""
@@ -261,9 +257,7 @@ class _AsyncLLMEngine(LLMEngine):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-    async def step_async(
-        self, virtual_engine: int
-    ) -> List[Union[RequestOutput, PoolingRequestOutput]]:
+    async def step_async(self, virtual_engine: int) -> List[RequestOutput]:
         """Performs one decoding iteration and returns newly generated results.
         The workers are ran asynchronously if possible.
 
@@ -308,13 +302,6 @@ class _AsyncLLMEngine(LLMEngine):
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
 
-            if (self.scheduler_config.is_multi_step
-                    and scheduler_outputs.num_lookahead_slots > 0):
-                # cache the scheduler outputs for the next iteration if we have
-                # lookahead slots
-                self._cache_scheduler_outputs_for_multi_step(
-                    virtual_engine, seq_group_metadata_list, scheduler_outputs,
-                    allow_async_output_proc)
         else:
             finished_requests_ids = list()
 
@@ -351,29 +338,14 @@ class _AsyncLLMEngine(LLMEngine):
             outputs = await self.model_executor.execute_model_async(
                 execute_model_req)
 
-            # we need to do this here so that last step's sampled_token_ids can
-            # be passed to the next iteration for PP.
-            if self.scheduler_config.is_multi_step:
-                self._update_cached_scheduler_output(virtual_engine, outputs)
         else:
             if len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
             outputs = []
 
-        # Finish the current step for all the sequence groups.
-        if self.scheduler_config.is_multi_step:
-            for seq_group in seq_group_metadata_list:
-                seq_group.finish_step()
-
         if not self._has_remaining_steps(seq_group_metadata_list):
-            # Clear the cache if we have finished all the steps
-            if self.scheduler_config.is_multi_step:
-                self.cached_scheduler_outputs[
-                    virtual_engine] = SchedulerOutputState()
-
             # is_first_step_output is True only when the num_steps of all
-            # the sequences are 1. When the num_steps > 1,
-            # multi_step_model_runner does the first-step output append.
+            # the sequences are 1.
             is_first_step_output: bool = False if not seq_group_metadata_list \
                 else seq_group_metadata_list[0].state.num_steps == 1
 
@@ -427,7 +399,7 @@ class _AsyncLLMEngine(LLMEngine):
         self,
         request_id: str,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -508,10 +480,10 @@ class AsyncLLMEngine(EngineClient):
     _engine_class: Type[_AsyncLLMEngine] = _AsyncLLMEngine
 
     def __init__(self,
-                 *args,
+                 *args: Any,
                  log_requests: bool = True,
                  start_engine_loop: bool = True,
-                 **kwargs) -> None:
+                 **kwargs: Any) -> None:
         if envs.VLLM_USE_V1:
             raise ValueError(
                 "Using V0 AsyncLLMEngine, but envs.VLLM_USE_V1=True. "
@@ -554,14 +526,20 @@ class AsyncLLMEngine(EngineClient):
         return LLMEngine._get_executor_cls(engine_config)
 
     @classmethod
+    @deprecate_kwargs(
+        "disable_log_requests",
+        additional_message=("This argument will have no effect. "
+                            "Use `enable_log_requests` instead."),
+    )
     def from_vllm_config(
-        cls,
-        vllm_config: VllmConfig,
-        start_engine_loop: bool = True,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
-        disable_log_requests: bool = False,
-        disable_log_stats: bool = False,
+            cls,
+            vllm_config: VllmConfig,
+            start_engine_loop: bool = True,
+            usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+            stat_loggers: Optional[dict[str, StatLoggerBase]] = None,
+            enable_log_requests: bool = False,
+            disable_log_stats: bool = False,
+            disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLMEngine":
         """Create an AsyncLLMEngine from the EngineArgs."""
 
@@ -569,7 +547,7 @@ class AsyncLLMEngine(EngineClient):
             vllm_config=vllm_config,
             executor_class=cls._get_executor_cls(vllm_config),
             start_engine_loop=start_engine_loop,
-            log_requests=not disable_log_requests,
+            log_requests=enable_log_requests,
             log_stats=not disable_log_stats,
             usage_context=usage_context,
             stat_loggers=stat_loggers,
@@ -598,7 +576,7 @@ class AsyncLLMEngine(EngineClient):
             usage_context=usage_context,
             stat_loggers=stat_loggers,
             disable_log_stats=engine_args.disable_log_stats,
-            disable_log_requests=engine_args.disable_log_requests,
+            enable_log_requests=engine_args.enable_log_requests,
         )
 
     @property
@@ -795,14 +773,14 @@ class AsyncLLMEngine(EngineClient):
         self,
         request_id: str,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams,
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
         data_parallel_rank: Optional[int] = None,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
-    ) -> AsyncGenerator[Union[RequestOutput, PoolingRequestOutput], None]:
+    ) -> AsyncGenerator[RequestOutput, None]:
         if not self.is_running:
             if self.start_engine_loop:
                 self.start_background_loop()
@@ -924,7 +902,7 @@ class AsyncLLMEngine(EngineClient):
             await self.abort(request_id)
             raise
 
-    async def encode(
+    def encode(
         self,
         prompt: PromptType,
         pooling_params: PoolingParams,
@@ -934,87 +912,10 @@ class AsyncLLMEngine(EngineClient):
         priority: int = 0,
         tokenization_kwargs: Optional[dict[str, Any]] = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
-        """Generate outputs for a request from a pooling model.
+        raise NotImplementedError(
+            "Pooling models are not supported in vLLM V0")
 
-        Generate outputs for a request. This method is a coroutine. It adds the
-        request into the waiting queue of the LLMEngine and streams the outputs
-        from the LLMEngine to the caller.
-
-        Args:
-            prompt: The prompt to the LLM. See
-                [`PromptType`][vllm.inputs.PromptType] for more details about
-                the format of each input.
-            pooling_params: The pooling parameters of the request.
-            request_id: The unique id of the request.
-            lora_request: LoRA request to use for generation, if any.
-            trace_headers: OpenTelemetry trace headers.
-            priority: The priority of the request.
-                Only applicable with priority scheduling.
-
-        Yields:
-            The output `PoolingRequestOutput` objects from the LLMEngine
-            for the request.
-
-        Details:
-            - If the engine is not running, start the background loop,
-                which iteratively invokes
-                [`vllm.engine.async_llm_engine.AsyncLLMEngine.engine_step`][]
-                to process the waiting requests.
-            - Add the request to the engine's `RequestTracker`.
-                On the next background loop, this request will be sent to
-                the underlying engine.
-                Also, a corresponding `AsyncStream` will be created.
-            - Wait for the request outputs from `AsyncStream` and yield them.
-
-        Example:
-        ```
-        # Please refer to entrypoints/api_server.py for
-        # the complete example.
-
-        # initialize the engine and the example input
-        # note that engine_args here is AsyncEngineArgs instance
-        engine = AsyncLLMEngine.from_engine_args(engine_args)
-        example_input = {
-            "input": "What is LLM?",
-            "request_id": 0,
-        }
-
-        # start the generation
-        results_generator = engine.encode(
-        example_input["input"],
-        PoolingParams(),
-        example_input["request_id"])
-
-        # get the results
-        final_output = None
-        async for request_output in results_generator:
-            if await request.is_disconnected():
-                # Abort the request if the client disconnects.
-                await engine.abort(request_id)
-                # Return or raise an error
-                ...
-            final_output = request_output
-
-        # Process and return the final output
-        ...
-        ```
-        """
-        try:
-            async for output in await self.add_request(
-                    request_id,
-                    prompt,
-                    pooling_params,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    priority=priority,
-                    tokenization_kwargs=tokenization_kwargs,
-            ):
-                yield LLMEngine.validate_output(output, PoolingRequestOutput)
-        except asyncio.CancelledError:
-            await self.abort(request_id)
-            raise
-
-    async def abort(self, request_id: str) -> None:
+    async def abort(self, request_id: Union[str, Iterable[str]]) -> None:
         """Abort a request.
 
         Abort a submitted request. If the request is finished or not found,
@@ -1023,6 +924,9 @@ class AsyncLLMEngine(EngineClient):
         Args:
             request_id: The unique id of the request.
         """
+        if not isinstance(request_id, str):
+            raise RuntimeError("Only single-request abort supported in"
+                               " deprecated V0")
         if not self.is_running:
             raise AsyncEngineDeadError(
                 "Background loop is not running. If it was running, "
@@ -1108,6 +1012,7 @@ class AsyncLLMEngine(EngineClient):
         self.engine.reset_prefix_cache(device)
 
     async def sleep(self, level: int = 1) -> None:
+        await self.reset_prefix_cache()
         self.engine.sleep(level)
 
     async def wake_up(self, tags: Optional[list[str]] = None) -> None:
@@ -1116,8 +1021,8 @@ class AsyncLLMEngine(EngineClient):
     async def is_sleeping(self) -> bool:
         return self.engine.is_sleeping()
 
-    async def add_lora(self, lora_request: LoRARequest) -> None:
-        self.engine.add_lora(lora_request)
+    async def add_lora(self, lora_request: LoRARequest) -> bool:
+        return self.engine.add_lora(lora_request)
 
     async def collective_rpc(self,
                              method: str,

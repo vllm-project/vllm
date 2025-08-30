@@ -21,13 +21,13 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import (AudioProcessorItems, ImageEmbeddingItems,
                                    ImageProcessorItems, ImageSize,
                                    MultiModalDataItems, MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate)
+                                        PromptUpdate, ResolvedPromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
@@ -262,9 +262,9 @@ class Phi4MMImageEncoder(nn.Module):
             img_features.shape[1]))
         assert base_feat_height == base_feat_height_target \
             and base_feat_width == base_feat_height_target, \
-                f'base_feat_height: {base_feat_height},"\
-                f" base_feat_width: {base_feat_width}, "\
-                f"expect {base_feat_height_target} features for hd transform'
+                (f"base_feat_height: {base_feat_height}, "
+                 f"base_feat_width: {base_feat_width}, "
+                 f"expect {base_feat_height_target} features for hd transform")
 
         # bs x max_num_crops x (24x24) x C
         img_features = img_features.view(bs, -1,
@@ -459,17 +459,6 @@ def cat_with_pad(tensors, dim, padding_value=0):
 
 class Phi4MMProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_processor(
-        self,
-        *,
-        dynamic_hd: Optional[int] = None,
-        **kwargs: object,
-    ) -> ProcessorMixin:
-        if dynamic_hd is not None:
-            kwargs["dynamic_hd"] = dynamic_hd
-
-        return self.ctx.get_hf_processor(**kwargs)
-
     @property
     def image_tokens(self) -> list[str]:
         return [f"<|image_{i+1}|>" for i in range(100)]
@@ -487,8 +476,9 @@ class Phi4MMProcessingInfo(BaseProcessingInfo):
         image_processor = processor.image_processor
         return image_processor.dynamic_hd
 
-    def get_feature_extractor(self) -> SequenceFeatureExtractor:
-        return self.get_hf_processor().audio_processor
+    def get_feature_extractor(self,
+                              **kwargs: object) -> SequenceFeatureExtractor:
+        return self.get_hf_processor(**kwargs).audio_processor
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None, "image": None}
@@ -769,7 +759,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-        sr = self.info.get_feature_extractor().sampling_rate
+        sr = self.info.get_feature_extractor(**mm_kwargs).sampling_rate
         if (audio_data := mm_data.get("audios", [])):
             mm_data['audios'] = [(data, sr) for data in audio_data]
 
@@ -812,11 +802,12 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         image_tokens: list[str] = self.info.image_tokens  # type: ignore
         audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
-        feature_extractor = self.info.get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor(
+            **hf_processor_mm_kwargs)
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
         def get_image_replacement_phi4mm(item_idx: int):
@@ -833,9 +824,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
                     processor=hf_processor,
                 )
 
-            image_tokens = [_IMAGE_PLACEHOLDER_TOKEN_ID] * num_image_tokens
-
-            return image_tokens
+            return [_IMAGE_PLACEHOLDER_TOKEN_ID] * num_image_tokens
 
         def get_audio_replacement_phi4mm(item_idx: int):
             audios = mm_items.get_items("audio", AudioProcessorItems)
@@ -846,28 +835,39 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             audio_embed_size = self.info._compute_audio_embed_size(
                 audio_frames)
 
-            audio_tokens = [_AUDIO_PLACEHOLDER_TOKEN_ID] * audio_embed_size
+            return [_AUDIO_PLACEHOLDER_TOKEN_ID] * audio_embed_size
 
-            return audio_tokens
-
-        num_images = mm_items.get_count("image", strict=False)
-        num_audios = mm_items.get_count("audio", strict=False)
-
-        image_repl = [
+        return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=image_tokens.__getitem__,
                 replacement=get_image_replacement_phi4mm,
-            ) for image_token in image_tokens[:num_images]
-        ]
-        audio_repl = [
+            ),
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=audio_tokens.__getitem__,
                 replacement=get_audio_replacement_phi4mm,
-            ) for audio_token in audio_tokens[:num_audios]
+            ),
         ]
-        return image_repl + audio_repl
+
+    def _recompute_cached_prompt_update(
+        self,
+        cached_update: ResolvedPromptUpdate,
+        new_item_idx: int,
+    ) -> ResolvedPromptUpdate:
+        new_update = super()._recompute_cached_prompt_update(
+            cached_update,
+            new_item_idx,
+        )
+
+        if cached_update.modality == "image":
+            image_tokens: list[str] = self.info.image_tokens  # type: ignore
+            new_update = new_update.with_target(image_tokens[new_item_idx])
+        elif cached_update.modality == "audio":
+            audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
+            new_update = new_update.with_target(audio_tokens[new_item_idx])
+
+        return new_update
 
 
 @MULTIMODAL_REGISTRY.register_processor(

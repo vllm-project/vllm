@@ -16,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, modular_triton_fused_moe)
 from vllm.platforms import current_platform
 from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import is_blackwell_deep_gemm_used
+from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 
 dg_available = has_deep_gemm()
 
@@ -161,18 +161,20 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
 
-    _, w1, w1_s, _, w2, w2_s = make_test_weights(E,
-                                                 N,
-                                                 K,
-                                                 dtype,
-                                                 torch.float8_e4m3fn,
-                                                 per_act_token_quant=False,
-                                                 block_shape=block_size)
+    (_, w1, w1_s, _), (_, w2, w2_s,
+                       _) = make_test_weights(E,
+                                              N,
+                                              K,
+                                              dtype,
+                                              torch.float8_e4m3fn,
+                                              per_act_token_quant=False,
+                                              block_shape=block_size)
 
     m_fused_moe = modular_triton_fused_moe(use_fp8_w8a8=True,
                                            use_int8_w8a8=False,
                                            use_int8_w8a16=False,
                                            use_int4_w4a16=False,
+                                           use_mxfp4_w4a4=False,
                                            per_act_token_quant=False,
                                            block_shape=block_size)
 
@@ -224,7 +226,7 @@ def test_w8a8_block_fp8_fused_moe(M, N, K, E, topk, block_size, dtype, seed,
 @pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not dg_available, reason="DeepGemm kernels not available.")
-@pytest.mark.skipif(is_blackwell_deep_gemm_used(), reason="Not E8M0 scale MOE")
+@pytest.mark.skipif(is_deep_gemm_e8m0_used(), reason="Not E8M0 scale MOE")
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
                                             monkeypatch):
@@ -246,13 +248,14 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed,
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
 
-    _, w1, w1_s, _, w2, w2_s = make_test_weights(E,
-                                                 N,
-                                                 K,
-                                                 dtype,
-                                                 torch.float8_e4m3fn,
-                                                 per_act_token_quant=False,
-                                                 block_shape=block_size)
+    (_, w1, w1_s, _), (_, w2, w2_s,
+                       _) = make_test_weights(E,
+                                              N,
+                                              K,
+                                              dtype,
+                                              torch.float8_e4m3fn,
+                                              per_act_token_quant=False,
+                                              block_shape=block_size)
 
     # Note: for now use_compile will error out if the problem size is
     # large enough to trigger chunking. I'm leaving the flag and

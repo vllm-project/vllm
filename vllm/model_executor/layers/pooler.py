@@ -5,7 +5,7 @@ from collections.abc import Mapping, Set
 from dataclasses import dataclass
 from enum import IntEnum
 from itertools import groupby
-from typing import Callable, Optional, TypeVar, Union
+from typing import Callable, Optional, TypeVar, Union, cast
 
 import torch
 import torch.nn as nn
@@ -13,16 +13,15 @@ import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, PoolerConfig
-from vllm.model_executor.pooling_metadata import (  # noqa: E501
-    PoolingMetadata as V0PoolingMetadata)
-from vllm.model_executor.pooling_metadata import PoolingTensors
+from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import PoolerOutput, PoolingSequenceGroupOutput
 from vllm.tasks import PoolingTask
-from vllm.utils import resolve_obj_by_qualname
-from vllm.v1.pool.metadata import PoolingMetadata as V1PoolingMetadata
+from vllm.utils import current_stream, resolve_obj_by_qualname
+from vllm.v1.pool.metadata import PoolingCursor, PoolingMetadata
 
-PoolingMetadata = Union[V0PoolingMetadata, V1PoolingMetadata]
+logger = init_logger(__name__)
+
 PoolingFn = Callable[
     [Union[torch.Tensor, list[torch.Tensor]], PoolingMetadata],
     Union[torch.Tensor, list[torch.Tensor]]]
@@ -41,35 +40,17 @@ class PoolingType(IntEnum):
 @dataclass(frozen=True)
 class ResolvedPoolingConfig:
     pooling_type: PoolingType
-
-    normalize: bool
-    softmax: bool
-    step_tag_id: Optional[int]
-    returned_token_ids: Optional[list[int]]
+    task: PoolingTask
 
     @classmethod
-    def from_config_with_defaults(
+    def from_config(
         cls,
+        task: PoolingTask,
         pooler_config: PoolerConfig,
-        pooling_type: PoolingType,
-        normalize: bool,
-        softmax: bool,
-        step_tag_id: Optional[int] = None,
-        returned_token_ids: Optional[list[int]] = None,
     ) -> "ResolvedPoolingConfig":
-        return cls(
-            pooling_type=PoolingType[pooler_config.pooling_type]
-            if pooler_config.pooling_type is not None else pooling_type,
-            normalize=pooler_config.normalize
-            if pooler_config.normalize is not None else normalize,
-            softmax=pooler_config.softmax
-            if pooler_config.softmax is not None else softmax,
-            step_tag_id=pooler_config.step_tag_id
-            if pooler_config.step_tag_id is not None else step_tag_id,
-            returned_token_ids=pooler_config.returned_token_ids
-            if pooler_config.returned_token_ids is not None else
-            returned_token_ids,
-        )
+        assert pooler_config.pooling_type is not None
+        return cls(task=task,
+                   pooling_type=PoolingType[pooler_config.pooling_type])
 
 
 @dataclass(frozen=True)
@@ -85,42 +66,20 @@ class Pooler(nn.Module, ABC):
     """The interface required for all poolers used in pooling models in vLLM."""
 
     @staticmethod
-    def for_encode(
-        pooler_config: PoolerConfig,
-        *,
-        default_pooling_type: PoolingType = PoolingType.ALL,
-        default_normalize: bool = False,
-        default_softmax: bool = False,
-        default_step_tag_id: Optional[int] = None,
-        default_returned_token_ids: Optional[list[int]] = None,
-    ):
-        resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
-            pooler_config=pooler_config,
-            pooling_type=default_pooling_type,
-            normalize=default_normalize,
-            softmax=default_softmax,
-            step_tag_id=default_step_tag_id,
-            returned_token_ids=default_returned_token_ids,
-        )
+    def for_encode(pooler_config: PoolerConfig):
+        if pooler_config.pooling_type == "STEP":
+            return StepPooler()
 
-        if resolved_config.pooling_type == PoolingType.STEP:
-            return StepPooler.from_config(resolved_config)
+        resolved_config = ResolvedPoolingConfig(task="encode",
+                                                pooling_type=PoolingType.ALL)
 
         return SimplePooler.from_config(resolved_config)
 
     @staticmethod
-    def for_embed(
-        pooler_config: PoolerConfig,
-        *,
-        default_pooling_type: PoolingType = PoolingType.LAST,
-        default_normalize: bool = True,
-        default_softmax: bool = False,
-    ):
-        resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
+    def for_embed(pooler_config: PoolerConfig):
+        resolved_config = ResolvedPoolingConfig.from_config(
+            task="embed",
             pooler_config=pooler_config,
-            pooling_type=default_pooling_type,
-            normalize=default_normalize,
-            softmax=default_softmax,
         )
 
         return SimplePooler.from_config(resolved_config)
@@ -129,25 +88,17 @@ class Pooler(nn.Module, ABC):
     def for_classify(
         pooler_config: PoolerConfig,
         classifier: Optional[ClassifierFn],
-        *,
-        default_pooling_type: PoolingType = PoolingType.LAST,
-        default_normalize: bool = False,
-        default_softmax: bool = True,
     ):
-        resolved_config = ResolvedPoolingConfig.from_config_with_defaults(
+        resolved_config = ResolvedPoolingConfig.from_config(
+            task="classify",
             pooler_config=pooler_config,
-            pooling_type=default_pooling_type,
-            normalize=default_normalize,
-            softmax=default_softmax,
         )
-        base_pooler = SimplePooler.from_config(resolved_config)
-        if classifier is None:
-            return base_pooler
+
+        pooling = PoolingMethod.from_pooling_type(resolved_config.pooling_type)
 
         return ClassifierPooler(
-            pooling=base_pooler.pooling,
+            pooling=pooling,
             classifier=classifier,
-            act_fn=base_pooler.head.activation,
         )
 
     @abstractmethod
@@ -174,35 +125,28 @@ def get_prompt_lens(
     hidden_states: Union[torch.Tensor, list[torch.Tensor]],
     pooling_metadata: PoolingMetadata,
 ) -> torch.Tensor:
-    if isinstance(pooling_metadata, V1PoolingMetadata):
-        return pooling_metadata.prompt_lens
-
-    return PoolingTensors.from_pooling_metadata(
-        pooling_metadata, hidden_states[0].device).prompt_lens
+    return pooling_metadata.prompt_lens
 
 
 def get_prompt_token_ids(
         pooling_metadata: PoolingMetadata) -> list[torch.Tensor]:
-    if isinstance(pooling_metadata, V1PoolingMetadata):
-        assert pooling_metadata.prompt_token_ids is not None, (
-            "Please set `requires_token_ids=True` in `get_pooling_updates`")
-
-        return [
-            pooling_metadata.prompt_token_ids[i, :num]
-            for i, num in enumerate(pooling_metadata.prompt_lens)
-        ]
+    assert pooling_metadata.prompt_token_ids is not None, (
+        "Please set `requires_token_ids=True` in `get_pooling_updates`")
 
     return [
-        torch.tensor(seq_data_i.prompt_token_ids)
-        for seq_data_i in pooling_metadata.seq_data.values()
+        pooling_metadata.prompt_token_ids[i, :num]
+        for i, num in enumerate(pooling_metadata.prompt_lens)
     ]
 
 
+def get_pooling_params(
+        pooling_metadata: PoolingMetadata) -> list[PoolingParams]:
+    pooling_params = pooling_metadata.pooling_params
+    return pooling_params
+
+
 def get_tasks(pooling_metadata: PoolingMetadata) -> list[PoolingTask]:
-    if isinstance(pooling_metadata, V0PoolingMetadata):
-        pooling_params = [p for _, p in pooling_metadata.seq_groups]
-    else:
-        pooling_params = pooling_metadata.pooling_params
+    pooling_params = get_pooling_params(pooling_metadata)
 
     tasks: list[PoolingTask] = [
         task for pooling_param in pooling_params
@@ -214,6 +158,15 @@ def get_tasks(pooling_metadata: PoolingMetadata) -> list[PoolingTask]:
 
 
 def get_classification_activation_function(config: PretrainedConfig):
+    # Implement alignment with transformers ForSequenceClassificationLoss
+    # https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92
+    problem_type = getattr(config, "problem_type", "")
+    if problem_type == "regression":
+        return PoolerIdentity()
+    if problem_type == "single_label_classification":
+        return PoolerClassify()
+    if problem_type == "multi_label_classification":
+        return PoolerMultiLabelClassify()
     return PoolerClassify()
 
 
@@ -233,11 +186,18 @@ def get_cross_encoder_activation_function(config: PretrainedConfig):
         fn = resolve_obj_by_qualname(function_name)()
         return PoolerActivation.wraps(fn)
 
-    return PoolerScore()
+    return PoolerClassify()
 
 
 def build_output(
     all_data: Union[torch.Tensor, list[torch.Tensor]], ) -> PoolerOutput:
+    # Pooling models D2H & synchronize occurs here
+    if isinstance(all_data, list):
+        all_data = [d.to("cpu", non_blocking=True) for d in all_data]
+    else:
+        all_data = all_data.to("cpu", non_blocking=True)
+    current_stream().synchronize()
+
     all_outputs = [PoolingSequenceGroupOutput(data) for data in all_data]
     return PoolerOutput(outputs=all_outputs)
 
@@ -265,39 +225,20 @@ class PoolingMethod(nn.Module, ABC):
         return PoolingParamsUpdate()
 
     @abstractmethod
-    def forward_one(
-        self,
-        hidden_states: torch.Tensor,
-        prompt_len: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        Note:
-            `prompt_len=None` means `prompt_len=len(hidden_states)`.
-        """
-        raise NotImplementedError
-
-    @abstractmethod
     def forward_all(
         self,
         hidden_states: torch.Tensor,
-        prompt_lens: torch.Tensor,
+        pooling_cursor: PoolingCursor,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
         raise NotImplementedError
 
     def forward(
         self,
-        hidden_states: Union[torch.Tensor, list[torch.Tensor]],
+        hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
-        prompt_lens = get_prompt_lens(hidden_states, pooling_metadata)
-
-        if isinstance(hidden_states, list):
-            return [
-                self.forward_one(h, prompt_len)
-                for h, prompt_len in zip(hidden_states, prompt_lens)
-            ]
-
-        return self.forward_all(hidden_states, prompt_lens)
+        pooling_cursor = pooling_metadata.pooling_cursor
+        return self.forward_all(hidden_states, pooling_cursor)
 
 
 class CLSPool(PoolingMethod):
@@ -305,24 +246,15 @@ class CLSPool(PoolingMethod):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"encode", "embed", "classify", "score"}
 
-    def forward_one(
-        self,
-        hidden_states: torch.Tensor,
-        prompt_len: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        assert prompt_len is None or prompt_len == hidden_states.shape[0], \
-            "partial prefill not supported with CLS pooling"
-
-        return hidden_states[0]
-
     def forward_all(
         self,
         hidden_states: torch.Tensor,
-        prompt_lens: torch.Tensor,
+        pooling_cursor: PoolingCursor,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
-        first_token_flat_indices = torch.zeros_like(prompt_lens)
-        first_token_flat_indices[1:] += torch.cumsum(prompt_lens, dim=0)[:-1]
-        return hidden_states[first_token_flat_indices]
+        assert not pooling_cursor.is_partial_prefill(), \
+            "partial prefill not supported with CLS pooling"
+
+        return hidden_states[pooling_cursor.first_token_indices_gpu]
 
 
 class LastPool(PoolingMethod):
@@ -330,20 +262,12 @@ class LastPool(PoolingMethod):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"encode", "embed", "classify", "score"}
 
-    def forward_one(
-        self,
-        hidden_states: torch.Tensor,
-        prompt_len: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        return hidden_states[-1]
-
     def forward_all(
         self,
         hidden_states: torch.Tensor,
-        prompt_lens: torch.Tensor,
+        pooling_cursor: PoolingCursor,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
-        last_token_flat_indices = torch.cumsum(prompt_lens, dim=0) - 1
-        return hidden_states[last_token_flat_indices]
+        return hidden_states[pooling_cursor.last_token_indices_gpu]
 
 
 class AllPool(PoolingMethod):
@@ -351,22 +275,19 @@ class AllPool(PoolingMethod):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"encode"}
 
-    def forward_one(
-        self,
-        hidden_states: torch.Tensor,
-        prompt_len: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        assert prompt_len is None or prompt_len == hidden_states.shape[0], \
-            "partial prefill not supported with ALL pooling"
-
-        return hidden_states
-
     def forward_all(
         self,
         hidden_states: torch.Tensor,
-        prompt_lens: torch.Tensor,
+        pooling_cursor: PoolingCursor,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
-        return list(hidden_states.split_with_sizes(prompt_lens.tolist()))
+
+        assert not pooling_cursor.is_partial_prefill(), \
+            "partial prefill not supported with ALL pooling"
+
+        hidden_states_lst = list(
+            hidden_states.split(
+                pooling_cursor.num_scheduled_tokens_cpu.tolist()))
+        return [hidden_states_lst[i] for i in pooling_cursor.index]
 
 
 class MeanPool(PoolingMethod):
@@ -374,31 +295,25 @@ class MeanPool(PoolingMethod):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"encode", "embed", "classify", "score"}
 
-    def forward_one(
-        self,
-        hidden_states: torch.Tensor,
-        prompt_len: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        assert prompt_len is None or prompt_len == hidden_states.shape[0], \
-            "partial prefill not supported with MEAN pooling"
-
-        return hidden_states.mean(dim=0, dtype=torch.float32)
-
     def forward_all(
         self,
         hidden_states: torch.Tensor,
-        prompt_lens: torch.Tensor,
+        pooling_cursor: PoolingCursor,
     ) -> Union[list[torch.Tensor], torch.Tensor]:
+
+        assert not pooling_cursor.is_partial_prefill(), \
+            "partial prefill not supported with MEAN pooling"
+
+        prompt_lens = pooling_cursor.prompt_lens_cpu.to(hidden_states.device,
+                                                        non_blocking=True)
+
         # Use float32 for torch.cumsum in MeanPool,
         # otherwise precision will be lost significantly.
         cumsum = torch.cumsum(hidden_states, dim=0, dtype=torch.float32)
 
-        start_indices = torch.cat([
-            torch.tensor([0], device=hidden_states.device),
-            torch.cumsum(prompt_lens[:-1], dim=0)
-        ])
-        end_indices = torch.cumsum(prompt_lens, dim=0)
-        return (cumsum[end_indices - 1] - cumsum[start_indices] +
+        start_indices = pooling_cursor.first_token_indices_gpu
+        end_indices = pooling_cursor.last_token_indices_gpu
+        return (cumsum[end_indices] - cumsum[start_indices] +
                 hidden_states[start_indices]) / prompt_lens.unsqueeze(1)
 
 
@@ -451,24 +366,37 @@ class PoolerNormalize(PoolerActivation):
         return x.to(pooled_data.dtype)
 
 
-class PoolerClassify(PoolerActivation):
+class PoolerMultiLabelClassify(PoolerActivation):
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        num_labels = pooled_data.shape[-1]
+        return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
+
+
+class PoolerClassify(PoolerActivation):
+
+    def __init__(self, *, static_num_labels: bool = True) -> None:
+        super().__init__()
+
+        if static_num_labels:
+            from vllm.config import get_current_vllm_config
+            vllm_config = get_current_vllm_config()
+            self.num_labels = getattr(vllm_config.model_config.hf_config,
+                                      "num_labels", 0)
+            if self.num_labels == 0:
+                logger.warning("num_labels should be > 0 for classification"
+                               "models, falling back to softmax. "
+                               "Please check if the configuration is correct.")
+        else:
+            self.num_labels = None
+
+    def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
+        num_labels = (self.num_labels if self.num_labels is not None else
+                      pooled_data.shape[-1])
+
         if num_labels < 2:
             return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
 
         return F.softmax(pooled_data.float(), dim=-1).to(pooled_data.dtype)
-
-
-class PoolerScore(PoolerActivation):
-
-    def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        num_labels = pooled_data.shape[-1]
-        if num_labels < 2:
-            return F.sigmoid(pooled_data.float()).to(pooled_data.dtype)
-
-        return pooled_data
 
 
 class LambdaPoolerActivation(PoolerActivation):
@@ -484,49 +412,54 @@ class LambdaPoolerActivation(PoolerActivation):
 
 class PoolerHead(nn.Module):
 
-    @classmethod
-    def from_config(cls, pooler_config: ResolvedPoolingConfig) -> "PoolerHead":
-        if pooler_config.normalize and pooler_config.softmax:
-            raise ValueError("`normalize=True` and `softmax=True` should not "
-                             "be set together")
-
-        activation: PoolerActivation
-        if pooler_config.normalize:
-            activation = PoolerNormalize()
-        elif pooler_config.softmax:
-            activation = PoolerClassify()
-        else:
-            activation = PoolerIdentity()
-
-        return cls(activation)
-
     def __init__(self, activation: PoolerActivation) -> None:
         super().__init__()
-
         self.activation = activation
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
 
-        # Using float32 in PoolerHead
+        return self.activation(pooled_data)
+
+
+class EmbeddingPoolerHead(PoolerHead):
+
+    def __init__(self) -> None:
+        super().__init__(activation=PoolerNormalize())
+
+        # Load ST projector if available
+        from vllm.config import get_current_vllm_config
+        from vllm.model_executor.models.adapters import _load_st_projector
+
+        vllm_config = get_current_vllm_config()
+        self.projector = _load_st_projector(
+            vllm_config.model_config) if vllm_config else None
+
+    def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
+                pooling_metadata: PoolingMetadata):
+
         if isinstance(pooled_data, list):
-            for i in range(len(pooled_data)):
-                pooled_data[i] = pooled_data[i].to(torch.float32)
-        else:
-            pooled_data = pooled_data.to(torch.float32)
+            pooled_data = torch.stack(pooled_data)
+        # pooled_data shape: [batchsize, hidden_dimension]
+
+        # Apply ST projector
+        if self.projector is not None:
+            projector = cast(nn.Module, self.projector)
+
+            def _proj(x: torch.Tensor) -> torch.Tensor:
+                orig_dtype = x.dtype
+                y = projector(x.to(torch.float32))
+                return y.to(orig_dtype)
+
+            pooled_data = _proj(pooled_data)
+        # pooled_data shape: [batchsize, embedding_dimension]
+
+        pooling_params = get_pooling_params(pooling_metadata)
 
         # for matryoshka representation
-        if isinstance(pooling_metadata, V0PoolingMetadata):
-            dimensions_list = [
-                pooling_param.dimensions
-                for _, pooling_param in pooling_metadata.seq_groups
-            ]
-        else:
-            assert isinstance(pooled_data, list)
-            dimensions_list = [
-                pooling_param.dimensions
-                for pooling_param in pooling_metadata.pooling_params
-            ]
+        dimensions_list = [
+            pooling_param.dimensions for pooling_param in pooling_params
+        ]
         if any(d is not None for d in dimensions_list):
             # change the output dimension
             assert len(pooled_data) == len(dimensions_list)
@@ -541,7 +474,42 @@ class PoolerHead(nn.Module):
                     for vecs, d in zip(pooled_data, dimensions_list)
                 ]
 
-        return self.activation(pooled_data)
+        # for normalize
+        flags = [p.normalize for p in pooling_params]
+        if len(set(flags)) == 1:
+            if flags[0]:
+                pooled_data = self.activation(pooled_data)
+        else:
+            pooled_data = [
+                self.activation(vecs) if f else vecs
+                for vecs, f in zip(pooled_data, flags)
+            ]
+
+        # pooled_data shape: [batchsize, embedding_dimension]
+        return pooled_data
+
+
+class RewardPoolerHead(PoolerHead):
+
+    def __init__(self) -> None:
+        super().__init__(activation=PoolerClassify(static_num_labels=False))
+
+    def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
+                pooling_metadata: PoolingMetadata):
+        pooling_params = get_pooling_params(pooling_metadata)
+
+        # for softmax
+        flags = [p.softmax for p in pooling_params]
+        if len(set(flags)) == 1:
+            if flags[0]:
+                pooled_data = self.activation(pooled_data)
+        else:
+            pooled_data = [
+                self.activation(vecs) if f else vecs
+                for vecs, f in zip(pooled_data, flags)
+            ]
+
+        return pooled_data
 
 
 class SimplePooler(Pooler):
@@ -559,8 +527,12 @@ class SimplePooler(Pooler):
         pooler_config: ResolvedPoolingConfig,
     ) -> "SimplePooler":
         pooling = PoolingMethod.from_pooling_type(pooler_config.pooling_type)
-        head = PoolerHead.from_config(pooler_config)
-
+        if pooler_config.task == "embed":
+            head = EmbeddingPoolerHead()
+        elif pooler_config.task == "encode":
+            head = RewardPoolerHead()
+        else:
+            raise NotImplementedError(f"Unknown task: {pooler_config.task}")
         return cls(pooling, head)
 
     def __init__(self, pooling: PoolingMethod, head: PoolerHead) -> None:
@@ -587,29 +559,11 @@ class SimplePooler(Pooler):
 
 class StepPooler(Pooler):
 
-    @classmethod
-    def from_config(cls, pooler_config: ResolvedPoolingConfig) -> "StepPooler":
-        assert pooler_config.pooling_type == PoolingType.STEP
-
-        return cls(
-            PoolerHead.from_config(pooler_config),
-            step_tag_id=pooler_config.step_tag_id,
-            returned_token_ids=pooler_config.returned_token_ids,
-        )
-
-    def __init__(
-        self,
-        head: PoolerHead,
-        *,
-        step_tag_id: Optional[int] = None,
-        returned_token_ids: Optional[list[int]] = None,
-    ) -> None:
+    def __init__(self, ) -> None:
         super().__init__()
 
         self.pooling = AllPool()
-        self.head = head
-        self.step_tag_id = step_tag_id
-        self.returned_token_ids = returned_token_ids
+        self.head = RewardPoolerHead()
 
     def extract_states(
         self,
@@ -620,10 +574,15 @@ class StepPooler(Pooler):
         prompt_token_ids = get_prompt_token_ids(pooling_metadata)
 
         pooled_data = list[torch.Tensor]()
-        returned_token_ids = self.returned_token_ids
-        step_tag_id = self.step_tag_id
 
-        for data, token_id in zip(pooled_data_lst, prompt_token_ids):
+        pooling_params = get_pooling_params(pooling_metadata)
+
+        for data, token_id, pooling_param in zip(pooled_data_lst,
+                                                 prompt_token_ids,
+                                                 pooling_params):
+            step_tag_id = pooling_param.step_tag_id
+            returned_token_ids = pooling_param.returned_token_ids
+
             if returned_token_ids is not None and len(returned_token_ids) > 0:
                 data = data[:, returned_token_ids]
 
@@ -669,14 +628,14 @@ class ClassifierPooler(Pooler):
     def __init__(
         self,
         pooling: PoolingFn,
-        classifier: ClassifierFn,
-        act_fn: PoolerActivation,
+        classifier: Optional[ClassifierFn],
+        act_fn: Optional[PoolerActivation] = None,
     ) -> None:
         super().__init__()
 
         self.pooling = pooling
         self.classifier = classifier
-        self.act_fn = act_fn
+        self.act_fn = act_fn or PoolerClassify()
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"classify", "score"}
@@ -687,17 +646,26 @@ class ClassifierPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
+        if isinstance(pooled_data, list):
+            pooled_data = torch.stack(pooled_data)
+        # pooled_data shape: [batchsize, hidden_size]
 
-        # apply classifier once on the full batch if possible
-        if isinstance(pooled_data, torch.Tensor):
-            pooled_output = self.classifier(pooled_data)
-        elif len({data.shape for data in pooled_data}) <= 1:
-            pooled_output = self.classifier(torch.stack(pooled_data))
+        if self.classifier is not None:
+            pooled_data = self.classifier(pooled_data)
+        # pooled_data shape: [batchsize, num_labels]
+
+        pooling_params = get_pooling_params(pooling_metadata)
+        flags = [p.activation for p in pooling_params]
+
+        if len(set(flags)) == 1:
+            scores = self.act_fn(pooled_data) if flags[0] else pooled_data
         else:
-            pooled_output = [self.classifier(data) for data in pooled_data]
+            scores = [
+                self.act_fn(vecs) if f else vecs
+                for vecs, f in zip(pooled_data, flags)
+            ]
 
-        scores = self.act_fn(pooled_output)
-
+        # scores shape: [batchsize, num_labels]
         return build_output(scores)
 
 
@@ -728,12 +696,6 @@ class DispatchPooler(Pooler):
     ) -> PoolerOutput:
         poolers_by_task = self.poolers_by_task
 
-        if isinstance(hidden_states, list):
-            hidden_states_lst = hidden_states
-        else:
-            prompt_lens = get_prompt_lens(hidden_states, pooling_metadata)
-            hidden_states_lst = list(hidden_states.split(prompt_lens.tolist()))
-
         outputs = list[PoolingSequenceGroupOutput]()
         offset = 0
         for task, group in groupby(get_tasks(pooling_metadata)):
@@ -744,7 +706,7 @@ class DispatchPooler(Pooler):
 
             num_items = len(list(group))
             group_output: PoolerOutput = pooler(
-                hidden_states_lst[offset:offset + num_items],
+                hidden_states,
                 pooling_metadata[offset:offset + num_items],
             )
 

@@ -60,3 +60,13 @@ struct enable_sm100_only : Kernel {
 #endif
   }
 };
+
+template <typename Kernel>
+struct enable_sm120_only : Kernel {
+  template <typename... Args>
+  CUTLASS_DEVICE void operator()(Args&&... args) {
+#if defined __CUDA_ARCH__ && __CUDA_ARCH__ == 1200
+    Kernel::operator()(std::forward<Args>(args)...);
+#endif
+  }
+};

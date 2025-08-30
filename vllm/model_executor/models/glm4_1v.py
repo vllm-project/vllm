@@ -37,8 +37,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers import BatchFeature
-from transformers.models.glm4v.configuration_glm4v import (Glm4vConfig,
-                                                           Glm4vVisionConfig)
+from transformers.models.glm4v.configuration_glm4v import Glm4vVisionConfig
 from transformers.models.glm4v.image_processing_glm4v import (
     Glm4vImageProcessor, smart_resize)
 from transformers.models.glm4v.video_processing_glm4v import (
@@ -60,7 +59,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, VideoItem)
+                                    MultiModalKwargsItems, VideoItem)
 from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -75,7 +74,8 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from ..layers.activation import SiluAndMul
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
-from .qwen2_vl import _qwen2vl_field_config, apply_rotary_pos_emb_vision
+from .qwen2_vl import (_create_qwen2vl_field_factory,
+                       apply_rotary_pos_emb_vision)
 from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -127,7 +127,7 @@ class Glm4vVideoPixelInputs(TensorSchema):
         - ctpp: Number of channels * temporal_patch_size *
             patch_size * patch_size
         - f: Number of frames
-        - g: Grid dimensions (3 for grid_t which is usually 1 for processed 
+        - g: Grid dimensions (3 for grid_t which is usually 1 for processed
           video, grid_h, grid_w)
     """
     type: Literal["pixel_values_videos"] = "pixel_values_videos"
@@ -142,7 +142,7 @@ class Glm4vVideoEmbeddingInputs(TensorSchema):
         - p: Number of video patches across all frames
         - h: Hidden size (must match language model backbone)
         - f: Number of frames
-        - g: Grid dimensions (3 for grid_t which is usually 1 for processed 
+        - g: Grid dimensions (3 for grid_t which is usually 1 for processed
           video, grid_h, grid_w)
     """
     type: Literal["video_embeds"] = "video_embeds"
@@ -235,7 +235,8 @@ class Glm4vVisionAttention(nn.Module):
             total_num_kv_heads=num_heads,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.qkv",
+            # Change qkv prefix to align with GLM-4.5V-FP8 quantization config
+            prefix=f"{prefix}.qkv_proj" if quant_config else f"{prefix}.qkv",
         )
         self.proj = RowParallelLinear(
             input_size=projection_size,
@@ -454,25 +455,30 @@ class Glm4vPatchMerger(nn.Module):
         context_dim: int,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = d_model
         self.proj = ColumnParallelLinear(self.hidden_size,
                                          self.hidden_size,
                                          bias=bias,
-                                         gather_output=True)
+                                         gather_output=True,
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.proj")
         self.post_projection_norm = nn.LayerNorm(self.hidden_size)
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=self.hidden_size,
             output_sizes=[context_dim] * 2,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
             context_dim,
             self.hidden_size,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
         self.act_fn = SiluAndMul()
         self.extra_activation_func = nn.GELU()
@@ -662,6 +668,7 @@ class Glm4vVisionTransformer(nn.Module):
             context_dim=vision_config.intermediate_size,
             quant_config=quant_config,
             bias=False,
+            prefix=f"{prefix}.merger",
         )
         self.embeddings = Glm4vVisionEmbeddings(vision_config)
 
@@ -801,7 +808,7 @@ class Glm4vVisionTransformer(nn.Module):
 class Glm4vProcessingInfo(BaseProcessingInfo):
 
     def get_hf_config(self):
-        return self.ctx.get_hf_config(Glm4vConfig)
+        return self.ctx.get_hf_config()
 
     def get_tokenizer(self):
         return self.ctx.tokenizer
@@ -809,11 +816,11 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": 1}
 
-    def get_image_processor(self) -> Glm4vImageProcessor:
-        return self.get_hf_processor().image_processor
+    def get_image_processor(self, **kwargs: object) -> Glm4vImageProcessor:
+        return self.get_hf_processor(**kwargs).image_processor
 
-    def get_video_processor(self) -> Glm4vVideoProcessor:
-        return self.get_hf_processor().video_processor
+    def get_video_processor(self, **kwargs: object) -> Glm4vVideoProcessor:
+        return self.get_hf_processor(**kwargs).video_processor
 
     def _get_vision_info(
         self,
@@ -937,7 +944,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
                               total_frames: int) -> list[int]:
         video_processor = self.get_video_processor()
 
-        video_fps = metadata.get("fps", 2.0)
+        video_fps = metadata.get("fps", video_processor.fps)
         meta_frames = metadata.get("total_num_frames", total_frames)
         max_frame_idx = meta_frames - 1
         duration = metadata.get("duration",
@@ -1120,11 +1127,7 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     video_placeholder,
                 )
 
-                grid_t = len(video_outputs["video_grid_thw"])
-                _, grid_h, grid_w = video_outputs["video_grid_thw"][0]
-                grid_thw = torch.tensor([[grid_t, grid_h, grid_w]])
-
-                video_grid_thw_lst.append(grid_thw)
+                video_grid_thw_lst.append(video_outputs["video_grid_thw"])
                 pixel_values_videos_lst.append(
                     video_outputs["pixel_values_videos"])
             video_outputs = dict(
@@ -1151,13 +1154,15 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return _qwen2vl_field_config(hf_inputs)
+        return _create_qwen2vl_field_factory(
+            self.info.get_hf_config().vision_config.spatial_merge_size)(
+                hf_inputs)
 
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(
@@ -1174,14 +1179,16 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
         merge_length = image_processor.merge_size**2
 
         def get_image_replacement_glm4v(item_idx: int):
-            grid_thw = out_mm_kwargs["image_grid_thw"][item_idx]
+            out_item = out_mm_kwargs["image"][item_idx]
+            grid_thw = out_item["image_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
 
             num_tokens = int(grid_thw.prod()) // merge_length
             return [hf_processor.image_token_id] * num_tokens
 
         def get_video_replacement_glm4v(item_idx: int):
-            grid_thw = out_mm_kwargs["video_grid_thw"][item_idx]
+            out_item = out_mm_kwargs["video"][item_idx]
+            grid_thw = out_item["video_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
 
             video, metadata = mm_items["video"][item_idx]
@@ -1232,10 +1239,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             "k_proj",
             "v_proj",
         ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "gate_up_proj": ["gate_up_proj"]
     }
 
     # To ensure correct weight loading and mapping.
@@ -1257,7 +1261,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config: Glm4vConfig = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
@@ -1271,11 +1275,18 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             prefix=maybe_prefix(prefix, "visual"),
         )
 
+        if config.model_type == "glm4v":
+            architectures = ["Glm4ForCausalLM"]
+        elif config.model_type == "glm4v_moe":
+            architectures = ["Glm4MoeForCausalLM"]
+        else:
+            architectures = None
+
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, ""),
-            architectures=["Glm4ForCausalLM"],
-        )
+            hf_config=config.text_config,
+            prefix=maybe_prefix(prefix, "language_model"),
+            architectures=architectures)
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
@@ -1565,7 +1576,26 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
         Get the module prefix in multimodal models
         """
         return MultiModelKeys.from_string_field(
-            language_model="language_model",
+            language_model="language_model.model",
             connector="visual.merger.",
             tower_model="visual.",
         )
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    Glm4vMultiModalProcessor,
+    info=Glm4vProcessingInfo,
+    dummy_inputs=Glm4vDummyInputsBuilder,
+)
+class Glm4vMoeForConditionalGeneration(Glm4vForConditionalGeneration):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }

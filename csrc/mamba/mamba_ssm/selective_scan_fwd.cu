@@ -132,8 +132,10 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     input_t *Bvar = reinterpret_cast<input_t *>(params.B_ptr) + sequence_start_index * params.B_batch_stride + group_id * params.B_group_stride;
     weight_t *C = reinterpret_cast<weight_t *>(params.C_ptr) + dim_id * kNRows * params.C_d_stride;
     input_t *Cvar = reinterpret_cast<input_t *>(params.C_ptr) + sequence_start_index * params.C_batch_stride + group_id * params.C_group_stride;
-    input_t *ssm_states = reinterpret_cast<input_t *>(params.ssm_states_ptr) + (cache_index * params.dim + dim_id * kNRows) * params.dstate;
-
+    input_t *ssm_states = reinterpret_cast<input_t *>(params.ssm_states_ptr) + 
+    cache_index * params.ssm_states_batch_stride + 
+    dim_id * kNRows * params.ssm_states_dim_stride;
+    
     float D_val[kNRows] = {0};
     if (params.D_ptr != nullptr) {
         #pragma unroll
@@ -248,7 +250,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 }
                 // Initialize running total
 
-                scan_t running_prefix = chunk > 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float2(1.0, has_initial_state ? float(ssm_states[state_idx]): 0.0);
+                scan_t running_prefix = chunk > 0 ? smem_running_prefix[state_idx + r * MAX_DSTATE] : make_float2(1.0, has_initial_state ? float(ssm_states[state_idx * params.ssm_states_dstate_stride]): 0.0);
 
                 SSMScanPrefixCallbackOp<weight_t> prefix_op(running_prefix);
                 typename Ktraits::BlockScanT(smem_scan).InclusiveScan(
@@ -259,7 +261,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 if (threadIdx.x == 0) {
                     smem_running_prefix[state_idx] = prefix_op.running_prefix;
                     if (chunk == n_chunks - 1) {
-                        ssm_states[state_idx] = input_t(prefix_op.running_prefix.y);
+                        ssm_states[state_idx * params.ssm_states_dstate_stride] = input_t(prefix_op.running_prefix.y);
                     }
                 }
                 #pragma unroll
@@ -481,6 +483,10 @@ void set_ssm_params_fwd(SSMParamsBase &params,
         params.out_batch_stride = out.stride(1);
         params.out_d_stride = out.stride(0);
 
+        params.ssm_states_batch_stride = ssm_states.stride(0);
+        params.ssm_states_dim_stride = ssm_states.stride(1);  
+        params.ssm_states_dstate_stride = ssm_states.stride(2);
+
     }
     else{
         if (!is_variable_B) {
@@ -509,6 +515,10 @@ void set_ssm_params_fwd(SSMParamsBase &params,
         }
         params.out_batch_stride = out.stride(0);
         params.out_d_stride = out.stride(1);
+        
+        params.ssm_states_batch_stride = ssm_states.stride(0);
+        params.ssm_states_dim_stride = ssm_states.stride(1);  
+        params.ssm_states_dstate_stride = ssm_states.stride(2);
     }
 }
 

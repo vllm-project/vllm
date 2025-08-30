@@ -178,7 +178,6 @@ main() {
         --max-num-seqs 256 \
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
-        --disable-log-request \
         --kv-transfer-config \
         "{\"kv_connector\":\"P2pNcclConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_size\":\"1e1\",\"kv_port\":\"$kv_port\",\"kv_connector_extra_config\":{\"proxy_ip\":\"0.0.0.0\",\"proxy_port\":\"$PROXY_PORT\",\"http_port\":\"$port\",\"send_type\":\"PUT_ASYNC\",\"nccl_num_channels\":\"16\"}}" > prefill$((i+1)).log 2>&1 &
         PIDS+=($!)
@@ -207,7 +206,6 @@ main() {
         --max-num-seqs 256 \
         --trust-remote-code \
         --gpu-memory-utilization 0.7 \
-        --disable-log-request \
         --kv-transfer-config \
         "{\"kv_connector\":\"P2pNcclConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_size\":\"8e9\",\"kv_port\":\"$kv_port\",\"kv_connector_extra_config\":{\"proxy_ip\":\"0.0.0.0\",\"proxy_port\":\"$PROXY_PORT\",\"http_port\":\"$port\",\"send_type\":\"PUT_ASYNC\",\"nccl_num_channels\":\"16\"}}" > decode$((i+1)).log 2>&1 &
         PIDS+=($!)
