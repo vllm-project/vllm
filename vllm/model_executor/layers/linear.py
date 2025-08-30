@@ -433,14 +433,18 @@ class MergedReplicatedLinear(ReplicatedLinear):
                 block_n)
             shard_size = ((self.output_sizes[loaded_shard_id] + block_n - 1) //
                           block_n)
-        elif isinstance(param, PerTensorScaleParameter):
-            shard_offset = loaded_shard_id
-            shard_size = 1
         else:
             shard_offset = sum(self.output_sizes[:loaded_shard_id])
             shard_size = self.output_sizes[loaded_shard_id]
 
-        param.data[shard_offset:shard_offset + shard_size] = loaded_weight
+        if isinstance(param, BasevLLMParameter):
+            param.load_merged_column_weight(loaded_weight=loaded_weight,
+                                            shard_id=loaded_shard_id,
+                                            shard_offset=shard_offset,
+                                            shard_size=shard_size,
+                                            tp_rank=0)
+        else:
+            param.data[shard_offset:shard_offset + shard_size] = loaded_weight
 
 
 @CustomOp.register("column_parallel_linear")
