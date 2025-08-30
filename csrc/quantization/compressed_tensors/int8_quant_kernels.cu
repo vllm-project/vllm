@@ -10,7 +10,7 @@
 #include "../../dispatch_utils.h"
 #include "../vectorization_utils.cuh"
 
-#include "../../cuda_compact.h"
+#include "../../cuda_compat.h"
 
 #ifndef USE_ROCM
   #include <cub/cub.cuh>
