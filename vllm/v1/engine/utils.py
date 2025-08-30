@@ -320,9 +320,13 @@ class CoreEngineActorManager:
         logger.info("Creating placement groups for data parallel")
         dp_master_ip = \
             vllm_config.parallel_config.data_parallel_master_ip
-        num_pg_to_create = vllm_config.parallel_config.data_parallel_size
-        local_engine_count = \
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        dp_size_local = \
             vllm_config.parallel_config.data_parallel_size_local
+        if dp_size % dp_size_local != 0:
+            raise ValueError(
+                f"Data parallel size {dp_size} must be divisible by "
+                f"local data parallel size {dp_size_local}")
 
         nodes = sorted(list_nodes(filters=[("state", "=", "ALIVE")]),
                        key=lambda node: node.node_ip != dp_master_ip)
@@ -337,6 +341,8 @@ class CoreEngineActorManager:
         local_dp_ranks: list[int] = []
 
         for node in nodes:
+            if len(placement_groups) == dp_size:
+                break
             node_ip = node.node_ip
             node_resources = available_resources[node.node_id]
             if "GPU" not in node_resources:
@@ -344,44 +350,40 @@ class CoreEngineActorManager:
             # For now, each DP rank can only be assigned to one node
             # TODO(rui): support allocating a single DP rank
             # to multiple nodes
-            available_engine_count = int(node_resources["GPU"]) // world_size
-            if node_ip == dp_master_ip:
-                assert available_engine_count >= local_engine_count, (
-                    "Not enough resources to allocate DP ranks "
-                    f"on DP master node {node_ip}")
-                for i in range(local_engine_count):
-                    bundles = [{
-                        "GPU": 1.0,
-                        "node:" + dp_master_ip: 0.001
-                    }] * world_size + [{
-                        "CPU": 1.0
-                    }]
-                    pg = ray.util.placement_group(
-                        name=f"dp_rank_{len(placement_groups)}",
-                        strategy="STRICT_PACK",
-                        bundles=bundles,
-                    )
-                    placement_groups.append(pg)
-                    local_dp_ranks.append(i)
-            else:
-                for i in range(available_engine_count):
-                    if len(placement_groups) == num_pg_to_create:
-                        break
-                    bundles = [{"GPU": 1.0}] * world_size + [{"CPU": 1.0}]
-                    pg = ray.util.placement_group(
-                        name=f"dp_rank_{len(placement_groups)}",
-                        strategy="STRICT_PACK",
-                        bundles=bundles,
-                    )
-                    placement_groups.append(pg)
-                    local_dp_ranks.append(i)
-        if len(placement_groups) < num_pg_to_create:
-            raise ValueError(
-                f"Not enough resources to allocate {num_pg_to_create} "
-                "placement groups, only created "
-                f"{len(placement_groups)} placement groups. "
-                "Available resources: "
-                f"{available_resources}")
+            dp_size_available = int(node_resources["GPU"]) // world_size
+            if dp_size_available < dp_size_local:
+                if node_ip == dp_master_ip:
+                    raise ValueError(
+                        "Not enough resources to allocate DP ranks "
+                        f"on DP master node {node_ip}")
+                else:
+                    logger.info(
+                        "Skipping node %s as %s DP ranks could not fit, "
+                        "possible to fit: %s", node_ip, dp_size_local,
+                        dp_size_available)
+                    continue
+
+            for i in range(dp_size_local):
+                bundles = [{
+                    "GPU": 1.0,
+                    "node:" + node_ip: 0.001
+                }] * world_size + [{
+                    "CPU": 1.0
+                }]
+                pg = ray.util.placement_group(
+                    name=f"dp_rank_{len(placement_groups)}",
+                    strategy="STRICT_PACK",
+                    bundles=bundles,
+                )
+                placement_groups.append(pg)
+                local_dp_ranks.append(i)
+
+        if len(placement_groups) < dp_size:
+            raise ValueError(f"Not enough resources to allocate {dp_size} "
+                             "placement groups, only created "
+                             f"{len(placement_groups)} placement groups. "
+                             "Available resources: "
+                             f"{available_resources}")
         return placement_groups, local_dp_ranks
 
     @staticmethod
