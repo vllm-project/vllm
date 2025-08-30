@@ -26,10 +26,12 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
-import time
+import threading
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
-from typing import Optional, Union
+from queue import Empty, Queue
+from typing import Any, Callable, Optional, Union
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -45,6 +47,178 @@ from .rebalance_algo import rebalance_experts
 from .rebalance_execute import rearrange_expert_weights_inplace
 
 logger = init_logger(__name__)
+
+
+class EPLBThread:
+    """
+    Encapsulates lifecycle management for asynchronous expert
+    rearrangement threads
+    """
+
+    def __init__(self, target_func: Callable, num_wait_worker_iterations: int):
+        """
+        Initialize asynchronous thread manager
+        Args:
+            target_func: Target function to execute in asynchronous thread
+                (e.g., rebalance_experts)
+            num_wait_worker_iterations: Number of steps to wait before
+                checking results
+        """
+        self.target_func = target_func
+        self._num_wait_worker_iterations = num_wait_worker_iterations
+
+        # Thread management related
+        self._thread: Optional[threading.Thread] = None
+        self._input_queue: Optional[Queue] = None
+        self._result_queue: Optional[Queue] = None
+        self._exception_queue: Optional[Queue] = None
+        self._step_counter = 0
+        self._result: Optional[tuple] = None
+        self._args: Optional[tuple] = None
+        self._is_running = False
+
+        # Save parameters needed for post-processing
+        self._post_process_args: Optional[dict[str, Any]] = None
+
+    def start(self, args: tuple, post_process_args: dict[str, Any]) -> bool:
+        """
+        Start asynchronous thread
+        Args:
+            args: Tuple of arguments to pass to the target function
+            post_process_args: Parameters needed for subsequent
+                processing (e.g., model, ep_group)
+        Returns:
+            True if thread started successfully, False otherwise
+        """
+        # Ensure previous thread is cleaned up
+        self.cleanup()
+
+        try:
+            # Initialize queues
+            self._input_queue = Queue()
+            self._result_queue = Queue()
+            self._exception_queue = Queue()
+            self._step_counter = 0
+            self._result = None
+            self._args = args
+            self._post_process_args = post_process_args
+
+            # Put arguments and start thread
+            self._input_queue.put(args)
+            self._thread = threading.Thread(target=self._worker,
+                                            args=(self._input_queue,
+                                                  self._result_queue,
+                                                  self._exception_queue),
+                                            daemon=True)
+            self._thread.start()
+            self._is_running = True
+            return True
+        except Exception as e:
+            logger.error("Failed to start asynchronous thread: %s", str(e))
+            self.cleanup()
+            return False
+
+    def _worker(self, input_queue: Queue, output_queue: Queue,
+                exception_queue: Queue) -> None:
+        """Subthread worker function"""
+        try:
+            # Get arguments
+            args = input_queue.get()
+
+            # Execute target function
+            result = self.target_func(*args)
+            output_queue.put(result)
+        except Exception as e:
+            output_queue.put(None)
+            if hasattr(e, "add_note"):
+                import traceback
+                e.add_note(traceback.format_exc())
+            exception_queue.put(e)
+            logger.exception("Asynchronous thread execution failed")
+
+    def step(self) -> bool:
+        """
+        Increment step counter and check if results need processing
+        Returns:
+            Whether results have been processed
+        """
+        if not self._is_running:
+            return False
+
+        self._step_counter += 1
+
+        # Check for exceptions first
+        if self._exception_queue and not self._exception_queue.empty():
+            try:
+                error_msg = self._exception_queue.get_nowait()
+                self.cleanup()
+                raise RuntimeError(f"Asynchronous thread failed: {error_msg}")
+            except Empty:
+                pass
+
+        # Check if processing conditions are met
+        if self._should_process():
+            self._fetch_result()
+            self.cleanup()
+            return True
+
+        return False
+
+    def _should_process(self) -> bool:
+        """Determine if results need processing"""
+        if not self._thread or not self._result_queue:
+            return True
+
+        return (self._step_counter >= self._num_wait_worker_iterations
+                or not self._thread.is_alive()
+                or not self._result_queue.empty())
+
+    def _fetch_result(self) -> None:
+        """Retrieve subthread results"""
+        if self._result_queue and not self._result_queue.empty():
+            try:
+                self._result = self._result_queue.get_nowait()
+            except Empty:
+                self._result = None
+        else:
+            self._result = None
+            logger.warning(
+                "Asynchronous thread completed but no result was returned")
+
+    def cleanup(self) -> None:
+        """Clean up thread resources"""
+        # Threads can't be terminated, so we just mark it as not running
+        self._is_running = False
+        self._thread = None
+
+        # Clear queues
+        for q in (self._input_queue, self._result_queue,
+                  self._exception_queue):
+            if q:
+                with suppress(Empty):
+                    while not q.empty():
+                        q.get_nowait()
+
+        self._input_queue = None
+        self._result_queue = None
+        self._exception_queue = None
+
+    @property
+    def is_running(self) -> bool:
+        """Return whether the thread is running"""
+        if not self._is_running or self._thread is None:
+            return False
+        return self._thread.is_alive()
+
+    @property
+    def result(self) -> Optional[tuple]:
+        """Return processing results"""
+        return self._result
+
+    @property
+    def post_process_args(self) -> Optional[dict[str, Any]]:
+        """Return post-processing arguments"""
+        return self._post_process_args
 
 
 @dataclass
@@ -155,6 +329,16 @@ class EplbState:
     """
     Interval for expert rearrangement steps.
     This is a constant and is taken from the config.
+    """
+
+    num_wait_worker_iterations: int = 0
+    """
+    Number of iterations to wait before applying a redistribution plan
+    """
+
+    _async_processor: Optional[EPLBThread] = None
+    """  
+    Asynchronous thread manager  
     """
 
     @staticmethod
@@ -324,7 +508,15 @@ class EplbState:
             expert_load_window_size=expert_load_window_size,
             expert_rearrangement_step=expert_rearrangement_step,
             expert_rearrangement_step_interval=eplb_step_interval,
+            num_wait_worker_iterations=parallel_config.eplb_config.
+            num_wait_worker_iterations,
         )
+
+    def __post_init__(self):
+        # Initialize asynchronous thread manager
+        self._async_processor = EPLBThread(
+            target_func=rebalance_experts,
+            num_wait_worker_iterations=self.num_wait_worker_iterations)
 
     def step(self,
              model: MixtureOfExperts,
@@ -409,6 +601,16 @@ class EplbState:
             self.expert_rearrangement_step = 0
             self.rearrange(model)
 
+        if self._async_processor:
+            try:
+                if self._async_processor.step():
+                    # Process results
+                    self._process_async_result()
+            except Exception as e:
+                logger.error("Error processing async rebalance results: {}",
+                             str(e))
+                self._async_processor.cleanup()
+
     def rearrange(self,
                   model: MixtureOfExperts,
                   is_profile: bool = False,
@@ -420,15 +622,6 @@ class EplbState:
         """
 
         ep_group = get_ep_group().device_group
-        ep_rank = ep_group.rank()
-
-        time_start = None
-        is_main_rank = ep_rank == 0
-        if is_main_rank:
-            torch.cuda.synchronize()
-            time_start = time.perf_counter()
-            logger.info("Rearranging experts %s...",
-                        "(profile)" if is_profile else "")
 
         if global_expert_load is None:
             # Map the physical expert load to global logical experts
@@ -498,18 +691,77 @@ class EplbState:
                 "not using hierarchical rearrangement algorithm.\n"
                 f"{num_gpus=}, {num_nodes=}")
 
-        # Get new expert mappings
-        (
-            new_physical_to_logical_map,
-            new_logical_to_physical_map,
-            new_logical_replica_count,
-        ) = (rebalance_experts(
-            global_expert_load_window,
+        # Prepare async execution parameters
+        input_args = (
+            global_expert_load_window.cpu(),
             num_replicas,
             num_groups,
             num_nodes,
             num_gpus,
-        ))
+        )
+
+        # Prepare post-processing parameters
+        post_process_args = {
+            "model": model,
+            "ep_group": ep_group,
+            "is_profile": is_profile,
+            "rank_mapping": rank_mapping,
+            "device": self.physical_to_logical_map.device
+        }
+
+        # Start asynchronous thread
+        if self._async_processor is None:
+            logger.error(
+                "Async processor is not initialized, cannot start thread")
+            return
+
+        if self._async_processor.is_running:
+            logger.info(
+                "EPLB async thread is already running, skipping new launch")
+            return
+
+        try:
+            success = self._async_processor.start(
+                args=input_args, post_process_args=post_process_args)
+        except Exception as e:
+            logger.error("Error starting async thread: %s", str(e))
+            success = False
+
+        if success:
+            logger.info_once(
+                "rebalance_experts has started in async thread, "
+                "will check results after maximum %s steps",
+                str(self.num_wait_worker_iterations))
+        else:
+            logger.error("Failed to start async rebalance thread")
+
+    def _process_async_result(self):
+        """Process asynchronously returned results"""
+        if not self._async_processor:
+            return
+
+        result = self._async_processor.result
+        post_args = self._async_processor.post_process_args
+
+        if not result or not post_args:
+            logger.error("Async thread did not return valid results, "
+                         "skipping post-processing")
+            return
+
+        # Parse parameters and results
+        model = post_args["model"]
+        ep_group = post_args["ep_group"]
+        is_profile = post_args["is_profile"]
+        rank_mapping = post_args["rank_mapping"]
+        device = post_args["device"]
+
+        (new_physical_to_logical_map, new_logical_to_physical_map,
+         new_logical_replica_count) = result
+
+        # Restore tensors to original device
+        new_physical_to_logical_map = new_physical_to_logical_map.to(device)
+        new_logical_to_physical_map = new_logical_to_physical_map.to(device)
+        new_logical_replica_count = new_logical_replica_count.to(device)
 
         # Update expert weights
         rearrange_expert_weights_inplace(
@@ -522,12 +774,13 @@ class EplbState:
         )
 
         if not is_profile:
+            # Update state mappings
             if self.physical_to_logical_map.shape[
                     1] != new_physical_to_logical_map.shape[1]:
-                self.physical_to_logical_map = new_physical_to_logical_map.to(
-                    self.physical_to_logical_map.device)
+                self.physical_to_logical_map = new_physical_to_logical_map
             else:
                 self.physical_to_logical_map.copy_(new_physical_to_logical_map)
+
             max_physical_slots = new_logical_to_physical_map.shape[-1]
             assert max_physical_slots <= self.logical_to_physical_map.shape[-1]
             new_logical_to_physical_map = torch.nn.functional.pad(
@@ -539,15 +792,8 @@ class EplbState:
             self.logical_to_physical_map.copy_(new_logical_to_physical_map)
             self.logical_replica_count.copy_(new_logical_replica_count)
 
-        if is_main_rank:
-            assert time_start is not None
-            torch.cuda.synchronize()
-            time_end = time.perf_counter()
-            logger.info(
-                "Rearranged experts%sin %.2f seconds.",
-                " (profile) " if is_profile else " ",
-                time_end - time_start,
-            )
+        logger.info_once("rearrange_expert_weights_inplace "
+                         "processing completed")
 
     @staticmethod
     def recv_state() -> tuple[torch.Tensor, torch.Tensor]:

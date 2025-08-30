@@ -56,6 +56,11 @@ class EPLBConfig:
     This is turned off by default since it will cause communication overhead.
     """
 
+    num_wait_worker_iterations: int = 30
+    """
+    Number of iterations to wait before applying a redistribution plan.
+    """
+
 
 @config
 @dataclass
