@@ -348,6 +348,22 @@ class InputPreprocessor:
     ) -> EmbedsInputs:
         return self._process_embeds(parsed_content)
 
+    def _truncate_inputs(
+            self,
+            inputs: list[int],
+            tokenization_kwargs: Optional[dict[str, Any]] = None) -> list[int]:
+
+        if not tokenization_kwargs or "truncation" not in \
+                tokenization_kwargs or self.tokenizer is None:
+            return inputs
+
+        max_length = tokenization_kwargs["max_length"]
+
+        if self.tokenizer.truncation_side == "left":
+            return inputs[-max_length:]
+        else:
+            return inputs[:max_length]
+
     def _process_tokens(
         self,
         parsed_content: TokensPrompt,
@@ -357,7 +373,8 @@ class InputPreprocessor:
         mm_hash_overrides: Optional[Union[dict[str, list[str]],
                                           MultiModalUUIDDict]] = None,
     ) -> Union[TokenInputs, MultiModalInputs]:
-        prompt_token_ids = parsed_content["prompt_token_ids"]
+        prompt_token_ids = self._truncate_inputs(
+            parsed_content["prompt_token_ids"], tokenization_kwargs)
 
         inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):
@@ -386,7 +403,8 @@ class InputPreprocessor:
         mm_hash_overrides: Optional[Union[dict[str, list[str]],
                                           MultiModalUUIDDict]] = None,
     ) -> Union[TokenInputs, MultiModalInputs]:
-        prompt_token_ids = parsed_content["prompt_token_ids"]
+        prompt_token_ids = self._truncate_inputs(
+            parsed_content["prompt_token_ids"], tokenization_kwargs)
 
         inputs: Union[TokenInputs, MultiModalInputs]
         if multi_modal_data := parsed_content.get("multi_modal_data"):

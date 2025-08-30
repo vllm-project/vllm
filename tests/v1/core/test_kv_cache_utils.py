@@ -601,8 +601,14 @@ def test_unify_kv_cache_configs():
     ]
 
     unify_kv_cache_configs(need_sort_kv_cache_config)
-    assert need_sort_kv_cache_config[0].num_blocks == 10
-    assert need_sort_kv_cache_config[1].num_blocks == 10
+    sorted_kv_cache_groups = [
+        KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+        KVCacheGroupSpec(["layer2"], new_kv_cache_spec(num_kv_heads=4)),
+    ]
+    assert (
+        need_sort_kv_cache_config[0].kv_cache_groups == sorted_kv_cache_groups)
+    assert (
+        need_sort_kv_cache_config[1].kv_cache_groups == sorted_kv_cache_groups)
 
     diff_kv_cache_config = [
         KVCacheConfig(
