@@ -4,6 +4,7 @@
 
 import asyncio
 import time
+from typing import Optional
 
 import aiohttp
 from tqdm.asyncio import tqdm
@@ -17,6 +18,7 @@ async def wait_for_endpoint(
     session: aiohttp.ClientSession,
     timeout_seconds: int = 600,
     retry_interval: int = 5,
+    pbar: Optional[tqdm] = None,
 ) -> RequestFuncOutput:
     """
     Wait for an endpoint to become available before starting benchmarks.
@@ -26,6 +28,7 @@ async def wait_for_endpoint(
         test_input: The RequestFuncInput to test with
         timeout_seconds: Maximum time to wait in seconds (default: 10 minutes)
         retry_interval: Time between retries in seconds (default: 5 seconds)
+        pbar: Optional external tqdm progress bar to update
         
     Returns:
         RequestFuncOutput: The successful response
@@ -35,38 +38,57 @@ async def wait_for_endpoint(
     """
     deadline = time.perf_counter() + timeout_seconds
     output = RequestFuncOutput(success=False)
-    print(f"Waiting for endpoint to become up in {timeout_seconds} seconds")
+    external_pbar = pbar is not None
     
-    with tqdm(
-        total=timeout_seconds, 
-        bar_format="{desc} |{bar}| {elapsed} elapsed, {remaining} remaining",
-        unit="s",
-    ) as pbar:
+    if not external_pbar:
+        print(f"Waiting for endpoint to become up in {timeout_seconds} seconds")
+    
+    # Use external pbar if provided, otherwise create internal one
+    if external_pbar:
+        internal_pbar = None
+    else:
+        internal_pbar = tqdm(
+            total=timeout_seconds, 
+            bar_format="{desc} |{bar}| {elapsed} elapsed, {remaining} remaining",
+            unit="s",
+        )
+        pbar = internal_pbar
 
+    try:
         while True:            
-            # update progress bar
-            remaining = deadline - time.perf_counter()
-            elapsed = timeout_seconds - remaining
-            update_amount = min(elapsed - pbar.n, timeout_seconds - pbar.n)
-            pbar.update(update_amount)
-            pbar.refresh()
-            if remaining <= 0:
-                pbar.close()
-                break
+            # update progress bar (only for internal progress bars with time-based updates)
+            if not external_pbar:
+                remaining = deadline - time.perf_counter()
+                elapsed = timeout_seconds - remaining
+                update_amount = min(elapsed - pbar.n, timeout_seconds - pbar.n)
+                pbar.update(update_amount)
+                pbar.refresh()
+                if remaining <= 0:
+                    break
 
             # ping the endpoint using request_func
             try:
                 output = await request_func(
                     request_func_input=test_input, session=session)
                 if output.success:
-                    pbar.close()
+                    # Update external pbar to indicate completion
+                    if external_pbar:
+                        pbar.update(1)
                     return output
             except aiohttp.ClientConnectorError:
                 pass
             
+            # Check timeout
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+                
             # retry after a delay
             sleep_duration = min(retry_interval, remaining)
             if sleep_duration > 0:
                 await asyncio.sleep(sleep_duration)
+    finally:
+        if internal_pbar:
+            internal_pbar.close()
     
     return output

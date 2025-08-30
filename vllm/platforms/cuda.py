@@ -14,8 +14,7 @@ from torch.distributed import PrefixStore, ProcessGroup
 from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
-# import custom ops, trigger op registration
-import vllm._C  # noqa
+
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import cuda_device_count_stateless, import_pynvml
@@ -26,6 +25,12 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
+
+# import custom ops, trigger op registration
+try:
+    import vllm._C  # noqa: F401
+except ImportError as e:
+    logger.warning("Failed to import from vllm._C with %r", e)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
