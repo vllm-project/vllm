@@ -192,20 +192,23 @@ class LiteWhisperAttention(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor):
         # Separate q, k, v projections
-        if hasattr(self.q_proj, 'forward'):
-            q = self.q_proj(hidden_states)
+        result = self.q_proj(hidden_states)
+        if isinstance(result, tuple):
+            q, _ = result
         else:
-            q, _ = self.q_proj(hidden_states)
+            q = result
             
-        if hasattr(self.k_proj, 'forward'):
-            k = self.k_proj(hidden_states)
+        result = self.k_proj(hidden_states)
+        if isinstance(result, tuple):
+            k, _ = result
         else:
-            k, _ = self.k_proj(hidden_states)
+            k = result
             
-        if hasattr(self.v_proj, 'forward'):
-            v = self.v_proj(hidden_states)
+        result = self.v_proj(hidden_states)
+        if isinstance(result, tuple):
+            v, _ = result
         else:
-            v, _ = self.v_proj(hidden_states)
+            v = result
 
         # Split for multi-head attention
         q = q.view(*q.shape[:-1], self.num_heads, self.head_dim)
@@ -214,10 +217,11 @@ class LiteWhisperAttention(nn.Module):
 
         attn_output = self.attn(q.flatten(-2), k.flatten(-2), v.flatten(-2))
 
-        if hasattr(self.out_proj, 'forward'):
-            output = self.out_proj(attn_output)
+        result = self.out_proj(attn_output)
+        if isinstance(result, tuple):
+            output, _ = result
         else:
-            output, _ = self.out_proj(attn_output)
+            output = result
 
         return output
 
@@ -327,15 +331,22 @@ class LiteWhisperMLP(nn.Module):
             )
 
     def forward(self, hidden_states: torch.Tensor):
-        if hasattr(self.fc1, 'forward'):
-            hidden_states = self.fc1(hidden_states)
+        # fc1 layer
+        result = self.fc1(hidden_states)
+        if isinstance(result, tuple):
+            hidden_states, _ = result
         else:
-            hidden_states, _ = self.fc1(hidden_states)
+            hidden_states = result
+            
         hidden_states = self.activation_fn(hidden_states)
-        if hasattr(self.fc2, 'forward'):
-            hidden_states = self.fc2(hidden_states)
+        
+        # fc2 layer  
+        result = self.fc2(hidden_states)
+        if isinstance(result, tuple):
+            hidden_states, _ = result
         else:
-            hidden_states, _ = self.fc2(hidden_states)
+            hidden_states = result
+            
         return hidden_states
 
 
@@ -448,12 +459,12 @@ class LiteWhisperModel(WhisperModel):
         loaded_params: set[str] = set()
         
         # Debug: Print a few parameter names to understand the structure
-        print("Sample model parameters:")
-        for i, (param_name, _) in enumerate(params_dict.items()):
-            if i < 20 or "proj_out" in param_name:  # Print first 20 and any proj_out
-                print(f"  {param_name}")
-            elif i == 20:
-                print(f"  ... and {len(params_dict) - 20} more")
+        # print("Sample model parameters:")
+        # for i, (param_name, _) in enumerate(params_dict.items()):
+        #     if i < 20 or "proj_out" in param_name:  # Print first 20 and any proj_out
+        #         print(f"  {param_name}")
+        #     elif i == 20:
+        #         print(f"  ... and {len(params_dict) - 20} more")
         
         # Check for proj_out specifically
         has_proj_out = "proj_out.weight" in params_dict or "model.proj_out.weight" in params_dict
@@ -528,7 +539,7 @@ class LiteWhisperModel(WhisperModel):
                                 weight_loader(param, loaded_weight, shard_id)
                                 loaded_params.add(name)
                                 loaded_params.add(vllm_name)  # Mark the actual param name as loaded
-                                print(f"  Loaded QKV: {name} -> {vllm_name} ({shard_id})")
+                                # print(f"  Loaded QKV: {name} -> {vllm_name} ({shard_id})")
                             else:
                                 print(f"  Warning: No weight_loader for stacked param: {vllm_name}")
                             processed = True
@@ -538,7 +549,8 @@ class LiteWhisperModel(WhisperModel):
                             processed = True
                             break
             else:
-                print(f"  Debug: Non-decoder weight: {name}")
+                # print(f"  Debug: Non-decoder weight: {name}")
+                pass
             
             if processed:
                 continue

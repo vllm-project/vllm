@@ -31,3 +31,12 @@ class LiteWhisperConfig(WhisperConfig):
     ):
         super().__init__(**kwargs)
         self.low_rank_config = low_rank_config or []
+
+
+# Register the configuration with HuggingFace
+try:
+    from transformers import CONFIG_MAPPING
+    CONFIG_MAPPING.register("lite_whisper", LiteWhisperConfig)
+except (ImportError, AttributeError):
+    # Fallback for older transformers versions or if registration fails
+    pass
