@@ -415,11 +415,11 @@ class MultiHeadAttention(nn.Module):
             out = flash_attention(query, key, value, sm_scale=self.scale)
             out = out.transpose(1, 2)
         elif self.attn_backend == _Backend.FLASH_ATTN:
-            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_func
-            out = flash_attn_func(query, key, value, softmax_scale=self.scale)
+            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
+            out = flash_attn_varlen_func(query, key, value, softmax_scale=self.scale)
         elif self.attn_backend == _Backend.FLASH_ATTN_VLLM_V1:
-            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_func
-            out = flash_attn_func(query, key, value, softmax_scale=self.scale)
+            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
+            out = flash_attn_varlen_func(query, key, value, softmax_scale=self.scale)
         elif self.attn_backend == _Backend.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
             out = flash_attn_varlen_func(query, key, value, softmax_scale=self.scale)
