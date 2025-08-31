@@ -8,6 +8,7 @@ import enum
 import hashlib
 import inspect
 import json
+import os
 import textwrap
 import warnings
 from collections.abc import Mapping
@@ -3531,6 +3532,15 @@ class VllmConfig:
                 disable_chunked_prefill_reasons.append(
                     "Encoder-decoder models do not support chunked prefill nor"
                     " prefix caching; disabling both.")
+                if (self.model_config.architecture
+                        == "WhisperForConditionalGeneration"
+                        and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD")
+                        != "spawn"):
+                    logger.warning(
+                        "Whisper is known to have issues with "
+                        "forked workers. If startup is hanging, "
+                        "try setting 'VLLM_WORKER_MULTIPROC_METHOD' "
+                        "to 'spawn'.")
 
         if disable_chunked_prefill_reasons:
             for reason in disable_chunked_prefill_reasons:
