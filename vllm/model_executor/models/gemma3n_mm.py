@@ -7,6 +7,7 @@ import numpy as np
 import torch
 # yapf: disable
 from torch import nn
+
 from transformers import AutoModel, BatchFeature
 from transformers.models.gemma3n import (Gemma3nAudioConfig,
                                          Gemma3nAudioFeatureExtractor,
@@ -44,7 +45,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import (MultiModalEmbeddings, SupportsMultiModal,
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal,
                          SupportsTranscription)
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix)
@@ -441,7 +442,7 @@ class Gemma3nMultimodalEmbedder(nn.Module):
                                         info=Gemma3nProcessingInfo,
                                         dummy_inputs=Gemma3nDummyInputsBuilder)
 class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                      SupportsTranscription):
+                                      SupportsTranscription, SupportsLoRA):
     merge_by_field_config = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
