@@ -18,7 +18,7 @@ cd kernels
 # install vllm-kernels and vllm without kernels packages
 pip install -v --no-build-isolation --editable .
 cd ..
-VLLM_TARGET_DEVICE=empty pip install -v --editable .
+VLLM_TARGET_DEVICE=empty pip install -v --no-build-isolation --editable .
 
 # simple test to confirm kernels can be loaded
 python -c "import vllm._C as c; import vllm.vllm_flash_attn as f; assert f.is_fa_version_supported(3)"

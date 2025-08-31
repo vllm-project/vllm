@@ -512,7 +512,11 @@ steps:
   - kernels/
   - CMakeLists.txt
   - setup.py
+  - vllm/kernels.py
+  - tests/standalone_tests/vllm_and_vllm_kernels_integration_test.sh
+  - tests/test_kernels_alias_modules.py
   commands:
+  - pytest -v -s test_kernels_alias_modules.py
   - bash standalone_tests/vllm_and_vllm_kernels_integration_test.sh
 
 #####  models test  #####

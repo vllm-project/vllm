@@ -27,7 +27,6 @@ def _alias_modules(package_to_scan, new_parent_name):
 
     for _, module_name, _ in pkgutil.iter_modules(package_path,
                                                   prefix=package_name_prefix):
-        # Dynamically import the found module
         original_module = importlib.import_module(module_name)
 
         # Alias the module under the new parent package
@@ -38,7 +37,7 @@ def _alias_modules(package_to_scan, new_parent_name):
             # anything else. But in case it does, we do nothing to avoid
             # unexpected problems.
             logger.warning("%s exists in sys.modules, do nothing",
-                           new_module_name, module_name)
+                           new_module_name)
             continue
         logger.info("import module %s from %s", new_module_name, module_name)
         sys.modules[new_module_name] = original_module
