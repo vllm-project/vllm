@@ -507,10 +507,10 @@ def merge_multimodal_embeddings(
         This updates ``inputs_embeds`` in place.
     """
     if isinstance(placeholder_token_id, list):
-        placeholder_token_id = torch.tensor(placeholder_token_id,
-                                            pin_memory=True).to(
-                                                device=input_ids.device,
-                                                non_blocking=True)
+        placeholder_token_id = torch.tensor(
+            placeholder_token_id,
+            pin_memory=is_pin_memory_available()).to(device=input_ids.device,
+                                                     non_blocking=True)
         return _merge_multimodal_embeddings(
             inputs_embeds,
             torch.isin(input_ids, placeholder_token_id),
