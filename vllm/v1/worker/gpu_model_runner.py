@@ -1349,6 +1349,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         tp = self.vllm_config.parallel_config.tensor_parallel_size
         enabled_sp = self.compilation_config.pass_config. \
             enable_sequence_parallelism
+        enabled_sp = True
         if enabled_sp:
             # When sequence parallelism is enabled, we always pad num_tokens
             # to be a multiple of tensor_parallel_size (tp) earlier
@@ -1484,23 +1485,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
          max_query_len) = self._prepare_inputs(scheduler_output)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        # Pad tokens to multiple of tensor_parallel_size when
+        # enabled collective fusion for SP
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        enabled_sp = self.compilation_config.pass_config. \
+            enable_sequence_parallelism and tp_size > 1
+        enabled_sp = True
+        num_input_tokens = round_up(num_scheduled_tokens, tp_size)
+        if enabled_sp:
+            print(f"rounding up num tokens {num_scheduled_tokens} to "
+                  f"next multiple of {tp_size}")
+            num_input_tokens = round_up(num_input_tokens, tp_size)
+
         if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
                 and not envs.VLLM_DISABLE_PAD_FOR_CUDAGRAPH
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use CUDA graphs.
             # Add padding to the batch size.
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                num_scheduled_tokens)
-        else:
-            # Eager mode.
-            # Pad tokens to multiple of tensor_parallel_size when
-            # enabled collective fusion for SP
-            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            if self.compilation_config.pass_config. \
-                enable_sequence_parallelism and tp_size > 1:
-                num_input_tokens = round_up(num_scheduled_tokens, tp_size)
-            else:
-                num_input_tokens = num_scheduled_tokens
+                num_input_tokens)
 
         # Padding for DP
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)

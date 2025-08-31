@@ -37,7 +37,9 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
                          get_current_vllm_config)
 from vllm.distributed import (get_ep_group, get_pp_group,
-                              get_tensor_model_parallel_world_size)
+                              get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_gather)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -99,6 +101,14 @@ class DeepseekV2MLP(nn.Module):
 
 class DeepseekV2MoE(nn.Module):
 
+    # Chunk x for sequence parallelism
+    def sp_chunk(self, x):
+        seq_len = x.size(0)
+        assert (seq_len % self.tp_size == 0)
+        chunk = seq_len // self.tp_size
+        start = self.tp_rank * chunk
+        return x.narrow(0, start, chunk).contiguous()
+
     def __init__(
         self,
         config: Union[DeepseekV2Config, DeepseekV3Config],
@@ -108,6 +118,8 @@ class DeepseekV2MoE(nn.Module):
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tensor_model_parallel_rank()
+
         self.routed_scaling_factor = config.routed_scaling_factor
 
         self.ep_group = get_ep_group().device_group
@@ -172,8 +184,9 @@ class DeepseekV2MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=self.experts.must_reduce_shared_expert_outputs(
-                ),
+                reduce_results=True,
+                #reduce_results=self.experts.must_reduce_shared_expert_outputs(
+                #),
                 prefix=f"{prefix}.shared_experts",
             )
 
@@ -183,17 +196,32 @@ class DeepseekV2MoE(nn.Module):
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
+
+        # **************************************************
+        sp_hidden_states = self.sp_chunk(hidden_states)
+        gathered_sp_hidden_states = tensor_model_parallel_all_gather(
+            sp_hidden_states, 0).contiguous()
+        assert torch.allclose(hidden_states,
+                              gathered_sp_hidden_states,
+                              atol=5e-4,
+                              rtol=5e-4)
+
+        sp_router_logits, _ = self.gate(sp_hidden_states)
 
         if hidden_states.dtype != torch.float16:
-            final_hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits) * self.routed_scaling_factor
+            final_sp_hidden_states = self.experts(
+                hidden_states=sp_hidden_states,
+                router_logits=sp_router_logits) * self.routed_scaling_factor
         else:
             # Fix FP16 overflow
             # See DeepseekV2DecoderLayer for more details.
-            final_hidden_states = self.experts(hidden_states=hidden_states,
-                                               router_logits=router_logits)
+            final_sp_hidden_states = self.experts(
+                hidden_states=sp_hidden_states, router_logits=sp_router_logits)
+
+        final_hidden_states = tensor_model_parallel_all_gather(
+            final_sp_hidden_states, 0).contiguous()
+        # **************************************************
+
         if shared_output is not None:
             if hidden_states.dtype != torch.float16:
                 final_hidden_states = final_hidden_states + shared_output
@@ -203,10 +231,10 @@ class DeepseekV2MoE(nn.Module):
                 final_hidden_states = final_hidden_states + shared_output \
                     * (1. / self.routed_scaling_factor)
 
-        if self.tp_size > 1:
-            final_hidden_states = (
-                self.experts.maybe_all_reduce_tensor_model_parallel(
-                    final_hidden_states))
+        #if self.tp_size > 1:
+        #    final_hidden_states = (
+        #        self.experts.maybe_all_reduce_tensor_model_parallel(
+        #            final_hidden_states))
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
