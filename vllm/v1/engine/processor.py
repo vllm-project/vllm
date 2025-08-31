@@ -470,6 +470,12 @@ class Processor:
         else:
             tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
             max_input_id = max(prompt_ids, default=0)
+
+            # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
+            # self.model_config.get_vocab_size() is the model’s vocab size.
+            # For some models, certain tokens exist in one but not the other,
+            # so we take the max of the two to decide if a token id is truly
+            # out-of-vocabulary.
             if max_input_id > max(tokenizer.max_token_id,
                                   self.model_config.get_vocab_size() - 1):
                 raise ValueError(
