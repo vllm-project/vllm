@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
 import torch
 
@@ -15,6 +15,7 @@ from vllm.multimodal.registry import MultiModalRegistry
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
+from vllm.config import VllmConfig
 
 if TYPE_CHECKING:
     from vllm.attention.layer import Attention
@@ -277,3 +278,24 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         # NOTE: Use list because of v0 PP virtual engine.
         forward_context[layer_name].kv_cache = [kv_cache]
+
+
+def get_all_gather_tensors(vllm_config: VllmConfig,
+                           num_input_tokens: int) -> Optional[Dict[str, bool]]:
+    """Get the all_gather_tensors dictionary for send/recv_tensor_dict.
+
+    This is used to control whether to use all_gather for the residual tensor
+    in sequence parallelism.
+    """
+    if not vllm_config.compilation_config.pass_config.enable_sequence_parallelism:
+        return None
+
+    tp = vllm_config.parallel_config.tensor_parallel_size
+    is_residual_scattered = (
+        tp > 1 and num_input_tokens % tp == 0 and num_input_tokens in
+        vllm_config.compilation_config.compile_sizes)
+
+    if is_residual_scattered:
+        return {"residual": False}
+
+    return None

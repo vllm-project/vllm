@@ -74,6 +74,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
+from vllm.v1.worker.utils import get_all_gather_tensors
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -1354,8 +1355,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # to be a multiple of tensor_parallel_size (tp) earlier
             assert num_tokens % tp == 0
         is_residual_scattered = tp > 1 and enabled_sp \
-            and num_tokens % tp == 0
+            and num_tokens % tp == 0 and num_tokens in self.compilation_config.compile_sizes
 
+        logger.info("num_tokens %s, is_residual_scattered %s", num_tokens, is_residual_scattered)
         # When sequence parallelism is enabled, the "residual" tensor is sharded
         # across tensor parallel ranks, so each rank only needs its own slice.
         if sync_self:
@@ -1456,6 +1458,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=pooler_output,
             kv_connector_output=kv_connector_output,
         )
+    
+    def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
+        if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                and not envs.VLLM_DISABLE_PAD_FOR_CUDAGRAPH
+                and hasattr(self, "cudagraph_batch_sizes")
+                and self.cudagraph_batch_sizes
+                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
+            # Use CUDA graphs.
+            # Add padding to the batch size.
+            return self.vllm_config.pad_for_cudagraph(num_scheduled_tokens)
+
+        # Eager mode.
+        # Pad tokens to multiple of tensor_parallel_size when
+        # enabled collective fusion for SP
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        if (self.compilation_config.pass_config.enable_sequence_parallelism
+                and tp_size > 1):
+            return round_up(num_scheduled_tokens, tp_size)
+        return num_scheduled_tokens
 
     @torch.inference_mode()
     def execute_model(
@@ -1484,24 +1505,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
          max_query_len) = self._prepare_inputs(scheduler_output)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-                and not envs.VLLM_DISABLE_PAD_FOR_CUDAGRAPH
-                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
-            # Use CUDA graphs.
-            # Add padding to the batch size.
-            num_input_tokens = self.vllm_config.pad_for_cudagraph(
-                num_scheduled_tokens)
-        else:
-            # Eager mode.
-            # Pad tokens to multiple of tensor_parallel_size when
-            # enabled collective fusion for SP
-            tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-            if self.compilation_config.pass_config. \
-                enable_sequence_parallelism and tp_size > 1:
-                num_input_tokens = round_up(num_scheduled_tokens, tp_size)
-            else:
-                num_input_tokens = num_scheduled_tokens
-
+        num_input_tokens = self._get_num_input_tokens(num_scheduled_tokens)
         # Padding for DP
         num_pad, num_tokens_across_dp = self.get_dp_padding(num_input_tokens)
         num_input_tokens += num_pad
@@ -1599,8 +1603,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if not broadcast_pp_output:
                 hidden_states.kv_connector_output = kv_connector_output
                 return hidden_states
+
+            all_gather_tensors = get_all_gather_tensors(self.vllm_config,
+                                                        num_input_tokens)
             get_pp_group().send_tensor_dict(hidden_states.tensors,
-                                            all_gather_group=get_tp_group())
+                                            all_gather_group=get_tp_group(),
+                                            all_gather_tensors=all_gather_tensors)
             logits = None
         else:
             if self.input_batch.pooling_params:

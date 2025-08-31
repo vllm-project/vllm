@@ -12,6 +12,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.v1.attention.backends.cpu_attn import TorchSDPAMetadataBuilderV1
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.utils import round_up
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -32,6 +33,17 @@ class CPUModelRunner(GPUModelRunner):
         self.cascade_attn_enabled = False
 
         self._postprocess_tensors()
+
+    def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
+        # Eager mode.
+        # Pad tokens to multiple of tensor_parallel_size when
+        # enabled collective fusion for SP
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        if (self.compilation_config.pass_config.enable_sequence_parallelism
+                and tp_size > 1):
+            return round_up(num_scheduled_tokens, tp_size)
+
+        return num_scheduled_tokens
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """

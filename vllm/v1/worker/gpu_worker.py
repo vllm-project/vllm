@@ -36,6 +36,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
+from vllm.v1.worker.utils import get_all_gather_tensors
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -358,10 +359,16 @@ class Worker(WorkerBase):
     ) -> Optional[ModelRunnerOutput]:
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
-        if forward_pass and not get_pp_group().is_first_rank:
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        num_input_tokens = self.model_runner._get_num_input_tokens(
+            num_scheduled_tokens)
+        all_gather_tensors = get_all_gather_tensors(self.vllm_config,
+                                                    num_input_tokens)
+        if forward_pass and not get_pp_group().is_first_rank:            
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
-                    all_gather_group=get_tp_group()))
+                    all_gather_group=get_tp_group(),
+                    all_gather_tensors=all_gather_tensors))
 
         output = self.model_runner.execute_model(scheduler_output,
                                                  intermediate_tensors)
@@ -374,7 +381,8 @@ class Worker(WorkerBase):
             "external_launcher") and not get_pp_group().is_last_rank
 
         get_pp_group().send_tensor_dict(output.tensors,
-                                        all_gather_group=get_tp_group())
+                                        all_gather_group=get_tp_group(),
+                                        all_gather_tensors=all_gather_tensors)
 
         kv_connector_output = output.kv_connector_output
         if not kv_connector_output:
