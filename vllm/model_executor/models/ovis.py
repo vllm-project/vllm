@@ -456,9 +456,12 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
                 raise ValueError("Incorrect type of indicator_tokens. "
                                  f"Got type: {type(pixel_values)}")
 
+            flat_data = flatten_bn(pixel_values, concat=True)
+            if flat_data.ndim >= 3:
+                flat_data = flat_data.flatten(start_dim=1)
             return OvisImagePatchInputs(
                 type="image_patches",
-                flat_data=flatten_bn(flatten_bn(pixel_values), concat=True),
+                flat_data=flat_data,
                 patches_per_image=[
                     x.shape[0] for x in flatten_bn(pixel_values)
                 ],
