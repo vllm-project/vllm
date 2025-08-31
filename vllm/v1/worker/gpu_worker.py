@@ -224,7 +224,7 @@ class Worker(WorkerBase):
         memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the free memory that can be used for KV cache in
+        Then, it calculates the free memory that can be used for KV cache in
         bytes.
 
         Tip:
