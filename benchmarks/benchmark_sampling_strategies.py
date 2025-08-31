@@ -293,7 +293,7 @@ if __name__ == "__main__":
     parser.add_argument("--batch-sizes", 
                        type=int, 
                        nargs="+", 
-                       default=[1, 8, 16],
+                       default=[1, 8, 16, 32, 64, 128],
                        help="Batch sizes to test")
     
     parser.add_argument("--vocab-sizes", 
