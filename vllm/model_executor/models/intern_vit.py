@@ -262,10 +262,12 @@ class InternSdpaAttention(nn.Module):
         
         # Validate supported backends
         if self.attn_backend not in {
-            _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.ROCM_AITER_FA
+            _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS, 
+            _Backend.ROCM_AITER_FA
         }:
             raise RuntimeError(
-                f"Vision attention does not support {self.attn_backend} backend now."
+                f"Vision attention does not support {self.attn_backend} "
+                f"backend now."
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -284,14 +286,16 @@ class InternSdpaAttention(nn.Module):
         
         # Apply attention using the pre-selected backend
         if self.attn_backend == _Backend.FLASH_ATTN:
-            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_func
+            from vllm.vllm_flash_attn.flash_attn_interface import (
+                flash_attn_func)
             # Flash Attention expects (batch, seq, heads, head_dim)
             x = flash_attn_func(q, k, v, softmax_scale=self.scale)
             x = x.reshape(B, N, -1)
         elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
             # xFormers expects (batch, seq, heads, head_dim)
-            x = xops.memory_efficient_attention_forward(q, k, v, scale=self.scale)
+            x = xops.memory_efficient_attention_forward(
+                q, k, v, scale=self.scale)
             x = x.reshape(B, N, -1)
         elif self.attn_backend == _Backend.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func

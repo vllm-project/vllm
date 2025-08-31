@@ -1087,10 +1087,12 @@ class PixtralHFAttention(nn.Module):
         
         # Validate supported backends
         if self.attn_backend not in {
-            _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.ROCM_AITER_FA
+            _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS, 
+            _Backend.ROCM_AITER_FA
         }:
             raise RuntimeError(
-                f"Vision attention does not support {self.attn_backend} backend now."
+                f"Vision attention does not support {self.attn_backend} "
+                f"backend now."
             )
 
     def forward(
@@ -1113,12 +1115,14 @@ class PixtralHFAttention(nn.Module):
 
         # Apply attention using the pre-selected backend
         if self.attn_backend == _Backend.FLASH_ATTN:
-            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_func
+            from vllm.vllm_flash_attn.flash_attn_interface import (
+                flash_attn_func)
             # Flash Attention expects (batch, seq, heads, head_dim)
             q = q.transpose(1, 2).contiguous()
             k = k.transpose(1, 2).contiguous()
             # Note: attention_mask is not supported in flash attention
-            out = flash_attn_func(q, k, v, softmax_scale=1.0 / math.sqrt(self.head_dim))
+            out = flash_attn_func(
+                q, k, v, softmax_scale=1.0 / math.sqrt(self.head_dim))
         elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
             # xFormers expects (batch, seq, heads, head_dim)
@@ -1133,7 +1137,8 @@ class PixtralHFAttention(nn.Module):
             # ROCm Flash Attention expects (batch, seq, heads, head_dim)
             q = q.transpose(1, 2).contiguous()
             k = k.transpose(1, 2).contiguous()
-            out = flash_attn_varlen_func(q, k, v, softmax_scale=1.0 / math.sqrt(self.head_dim))
+            out = flash_attn_varlen_func(
+                q, k, v, softmax_scale=1.0 / math.sqrt(self.head_dim))
         else:
             # PyTorch SDPA (default and fallback)
             v = v.transpose(1, 2)

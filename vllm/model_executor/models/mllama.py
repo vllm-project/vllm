@@ -523,10 +523,12 @@ class MllamaVisionSdpaAttention(nn.Module):
         
         # Validate supported backends
         if self.attn_backend not in {
-            _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.ROCM_AITER_FA
+            _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS, 
+            _Backend.ROCM_AITER_FA
         }:
             raise RuntimeError(
-                f"Vision attention does not support {self.attn_backend} backend now."
+                f"Vision attention does not support {self.attn_backend} "
+                f"backend now."
             )
 
     def forward(
@@ -545,20 +547,24 @@ class MllamaVisionSdpaAttention(nn.Module):
 
         # Apply attention using the pre-selected backend
         if self.attn_backend == _Backend.FLASH_ATTN:
-            from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_func
+            from vllm.vllm_flash_attn.flash_attn_interface import (
+                flash_attn_func)
             # Flash Attention expects (batch, seq, heads, head_dim)
             # Note: attention_mask is not supported in flash attention
-            attn_output = flash_attn_func(q, k, v, softmax_scale=1.0 / math.sqrt(self.head_dim))
+            attn_output = flash_attn_func(
+                q, k, v, softmax_scale=1.0 / math.sqrt(self.head_dim))
         elif self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
             # xFormers expects (batch, seq, heads, head_dim)
             attn_output = xops.memory_efficient_attention_forward(
-                q, k, v, attn_bias=attention_mask, scale=1.0 / math.sqrt(self.head_dim)
+                q, k, v, attn_bias=attention_mask, 
+                scale=1.0 / math.sqrt(self.head_dim)
             )
         elif self.attn_backend == _Backend.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
             # ROCm Flash Attention expects (batch, seq, heads, head_dim)
-            attn_output = flash_attn_varlen_func(q, k, v, softmax_scale=1.0 / math.sqrt(self.head_dim))
+            attn_output = flash_attn_varlen_func(
+                q, k, v, softmax_scale=1.0 / math.sqrt(self.head_dim))
         else:
             # PyTorch SDPA (default and fallback)
             q = q.transpose(1, 2)

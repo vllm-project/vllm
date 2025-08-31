@@ -5,8 +5,6 @@ from abc import ABC, abstractmethod
 from typing import Final, Generic, Optional, Protocol, TypeVar, Union
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.attention.layer import MultiHeadAttention
@@ -161,7 +159,8 @@ class VisionAttention(torch.nn.Module):
         self.proj = torch.nn.Linear(embed_dim, embed_dim, bias=bias)
         
         # Use unified MultiHeadAttention with Flash Attention support
-        self.attn = MultiHeadAttention(num_heads, self.head_dim, self.head_dim**-0.5)
+        self.attn = MultiHeadAttention(
+            num_heads, self.head_dim, self.head_dim**-0.5)
         
         # Rotary embeddings if needed
         if use_rotary:
@@ -182,8 +181,10 @@ class VisionAttention(torch.nn.Module):
             # Fallback to basic implementation
             return None
     
-    def _apply_rotary_embeddings(self, q: torch.Tensor, k: torch.Tensor, 
-                                positions: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def _apply_rotary_embeddings(
+        self, q: torch.Tensor, k: torch.Tensor,
+        positions: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Apply rotary position embeddings to Q and K."""
         if not self.use_rotary or self.rotary_emb is None:
             return q, k
@@ -229,9 +230,12 @@ class VisionAttention(torch.nn.Module):
             q, k = self._apply_rotary_embeddings(q, k, positions)
         
         # Reshape for MultiHeadAttention: (batch, seq, hidden_size)
-        q_reshaped = q.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
-        k_reshaped = k.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
-        v_reshaped = v.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+        q_reshaped = q.transpose(1, 2).contiguous().view(
+            batch_size, seq_len, -1)
+        k_reshaped = k.transpose(1, 2).contiguous().view(
+            batch_size, seq_len, -1)
+        v_reshaped = v.transpose(1, 2).contiguous().view(
+            batch_size, seq_len, -1)
         
         # Use unified MultiHeadAttention
         attn_output = self.attn(q_reshaped, k_reshaped, v_reshaped)

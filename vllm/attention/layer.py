@@ -414,24 +414,29 @@ class MultiHeadAttention(nn.Module):
             from torch_xla.experimental.custom_kernel import flash_attention
             out = flash_attention(query, key, value, sm_scale=self.scale)
             out = out.transpose(1, 2)
-        elif self.attn_backend in (_Backend.FLASH_ATTN, _Backend.FLASH_ATTN_VLLM_V1):
+        elif self.attn_backend in (_Backend.FLASH_ATTN, 
+                                  _Backend.FLASH_ATTN_VLLM_V1):
             # Flash Attention for ViT is not essential, fallback to PyTorch SDPA
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
-            out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
+            out = F.scaled_dot_product_attention(
+                query, key, value, scale=self.scale)
             out = out.transpose(1, 2)
         elif self.attn_backend == _Backend.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
-            out = flash_attn_varlen_func(query, key, value, softmax_scale=self.scale)
+            out = flash_attn_varlen_func(
+                query, key, value, softmax_scale=self.scale)
         elif self.attn_backend == _Backend.FLEX_ATTENTION:
             # FlexAttention requires specific tensor format
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
             # Use a simple fallback to torch SDPA for now
-            out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
+            out = F.scaled_dot_product_attention(
+                query, key, value, scale=self.scale)
             out = out.transpose(1, 2)
         else:
             # Fallback to torch SDPA for unsupported backends
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
-            out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
+            out = F.scaled_dot_product_attention(
+                query, key, value, scale=self.scale)
             out = out.transpose(1, 2)
 
         return out.reshape(bsz, q_len, -1)
