@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
+import json
 import os
 import sys
 import tempfile
@@ -42,7 +43,6 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: Optional[bool] = None
-    VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: Optional[int] = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
+    VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -131,7 +132,9 @@ if TYPE_CHECKING:
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = False
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
+    VLLM_USE_DEEP_GEMM_E8M0_HOPPER: bool = False
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
+    VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: str = "throughput"
@@ -159,9 +162,12 @@ if TYPE_CHECKING:
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_USE_TRTLLM_ATTENTION: Optional[str] = None
+    VLLM_HAS_FLASHINFER_CUBIN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
+    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
+    VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
 
 
 def get_default_cache_root():
@@ -465,11 +471,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
     if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ else None,
 
-    # If set, vllm will force flashinfer to use tensor cores;
-    # otherwise will use heuristic based on model architecture.
-    "VLLM_FLASHINFER_FORCE_TENSOR_CORES":
-    lambda: bool(int(os.getenv("VLLM_FLASHINFER_FORCE_TENSOR_CORES", "0"))),
-
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
@@ -673,7 +674,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Note that it must be an absolute path.
     "VLLM_TORCH_PROFILER_DIR":
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
-             .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
+             .path.abspath(os.path.expanduser(os.getenv(
+        "VLLM_TORCH_PROFILER_DIR", ".")))),
 
     # Enable torch profiler to record shapes if set
     # VLLM_TORCH_PROFILER_RECORD_SHAPES=1. If not set, torch profiler will
@@ -771,6 +773,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MHA":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in
+             ("true", "1")),
+
+    # Whether to use aiter triton fp8 bmm kernel
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_FP8BMM":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "True").lower() in
              ("true", "1")),
 
     # use rocm skinny gemms
@@ -955,9 +963,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "0"))),
 
     # Whether to use E8M0 scaling when DeepGEMM is used on Blackwell GPUs.
-    # E8M0 is faster on B200 but may reduce accuracy.
     "VLLM_USE_DEEP_GEMM_E8M0":
     lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM_E8M0", "1"))),
+    # TODO(wentao): unify the two E8M0 flags after verifying the correctness.
+    # Whether to use E8M0 scaling when DeepGEMM is used on Hopper GPUs.
+    "VLLM_USE_DEEP_GEMM_E8M0_HOPPER":
+    lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM_E8M0_HOPPER", "0"))),
     # DeepGemm JITs the kernels on-demand. The warmup attempts to make DeepGemm
     # JIT all the required kernels before model execution so there is no
     # JIT'ing in the hot-path. However, this warmup increases the engine
@@ -965,6 +976,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Set `VLLM_SKIP_DEEP_GEMM_WARMUP` to disable the warmup.
     "VLLM_SKIP_DEEP_GEMM_WARMUP":
     lambda: bool(int(os.getenv("VLLM_SKIP_DEEP_GEMM_WARMUP", "0"))),
+
+    # Whether to use fused grouped_topk used for MoE expert selection.
+    "VLLM_USE_FUSED_MOE_GROUPED_TOPK":
+    lambda: bool(int(os.getenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", "1"))),
 
     # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP8":
@@ -1044,6 +1059,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE":
     lambda: int(os.getenv("VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE", "163840")),
 
+    # Specifies the thresholds of the communicated tensor sizes under which
+    # vllm should use flashinfer fused allreduce. The variable should be a
+    # JSON with the following format:
+    #     { <world size>: <max size in mb> }
+    # Unspecified world sizes will fallback to
+    #     { 2: 64, 4: 1, <everything else>: 0.5 }
+    "VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB":
+    lambda: json.loads(os.getenv(
+        "VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB", "{}")),
+
     # MoE routing strategy selector.
     # See `RoutingSimulator.get_available_strategies()` # for available
     # strategies.
@@ -1110,6 +1135,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_TRTLLM_ATTENTION":
     lambda: os.getenv("VLLM_USE_TRTLLM_ATTENTION", None),
 
+    # If set, it means we pre-downloaded cubin files and flashinfer will
+    # read the cubin files directly.
+    "VLLM_HAS_FLASHINFER_CUBIN":
+    lambda: os.getenv("VLLM_HAS_FLASHINFER_CUBIN", False),
+
     # If set to 1, force the use of TRTLLM FP4 GEMM backend in flashinfer.
     # Otherwise, uses the first available of: flashinfer cutlass GEMM,
     # vllm cutlass GEMM, marlin GEMM.
@@ -1121,6 +1151,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set to 1, allows GC to run during capture.
     "VLLM_ENABLE_CUDAGRAPH_GC":
     lambda: bool(int(os.getenv("VLLM_ENABLE_CUDAGRAPH_GC", "0"))),
+
+    # Disable padding to CUDA graph capture batch sizes.
+    # TODO(wentao): https://github.com/vllm-project/vllm/issues/23378
+    # After the issue is fixed, we can remove this flag.
+    "VLLM_DISABLE_PAD_FOR_CUDAGRAPH":
+    lambda: bool(int(os.getenv("VLLM_DISABLE_PAD_FOR_CUDAGRAPH", "0"))),
 
     # Used to force set up loopback IP
     "VLLM_LOOPBACK_IP":
@@ -1154,6 +1190,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #    never removed from memory until the server terminates.
     "VLLM_ENABLE_RESPONSES_API_STORE":
     lambda: bool(int(os.getenv("VLLM_ENABLE_RESPONSES_API_STORE", "0"))),
+
+    # Whether to use pytorch symmetric memory for allreduce
+    "VLLM_ALLREDUCE_USE_SYMM_MEM":
+    lambda: bool(int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))),
 
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER":
@@ -1220,10 +1260,12 @@ def compute_hash() -> str:
         "VLLM_USE_AITER_UNIFIED_ATTENTION",
         "VLLM_ATTENTION_BACKEND",
         "VLLM_USE_FLASHINFER_SAMPLER",
-        "VLLM_FLASHINFER_FORCE_TENSOR_CORES",
         "VLLM_DISABLED_KERNELS",
         "VLLM_USE_DEEP_GEMM",
+        "VLLM_USE_DEEP_GEMM_E8M0",
+        "VLLM_USE_DEEP_GEMM_E8M0_HOPPER",
         "VLLM_USE_TRTLLM_FP4_GEMM",
+        "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
         "VLLM_USE_FLASHINFER_MOE_FP8",
         "VLLM_USE_FLASHINFER_MOE_FP4",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
@@ -1237,6 +1279,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_USE_AITER_RMSNORM",
         "VLLM_ROCM_USE_AITER_MLA",
         "VLLM_ROCM_USE_AITER_MHA",
+        "VLLM_ROCM_USE_AITER_FP8BMM",
         "VLLM_ROCM_USE_SKINNY_GEMM",
         "VLLM_ROCM_FP8_PADDING",
         "VLLM_ROCM_MOE_PADDING",

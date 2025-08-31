@@ -640,7 +640,7 @@ class BaseMultiModalContentParser(ABC):
     def __init__(self) -> None:
         super().__init__()
 
-        # stores model placehodlers list with corresponding
+        # stores model placeholders list with corresponding
         # general MM placeholder:
         # {
         #   "<##IMAGE##>": ["<image>", "<image>", "<image>"],
@@ -1330,7 +1330,7 @@ def apply_mistral_chat_template(
     # mistral-common uses assert statements to stop processing of input
     # if input does not comply with the expected format.
     # We convert those assertion errors to ValueErrors so they can be
-    # are properly caught in the preprocessing_input step
+    # properly caught in the preprocessing_input step
     except (AssertionError, MistralCommonException) as e:
         raise ValueError(str(e)) from e
 
