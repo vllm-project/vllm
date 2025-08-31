@@ -55,7 +55,7 @@ def _query_start_loc_to_chunk_indices_offsets(
     query_start_loc = [0, 5, 10]
     chunk_size = 8
     total_seqlens = 10
-    -> chunk_indices = [0, 1, 0]
+    -> chunk_indices = [0, 0, 1]
     -> chunk_offsets = [0, 5, 0]
 
     In this example, we have 2 sequences, each with 5 tokens. The physical
