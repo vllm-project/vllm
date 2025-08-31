@@ -629,6 +629,7 @@ class MoonVitPretrainedModel(PreTrainedModel):
         self.merge_kernel_size = config.merge_kernel_size
         self.hidden_size = config.hidden_size
         self.patch_size = config.patch_size
+        self.vit_processing_type = "rope_2d"
         self.patch_embed = MoonVisionPatchEmbed(
             out_dim=config.hidden_size,
             patch_size=config.patch_size,

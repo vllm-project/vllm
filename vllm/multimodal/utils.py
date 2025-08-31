@@ -605,7 +605,7 @@ def run_dp_sharded_mrope_vision_model(
                                          device=pixel_values.device,
                                          dtype=pixel_values.dtype)
     # embed_dim_reduction_factor = 2 * 2
-    if vision_model_name == "MoonVitPretrainedModel":
+    if getattr(vision_model, "vit_processing_type", "default") == "rope_2d":
         embed_dim_reduction_factor = (vision_model.merge_kernel_size[0] *
                                       vision_model.merge_kernel_size[1])
     else:
@@ -621,7 +621,7 @@ def run_dp_sharded_mrope_vision_model(
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
 
     # Run the vision model on the local pixel_values_local
-    if vision_model_name == "MoonVitPretrainedModel":
+    if getattr(vision_model, "vit_processing_type", "default") == "rope_2d":
         if pixel_values_local.shape[0] > 0:
             image_embeds_local = vision_model(
                 pixel_values_local, torch.tensor(local_grid_thw_list))
@@ -648,7 +648,8 @@ def run_dp_sharded_mrope_vision_model(
     current_len = image_embeds_local.shape[0]
     if current_len < max_len_per_rank:
         padding_size = max_len_per_rank - current_len
-        if vision_model_name == "MoonVitPretrainedModel":
+        if getattr(vision_model,
+                   "vit_processing_type", "default") == "rope_2d":
             padding = torch.empty((padding_size, image_embeds_local.shape[1],
                                    image_embeds_local.shape[2]),
                                   dtype=image_embeds_local.dtype,
@@ -697,7 +698,7 @@ def run_dp_sharded_mrope_vision_model(
                     embed_start:embed_start + img_patches]
                 embed_start += img_patches
             current_idx += count
-    if vision_model_name == "MoonVitPretrainedModel":
+    if getattr(vision_model, "vit_processing_type", "default") == "rope_2d":
         out_embeddings_list = [
             embed for embed in original_order_embeddings if embed is not None
         ]
