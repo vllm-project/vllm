@@ -224,7 +224,7 @@ class Worker(WorkerBase):
         memory can be used for KV cache without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the free memory that can be used for KV cache in
+        Then, it calculates the free memory that can be used for KV cache in
         bytes.
 
         Tip:
@@ -308,7 +308,10 @@ class Worker(WorkerBase):
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(size, skip_eplb=True)
+            self.model_runner._dummy_run(size,
+                                         skip_eplb=True,
+                                         remove_lora=False)
+        self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
