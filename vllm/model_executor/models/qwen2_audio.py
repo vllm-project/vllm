@@ -23,7 +23,7 @@
 # limitations under the License.
 """Inference-only Qwen2-Audio model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Any, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -55,18 +55,17 @@ from .utils import (AutoWeightsLoader, init_vllm_registered_model,
 
 
 # # === Audio Inputs === #
-class Qwen2AudioInputs(TensorSchema):
+class Qwen2AudioFeatureInputs(TensorSchema):
     """
     Dimensions:
         - na: Number of audios
         - nmb: Number of mel bins
     """
-
+    type: Literal["audio_features"]
     input_features: Annotated[
-        torch.Tensor,
+        [torch.Tensor, list[torch.Tensor]],
         TensorShape("na", "nmb", 3000),
     ]
-
 
     feature_attention_mask: Annotated[
         torch.Tensor,
@@ -74,12 +73,20 @@ class Qwen2AudioInputs(TensorSchema):
     ]
 
 
-class Qwen2AudioEmbeddingInputs(TypedDict):
-    type: Literal["audio_embeds"]
-    audio_embeds: list[torch.Tensor]
-    """Shape: `(num_audio_features, hidden_size)`
-    `hidden_size` must match the hidden size of language model backbone.
+class Qwen2AudioEmbeddingInputs(TensorSchema):
     """
+    Dimensions:
+        - bn: Batch size
+        - naf: Number of audio features
+        - hs: Hidden size (must match the hidden size of language model
+          backbone)
+    """
+    type: Literal["audio_embeds"] = "audio_embeds"
+
+    audio_embeds: Annotated[
+        list[torch.Tensor],
+        TensorShape("bn", "naf", "hs"),
+    ]
 
 
 Qwen2AudioInputs = Union[Qwen2AudioFeatureInputs, Qwen2AudioEmbeddingInputs]

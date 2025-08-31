@@ -542,15 +542,20 @@ class Qwen2_5OmniConditionalGenerationMixin:
         feature_attention_mask = kwargs.pop('feature_attention_mask', None)
         if input_audio_features is None:
             return None
-        input_audio_features = self._validate_and_reshape_mm_tensor(
-            input_audio_features, 'input_audio_features', dim=1)
+        input_audio_features = torch.stack([
+            x[:, :3000] if x.size(1) >= 3000 else torch.nn.functional.pad(
+                x, (0, 3000 - x.size(1))) for x in input_audio_features
+        ],
+                                           dim=0)
         if feature_attention_mask is not None:
-            feature_attention_mask = self._validate_and_reshape_mm_tensor(
-                feature_attention_mask, 'feature_attention_mask')
-        if not isinstance(input_audio_features, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of audio input features. "
-                             f"Got type: {type(input_audio_features)}")
+            feature_attention_mask = torch.stack(
+                [(m.squeeze(0)[::10]
+                  if m.numel() == 30000 else m.squeeze(0))[:3000]
+                 for m in feature_attention_mask],
+                dim=0).to(torch.long)
+
         return Qwen2AudioFeatureInputs(
+            type="audio_features",
             input_features=input_audio_features,
             audio_feature_lengths=audio_feature_lengths,
             feature_attention_mask=feature_attention_mask)
@@ -660,8 +665,8 @@ class Qwen2_5OmniConditionalGenerationMixin:
             feature_lens=audio_feature_lengths,
             aftercnn_lens=audio_feat_lengths,
         )
-        audio_features = audio_outputs.last_hidden_state
-        return audio_features.split(audio_output_lengths.tolist())
+        return audio_outputs.last_hidden_state.split(
+            audio_output_lengths.tolist())
 
     def _process_image_input(
             self,

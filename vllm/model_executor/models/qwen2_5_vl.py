@@ -169,7 +169,7 @@ class Qwen2_5_VLVideoPixelInputs(TensorSchema):
     ]
 
     second_per_grid_ts: Annotated[
-        torch.Tensor,
+        Optional[torch.Tensor],
         TensorShape("nv"),
     ]
 
@@ -1008,7 +1008,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 pixel_values_videos, "video pixel values")
             video_grid_thw = self._validate_and_reshape_mm_tensor(
                 video_grid_thw, "video grid_thw")
-
+            if second_per_grid_ts is not None and second_per_grid_ts.ndim == 2:
+                second_per_grid_ts = second_per_grid_ts.squeeze(-1)
             return Qwen2_5_VLVideoPixelInputs(
                 type="pixel_values_videos",
                 pixel_values_videos=pixel_values_videos,
