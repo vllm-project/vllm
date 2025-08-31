@@ -1268,6 +1268,7 @@ class AssetHandler(http.server.BaseHTTPRequestHandler):
         filename = self.path.lstrip("/")
         if not filename or "." not in filename:
             self.send_error(404, "Missing filename (expected /<name>.<ext>)")
+            return
 
         base, ext = filename.rsplit(".", 1)
         ext = ext.lower()
@@ -1277,7 +1278,7 @@ class AssetHandler(http.server.BaseHTTPRequestHandler):
             return
 
         try:
-            data = ImageAsset(base).pil_image(ext=ext)
+            data = ImageAsset(base).read_bytes(ext=ext)
         except Exception as e:
             self.send_error(500, f"Failed to load asset: {ext} {base} {e} ")
             return
@@ -1298,34 +1299,67 @@ def _find_free_port() -> int:
         return s.getsockname()[1]
 
 
+class LocalAssetServer:
+
+    def __init__(self, address: str = "127.0.0.1") -> None:
+        self.address = address
+        self.port: int | None = None
+        self.server = None
+        self.thread: threading.Thread | None = None
+
+    def __enter__(self):
+        self.port = _find_free_port()
+        self.server = http.server.ThreadingHTTPServer(
+            (self.address, self.port), AssetHandler)
+        self.thread = threading.Thread(target=self.server.serve_forever,
+                                       daemon=True)
+        self.threading.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.server:
+            self.server.shutdown()
+            del self.server
+
+        if self.thread:
+            self.thread.join()
+            del self.thread
+
+        if exc_type is None:
+            return None
+
+        return False
+
+    @property
+    def base_url(self) -> str:
+        assert self.port is not None
+        return f"http://{self.address}:{self.port}"
+
+    def url_for(self, name: str) -> str:
+        """e.g., name='RGBA_comp.png' -> 'http://127.0.0.1:PORT/RGBA_comp.png'"""
+        return f"{self.base_url}/{name}"
+
+
 @pytest.fixture(scope="session")
-def local_asset_server_base_url() -> Generator[str, None, None]:
+def local_asset_server() -> Generator[LocalAssetServer, None, None]:
     """
     Starts a thread based HTTP server bound to 127.0.0.1 on a random free port. 
     The server currently servers images at:
     http://127.0.0.1:<port>/<name>.<ext>
     """
-    port = _find_free_port()
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), AssetHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-
-    try:
-        yield f"http://127.0.0.1:{port}"
-    finally:
-        server.shutdown()
-        thread.join()
+    with LocalAssetServer() as srv:
+        yield srv
 
 
 @pytest.fixture
-def image_url(request, local_asset_server_base_url) -> str:
-    # request.param is one of the IMAGE_URLS filenames
+def image_url(request, local_asset_server) -> str:
+    # request.param is one of the IMAGE_ASSETS filenames
     name = request.param
-    return f"{local_asset_server_base_url}/{name}"
+    return local_asset_server.url_for(name)
 
 
 @pytest.fixture
-def image_urls(request, local_asset_server_base_url):
+def image_ASSETS(request, local_asset_server) -> str:
     """Indirect fixture: takes a list of names, returns list of full URLs."""
     names: list[str] = request.param
-    return [f"{local_asset_server_base_url}/{name}" for name in names]
+    return [local_asset_server.url_for(name) for name in names]

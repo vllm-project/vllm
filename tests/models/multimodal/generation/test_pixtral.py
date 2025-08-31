@@ -151,7 +151,7 @@ def load_outputs_w_logprobs(filename: "StrPath") -> OutputsLogprobs:
 @pytest.mark.parametrize("max_model_len", MAX_MODEL_LEN)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 def test_chat(vllm_runner, max_model_len: int, model: str, dtype: str,
-              local_asset_server_base_url) -> None:
+              local_asset_server) -> None:
     EXPECTED_CHAT_LOGPROBS = load_outputs_w_logprobs(
         FIXTURE_LOGPROBS_CHAT[model])
     with vllm_runner(
@@ -165,7 +165,7 @@ def test_chat(vllm_runner, max_model_len: int, model: str, dtype: str,
     ) as vllm_model:
         outputs = []
 
-        urls_all = [f"{local_asset_server_base_url}/{u}" for u in IMG_URLS]
+        urls_all = [local_asset_server.url_for(u) for u in IMG_URLS]
         msgs = [
             _create_msg_format(urls_all[:1]),
             _create_msg_format(urls_all[:2]),
@@ -188,9 +188,9 @@ def test_chat(vllm_runner, max_model_len: int, model: str, dtype: str,
 
 
 @pytest.fixture
-def prompt(request, local_asset_server_base_url) -> TextPrompt:
+def prompt(request, local_asset_server) -> TextPrompt:
     names = request.param
-    urls = [f"{local_asset_server_base_url}/{n}" for n in names]
+    urls = [local_asset_server.url_for(n) for n in names]
     return _create_engine_inputs_hf(urls)
 
 

@@ -52,11 +52,10 @@ async def client(image_server):
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image(local_asset_server_base_url) -> dict[str, str]:
+def base64_encoded_image(local_asset_server) -> dict[str, str]:
     return {
         image_url:
-        encode_image_base64(
-            fetch_image(f"{local_asset_server_base_url}/{image_url}"))
+        encode_image_base64(fetch_image(local_asset_server.url_for(image_url)))
         for image_url in TEST_IMAGE_URLS
     }
 

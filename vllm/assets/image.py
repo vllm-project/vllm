@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 import torch
@@ -23,11 +24,17 @@ ImageAssetName = Literal["stop_sign", "cherry_blossom",
 class ImageAsset:
     name: ImageAssetName
 
+    def get_path(self, ext: str) -> str:
+        """
+        Return s3 path for given image.
+        """
+        return get_vllm_public_assets(filename=f"{self.name}.{ext}",
+                                      s3_prefix=VLM_IMAGES_DIR)
+
     @property
     def pil_image(self, ext="jpg") -> Image.Image:
 
-        image_path = get_vllm_public_assets(filename=f"{self.name}.{ext}",
-                                            s3_prefix=VLM_IMAGES_DIR)
+        image_path = self.path(ext)
         return Image.open(image_path)
 
     @property
@@ -35,6 +42,9 @@ class ImageAsset:
         """
         Image embeddings, only used for testing purposes with llava 1.5.
         """
-        image_path = get_vllm_public_assets(filename=f"{self.name}.pt",
-                                            s3_prefix=VLM_IMAGES_DIR)
+        image_path = self.path('pt')
         return torch.load(image_path, map_location="cpu", weights_only=True)
+
+    def read_bytes(self, ext: str) -> bytes:
+        p = Path(self.path(ext))
+        return p.read_bytes()

@@ -45,12 +45,11 @@ TEST_VIDEO_URLS = [
 
 
 @pytest.fixture(scope="module")
-def url_images(local_asset_server_base_url) -> dict[str, Image.Image]:
+def url_images(local_asset_server) -> dict[str, Image.Image]:
     connector = MediaConnector()
 
     return {
-        image_url:
-        connector.fetch_image(f"{local_asset_server_base_url}/{image_url}")
+        image_url: connector.fetch_image(local_asset_server.url_for(image_url))
         for image_url in TEST_IMAGE_URLS
     }
 
