@@ -1032,8 +1032,8 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         tokenizer = self.info.get_tokenizer()
-        image_token_id = tokenizer.vocab[tokenizer.image_token]
-        audio_token_id = tokenizer.vocab[tokenizer.audio_token]
+        image_token_id: int = tokenizer.vocab[tokenizer.image_token]
+        audio_token_id: int = tokenizer.vocab[tokenizer.audio_token]
 
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         audio_processor = self.info.get_feature_extractor(
@@ -1053,9 +1053,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
                     processor=hf_processor,
                 )
 
-            image_tokens = [image_token_id] * num_image_tokens
-
-            return image_tokens
+            return [image_token_id] * num_image_tokens
 
         def get_audio_replacement_phi4mm(item_idx: int):
             audios = mm_items.get_items("audio", AudioProcessorItems)
@@ -1066,9 +1064,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             audio_embed_size = self.info._compute_audio_embed_size(
                 audio_frames)
 
-            audio_tokens = [audio_token_id] * audio_embed_size
-
-            return audio_tokens
+            return [audio_token_id] * audio_embed_size
 
         return [
             PromptReplacement(

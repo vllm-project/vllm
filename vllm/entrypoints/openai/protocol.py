@@ -38,7 +38,7 @@ from typing_extensions import TypeAlias
 
 from vllm import envs
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
-                                         random_tool_call_id)
+                                         make_tool_call_id)
 from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam)
 from vllm.logger import init_logger
@@ -357,12 +357,21 @@ class ResponsesRequest(OpenAIBaseModel):
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
-            logprobs=self.top_logprobs,
+            logprobs=self.top_logprobs
+            if self.is_include_output_logprobs() else None,
             stop_token_ids=stop_token_ids,
             output_kind=(RequestOutputKind.DELTA
                          if self.stream else RequestOutputKind.FINAL_ONLY),
             guided_decoding=guided_decoding,
         )
+
+    def is_include_output_logprobs(self) -> bool:
+        """Check if the request includes output logprobs."""
+        if self.include is None:
+            return False
+        return isinstance(
+            self.include,
+            list) and "message.output_text.logprobs" in self.include
 
     @model_validator(mode="before")
     def validate_background(cls, data):
@@ -443,7 +452,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
     prompt_logprobs: Optional[int] = None
     allowed_token_ids: Optional[list[int]] = None
     bad_words: list[str] = Field(default_factory=list)
@@ -576,6 +585,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
+    return_token_ids: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If specified, the result will include token IDs alongside the "
+            "generated text. In streaming mode, prompt_token_ids is included "
+            "only in the first chunk, and token_ids contains the delta tokens "
+            "for each chunk. This is useful for debugging or when you "
+            "need to map generated text back to input tokens."))
     cache_salt: Optional[str] = Field(
         default=None,
         description=(
@@ -978,7 +995,7 @@ class CompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
     allowed_token_ids: Optional[list[int]] = None
     prompt_logprobs: Optional[int] = None
     # --8<-- [end:completion-sampling-params]
@@ -1062,6 +1079,14 @@ class CompletionRequest(OpenAIBaseModel):
             "If specified with 'logprobs', tokens are represented "
             " as strings of the form 'token_id:{token_id}' so that tokens "
             "that are not JSON-encodable can be identified."))
+    return_token_ids: Optional[bool] = Field(
+        default=None,
+        description=(
+            "If specified, the result will include token IDs alongside the "
+            "generated text. In streaming mode, prompt_token_ids is included "
+            "only in the first chunk, and token_ids contains the delta tokens "
+            "for each chunk. This is useful for debugging or when you "
+            "need to map generated text back to input tokens."))
 
     cache_salt: Optional[str] = Field(
         default=None,
@@ -1300,8 +1325,10 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions,
-                             normalize=self.normalize)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
+            normalize=self.normalize)
 
 
 class EmbeddingChatRequest(OpenAIBaseModel):
@@ -1368,8 +1395,10 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         return data
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions,
-                             normalize=self.normalize)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
+            normalize=self.normalize)
 
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
@@ -1405,7 +1434,9 @@ class ScoreRequest(OpenAIBaseModel):
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            activation=self.activation)
 
 
 class RerankRequest(OpenAIBaseModel):
@@ -1435,7 +1466,9 @@ class RerankRequest(OpenAIBaseModel):
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            activation=self.activation)
 
 
 class RerankDocument(BaseModel):
@@ -1480,7 +1513,9 @@ class CompletionResponseChoice(OpenAIBaseModel):
             "to stop, None if the completion finished for some other reason "
             "including encountering the EOS token"),
     )
+    token_ids: Optional[list[int]] = None  # For response
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    prompt_token_ids: Optional[list[int]] = None  # For prompt
 
 
 class CompletionResponse(OpenAIBaseModel):
@@ -1511,6 +1546,10 @@ class CompletionResponseStreamChoice(OpenAIBaseModel):
             "to stop, None if the completion finished for some other reason "
             "including encountering the EOS token"),
     )
+    # not part of the OpenAI spec but for tracing the tokens
+    # prompt tokens is put into choice to align with CompletionResponseChoice
+    prompt_token_ids: Optional[list[int]] = None
+    token_ids: Optional[list[int]] = None
 
 
 class CompletionStreamResponse(OpenAIBaseModel):
@@ -1587,7 +1626,9 @@ class ClassificationRequest(OpenAIBaseModel):
     # --8<-- [end:classification-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            activation=self.activation)
 
 
 class ClassificationData(OpenAIBaseModel):
@@ -1612,7 +1653,7 @@ class FunctionCall(OpenAIBaseModel):
 
 
 class ToolCall(OpenAIBaseModel):
-    id: str = Field(default_factory=random_tool_call_id)
+    id: str = Field(default_factory=make_tool_call_id)
     type: Literal["function"] = "function"
     function: FunctionCall
 
@@ -1680,6 +1721,9 @@ class ChatCompletionResponseChoice(OpenAIBaseModel):
     finish_reason: Optional[str] = "stop"
     # not part of the OpenAI spec but included in vLLM for legacy reasons
     stop_reason: Optional[Union[int, str]] = None
+    # not part of the OpenAI spec but is useful for tracing the tokens
+    # in agent scenarios
+    token_ids: Optional[list[int]] = None
 
 
 class ChatCompletionResponse(OpenAIBaseModel):
@@ -1695,6 +1739,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
 
     # vLLM-specific fields that are not in OpenAI spec
     prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+    prompt_token_ids: Optional[list[int]] = None
     kv_transfer_params: Optional[dict[str, Any]] = Field(
         default=None, description="KVTransfer parameters.")
 
@@ -1712,6 +1757,8 @@ class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
     logprobs: Optional[ChatCompletionLogProbs] = None
     finish_reason: Optional[str] = None
     stop_reason: Optional[Union[int, str]] = None
+    # not part of the OpenAI spec but for tracing the tokens
+    token_ids: Optional[list[int]] = None
 
 
 class ChatCompletionStreamResponse(OpenAIBaseModel):
@@ -1721,6 +1768,8 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[ChatCompletionResponseStreamChoice]
     usage: Optional[UsageInfo] = Field(default=None)
+    # not part of the OpenAI spec but for tracing the tokens
+    prompt_token_ids: Optional[list[int]] = None
 
 
 class TranscriptionResponseStreamChoice(OpenAIBaseModel):
@@ -1778,7 +1827,7 @@ class ResponsesResponse(OpenAIBaseModel):
     service_tier: Literal["auto", "default", "flex", "scale", "priority"]
     status: ResponseStatus
     text: Optional[ResponseTextConfig] = None
-    top_logprobs: int
+    top_logprobs: Optional[int] = None
     truncation: Literal["auto", "disabled"]
     usage: Optional[ResponseUsage] = None
     user: Optional[str] = None
@@ -2193,9 +2242,15 @@ class TranscriptionRequest(OpenAIBaseModel):
 
 
 # Transcription response objects
+class TranscriptionUsageAudio(OpenAIBaseModel):
+    type: Literal["duration"] = "duration"
+    seconds: int
+
+
 class TranscriptionResponse(OpenAIBaseModel):
     text: str
     """The transcribed text."""
+    usage: TranscriptionUsageAudio
 
 
 class TranscriptionWord(OpenAIBaseModel):

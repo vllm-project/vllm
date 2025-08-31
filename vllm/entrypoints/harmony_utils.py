@@ -155,7 +155,7 @@ def parse_chat_input(chat_msg) -> Message:
         contents = [TextContent(text=content)]
     else:
         # TODO: Support refusal.
-        contents = [TextContent(text=c["text"]) for c in content]
+        contents = [TextContent(text=c.get("text", "")) for c in content]
     msg = Message.from_role_and_contents(role, contents)
     return msg
 
@@ -218,8 +218,8 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
             )
             output_items.append(reasoning_item)
     elif message.channel == "commentary":
-        if message.recipient.startswith("functions."):
-            function_name = message.recipient.split(".")[-1]
+        if recipient is not None and recipient.startswith("functions."):
+            function_name = recipient.split(".")[-1]
             for content in message.content:
                 random_id = random_uuid()
                 response_item = ResponseFunctionToolCall(
@@ -230,8 +230,8 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                     id=f"ft_{random_id}",
                 )
                 output_items.append(response_item)
-        elif message.recipient.startswith(
-                "python") or message.recipient.startswith("browser"):
+        elif recipient is not None and (recipient.startswith("python")
+                                        or recipient.startswith("browser")):
             for content in message.content:
                 reasoning_item = ResponseReasoningItem(
                     id=f"rs_{random_uuid()}",
@@ -245,7 +245,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                 )
                 output_items.append(reasoning_item)
         else:
-            raise ValueError(f"Unknown recipient: {message.recipient}")
+            raise ValueError(f"Unknown recipient: {recipient}")
     elif message.channel == "final":
         contents = []
         for content in message.content:
@@ -329,23 +329,19 @@ def parse_chat_output(
         token_ids: Sequence[int]) -> tuple[Optional[str], Optional[str], bool]:
     parser = parse_output_into_messages(token_ids)
     output_msgs = parser.messages
+    is_tool_call = False  # TODO: update this when tool call is supported
     if len(output_msgs) == 0:
         # The generation has stopped during reasoning.
-        is_tool_call = False
         reasoning_content = parser.current_content
         final_content = None
     elif len(output_msgs) == 1:
         # The generation has stopped during final message.
-        is_tool_call = False
         reasoning_content = output_msgs[0].content[0].text
         final_content = parser.current_content
     else:
-        if len(output_msgs) != 2:
-            raise ValueError(
-                "Expected 2 output messages (reasoning and final), "
-                f"but got {len(output_msgs)}.")
-        reasoning_msg, final_msg = output_msgs
-        reasoning_content = reasoning_msg.content[0].text
+        reasoning_msg = output_msgs[:-1]
+        final_msg = output_msgs[-1]
+        reasoning_content = "\n".join(
+            [msg.content[0].text for msg in reasoning_msg])
         final_content = final_msg.content[0].text
-        is_tool_call = final_msg.recipient is not None
     return reasoning_content, final_content, is_tool_call

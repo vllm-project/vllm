@@ -38,8 +38,7 @@ def test_model_load_and_run(vllm_runner, model_id: str, force_marlin: bool,
     with vllm_runner(model_id) as llm:
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
-        outputs = llm.generate_greedy(prompts=["Hello my name is"],
-                                      max_tokens=10)
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=10)
         print(outputs[0][1])
 
 
@@ -90,8 +89,7 @@ def test_kv_cache_model_load_and_run(vllm_runner, model_id: str,
 
         # note: this does not test accuracy, just that we can run through
         # see lm-eval tests for accuracy
-        outputs = llm.generate_greedy(prompts=["Hello my name is"],
-                                      max_tokens=10)
+        outputs = llm.generate_greedy(["Hello my name is"], max_tokens=10)
         print(outputs[0][1])
 
 
