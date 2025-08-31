@@ -817,7 +817,8 @@ steps:
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)'
+  - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py 
+  - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)' 
   # test sequence parallel
   - pytest -v -s distributed/test_sequence_parallel.py
   # this test fails consistently.
