@@ -53,7 +53,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.vision import get_vit_attn_backend
+
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
@@ -71,6 +71,7 @@ from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal, SupportsV0Only
 from .llama import LlamaDecoderLayer, LlamaMLP
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
+from vllm.attention.layer import MultiHeadAttention
 
 logger = init_logger(__name__)
 
@@ -518,18 +519,9 @@ class MllamaVisionSdpaAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
         
-        # Detect attention backend at initialization time
-        self.attn_backend = get_vit_attn_backend(support_fa=True)
-        
-        # Validate supported backends
-        if self.attn_backend not in {
-            _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS, 
-            _Backend.ROCM_AITER_FA
-        }:
-            raise RuntimeError(
-                f"Vision attention does not support {self.attn_backend} "
-                f"backend now."
-            )
+        # Use unified MultiHeadAttention with automatic backend selection
+        self.attn = MultiHeadAttention(
+            self.num_local_heads, self.head_dim, 1.0 / math.sqrt(self.head_dim))
 
     def forward(
         self,
@@ -538,44 +530,9 @@ class MllamaVisionSdpaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_state)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.view(q.shape[0], q.shape[1], self.num_local_heads,
-                   self.head_dim)
-        k = k.view(k.shape[0], k.shape[1], self.num_local_heads,
-                   self.head_dim)
-        v = v.view(v.shape[0], v.shape[1], self.num_local_heads,
-                   self.head_dim)
-
-        # Apply attention using the pre-selected backend
-        if self.attn_backend == _Backend.FLASH_ATTN:
-            from vllm.vllm_flash_attn.flash_attn_interface import (
-                flash_attn_func)
-            # Flash Attention expects (batch, seq, heads, head_dim)
-            # Note: attention_mask is not supported in flash attention
-            attn_output = flash_attn_func(
-                q, k, v, softmax_scale=1.0 / math.sqrt(self.head_dim))
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-            # xFormers expects (batch, seq, heads, head_dim)
-            attn_output = xops.memory_efficient_attention_forward(
-                q, k, v, attn_bias=attention_mask, 
-                scale=1.0 / math.sqrt(self.head_dim)
-            )
-        elif self.attn_backend == _Backend.ROCM_AITER_FA:
-            from aiter import flash_attn_varlen_func
-            # ROCm Flash Attention expects (batch, seq, heads, head_dim)
-            attn_output = flash_attn_varlen_func(
-                q, k, v, softmax_scale=1.0 / math.sqrt(self.head_dim))
-        else:
-            # PyTorch SDPA (default and fallback)
-            q = q.transpose(1, 2)
-            k = k.transpose(1, 2)
-            v = v.transpose(1, 2)
-            attn_output = F.scaled_dot_product_attention(q,
-                                                         k,
-                                                         v,
-                                                         attn_mask=attention_mask,
-                                                         dropout_p=0.0)
-            attn_output = attn_output.transpose(1, 2)
+        
+        # Use unified MultiHeadAttention with automatic backend selection
+        attn_output = self.attn(q, k, v)
 
         attn_output = attn_output.contiguous()
         attn_output = attn_output.reshape(attn_output.shape[0],

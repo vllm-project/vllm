@@ -25,9 +25,8 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
-from vllm.model_executor.models.vision import get_vit_attn_backend
+from vllm.attention.layer import MultiHeadAttention
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.platforms import _Backend
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems, NestedTensors)
@@ -699,22 +698,9 @@ class Step3VisionAttention(nn.Module):
                                               quant_config=quant_config,
                                               prefix=prefix)
         
-        # Detect attention backend at initialization time
-        self.attn_backend = get_vit_attn_backend(support_fa=True)
-        
-        # Validate supported backends
-        if self.attn_backend not in {
-            _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS, 
-            _Backend.ROCM_AITER_FA
-        }:
-            raise RuntimeError(
-                f"Vision attention does not support {self.attn_backend} "
-                f"backend now."
-            )
-
-    def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads,
-                           self.head_dim).transpose(1, 2).contiguous()
+        # Use unified MultiHeadAttention with automatic backend selection
+        self.attn = MultiHeadAttention(
+            self.num_heads, self.head_dim, self.scale)
 
     def forward(
         self,
@@ -726,44 +712,14 @@ class Step3VisionAttention(nn.Module):
         # get query proj
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        q = q.view(bsz, tgt_len, self.num_heads, self.head_dim)
-        k = k.view(bsz, tgt_len, self.num_heads, self.head_dim)
-        v = v.view(bsz, tgt_len, self.num_heads, self.head_dim)
         
-        # Apply attention using the pre-selected backend
-        if self.attn_backend == _Backend.FLASH_ATTN:
-            from vllm.vllm_flash_attn.flash_attn_interface import (
-                flash_attn_func)
-            # Flash Attention expects (batch, seq, heads, head_dim)
-            attn_output = flash_attn_func(q, k, v, softmax_scale=self.scale)
-            attn_output = attn_output.reshape(
-                bsz, tgt_len, self.num_heads * self.head_dim)
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-            # xFormers expects (batch, seq, heads, head_dim)
-            attn_output = xops.memory_efficient_attention_forward(
-                q, k, v, scale=self.scale)
-            attn_output = attn_output.reshape(
-                bsz, tgt_len, self.num_heads * self.head_dim)
-        elif self.attn_backend == _Backend.ROCM_AITER_FA:
-            from aiter import flash_attn_varlen_func
-            # ROCm Flash Attention expects (batch, seq, heads, head_dim)
-            attn_output = flash_attn_varlen_func(
-                q, k, v, softmax_scale=self.scale)
-            attn_output = attn_output.reshape(
-                bsz, tgt_len, self.num_heads * self.head_dim)
-        else:
-            # PyTorch SDPA (default and fallback)
-            q = q.transpose(1, 2)
-            k = k.transpose(1, 2)
-            v = v.transpose(1, 2)
-            attn_output = F.scaled_dot_product_attention(q,
-                                                         k,
-                                                         v,
-                                                         scale=self.scale,
-                                                         is_causal=False)
-            attn_output = attn_output.transpose(1, 2).reshape(
-                bsz, tgt_len, self.num_heads * self.head_dim)
+        # Reshape for MultiHeadAttention: (batch, seq, hidden_size)
+        q_reshaped = q.view(bsz, tgt_len, -1)
+        k_reshaped = k.view(bsz, tgt_len, -1)
+        v_reshaped = v.view(bsz, tgt_len, -1)
+        
+        # Use unified MultiHeadAttention with automatic backend selection
+        attn_output = self.attn(q_reshaped, k_reshaped, v_reshaped)
 
         attn_output, _ = self.out_proj(attn_output)
 
