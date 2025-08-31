@@ -54,12 +54,12 @@ class UltravoxAudioFeatureInputs(TensorSchema):
     type: Literal["audio_features"]
     data: Annotated[Union[torch.Tensor, list[torch.Tensor],
                           list[list[torch.Tensor]]],
-                    TensorShape("b", "n", 80, "t")]
+                    TensorShape("b", "n", 80, "t", dynamic_dims={"n"})]
     lens: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                    TensorShape("b", "n")]
+                    TensorShape("b", "n", dynamic_dims={"n"})]
     """Length of the audio frames. Used for attention mask in WhisperEncoder."""
     token_len: Annotated[Union[torch.Tensor, list[torch.Tensor]],
-                         TensorShape("b", "n")]
+                         TensorShape("b", "n", dynamic_dims={"n"})]
     """Length of the audio tokens. Used for flattening the audio features."""
 
 
@@ -495,6 +495,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             return None
 
         if audio_features is not None:
+            audio_features = [feature[:, :80, :] for feature in audio_features]
             return UltravoxAudioFeatureInputs(type="audio_features",
                                               data=audio_features,
                                               lens=audio_lens,
