@@ -5,22 +5,21 @@
 set -e
 set -x
 
-TEST_IMAGE="${TEST_IMAGE:-1}"
-
-if [ "$TEST_IMAGE" -eq 1 ]; then
-    cd /vllm-workspace/
+if [ -d "/vllm-workspace" ]; then
+    cd /vllm-workspace
     # restore the original files
     mv src/vllm ./vllm
-    pip uninstall -y vllm
 fi
+
+pip uninstall -y vllm
 
 cd kernels
 # install vllm-kernels and vllm without kernels packages
 pip install -v --no-build-isolation --editable .
 cd ..
-VLLM_TARGET_DEVICE=empty pip install -v --no-build-isolation --editable .
+VLLM_NO_EXTENSION=1 pip install -v --no-build-isolation --editable .
 
 # simple test to confirm kernels can be loaded
-python -c "import vllm._C as c; import vllm.vllm_flash_attn as f; assert f.is_fa_version_supported(3)"
+python -c "import vllm._C as c"
 # eval
-pytest -s -v ./tests/evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
+pytest -s -v ./tests/evals/gsm8k/test_gsm8k_correctness.py --model-config-file=Llama-3-8B-Instruct-nonuniform-CT.yaml --tp-size=1

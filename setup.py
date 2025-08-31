@@ -679,6 +679,10 @@ else:
         precompiled_build_ext if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
     }
 
+if os.getenv("VLLM_NO_EXTENSION"):
+    ext_modules = []
+    cmdclass = {}
+
 setup(
     # static metadata should rather go in pyproject.toml
     version=get_vllm_version(),

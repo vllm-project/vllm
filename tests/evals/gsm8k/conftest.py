@@ -9,6 +9,11 @@ def pytest_addoption(parser):
     parser.addoption("--config-list-file",
                      default="configs/models-small.txt",
                      help="File containing list of config files to test")
+    parser.addoption("--model-config-file",
+                     default=None,
+                     help="""The model config file to test,
+                     e.g. Llama-3-8B-Instruct-nonuniform-CT.yaml.
+                     The --config-list-file will be ignored if provided.""")
     parser.addoption("--tp-size",
                      default=1,
                      type=int,
@@ -19,6 +24,7 @@ def pytest_generate_tests(metafunc):
     """Generate test parameters from config files."""
     if "config_filename" in metafunc.fixturenames:
         config_list_file = metafunc.config.getoption("--config-list-file")
+        config_file = metafunc.config.getoption("--model-config-file")
         tp_size = metafunc.config.getoption("--tp-size")
 
         # Handle both relative and absolute paths
@@ -35,7 +41,11 @@ def pytest_generate_tests(metafunc):
         print(f"Looking for config list at: {config_list_path}")
 
         config_files = []
-        if config_list_path.exists():
+        if config_file:
+            config_path = Path(__file__).parent / "configs" / config_file
+            assert config_path.exists(), f"Config file({config_path}) not found"
+            config_files.append(config_path)
+        elif config_list_path.exists():
             # Determine config directory (same directory as the list file)
             config_dir = config_list_path.parent
 
