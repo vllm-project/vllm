@@ -123,6 +123,8 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
 
+        self.failure_request: set[str] = set()
+
         # Encoder-related.
         # Calculate encoder cache size if applicable
         # NOTE: For now we use the same budget for both compute and space.
@@ -365,7 +367,8 @@ class Scheduler(SchedulerInterface):
                 load_kv_async = False
 
                 # Get already-cached tokens.
-                if request.num_computed_tokens == 0:
+                if request.num_computed_tokens == 0 and (
+                        request.request_id not in self.failure_request):
                     # Get locally-cached tokens.
                     new_computed_blocks, num_new_local_computed_tokens = \
                         self.kv_cache_manager.get_computed_blocks(
@@ -383,6 +386,7 @@ class Scheduler(SchedulerInterface):
                 # KVTransfer: WAITING reqs have num_computed_tokens > 0
                 # after async KV recvs are completed.
                 else:
+                    self.failure_request.discard(request.request_id)
                     new_computed_blocks = (
                         self.kv_cache_manager.create_empty_block_list())
                     num_new_local_computed_tokens = 0
@@ -1201,6 +1205,10 @@ class Scheduler(SchedulerInterface):
         WAITING_FOR_REMOTE_KV.
         """
         assert self.connector is not None
+
+        if request.request_id in self.failure_request:
+            return True
+
         if request.request_id not in self.finished_recving_kv_req_ids:
             return False
 
@@ -1243,3 +1251,9 @@ class Scheduler(SchedulerInterface):
         for req_id in (kv_connector_output.finished_sending or ()):
             logger.debug("Finished sending KV transfer for request %s", req_id)
             self._free_blocks(self.requests[req_id])
+        for req_id in (kv_connector_output.failure_request or ()):
+            logger.debug("Failed KV transfer for request %s", req_id)
+            request = self.requests.get(req_id)
+            if request is None:
+                self._free_blocks(self.requests[req_id])
+                self.failure_request.add(req_id)
