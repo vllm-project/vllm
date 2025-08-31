@@ -470,7 +470,8 @@ class Processor:
         else:
             tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
             max_input_id = max(prompt_ids, default=0)
-            if max_input_id > self.model_config.get_vocab_size() - 1:
+            if max_input_id > max(tokenizer.max_token_id,
+                                  self.model_config.get_vocab_size() - 1):
                 raise ValueError(
                     f"Token id {max_input_id} is out of vocabulary")
 
