@@ -345,7 +345,7 @@ class MsgpackSerde(ObjectSerde):
 
     def deserialize(self, data_view: memoryview) -> Any:
         # pickle.loads do not read past the end of a pickled object
-        # within a large buffer
+        # within a large buffer, so we can skip storing the metadata size
         type_name, nbytes, len_arr = pickle.loads(data_view)
         serialized_data = bytearray(data_view[-nbytes:])
 
@@ -524,7 +524,7 @@ class SingleWriterShmObjectStorage:
         """
         return key in self.key_index
 
-    def get_cached(self, key: str) -> tuple[Optional[int], Optional[int]]:
+    def get_cached(self, key: str) -> tuple[int, int]:
         """
         Get the cached object by key if it exists.
         """

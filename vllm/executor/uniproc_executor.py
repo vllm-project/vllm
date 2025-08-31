@@ -49,7 +49,7 @@ class UniProcExecutor(ExecutorBase):
             is_driver_worker=is_driver_worker,
         )
         self.receiver_cache = receiver_cache_from_config(
-            self.vllm_config, MULTIMODAL_REGISTRY, True, Lock())
+            self.vllm_config, MULTIMODAL_REGISTRY, Lock())
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
@@ -61,7 +61,7 @@ class UniProcExecutor(ExecutorBase):
                        kwargs: Optional[Dict] = None) -> List[Any]:
         if kwargs is None:
             kwargs = {}
-        if self.receiver_cache is not None:
+        if self.receiver_cache is not None and method == "execute_model":
             get_and_update_mm_cache(self.receiver_cache, args)
         answer = run_method(self.driver_worker, method, args, kwargs)
         return [answer]

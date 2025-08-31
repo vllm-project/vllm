@@ -450,6 +450,10 @@ class ModelConfig:
     mm_processor_cache_type: MMCacheType = "lru"
     """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
     use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
+    mm_cache_max_object_size_mb: int = 128
+    """Size limit (in MiB) for each object stored in the multi-modal processor
+    shared memory cache. Only effective when `mm_processor_cache_type` is
+    `"shm"`."""
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """Indicates how to optimize multi-modal encoder inference using
     tensor parallelism (TP).
@@ -889,6 +893,7 @@ class ModelConfig:
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 mm_processor_cache_gb=self.mm_processor_cache_gb,
                 mm_processor_cache_type=self.mm_processor_cache_type,
+                mm_cache_max_object_size_mb=self.mm_cache_max_object_size_mb,
                 mm_encoder_tp_mode=self.mm_encoder_tp_mode,
                 interleave_mm_strings=self.interleave_mm_strings,
                 skip_mm_profiling=self.skip_mm_profiling,
@@ -2571,6 +2576,11 @@ class MultiModalConfig:
     mm_processor_cache_type: MMCacheType = "lru"
     """Type of cache to use for the multi-modal preprocessor/mapper. If `shm`,
     use shared memory FIFO cache. If `lru`, use mirrored LRU cache."""
+
+    mm_cache_max_object_size_mb: int = 128
+    """Size limit (in MiB) for each object stored in the multi-modal processor
+    shared memory cache. Only effective when `mm_processor_cache_type` is
+    `"shm"`."""
 
     mm_encoder_tp_mode: MMEncoderTPMode = "weights"
     """

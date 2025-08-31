@@ -3,28 +3,26 @@
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union
+from multiprocessing.synchronize import Lock as LockType
+from typing import TYPE_CHECKING, Generic, Optional, TypeVar, Union, cast
 
 import torch
 from typing_extensions import TypeAlias, override
 
 from vllm.distributed.device_communicators.shm_object_storage import (
     MsgpackSerde, SingleWriterShmObjectStorage, SingleWriterShmRingBuffer)
-from vllm.envs import (VLLM_OBJECT_STORAGE_MAX_OBJECT_SIZE_MB,
-                       VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
-                       VLLM_OBJECT_STORAGE_SHM_BUFFER_SIZE_MB)
+from vllm.envs import VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, LRUCache
+from vllm.utils import GiB_bytes, LRUCache, MiB_bytes
 from vllm.utils.jsontree import (json_count_leaves, json_map_leaves,
                                  json_reduce_leaves)
 
-from .inputs import (MultiModalBatchedField, MultiModalFeatureSpec, MultiModalFieldElem,
-                     MultiModalKwargs, MultiModalKwargsItem,
-                     MultiModalKwargsItems, NestedTensors)
+from .inputs import (MultiModalBatchedField, MultiModalFeatureSpec,
+                     MultiModalFieldElem, MultiModalKwargs,
+                     MultiModalKwargsItem, MultiModalKwargsItems,
+                     NestedTensors)
 
 if TYPE_CHECKING:
-    from multiprocessing.synchronize import Lock as LockType
-
     from vllm.config import ModelConfig, VllmConfig
 
     from .processing import ResolvedPromptUpdate
@@ -412,16 +410,15 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         super().__init__()
 
         self.world_size = vllm_config.parallel_config.world_size
+        mm_config = vllm_config.model_config.get_multimodal_config()
 
         ring_buffer = SingleWriterShmRingBuffer(
-            data_buffer_size=VLLM_OBJECT_STORAGE_SHM_BUFFER_SIZE_MB * 1024 *
-            1024,
+            data_buffer_size=int(mm_config.mm_processor_cache_gb * GiB_bytes),
             name=VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
             create=True,  # sender is the writer
         )
         self._shm_cache = SingleWriterShmObjectStorage(
-            max_object_size=VLLM_OBJECT_STORAGE_MAX_OBJECT_SIZE_MB * 1024 *
-            1024,
+            max_object_size=mm_config.mm_cache_max_object_size_mb * MiB_bytes,
             n_readers=self.world_size,
             ring_buffer=ring_buffer,
             serde_class=MsgpackSerde,
@@ -516,10 +513,7 @@ def _enable_ipc_cache(vllm_config: "VllmConfig") -> bool:
 
 
 def _enable_mm_input_shm_cache(vllm_config: "VllmConfig") -> bool:
-    """Whether the shared memory based cache should be enabled.
-    NOTE: This is put under MultiModalRegistry on purpose to respect 
-    text-only mode for multimodal models.
-    """
+    """Whether the shared memory based cache should be enabled."""
 
     if not _enable_ipc_cache(vllm_config):
         return False
@@ -542,10 +536,9 @@ def processor_cache_from_config(
     if not _enable_ipc_cache(vllm_config):
         return MultiModalProcessorOnlyCache(model_config)
 
-    if _enable_mm_input_shm_cache(vllm_config):
-        return ShmObjectStoreSenderCache(vllm_config)
-    else:
+    if not _enable_mm_input_shm_cache(vllm_config):
         return MultiModalProcessorSenderCache(model_config)
+    return ShmObjectStoreSenderCache(vllm_config)
 
 
 def processor_only_cache_from_config(
@@ -635,16 +628,15 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
         assert shared_worker_lock is not None, \
             "shared_worker_lock must be provided for shm receiver cache"
         self.world_size = vllm_config.parallel_config.world_size
+        mm_config = vllm_config.model_config.get_multimodal_config()
 
         ring_buffer = SingleWriterShmRingBuffer(
-            data_buffer_size=VLLM_OBJECT_STORAGE_SHM_BUFFER_SIZE_MB * 1024 *
-            1024,
+            data_buffer_size=int(mm_config.mm_processor_cache_gb * GiB_bytes),
             name=VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME,
             create=False,  # Server is a reader
         )
         self._shm_cache = SingleWriterShmObjectStorage(
-            max_object_size=VLLM_OBJECT_STORAGE_MAX_OBJECT_SIZE_MB * 1024 *
-            1024,
+            max_object_size=mm_config.mm_cache_max_object_size_mb * MiB_bytes,
             n_readers=self.world_size,
             ring_buffer=ring_buffer,
             serde_class=MsgpackSerde,
@@ -657,9 +649,10 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
         mm_item: Optional[MultiModalKwargsItem],
         mm_hash: str,
     ) -> MultiModalKwargsItem:
+        assert mm_item is not None, f"Expected an address item for {mm_hash=}"
         if "address" in mm_item:
-            address, monotonic_id = mm_item["address"].data, mm_item[
-                "monotonic_id"].data
+            address = cast(int, mm_item["address"].data)
+            monotonic_id = cast(int, mm_item["monotonic_id"].data)
             return self._shm_cache.get(address, monotonic_id)
 
         return mm_item
@@ -672,7 +665,6 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
 def receiver_cache_from_config(
     vllm_config: "VllmConfig",
     mm_registry: "MultiModalRegistry",
-    is_worker_proc: bool = False,
     shared_worker_lock: Optional[LockType] = None,
 ) -> Optional[BaseMultiModalReceiverCache]:
     """Return a `BaseMultiModalReceiverCache`, if enabled."""
@@ -684,9 +676,11 @@ def receiver_cache_from_config(
     if not _enable_ipc_cache(vllm_config):
         return None
 
-    if _enable_mm_input_shm_cache(vllm_config):
-        return ShmObjectStoreReceiverCache(
-            vllm_config, shared_worker_lock) if is_worker_proc else None
-    else:
+    # Determine if we are in a worker process
+    is_worker_proc = shared_worker_lock is not None
+    if not _enable_mm_input_shm_cache(vllm_config):
         return None if is_worker_proc else MultiModalReceiverCache(
             model_config)
+
+    return ShmObjectStoreReceiverCache(
+        vllm_config, shared_worker_lock) if is_worker_proc else None

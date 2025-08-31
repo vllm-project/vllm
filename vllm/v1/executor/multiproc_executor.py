@@ -15,8 +15,9 @@ from functools import partial
 from multiprocessing import Lock
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
+from multiprocessing.synchronize import Lock as LockType
 from threading import Thread
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
+from typing import Any, Callable, Optional, Union, cast
 
 import cloudpickle
 
@@ -39,9 +40,6 @@ from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.executor.utils import get_and_update_mm_cache
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
-
-if TYPE_CHECKING:
-    from multiprocessing.synchronize import Lock as LockType
 
 logger = init_logger(__name__)
 
@@ -423,7 +421,7 @@ class WorkerProc:
         self.worker_response_mq = MessageQueue(1, 1)
 
         self.receiver_cache = receiver_cache_from_config(
-            vllm_config, MULTIMODAL_REGISTRY, True, shared_worker_lock)
+            vllm_config, MULTIMODAL_REGISTRY, shared_worker_lock)
 
         # Initialize device and loads weights
         self.worker.init_device()
@@ -612,7 +610,7 @@ class WorkerProc:
         """Main busy loop for Multiprocessing Workers"""
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue()
-            if self.receiver_cache is not None:
+            if self.receiver_cache is not None and method == "execute_model":
                 get_and_update_mm_cache(self.receiver_cache, args)
             try:
                 if isinstance(method, str):
