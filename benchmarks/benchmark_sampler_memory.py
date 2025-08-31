@@ -388,6 +388,18 @@ def main(args: argparse.Namespace):
     if args.output_json:
         write_to_json(args.output_json, combined_results)
         print(f"\nResults saved to {args.output_json}")
+    
+    # Save in PyTorch benchmark format if requested
+    if os.environ.get("SAVE_TO_PYTORCH_BENCHMARK_FORMAT", False):
+        pt_records = convert_to_pytorch_benchmark_format(
+            args=args,
+            metrics={"sampler_memory": [combined_results]},
+            extra_info={"benchmark_type": "sampler_memory_usage"}
+        )
+        if pt_records:
+            pt_file = f"{os.path.splitext(args.output_json)[0]}.pytorch.json"
+            write_to_json(pt_file, pt_records)
+            print(f"PyTorch benchmark format saved to {pt_file}")
 
 
 if __name__ == "__main__":
