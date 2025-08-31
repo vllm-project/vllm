@@ -27,7 +27,7 @@ class InputBatch:
     # batch_idx -> num_scheduled_tokens
     num_scheduled_tokens: np.ndarray
     total_num_tokens: int
-    max_num_tokens: int
+    max_query_len: int
     num_reqs: int
 
     attn_metadata: dict[str, Any]
