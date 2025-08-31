@@ -77,7 +77,8 @@ from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_block_table import BlockTables
-from vllm.v1.worker.gpu_input_batch import InputBatch, prepare_inputs
+from vllm.v1.worker.gpu_input_batch import (InputBatch, prepare_inputs,
+                                            prepare_spec_decode)
 from vllm.v1.worker.gpu_worker_states import RequestState
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
@@ -241,6 +242,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             (self.max_num_tokens, self.hidden_size),
             dtype=self.dtype,
             device=self.device)
+        self.cu_num_draft_tokens = self._make_buffer(self.max_num_reqs,
+                                                     dtype=torch.int32)
+        self.spec_logits_indices = self._make_buffer(self.max_num_tokens +
+                                                     self.max_num_reqs,
+                                                     dtype=torch.int32)
+        self.target_logits_indices = self._make_buffer(self.max_num_tokens,
+                                                       dtype=torch.int32)
+        self.bonus_logits_indices = self._make_buffer(self.max_num_reqs,
+                                                      dtype=torch.int32)
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -271,13 +281,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         self.idx_mapping = self._make_buffer(self.max_num_reqs,
                                              dtype=torch.int32)
-
-        # OPTIMIZATION: Cache the tensors rather than creating them every step.
-        # Keep in int64 to avoid overflow with long context
-        self.arange_np = np.arange(max(self.max_num_reqs + 1,
-                                       self.max_model_len,
-                                       self.max_num_tokens),
-                                   dtype=np.int64)
 
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
@@ -529,26 +532,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         dummy_modality = mm_budget.get_modality_with_max_tokens()
         return self._get_mm_dummy_batch(dummy_modality, num_seqs)
 
-    def _get_cumsum_and_arange(
-        self,
-        num_tokens: np.ndarray,
-        cumsum_dtype: Optional[np.dtype] = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Get the cumulative sum and batched arange of the given array.
-        # E.g., [2, 5, 3] -> ([2, 7, 10], [0, 1, 0, 1, 2, 3, 4, 0, 1, 2])
-        # Equivalent to but faster than:
-        # np.concatenate([np.arange(n) for n in num_tokens])
-        """
-        # Step 1. [2, 5, 3] -> [2, 7, 10]
-        cu_num_tokens = np.cumsum(num_tokens, dtype=cumsum_dtype)
-        total_num_tokens = cu_num_tokens[-1]
-        # Step 2. [2, 7, 10] -> [0, 0, 2, 2, 2, 2, 2, 7, 7, 7]
-        cumsums_offsets = np.repeat(cu_num_tokens - num_tokens, num_tokens)
-        # Step 3. [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        arange = self.arange_np[:total_num_tokens] - cumsums_offsets
-
-        return cu_num_tokens, arange
-
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -577,7 +560,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Get the number of scheduled tokens for each request.
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
-        max_num_scheduled_tokens = int(num_scheduled_tokens.max())
+        max_num_scheduled_tokens = max(tokens)
 
         prepare_inputs(
             idx_mapping=idx_mapping_np,
@@ -632,7 +615,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if draft_token_ids:
                     num_draft_tokens[i] = len(draft_token_ids)
             spec_decode_metadata = self._calc_spec_decode_metadata(
-                num_draft_tokens, self.query_start_loc.np[1:num_reqs + 1])
+                num_draft_tokens)
             logits_indices = spec_decode_metadata.logits_indices
 
         logits_indices_padded = None
@@ -905,55 +888,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _calc_spec_decode_metadata(
         self,
         num_draft_tokens: np.ndarray,
-        cu_num_scheduled_tokens: np.ndarray,
     ) -> SpecDecodeMetadata:
-        # Inputs:
-        # cu_num_scheduled_tokens:  [  4, 104, 107, 207, 209]
-        # num_draft_tokens:         [  3,   0,   2,   0,   1]
-        # Outputs:
-        # cu_num_draft_tokens:      [  3,   3,   5,   5,   6]
-        # logits_indices:           [  0,   1,   2,   3, 103, 104, 105, 106,
-        #                            206, 207, 208]
-        # target_logits_indices:    [  0,   1,   2,   5,   6,   9]
-        # bonus_logits_indices:     [  3,   4,   7,   8,  10]
+        num_reqs = num_draft_tokens.shape[0]
+        total_num_draft_tokens = prepare_spec_decode(
+            self.query_start_loc.np,
+            num_draft_tokens,
+            self.cu_num_draft_tokens.np,
+            self.logits_indices.np,
+            self.target_logits_indices.np,
+            self.bonus_logits_indices.np,
+        )
 
-        # Compute the logits indices.
-        # [4, 1, 3, 1, 2]
-        num_sampled_tokens = num_draft_tokens + 1
-
-        # Step 1. cu_num_sampled_tokens: [4, 5, 8, 9, 11]
-        # arange: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
-        cu_num_sampled_tokens, arange = self._get_cumsum_and_arange(
-            num_sampled_tokens, cumsum_dtype=np.int32)
-        # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
-        logits_indices = np.repeat(
-            cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens)
-        # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
-        logits_indices += arange
-
-        # Compute the bonus logits indices.
-        bonus_logits_indices = cu_num_sampled_tokens - 1
-
-        # Compute the draft logits indices.
-        # cu_num_draft_tokens: [3, 3, 5, 5, 6]
-        # arange: [0, 1, 2, 0, 1, 0]
-        cu_num_draft_tokens, arange = self._get_cumsum_and_arange(
-            num_draft_tokens, cumsum_dtype=np.int32)
-        # [0, 0, 0, 5, 5, 9]
-        target_logits_indices = np.repeat(
-            cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens)
-        # [0, 1, 2, 5, 6, 9]
-        target_logits_indices += arange
-
-        # TODO: Optimize the CPU -> GPU copy.
-        cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
-            self.device, non_blocking=True)
-        logits_indices = torch.from_numpy(logits_indices).to(self.device,
-                                                             non_blocking=True)
-        target_logits_indices = torch.from_numpy(target_logits_indices).to(
-            self.device, non_blocking=True)
-        bonus_logits_indices = torch.from_numpy(bonus_logits_indices).to(
-            self.device, non_blocking=True)
+        cu_num_draft_tokens = self.cu_num_draft_tokens.copy_to_gpu(num_reqs)
+        logits_indices = self.logits_indices.copy_to_gpu(
+            num_reqs + total_num_draft_tokens)
+        target_logits_indices = self.target_logits_indices.copy_to_gpu(
+            total_num_draft_tokens)
+        bonus_logits_indices = self.bonus_logits_indices.copy_to_gpu(num_reqs)
 
         # Compute the draft token ids.
         # draft_token_indices:      [  1,   2,   3, 105, 106, 208]
@@ -1669,7 +1620,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     target_hidden_states = hidden_states[:num_scheduled_tokens]
             else:
                 # TODO(woosuk): Refactor this.
-                num_draft_tokens = input_batch.spec_decode_metadata.num_draft_tokens
+                num_draft_tokens = (
+                    input_batch.spec_decode_metadata.num_draft_tokens)
                 num_rejected_tokens = [
                     n + 1 - len(sampled_token_ids[i]) if n > 0 else 0
                     for i, n in enumerate(num_draft_tokens)

@@ -91,3 +91,53 @@ def prepare_inputs(
     query_start_loc[num_reqs + 1:].fill(cu_num_tokens)
     # Fill unused with 0 for full cuda graph mode.
     seq_lens[num_reqs:].fill(0)
+
+
+def prepare_spec_decode(
+        # Inputs
+        query_start_loc: np.ndarray,  # [B + 1]
+        num_draft_tokens: np.ndarray,  # [B]
+        # Outputs
+    cu_num_draft_tokens: np.ndarray,  # [B]
+        logits_indices: np.ndarray,  # [N + B]
+        target_logits_indices: np.ndarray,  # [N]
+        bonus_logits_indices: np.ndarray,  # [B]
+) -> int:  # N
+    # Inputs:
+    # query_start_loc:          [  0,   4, 104, 107, 207, 209]
+    # num_draft_tokens:         [  3,   0,   2,   0,   1]
+    # Outputs:
+    # cu_num_draft_tokens:      [  3,   3,   5,   5,   6]
+    # logits_indices:           [  0,   1,   2,   3, 103, 104, 105, 106,
+    #                            206, 207, 208]
+    # target_logits_indices:    [  0,   1,   2,   5,   6,   9]
+    # bonus_logits_indices:     [  3,   4,   7,   8,  10]
+    # return:                   6 (total number of draft tokens)
+
+    cu_num_draft = 0
+    cu_num_sample = 0
+    num_reqs = num_draft_tokens.shape[0]
+    for i in range(num_reqs):
+        q_end_idx = query_start_loc[i + 1]
+        draft_len = num_draft_tokens[i]
+
+        # The last draft_len + 1 query tokens are used for sampling.
+        sample_len = draft_len + 1
+        sample_start_idx = cu_num_sample
+        sample_end_idx = sample_start_idx + sample_len
+        logits_indices[sample_start_idx:sample_end_idx] = (np.arange(
+            q_end_idx - sample_len, q_end_idx))
+
+        # For each query, the first draft_len tokens need target logits for
+        # rejection sampling. The draft_len + 1th token is used for bonus token.
+        draft_start_idx = cu_num_draft
+        draft_end_idx = draft_start_idx + draft_len
+        target_logits_indices[draft_start_idx:draft_end_idx] = (np.arange(
+            sample_start_idx, sample_end_idx - 1))
+        bonus_logits_indices[i] = sample_end_idx - 1
+
+        cu_num_draft += draft_len
+        cu_num_draft_tokens[i] = cu_num_draft
+        cu_num_sample += sample_len
+
+    return cu_num_draft
