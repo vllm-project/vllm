@@ -135,8 +135,12 @@ __device__ __forceinline__ void cp_async_wait<0>() {
   asm volatile("cp.async.wait_all;\n" ::);
 }
 
+__device__ __forceinline__ float clip(float v, float mmin, float mmax) {
+  return fminf(mmax, fmaxf(v, mmin));
+}
+
 template <typename scalar_t, uint32_t NUM_WARPS, typename Idx_t, bool USE_UE8M0,
-          int GROUP_SIZE = 128, int NUM_STAGES = 1>
+          int GROUP_SIZE = 128, int NUM_STAGES = 3>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const scalar_t* __restrict__ _input, __nv_fp8_e4m3* __restrict__ _y_q,
     float* __restrict__ _y_s, const uint32_t* __restrict__ counts,
@@ -222,7 +226,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   };
 
 #pragma unroll
-  for (int i = 0; i < NUM_STAGES; i++) {
+  for (int i = 0; i < NUM_STAGES - 1; i++) {
     load_and_advance_y_pred();
   }
 
@@ -233,8 +237,10 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     float y_max = EPS;
     float results[4];
 
-    cp_async_wait<NUM_STAGES - 1>();
+    cp_async_wait<NUM_STAGES - 2>();
     __syncthreads();
+
+    load_and_advance_y_pred();
 
     const auto compute_pipeline_offset =
         (t % NUM_STAGES) * (GROUP_SIZE / 2u) * NUM_WARPS;
@@ -256,24 +262,22 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       s_up_compute += WARP_SIZE;
     }
 
-    __syncthreads();
-
-    load_and_advance_y_pred();
-
     float y_s = warp_max(y_max) / fp8_max;
 
     if constexpr (USE_UE8M0) {
       y_s = exp2f(ceilf(log2f(y_s)));
     }
 
+#pragma unroll
+    for (Idx_t i = 0; i < 4; ++i) {
+      results[i] = clip(results[i] / y_s, fp8_min, fp8_max);
+    }
+
     auto local_y_q_ptr = y_q_ptr;
 #pragma unroll
     for (Idx_t i = 0; i < 2; ++i) {
-      float q = fminf(fmaxf(results[2 * i] / y_s, fp8_min), fp8_max);
-      local_y_q_ptr[0] = __nv_fp8_e4m3(q);
-      q = fminf(fmaxf(results[2 * i + 1] / y_s, fp8_min), fp8_max);
-      local_y_q_ptr[1] = __nv_fp8_e4m3(q);
-
+      local_y_q_ptr[0] = __nv_fp8_e4m3(results[2 * i]);
+      local_y_q_ptr[1] = __nv_fp8_e4m3(results[2 * i + 1]);
       local_y_q_ptr += 2 * WARP_SIZE;
     }
 
