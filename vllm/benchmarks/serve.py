@@ -1202,6 +1202,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     # Print the URLs that will be used for load balancing
     if len(api_urls) > 1:
         print(f"Round-robin load balancing enabled across {len(api_urls)} URLs:")
+        api_urls = sorted(api_urls)
         for i, url in enumerate(api_urls, 1):
             print(f"  {i}. {url}")
     else:
