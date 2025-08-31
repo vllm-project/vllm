@@ -564,7 +564,6 @@ def run_dp_sharded_mrope_vision_model(
         ```
 
     """
-    vision_model_name = vision_model.__class__.__name__
     tp_size = get_tensor_model_parallel_world_size()
 
     # GPU_0 tp_rank_local = 0
@@ -648,8 +647,8 @@ def run_dp_sharded_mrope_vision_model(
     current_len = image_embeds_local.shape[0]
     if current_len < max_len_per_rank:
         padding_size = max_len_per_rank - current_len
-        if getattr(vision_model,
-                   "vit_processing_type", "default") == "rope_2d":
+        if getattr(vision_model, "vit_processing_type",
+                   "default") == "rope_2d":
             padding = torch.empty((padding_size, image_embeds_local.shape[1],
                                    image_embeds_local.shape[2]),
                                   dtype=image_embeds_local.dtype,
