@@ -7,6 +7,7 @@ import numpy as np
 import torch
 
 from torch import nn
+
 from transformers import AutoModel, BatchFeature
 from transformers.models.gemma3n import (
     Gemma3nAudioConfig,
@@ -54,14 +55,10 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
-from .utils import (
-    AutoWeightsLoader,
-    WeightsMapper,
-    flatten_bn,
-    init_vllm_registered_model,
-    maybe_prefix,
-)
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal,
+                         SupportsTranscription)
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -456,14 +453,11 @@ class Gemma3nMultimodalEmbedder(nn.Module):
         return self.embedding_post_projection_norm(emb_norm_proj)
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    Gemma3nMultiModalProcessor,
-    info=Gemma3nProcessingInfo,
-    dummy_inputs=Gemma3nDummyInputsBuilder,
-)
-class Gemma3nForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsTranscription
-):
+@MULTIMODAL_REGISTRY.register_processor(Gemma3nMultiModalProcessor,
+                                        info=Gemma3nProcessingInfo,
+                                        dummy_inputs=Gemma3nDummyInputsBuilder)
+class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                      SupportsTranscription, SupportsLoRA):
     merge_by_field_config = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
