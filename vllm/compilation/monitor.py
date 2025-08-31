@@ -43,7 +43,7 @@ cudagraph_capturing_enabled: bool = True
 
 
 def validate_cudagraph_capturing_enabled():
-    # used to monitor whether an cudagraph capturing is legal at runtime.
+    # used to monitor whether a cudagraph capturing is legal at runtime.
     # should be called before any cudagraph capturing.
     # if an illegal cudagraph capturing happens, raise an error.
     global cudagraph_capturing_enabled
