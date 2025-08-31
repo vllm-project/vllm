@@ -6,7 +6,7 @@ import argparse
 import json
 import os
 import time
-from typing import Any, Dict, List
+from typing import Any
 
 import torch
 import numpy as np
@@ -26,19 +26,21 @@ def create_synthetic_logits(
     # Make some tokens more likely (simulate realistic distribution)
     for i in range(batch_size):
         # Randomly boost some tokens to create realistic peaks
-        high_prob_indices = torch.randint(0, vocab_size, (vocab_size // 100,), device=device)
-        boost_values = torch.randn(len(high_prob_indices), device=device) * 2 + 3
+        high_prob_indices = torch.randint(
+            0, vocab_size, (vocab_size // 100,), device=device
+        )
+        boost_values = (torch.randn(len(high_prob_indices), device=device) * 2 + 3)
         logits[i, high_prob_indices] += boost_values
     
     return logits
 
 
 def benchmark_core_performance(
-    batch_sizes: List[int],
-    vocab_sizes: List[int],
+    batch_sizes: list[int],
+    vocab_sizes: list[int],
     num_iterations: int = 100,
     device: str = "cuda"
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Benchmark core sampler performance - greedy sampling only."""
     
     results = {
@@ -71,13 +73,16 @@ def benchmark_core_performance(
             latencies = []
             memory_before = torch.cuda.memory_allocated() if device == "cuda" else 0
             
-            for _ in tqdm(range(num_iterations), desc=f"Batch={batch_size}, Vocab={vocab_size}"):
+            for _ in tqdm(
+                range(num_iterations), 
+                desc=f"Batch={batch_size}, Vocab={vocab_size}"
+            ):
                 logits = create_synthetic_logits(batch_size, vocab_size, device)
                 
                 start_time = time.perf_counter()
                 
                 with torch.no_grad():
-                    sampled_tokens = torch.argmax(logits, dim=-1)
+                    _ = torch.argmax(logits, dim=-1)
                 
                 torch.cuda.synchronize() if device == "cuda" else None
                 end_time = time.perf_counter()
@@ -112,7 +117,7 @@ def benchmark_core_performance(
     return results
 
 
-def print_results(results: Dict[str, Any]):
+def print_results(results: dict[str, Any]):
     """Print benchmark results in a formatted way."""
     print("\n" + "="*80)
     print("CORE SAMPLER PERFORMANCE RESULTS (Greedy Sampling)")
@@ -120,7 +125,8 @@ def print_results(results: Dict[str, Any]):
     
     for batch_size in results["batch_sizes"]:
         print(f"\nBatch Size: {batch_size}")
-        print(f"{'Vocab Size':<12} {'Avg Latency (ms)':<18} {'P99 Latency (ms)':<18} {'Throughput (tok/s)':<20} {'Memory (MB)':<12}")
+        print(f"{'Vocab Size':<12} {'Avg Latency (ms)':<18} {'P99 Latency (ms)':<18} "
+              f"{'Throughput (tok/s)':<20} {'Memory (MB)':<12}")
         print("-" * 90)
         
         for vocab_size in results["vocab_sizes"]:
@@ -128,10 +134,12 @@ def print_results(results: Dict[str, Any]):
             throughput = results["throughputs"][batch_size][vocab_size]
             memory = results["memory_usage"][batch_size][vocab_size]
             
-            print(f"{vocab_size:<12} {latency_data['avg_ms']:<18.2f} {latency_data['p99_ms']:<18.2f} {throughput:<20.2f} {memory:<12.2f}")
+            print(f"{vocab_size:<12} {latency_data['avg_ms']:<18.2f} "
+                  f"{latency_data['p99_ms']:<18.2f} {throughput:<20.2f} "
+                  f"{memory:<12.2f}")
 
 
-def analyze_scaling(results: Dict[str, Any]):
+def analyze_scaling(results: dict[str, Any]):
     """Analyze scaling efficiency."""
     print("\n" + "="*80)
     print("SCALING ANALYSIS")
