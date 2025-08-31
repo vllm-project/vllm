@@ -165,6 +165,7 @@ class InternParallelAttention(nn.Module):
 
         self.scale = self.head_dim**-0.5
         if use_data_parallel:
+            print("******using data parallel in InternParallelAttention")
             self.qkv = ReplicatedLinear(
                 self.embed_dim,
                 3 * self.head_dim * self.num_heads,
@@ -384,10 +385,12 @@ class InternVisionEncoderLayer(nn.Module):
         use_data_parallel: bool = False,
     ):
         # fallback to sdpa attention if tp unavailable
-        tp_size = get_tensor_model_parallel_world_size()
+        # tp_size = get_tensor_model_parallel_world_size()
+        tp_size = (1 if use_data_parallel else
+                        get_tensor_model_parallel_world_size())
         num_heads = config.num_attention_heads
 
-        if (num_heads + num_dummy_heads) % tp_size == 0 or use_data_parallel:
+        if (num_heads + num_dummy_heads) % tp_size == 0:
             return InternParallelAttention(config,
                                            quant_config=quant_config,
                                            num_dummy_heads=num_dummy_heads,

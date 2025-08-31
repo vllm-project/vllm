@@ -1040,7 +1040,9 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
 
         self.config = config
         self.multimodal_config = multimodal_config
+        print(f"******mm_encoder_tp_mode: {multimodal_config.mm_encoder_tp_mode}")
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+        print(f"******use_data_parallel: {self.use_data_parallel}")
         self._patch_quant_config(config, quant_config)
 
         image_size = config.force_image_size or config.vision_config.image_size
