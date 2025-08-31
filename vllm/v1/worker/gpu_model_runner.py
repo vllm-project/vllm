@@ -2734,7 +2734,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                  layer_names)
             attn_backends = {}
             attn_backend_layers = defaultdict(list)
-            # Dedupe based on full class name; this is a bit safer than using
+            # Dedupe based on full class name; this is a bit safer than
             # using the class itself as the key because when we create dynamic
             # attention backend subclasses (e.g. ChunkedLocalAttention) unless
             # they are cached correctly, there will be different objects per

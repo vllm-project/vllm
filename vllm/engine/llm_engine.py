@@ -1239,7 +1239,7 @@ class LLMEngine:
 
             # Stop the execute model loop in parallel workers until there are
             # more requests to process. This avoids waiting indefinitely in
-            # torch.distributed ops which may otherwise timeout, and unblocks
+            # torch.distributed ops which may otherwise time out, and unblocks
             # the RPC thread in the workers so that they can process any other
             # queued control plane messages, such as add/remove lora adapters.
             logger.debug("Stopping remote worker execution loop.")

@@ -329,7 +329,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             sampling_params: The sampling parameters for text generation. If
                 None, we use the default sampling parameters.
                 When it is a single value, it is applied to every prompt.
@@ -853,7 +853,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
             use_tqdm: If `True`, shows a tqdm progress bar.
@@ -946,7 +946,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
             use_tqdm: If `True`, shows a tqdm progress bar.
@@ -994,7 +994,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
@@ -1038,7 +1038,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.

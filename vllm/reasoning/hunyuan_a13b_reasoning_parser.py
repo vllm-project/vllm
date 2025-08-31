@@ -30,7 +30,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
     Key Features:
         - For non-stream output , Recognizes and extracts reasoning ("think")
          and answer ("answer") sections from text using regular expressions.
-        - For stream process, it require a token id sequences to change the 
+        - For stream process, it requires a token id sequences to change the
           reasoning state and other state so it maintains internal state to 
           manage parsing across multiple token.
 

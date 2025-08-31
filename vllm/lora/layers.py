@@ -605,7 +605,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
 class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     """ColumnParallelLinear layer that is composed of 2 sublayers (slices)
-    packed together (eg. gate_proj + up_proj -> gate_up_proj).
+    packed together (e.g. gate_proj + up_proj -> gate_up_proj).
 
     This means we have 2 LoRAs, each applied to one half of the layer.
 
