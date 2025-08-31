@@ -51,7 +51,7 @@ from vllm.tasks import PoolingTask
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, Device, is_list_of
+from vllm.utils import Counter, Device, as_iter, is_list_of
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
@@ -186,7 +186,7 @@ class LLM:
                                            CompilationConfig]] = None,
         logits_processors: Optional[list[Union[str,
                                                type[LogitsProcessor]]]] = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> None:
         """LLM constructor."""
 
@@ -329,7 +329,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             sampling_params: The sampling parameters for text generation. If
                 None, we use the default sampling parameters.
                 When it is a single value, it is applied to every prompt.
@@ -364,14 +364,6 @@ class LLM:
             # Use default sampling params.
             sampling_params = self.get_default_sampling_params()
 
-        tokenization_kwargs: dict[str, Any] = {}
-        truncate_prompt_tokens = None
-        if isinstance(sampling_params, SamplingParams):
-            truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
-
-        _validate_truncation_size(model_config.max_model_len,
-                                  truncate_prompt_tokens, tokenization_kwargs)
-
         # Add any modality specific loras to the corresponding prompts
         lora_request = self._get_modality_specific_lora_reqs(
             prompts, lora_request)
@@ -381,7 +373,6 @@ class LLM:
             params=sampling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
 
@@ -523,6 +514,7 @@ class LLM:
         params: BeamSearchParams,
         lora_request: Optional[Union[list[LoRARequest], LoRARequest]] = None,
         use_tqdm: bool = False,
+        concurrency_limit: Optional[int] = None,
     ) -> list[BeamSearchOutput]:
         """
         Generate sequences using beam search.
@@ -533,6 +525,8 @@ class LLM:
             params: The beam search parameters.
             lora_request: LoRA request to use for generation, if any.
             use_tqdm: Whether to use tqdm to display the progress bar.
+            concurrency_limit: The maximum number of concurrent requests.
+                If None, the number of concurrent requests is unlimited.
         """
         # TODO: how does beam search work together with length penalty,
         # frequency, penalty, and stopping criteria, etc.?
@@ -550,6 +544,15 @@ class LLM:
             tokenizer.eos_token_id,
             length_penalty,
         )
+
+        if use_tqdm and concurrency_limit is not None:
+            logger.warning(
+                "Progress bar is not supported when using concurrency_limit. "
+                "Disabling progress bar.")
+            use_tqdm = False
+
+        if concurrency_limit is None:
+            concurrency_limit = len(prompts)
 
         def create_tokens_prompt_from_beam(
                 beam: BeamSearchSequence) -> TokensPrompt:
@@ -595,73 +598,79 @@ class LLM:
                     **mm_kwargs,
                 ), )
 
-        token_iter = range(max_tokens)
-        if use_tqdm:
-            token_iter = tqdm(token_iter,
-                              desc="Beam search",
-                              unit="token",
-                              unit_scale=False)
-            logger.warning(
-                "The progress bar shows the upper bound on token steps and "
-                "may finish early due to stopping conditions. It does not "
-                "reflect instance-level progress.")
+        for prompt_start in range(0, len(prompts), concurrency_limit):
+            instances_batch = instances[prompt_start:prompt_start +
+                                        concurrency_limit]
 
-        for _ in token_iter:
-            all_beams: list[BeamSearchSequence] = list(
-                sum((instance.beams for instance in instances), []))
-            pos = [0] + list(
-                itertools.accumulate(
-                    len(instance.beams) for instance in instances))
-            instance_start_and_end: list[tuple[int, int]] = list(
-                zip(pos[:-1], pos[1:]))
+            token_iter = range(max_tokens)
+            if use_tqdm:
+                token_iter = tqdm(token_iter,
+                                  desc="Beam search",
+                                  unit="token",
+                                  unit_scale=False)
+                logger.warning(
+                    "The progress bar shows the upper bound on token steps and "
+                    "may finish early due to stopping conditions. It does not "
+                    "reflect instance-level progress.")
+            for _ in token_iter:
+                all_beams: list[BeamSearchSequence] = list(
+                    sum((instance.beams for instance in instances_batch), []))
+                pos = [0] + list(
+                    itertools.accumulate(
+                        len(instance.beams) for instance in instances_batch))
+                instance_start_and_end: list[tuple[int, int]] = list(
+                    zip(pos[:-1], pos[1:]))
 
-            if len(all_beams) == 0:
-                break
+                if len(all_beams) == 0:
+                    break
 
-            # create the corresponding batch entries for prompt & optional lora
-            prompts_batch, lora_req_batch = zip(
-                *[(create_tokens_prompt_from_beam(beam), beam.lora_request)
-                  for beam in all_beams])
+                # create corresponding batch entries for prompt & optional lora
+                prompts_batch, lora_req_batch = zip(
+                    *[(create_tokens_prompt_from_beam(beam), beam.lora_request)
+                      for beam in all_beams])
 
-            # only runs for one step
-            # we don't need to use tqdm here
-            output = self.generate(prompts_batch,
-                                   sampling_params=beam_search_params,
-                                   use_tqdm=False,
-                                   lora_request=lora_req_batch)
+                # only runs for one step
+                # we don't need to use tqdm here
+                output = self.generate(prompts_batch,
+                                       sampling_params=beam_search_params,
+                                       use_tqdm=False,
+                                       lora_request=lora_req_batch)
 
-            for (start, end), instance in zip(instance_start_and_end,
-                                              instances):
-                instance_new_beams = []
-                for i in range(start, end):
-                    current_beam = all_beams[i]
-                    result = output[i]
+                for (start, end), instance in zip(instance_start_and_end,
+                                                  instances_batch):
+                    instance_new_beams = []
+                    for i in range(start, end):
+                        current_beam = all_beams[i]
+                        result = output[i]
 
-                    if result.outputs[0].logprobs is not None:
-                        # if `result.outputs[0].logprobs` is None, it means
-                        # the sequence is completed because of the max-model-len
-                        # or abortion. we don't need to add it to the new beams.
-                        logprobs = result.outputs[0].logprobs[0]
-                        for token_id, logprob_obj in logprobs.items():
-                            new_beam = BeamSearchSequence(
-                                tokens=current_beam.tokens + [token_id],
-                                logprobs=current_beam.logprobs + [logprobs],
-                                lora_request=current_beam.lora_request,
-                                cum_logprob=current_beam.cum_logprob +
-                                logprob_obj.logprob,
-                                multi_modal_data=current_beam.multi_modal_data,
-                                mm_processor_kwargs=current_beam.
-                                mm_processor_kwargs)
+                        if result.outputs[0].logprobs is not None:
+                            # if `result.outputs[0].logprobs` is None, it means
+                            # the sequence is completed because of the
+                            # max-model-len or abortion. we don't need to add
+                            # it to the new beams.
+                            logprobs = result.outputs[0].logprobs[0]
+                            for token_id, logprob_obj in logprobs.items():
+                                new_beam = BeamSearchSequence(
+                                    tokens=current_beam.tokens + [token_id],
+                                    logprobs=current_beam.logprobs +
+                                    [logprobs],
+                                    lora_request=current_beam.lora_request,
+                                    cum_logprob=current_beam.cum_logprob +
+                                    logprob_obj.logprob,
+                                    multi_modal_data=current_beam.
+                                    multi_modal_data,
+                                    mm_processor_kwargs=current_beam.
+                                    mm_processor_kwargs)
 
-                            if token_id == tokenizer.eos_token_id and \
-                                not ignore_eos:
-                                instance.completed.append(new_beam)
-                            else:
-                                instance_new_beams.append(new_beam)
-                sorted_beams = sorted(instance_new_beams,
-                                      key=sort_beams_key,
-                                      reverse=True)
-                instance.beams = sorted_beams[:beam_width]
+                                if token_id == tokenizer.eos_token_id and \
+                                    not ignore_eos:
+                                    instance.completed.append(new_beam)
+                                else:
+                                    instance_new_beams.append(new_beam)
+                    sorted_beams = sorted(instance_new_beams,
+                                          key=sort_beams_key,
+                                          reverse=True)
+                    instance.beams = sorted_beams[:beam_width]
 
         outputs = []
         for instance in instances:
@@ -697,8 +706,8 @@ class LLM:
         Generate responses for a chat conversation.
 
         The chat conversation is converted into a text prompt using the
-        tokenizer and calls the [generate][] method to generate the
-        responses.
+        tokenizer and calls the [generate][vllm.LLM.generate] method to generate
+        the responses.
 
         Multi-modal inputs can be passed in the same way you would pass them
         to the OpenAI API.
@@ -844,7 +853,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
             use_tqdm: If `True`, shows a tqdm progress bar.
@@ -853,6 +862,8 @@ class LLM:
                 If `False`, no progress bar is created.
             lora_request: LoRA request to use for generation, if any.
             pooling_task: Override the pooling task to use.
+            tokenization_kwargs: overrides tokenization_kwargs set in
+                pooling_params
 
         Returns:
             A list of `PoolingRequestOutput` objects containing the
@@ -898,24 +909,17 @@ class LLM:
             # Use default pooling params.
             pooling_params = PoolingParams()
 
-        if isinstance(pooling_params, PoolingParams):
-            pooling_params.verify(pooling_task, model_config)
-        else:
-            for pooling_param in pooling_params:
-                pooling_param.verify(pooling_task, model_config)
-
-        if tokenization_kwargs is None:
-            tokenization_kwargs = dict[str, Any]()
-            _validate_truncation_size(model_config.max_model_len,
-                                      truncate_prompt_tokens,
-                                      tokenization_kwargs)
+        for param in as_iter(pooling_params):
+            param.verify(pooling_task, model_config)
+            # for backwards compatibility
+            if truncate_prompt_tokens is not None:
+                param.truncate_prompt_tokens = truncate_prompt_tokens
 
         self._validate_and_add_requests(
             prompts=prompts,
             params=pooling_params,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
@@ -942,7 +946,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             pooling_params: The pooling parameters for pooling. If None, we
                 use the default pooling parameters.
             use_tqdm: If `True`, shows a tqdm progress bar.
@@ -990,7 +994,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
@@ -1034,7 +1038,7 @@ class LLM:
         Args:
             prompts: The prompts to the LLM. You may pass a sequence of prompts
                 for batch inference. See [PromptType][vllm.inputs.PromptType]
-                for more details about the format of each prompts.
+                for more details about the format of each prompt.
             use_tqdm: If `True`, shows a tqdm progress bar.
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
@@ -1138,8 +1142,7 @@ class LLM:
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-            if envs.VLLM_USE_V1 and (token_type_ids := engine_prompt.pop(
-                    "token_type_ids", None)):
+            if (token_type_ids := engine_prompt.pop("token_type_ids", None)):
                 params = pooling_params.clone()
                 compressed = compress_token_type_ids(token_type_ids)
                 params.extra_kwargs = {"compressed_token_type_ids": compressed}
@@ -1334,8 +1337,8 @@ class LLM:
 
     def wake_up(self, tags: Optional[list[str]] = None):
         """
-        Wake up the engine from sleep mode. See the [sleep][] method
-        for more details.
+        Wake up the engine from sleep mode. See the [sleep][vllm.LLM.sleep]
+        method for more details.
 
         Args:
             tags: An optional list of tags to reallocate the engine memory
@@ -1368,7 +1371,6 @@ class LLM:
         *,
         use_tqdm: Union[bool, Callable[..., tqdm]] = True,
         lora_request: Optional[Union[Sequence[LoRARequest], LoRARequest]],
-        tokenization_kwargs: Optional[dict[str, Any]] = None,
         priority: Optional[list[int]] = None,
     ) -> None:
         if isinstance(prompts, (str, dict)):
@@ -1395,7 +1397,17 @@ class LLM:
             tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
             it = tqdm_func(it, desc="Adding requests")
 
+        model_config = self.llm_engine.model_config
+
         for i, prompt in enumerate(it):
+
+            param = params[i] if isinstance(params, Sequence) else params
+
+            tokenization_kwargs: dict[str, Any] = {}
+            _validate_truncation_size(model_config.max_model_len,
+                                      param.truncate_prompt_tokens,
+                                      tokenization_kwargs)
+
             self._add_request(
                 prompt,
                 params[i] if isinstance(params, Sequence) else params,
