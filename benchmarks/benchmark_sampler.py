@@ -29,8 +29,9 @@ def create_synthetic_logits(
     # Make some tokens more likely (simulate realistic distribution)
     for i in range(batch_size):
         # Randomly boost some tokens to create realistic peaks
-        high_prob_indices = torch.randint(0, vocab_size, (vocab_size // 100,))
-        logits[i, high_prob_indices] += torch.randn(len(high_prob_indices)) * 2 + 3
+        high_prob_indices = torch.randint(0, vocab_size, (vocab_size // 100,), device=device)
+        boost_values = torch.randn(len(high_prob_indices), device=device) * 2 + 3
+        logits[i, high_prob_indices] += boost_values
     
     return logits
 
