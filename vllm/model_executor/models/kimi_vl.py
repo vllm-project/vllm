@@ -396,7 +396,8 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
         if self.use_data_parallel:
             return run_dp_sharded_mrope_vision_model(self.vision_tower,
                                                      pixel_values,
-                                                     image_grid_hws.tolist())
+                                                     image_grid_hws.tolist(),
+                                                     rope_type="rope_2d")
         else:
             return self.vision_tower(pixel_values, image_grid_hws)
 
@@ -404,7 +405,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
                              image_input: KimiVLImageInputs) -> torch.Tensor:
         assert image_input["type"] == "pixel_values"
         image_features = self._process_image_pixels(image_input)
-        assert isinstance(image_features, list)
+        assert isinstance(image_features, (list, tuple))
         lengths = [x.shape[0] for x in image_features]
         return self.multi_modal_projector(
             torch.cat(image_features)).split(lengths)

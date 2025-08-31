@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional, TypeVar, Union
 from urllib.parse import ParseResult, urlparse
 from urllib.request import url2pathname
 
@@ -541,7 +541,9 @@ def run_dp_sharded_mrope_vision_model(
     vision_model: torch.nn.Module,
     pixel_values: torch.Tensor,
     grid_thw_list: list[list[int]],
-) -> Union[tuple[torch.Tensor, ...], list[torch.Tensor]]:
+    *,
+    rope_type: Literal["rope_3d", "rope_2d"],
+) -> tuple[torch.Tensor, ...]:
     """Run a vision model with data parallelism (DP) sharding. 
     The function will shard the input image tensor on the 
     first dimension and run the vision model.
@@ -551,6 +553,10 @@ def run_dp_sharded_mrope_vision_model(
         vision_model (torch.nn.Module): Vision model.
         pixel_values (torch.Tensor): Image/Video input tensor.
         grid_thw_list: List of grid dimensions for each image
+        rope_type: Type of rope used in the vision model.
+                   Different rope types have different dimension to do ViT.
+                   "rope_3d" for 3D rope (e.g., Qwen2.5-VL)
+                   "rope_2d" for 2D rope (e.g., Kimi-VL)
     Returns:
         torch.Tensor: Output image embeddings
 
@@ -604,12 +610,7 @@ def run_dp_sharded_mrope_vision_model(
                                          device=pixel_values.device,
                                          dtype=pixel_values.dtype)
     # embed_dim_reduction_factor = 2 * 2
-    # Special handling for Kimi and models that use 2D rotary position
-    # embedding (rope_2d) for vision processing. By checking
-    # `vit_processing_type`, this logic is extensible: other models that
-    # require rope_2d processing can also be supported in the future by
-    # setting this attribute.
-    if getattr(vision_model, "vit_processing_type", "default") == "rope_2d":
+    if rope_type == "rope_2d":
         embed_dim_reduction_factor = (vision_model.merge_kernel_size[0] *
                                       vision_model.merge_kernel_size[1])
     else:
@@ -625,7 +626,7 @@ def run_dp_sharded_mrope_vision_model(
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
 
     # Run the vision model on the local pixel_values_local
-    if getattr(vision_model, "vit_processing_type", "default") == "rope_2d":
+    if rope_type == "rope_2d":
         if pixel_values_local.shape[0] > 0:
             image_embeds_local = vision_model(
                 pixel_values_local, torch.tensor(local_grid_thw_list))
@@ -652,8 +653,7 @@ def run_dp_sharded_mrope_vision_model(
     current_len = image_embeds_local.shape[0]
     if current_len < max_len_per_rank:
         padding_size = max_len_per_rank - current_len
-        if getattr(vision_model, "vit_processing_type",
-                   "default") == "rope_2d":
+        if rope_type == "rope_2d":
             padding = torch.empty((padding_size, image_embeds_local.shape[1],
                                    image_embeds_local.shape[2]),
                                   dtype=image_embeds_local.dtype,
@@ -702,19 +702,11 @@ def run_dp_sharded_mrope_vision_model(
                     embed_start:embed_start + img_patches]
                 embed_start += img_patches
             current_idx += count
-    if getattr(vision_model, "vit_processing_type", "default") == "rope_2d":
-        out_embeddings_list = [
-            embed for embed in original_order_embeddings if embed is not None
-        ]
-        assert len(out_embeddings_list) == len(
-            original_order_embeddings), "Found unassigned embeddings"
-        return out_embeddings_list
-    else:
-        out_embeddings = tuple(embed for embed in original_order_embeddings
-                               if embed is not None)
-        assert len(out_embeddings) == len(
-            original_order_embeddings), "Found unassigned embeddings"
-        return out_embeddings
+    out_embeddings = tuple(embed for embed in original_order_embeddings
+                            if embed is not None)
+    assert len(out_embeddings) == len(
+        original_order_embeddings), "Found unassigned embeddings"
+    return out_embeddings
 
 
 def fetch_audio(
