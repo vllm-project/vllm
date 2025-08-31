@@ -37,6 +37,7 @@ from vllm.distributed import (cleanup_dist_env_and_memory,
 from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
                          to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
+from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.sequence import Logprob
@@ -1338,6 +1339,9 @@ class LocalAssetServer:
     def url_for(self, name: str) -> str:
         """e.g., name='RGBA_comp.png' -> 'http://127.0.0.1:PORT/RGBA_comp.png'"""
         return f"{self.base_url}/{name}"
+
+    def get_image_asset(self, name: str) -> Image.Image:
+        return fetch_image(self.url_for(name))
 
 
 @pytest.fixture(scope="session")
