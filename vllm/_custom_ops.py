@@ -1973,3 +1973,7 @@ def onednn_scaled_mm(
                                   input_zp_adj, bias, dnnl_handler.handler)
 
     return output
+
+
+def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
+    return torch.ops._C.hadacore_transform(x, inplace)

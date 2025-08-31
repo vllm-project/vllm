@@ -777,6 +777,38 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
+  # TODO
+  # note: CUDA synchronization primitives are only supported for sm_70 and up.
+  #cuda_archs_loose_intersection(W4A8_ARCHS "7.0" "${CUDA_ARCHS}")
+  set(SRCS
+    "csrc/quantization/hadamard/hadacore/hadamard_transform_cuda.cu"
+    "csrc/quantization/hadamard/hadacore/hadamard_transform.cpp")
+  set_gencode_flags_for_srcs(
+    SRCS "${SRCS}"
+    CUDA_ARCHS "${CUDA_ARCHS}")
+  list(APPEND VLLM_EXT_SRC "${SRCS}")
+  message(STATUS "Building hadacore")
+
+  # cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
+  # if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.2 AND SCALED_MM_ARCHS)
+  #   set(SRCS "csrc/sparse/cutlass/sparse_scaled_mm_c3x.cu")
+  #   set_gencode_flags_for_srcs(
+  #     SRCS "${SRCS}"
+  #     CUDA_ARCHS "${SCALED_MM_ARCHS}")
+  #   list(APPEND VLLM_EXT_SRC "${SRCS}")
+  #   list(APPEND VLLM_GPU_FLAGS "-DENABLE_SPARSE_SCALED_MM_C3X=1")
+  #   message(STATUS "Building sparse_scaled_mm_c3x for archs: ${SCALED_MM_ARCHS}")
+  # else()
+  #   if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.2 AND SCALED_MM_ARCHS)
+  #     message(STATUS "Not building sparse_scaled_mm_c3x kernels as CUDA Compiler version is "
+  #                    "not >= 12.2, we recommend upgrading to CUDA 12.2 or later "
+  #                    "if you intend on running FP8 sparse quantized models on Hopper.")
+  #   else()
+  #     message(STATUS "Not building sparse_scaled_mm_c3x as no compatible archs found "
+  #                    "in CUDA target architectures")
+  #   endif()
+  # endif()
+
 # if CUDA endif
 endif()
 

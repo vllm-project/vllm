@@ -32,6 +32,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   #define stride_tag
 #endif
 
+  // Applied AI hadamard transform
+  ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
+  // TODO: conditional generation
+  ops.impl("hadacore_transform", torch::kCUDA, &hadacore_transform);
+
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
 
