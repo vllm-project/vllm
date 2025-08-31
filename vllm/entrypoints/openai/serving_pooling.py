@@ -146,7 +146,6 @@ class OpenAIServingPooling(OpenAIServing):
                     # so there is no need to append extra tokens to the input
                     add_generation_prompt=False,
                     continue_final_message=False,
-                    truncate_prompt_tokens=truncate_prompt_tokens,
                     add_special_tokens=request.add_special_tokens,
                 )
             elif isinstance(request, PoolingCompletionRequest):
@@ -155,7 +154,6 @@ class OpenAIServingPooling(OpenAIServing):
                      request,
                      tokenizer,
                      request.input,
-                     truncate_prompt_tokens=truncate_prompt_tokens,
                      add_special_tokens=request.add_special_tokens,
                  )
             else:
