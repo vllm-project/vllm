@@ -400,6 +400,7 @@ class Phi4MMImagePixelInputs(TensorSchema):
         - c: Number of channels (3)
         - h: Height of each image patch
         - w: Width of each image patch
+        - nc: Number of crops
         - H_mask: Height of attention mask
         - W_mask: Width of attention mask
     """
@@ -424,7 +425,7 @@ class Phi4MMImagePixelInputs(TensorSchema):
 
     image_attention_mask: Annotated[
         torch.Tensor,
-        TensorShape("bn", "H_mask", "W_mask"),
+        TensorShape("bn", "nc", 32, 32),  # H_mask, W_mask
     ]
 
 
@@ -439,7 +440,7 @@ class Phi4MMAudioFeatureInputs(TensorSchema):
 
     data: Annotated[
         Union[torch.Tensor, list[torch.Tensor]],
-        TensorShape("bn", 80, "t"),
+        TensorShape("bn", "t", 80, dynamic_dims={"t"}),
     ]
 
 
