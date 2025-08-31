@@ -9,15 +9,12 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import Siglip2VisionConfig
 from transformers.configuration_utils import PretrainedConfig
-from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.models.siglip2.configuration_siglip2 import Siglip2TextConfig, Siglip2VisionConfig
-from transformers.utils import auto_docstring
-from transformers.utils.generic import can_return_tuple
-
 
 from vllm.config import QuantizationConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, QKVParallelLinear,
                                                ReplicatedLinear,
@@ -695,9 +692,10 @@ class Siglip2TextEmbeddings(nn.Module):
         super().__init__()
         embed_dim = config.hidden_size
 
-        self.token_embedding = nn.Embedding(config.vocab_size, embed_dim)
-        self.position_embedding = nn.Embedding(
-            config.max_position_embeddings, embed_dim)
+        self.token_embedding = VocabParallelEmbedding(
+            config.vocab_size, embed_dim, prefix=f"{prefix}.token_embedding")
+        self.position_embedding = VocabParallelEmbedding(
+            config.max_position_embeddings, embed_dim, prefix=f"{prefix}.position_embedding")
 
         self.register_buffer(
             "position_ids", torch.arange(config.max_position_embeddings), persistent=False
@@ -726,8 +724,6 @@ class Siglip2TextTransformer(nn.Module):
         self.encoder = Siglip2Encoder(config)
         self.final_layer_norm = nn.LayerNorm(
             embed_dim, eps=config.layer_norm_eps)
-
-        self.head = nn.Linear(embed_dim, config.projection_size)
 
     def forward(
         self,
