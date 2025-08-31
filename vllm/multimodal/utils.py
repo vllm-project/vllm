@@ -604,6 +604,11 @@ def run_dp_sharded_mrope_vision_model(
                                          device=pixel_values.device,
                                          dtype=pixel_values.dtype)
     # embed_dim_reduction_factor = 2 * 2
+    # Special handling for Kimi and models that use 2D rotary position
+    # embedding (rope_2d) for vision processing. By checking
+    # `vit_processing_type`, this logic is extensible: other models that
+    # require rope_2d processing can also be supported in the future by
+    # setting this attribute.
     if getattr(vision_model, "vit_processing_type", "default") == "rope_2d":
         embed_dim_reduction_factor = (vision_model.merge_kernel_size[0] *
                                       vision_model.merge_kernel_size[1])
