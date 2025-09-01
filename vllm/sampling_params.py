@@ -76,8 +76,8 @@ class StructuredOutputsParams:
         ])
         if count > 1:
             raise ValueError(
-                f"You can only use one kind of structured outputs constraint but multiple are specified: {self.__dict__}"  # noqa: E501
-            )
+                "You can only use one kind of structured outputs constraint "
+                f"but multiple are specified: {self.__dict__}")
 
 
 class RequestOutputKind(Enum):
@@ -192,6 +192,7 @@ class SamplingParams(
 
     # Fields used to construct logits processors
     structured_outputs: Optional[StructuredOutputsParams] = None
+    """Parameters for configuring structured outputs."""
     logit_bias: Optional[dict[int, float]] = None
     """If provided, the engine will construct a logits processor that applies
     these logit biases."""
