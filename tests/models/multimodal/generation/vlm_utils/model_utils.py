@@ -656,6 +656,7 @@ def _internvl_generate(
 
     return outputs
 
+
 def eagle2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Eagle2.5 VL."""
 
@@ -683,7 +684,8 @@ def eagle2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         ):
             from vllm.model_executor.models.eagle2_5_vl import (
                 IMG_CONTEXT, IMG_END, IMG_START,
-                image_to_pixel_values_eagle2_5_vl, video_to_pixel_values_eagle2_5_vl)
+                image_to_pixel_values_eagle2_5_vl,
+                video_to_pixel_values_eagle2_5_vl)
             images = [images] if isinstance(images, Image) else images
             videos = [videos] if isinstance(videos, np.ndarray) else videos
             if images is not None:
@@ -797,6 +799,7 @@ def _eagle2_5_vl_generate(
     )
 
     return outputs
+
 
 def mantis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     from mantis.models.mllava import MLlavaProcessor
