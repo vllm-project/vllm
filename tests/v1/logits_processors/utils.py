@@ -107,42 +107,26 @@ class EntryPoints(list):
         self.names = [ep.name for ep in eps]
 
 
-def get_req_dummy_logits_processor(
-    params: SamplingParams, ) -> Optional[RequestLogitsProcessor]:
-    """Fake example of a request-level logits processor implementation.
+class DummyPerReqLogitsProcessor:
+    """The request-level logits processor masks out all logits except the
+    token id identified by `target_token`"""
 
-    This function returns a new request-level logits processor, customized
-    to the sampling params associated with a particular request.
+    def __init__(self, target_token: int) -> None:
+        """Specify `target_token`"""
+        self.target_token = target_token
 
-    Returns None if the logits processor should not be applied to the
-    particular request. To use the logits processor the request must have
-    a "target_token" custom argument with an integer value.
-
-    Args:
-      params: per-request sampling params
-
-    Returns:
-      `Callable` request logits processor, or None
-    """
-    if not params.extra_args or "target_token" not in params.extra_args:
-        return None
-    target_token = params.extra_args["target_token"]
-
-    def req_dummy_logits_processor(
+    def __call__(
+        self,
         output_ids: list[int],
         logits: torch.Tensor,
     ) -> torch.Tensor:
-        """The request-level logits processor masks out all logits except the
-        token id identified by target_token"""
-        val_to_keep = logits[target_token].item()
+        val_to_keep = logits[self.target_token].item()
         logits[:] = float("-inf")
-        logits[target_token] = val_to_keep
+        logits[self.target_token] = val_to_keep
         return logits
 
-    return req_dummy_logits_processor
 
-
-class DummyPerReqLogitsProcessor(AdapterLogitsProcessor):
+class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
     """Example of wrapping a fake request-level logit processor to create a
     batch-level logits processor"""
 
@@ -153,7 +137,22 @@ class DummyPerReqLogitsProcessor(AdapterLogitsProcessor):
         self,
         params: SamplingParams,
     ) -> Optional[RequestLogitsProcessor]:
-        return get_req_dummy_logits_processor(params)
+        """This method returns a new request-level logits processor, customized
+        to the `target_token` value associated with a particular request.
+
+        Returns None if the logits processor should not be applied to the
+        particular request. To use the logits processor the request must have
+        a "target_token" custom argument with an integer value.
+
+        Args:
+          params: per-request sampling params
+
+        Returns:
+          `Callable` request logits processor, or None
+        """
+        if not params.extra_args or "target_token" not in params.extra_args:
+            return None
+        return DummyPerReqLogitsProcessor(params.extra_args["target_token"])
 
 
 """Fake version of importlib.metadata.entry_points"""

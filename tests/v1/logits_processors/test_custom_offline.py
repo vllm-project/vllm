@@ -15,7 +15,7 @@ from tests.v1.logits_processors.utils import (DUMMY_LOGITPROC_ARG,
                                               POOLING_MODEL_NAME, TEMP_GREEDY,
                                               CustomLogitprocSource,
                                               DummyLogitsProcessor,
-                                              DummyPerReqLogitsProcessor,
+                                              WrappedPerReqLogitsProcessor,
                                               dummy_module)
 from tests.v1.logits_processors.utils import entry_points as fake_entry_points
 from tests.v1.logits_processors.utils import prompts
@@ -190,7 +190,7 @@ def test_custom_logitsprocs_req(monkeypatch):
     # Test that logitproc info is passed to workers
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
     random.seed(40)
-    _run_test({"logits_processors": [DummyPerReqLogitsProcessor]},
+    _run_test({"logits_processors": [WrappedPerReqLogitsProcessor]},
               logitproc_loaded=True)
 
 
