@@ -120,7 +120,8 @@ class WhisperAudioInputs(TensorSchema):
         - t: Time frames (M)
     """
 
-    input_features: Annotated[NestedTensors, TensorShape("b", 128, "t")]
+    input_features: Annotated[Optional[NestedTensors],
+                              TensorShape("b", 128, "t")]
 
 
 class WhisperPositionalEmbedding(nn.Embedding):
