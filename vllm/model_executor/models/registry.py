@@ -435,7 +435,7 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         if model_info_dict is not None:
             mi = _ModelInfo(**model_info_dict["modelinfo"])
             elapsed_time = time.perf_counter() - start_time
-            logger.info(
+            logger.debug(
                 "Retrieving model info properties for class %s took %.7f secs",
                 self.class_name, elapsed_time)
             return mi
@@ -444,8 +444,8 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
         mi = _run_in_subprocess(
             lambda: _ModelInfo.from_model_cls(self.load_model_cls()))
         elapsed_time = time.perf_counter() - start_time
-        logger.info("Loading model info for class %s took %.7f secs",
-                    self.class_name, elapsed_time)
+        logger.debug("Loading model info for class %s took %.7f secs",
+                     self.class_name, elapsed_time)
         return mi
 
     def load_model_cls(self) -> type[nn.Module]:
