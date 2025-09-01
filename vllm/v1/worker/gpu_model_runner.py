@@ -827,13 +827,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 blk_table_tensor = torch.zeros(
                     (num_reqs, 1),
                     dtype=torch.int32,
-                    pin_memory=self.pin_memory,
-                    device="cpu").to(self.device, non_blocking=True)
-                slot_mapping = torch.zeros((total_num_scheduled_tokens, ),
-                                           dtype=torch.int32,
-                                           pin_memory=self.pin_memory,
-                                           device="cpu").to(self.device,
-                                                            non_blocking=True)
+                    device=self.device,
+                )
+                slot_mapping = torch.zeros(
+                    (total_num_scheduled_tokens, ),
+                    dtype=torch.int64,
+                    device=self.device,
+                )
                 num_common_prefix_blocks = 0
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
@@ -1248,10 +1248,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 and "encode" in supported_tasks):
             supported_tasks.remove("encode")
 
-            logger.info_once("Chunked prefill is not supported with "
-                             "encode task which using ALL pooling. "
-                             "Please turn off chunked prefill by "
-                             "`--no-enable-chunked-prefill` before using it.")
+            logger.debug_once("Chunked prefill is not supported with "
+                              "encode task which using ALL pooling. "
+                              "Please turn off chunked prefill by "
+                              "`--no-enable-chunked-prefill` before using it.")
+
+        if "score" in supported_tasks:
+            num_labels = getattr(self.model_config.hf_config, "num_labels", 0)
+            if num_labels != 1:
+                supported_tasks.remove("score")
+                logger.debug_once(
+                    "Score API is only enabled for num_labels == 1.")
 
         return supported_tasks
 
@@ -2206,6 +2213,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         uniform_decode: bool = False,
         skip_eplb: bool = False,
         is_profile: bool = False,
+        remove_lora: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -2223,6 +2231,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             uniform_decode: If True, the batch is a uniform decode batch.
             skip_eplb: If True, skip EPLB state update.
             is_profile: If True, this is a profile run.
+            remove_lora: If False, dummy LoRAs are not destroyed after the run
         """
         assert cudagraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
@@ -2310,7 +2319,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         attn_metadata[layer_name] = attn_metadata_i
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
-                                            num_scheduled_tokens):
+                                            num_scheduled_tokens, remove_lora):
             if self.supports_mm_inputs:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -2701,11 +2710,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                                 force_attention=force_attention,
                                 uniform_decode=uniform_decode,
-                                skip_eplb=True)
+                                skip_eplb=True,
+                                remove_lora=False)
             self._dummy_run(num_tokens,
                             cudagraph_runtime_mode=cudagraph_runtime_mode,
                             uniform_decode=uniform_decode,
-                            skip_eplb=True)
+                            skip_eplb=True,
+                            remove_lora=False)
+        self.maybe_remove_all_loras(self.lora_config)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -2722,7 +2734,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                  layer_names)
             attn_backends = {}
             attn_backend_layers = defaultdict(list)
-            # Dedupe based on full class name; this is a bit safer than using
+            # Dedupe based on full class name; this is a bit safer than
             # using the class itself as the key because when we create dynamic
             # attention backend subclasses (e.g. ChunkedLocalAttention) unless
             # they are cached correctly, there will be different objects per

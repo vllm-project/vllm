@@ -12,7 +12,8 @@ from .base import get_vllm_public_assets
 
 VLM_IMAGES_DIR = "vision_model_images"
 
-ImageAssetName = Literal["stop_sign", "cherry_blossom",
+
+ImageAssetName = Literal["stop_sign", "cherry_blossom", "hato", 
                          "2560px-Gfp-wisconsin-madison-the-nature-boardwalk",
                          "Grayscale_8bits_palette_sample_image",
                          "1280px-Venn_diagram_rgb", "RGBA_comp", "237-400x300",
