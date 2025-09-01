@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from pprint import pprint
 
 import pytest
 
@@ -48,11 +47,9 @@ def test_qwen2_5_vl_evs_functionality(vllm_runner, video_assets, model,
         for asset in video_assets
     ]
 
-    # Test single video with different pruning rates
     prompts = [VIDEO_PROMPTS[0]]
     videos = [sampled_vids[0]]
-    pprint(prompts)
-    pprint(videos)
+
     # Initialize model with EVS configuration
     with vllm_runner(model,
                      runner="generate",
