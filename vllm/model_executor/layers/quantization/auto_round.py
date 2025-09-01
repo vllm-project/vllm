@@ -133,7 +133,8 @@ class AutoRoundConfig(QuantizationConfig):
                 cfg = self.extra_config[name]
                 return (
                     cfg.get("bits", self.weight_bits if quantized else 16),
-                    cfg.get("group_size", self.group_size if quantized else -1),
+                    cfg.get("group_size",
+                            self.group_size if quantized else -1),
                     cfg.get("sym", self.sym if quantized else True),
                 )
             
@@ -142,8 +143,10 @@ class AutoRoundConfig(QuantizationConfig):
                 try:
                     if re.fullmatch(pattern, name):
                         return (
-                            cfg.get("bits", self.weight_bits if quantized else 16),
-                            cfg.get("group_size", self.group_size if quantized else -1),
+                            cfg.get("bits",
+                                    self.weight_bits if quantized else 16),
+                            cfg.get("group_size",
+                                    self.group_size if quantized else -1),
                             cfg.get("sym", self.sym if quantized else True),
                         )
                 except (re.error, TypeError):
