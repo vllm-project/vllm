@@ -62,12 +62,8 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
-  - block: "Build release image (x86)"
-    depends_on: ~
-    key: block-release-image-build
-
   - label: "Build release image (x86)"
-    depends_on: block-release-image-build
+    depends_on: ~
     id: build-release-image-x86
     agents:
       queue: cpu_queue_postmerge
@@ -80,7 +76,7 @@ steps:
       - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
 
   - label: "Build release image (arm64)"
-    depends_on: block-release-image-build
+    depends_on: ~
     id: build-release-image-arm64
     agents:
       queue: arm64_cpu_queue_postmerge
