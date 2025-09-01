@@ -1349,14 +1349,7 @@ class Eagle2_5_VLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        # unused modules appear in OpenGVLab/InternVideo2_5_Chat_8B
-        skip_prefixes = [
-            "action_embed", "temporal_embed", "track_embed",
-            "track_embed_decoder", "box_token", "cg_criterion", "cg_model",
-            "loc_encoder", "loc_decoder", "sam", "temporal_token",
-            "track_token"
-        ]
-        loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
     def get_mm_mapping(self) -> MultiModelKeys:
