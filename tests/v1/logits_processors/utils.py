@@ -153,7 +153,7 @@ class DummyLogitsProcessorWrapped(AdapterLogitsProcessor):
     def is_argmax_invariant(self) -> bool:
         return False
 
-    def req_logits_processor(
+    def new_req_logits_processor(
         self,
         params: SamplingParams,
     ) -> Optional[RequestLogitsProcessor]:

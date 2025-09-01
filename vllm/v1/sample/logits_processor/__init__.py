@@ -216,7 +216,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
         self.req_info: dict[int, partial[torch.Tensor]] = {}
 
     @abstractmethod
-    def req_logits_processor(
+    def new_req_logits_processor(
         self,
         params: SamplingParams,
     ) -> Optional[RequestLogitsProcessor]:
@@ -253,7 +253,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
           logits processor partial[Tensor] or None
         
         """
-        if req_lp := self.req_logits_processor(params):
+        if req_lp := self.new_req_logits_processor(params):
             args = [prompt_ids, output_ids] if (len(
                 inspect.signature(req_lp).parameters) == 3) else [output_ids]
             return partial(req_lp, *args)
