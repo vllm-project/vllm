@@ -200,7 +200,22 @@ class OpenAISpeechToText(OpenAIServing):
             for result_generator in list_result_generator:
                 async for op in result_generator:
                     text += op.outputs[0].text
-            return cast(T, response_class(text=text))
+
+            if self.task_type == "transcribe":
+                # add usage in TranscriptionResponse.
+                usage = {
+                    "type": "duration",
+                    # rounded up as per openAI specs
+                    "seconds": int(math.ceil(duration_s)),
+                }
+                final_response = cast(T, response_class(text=text,
+                                                        usage=usage))
+            else:
+                # no usage in response for translation task
+                final_response = cast(
+                    T, response_class(text=text))  # type: ignore[call-arg]
+
+            return final_response
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:

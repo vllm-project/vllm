@@ -168,7 +168,7 @@ llm = LLM(
     Batch-level DP is not to be confused with API request-level DP
     (which is instead controlled by `data_parallel_size`).
 
-The availablilty of batch-level DP is based on model implementation.
+The availability of batch-level DP is based on model implementation.
 Currently, the following models support `mm_encoder_tp_mode="data"`:
 
 - Llama4 (<gh-pr:18368>)
@@ -205,7 +205,7 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct --api-server-count 4 -dp 2
 
 !!! note
     [Multi-modal processor cache](#processor-cache) is disabled when API server scale-out is enabled
-    because it requires a one-to-one correspondance between API and engine core processes.
+    because it requires a one-to-one correspondence between API and engine core processes.
 
 ## Multi-Modal Caching
 
