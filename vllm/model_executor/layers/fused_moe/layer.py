@@ -36,8 +36,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils import (direct_register_custom_op, has_deep_ep, has_pplx,
-                        has_triton_kernels, is_torch_equal_or_newer, round_up)
-from vllm.utils.flashinfer import has_flashinfer
+                        round_up)
 
 if current_platform.is_cuda_alike():
     from .fused_batched_moe import BatchedTritonExperts
@@ -49,9 +48,6 @@ if current_platform.is_cuda_alike():
         from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
         from .deepep_ll_prepare_finalize import (DEEPEP_QUANT_BLOCK_SHAPE,
                                                  DeepEPLLPrepareAndFinalize)
-    if has_flashinfer():
-        from .flashinfer_cutlass_prepare_finalize import (
-            FlashInferCutlassMoEPrepareAndFinalize)
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = None  # type: ignore
@@ -80,7 +76,12 @@ class FusedMoeWeightScaleSupported(Enum):
 
 class FusedMoEMethodBase(QuantizeMethodBase):
 
-    moe: FusedMoEConfig
+    # TODO(bnell): also pass quant_config?
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__()
+        self.moe = moe
+        self.fused_experts: Optional[Callable] = None
+        self.topk_indices_dtype = None
 
     @abstractmethod
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -99,16 +100,16 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         return False
 
     @staticmethod
-    def maybe_make_prepare_finalize(
-            moe: FusedMoEConfig) -> Optional[FusedMoEPrepareAndFinalize]:
+    def _maybe_make_prepare_finalize(
+        moe: FusedMoEConfig, ) -> Optional[FusedMoEPrepareAndFinalize]:
         all2all_manager = get_ep_group().device_communicator.all2all_manager
         assert all2all_manager is not None
 
         prepare_finalize: Optional[FusedMoEPrepareAndFinalize] = None
 
-        if moe.use_flashinfer_cutlass_kernels:
-            prepare_finalize = FlashInferCutlassMoEPrepareAndFinalize(
-                quant_dtype=moe.quant_dtype, )
+        assert not moe.use_flashinfer_cutlass_kernels, \
+            "Must be created in modelopt.py"
+
         if moe.use_pplx_kernels:
             hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
                 moe.max_num_tokens,
@@ -188,16 +189,29 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
         return prepare_finalize
 
-    def init_prepare_finalize(self, moe: FusedMoEConfig):
-        self.moe = moe
-        prepare_finalize = FusedMoEMethodBase.maybe_make_prepare_finalize(
-            self.moe)
+    def maybe_make_prepare_finalize(
+        self,
+        moe: FusedMoEConfig,
+    ) -> Optional[FusedMoEPrepareAndFinalize]:
+        if moe.moe_parallel_config.use_all2all_kernels:
+            return FusedMoEMethodBase._maybe_make_prepare_finalize(moe)
+        else:
+            return None
 
-        self.topk_indices_dtype = None
+    # Note: init_prepare_finalize should only be called by
+    # prepare_communication_buffer_for_model.
+    def init_prepare_finalize(self, layer: torch.nn.Module):
+        assert self.moe is not None
+        prepare_finalize = self.maybe_make_prepare_finalize(self.moe)
+
         if prepare_finalize is not None:
-            logger.debug("%s", prepare_finalize.__class__.__name__)
+            logger.debug("%s for %s(%s)", prepare_finalize.__class__.__name__,
+                         self, id(self))
+            assert self.topk_indices_dtype is None
+            assert self.fused_experts is None, \
+                f"Attempt to override experts for {id(self)}!"
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
-            experts = self.select_gemm_impl(prepare_finalize, self.moe)
+            experts = self.select_gemm_impl(prepare_finalize, self.moe, layer)
             self.fused_experts = FusedMoEModularKernel(
                 prepare_finalize,
                 experts,
@@ -207,18 +221,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         # based on the all2all implementation, select the appropriate
         # gemm implementation
         raise NotImplementedError(
             f"{self.__class__.__name__} must select appropriate gemm "
             "implementation based on the prepare_finalize")
-
-    def maybe_swap_experts_impl(
-        self,
-        moe_parallel_config: FusedMoEParallelConfig,
-    ):
-        pass
 
     @abstractmethod
     def apply(
@@ -235,6 +244,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -251,10 +261,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
     def __init__(self, moe: FusedMoEConfig):
-        super().__init__()
-        self.fused_experts = fused_experts  # type: ignore
-        self.topk_indices_dtype = None
-        self.moe = moe
+        super().__init__(moe)
         self.has_bias = self.moe.has_bias
         self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
         if self.rocm_aiter_moe_enabled:
@@ -266,7 +273,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
+        # TODO(bnell): Remove. Every layer should have an moe config object.
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
@@ -352,12 +361,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 use_prepack=True,
             )
         elif current_platform.is_cpu():
+            from vllm.model_executor.layers.fused_moe import cpu_fused_moe
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                from vllm.model_executor.layers.fused_moe import cpu_fused_moe
-                dtype = layer.w13_weight.dtype
+                from vllm.model_executor.layers.utils import (
+                    check_cpu_sgl_kernel)
+                dtype_w13 = layer.w13_weight.dtype
+                _, n_w13, k_w13 = layer.w13_weight.size()
+                dtype_w2 = layer.w2_weight.dtype
+                _, n_w2, k_w2 = layer.w2_weight.size()
                 if (envs.VLLM_CPU_SGL_KERNEL
-                        and torch._C._cpu._is_amx_tile_supported()
-                        and dtype == torch.bfloat16):
+                        and check_cpu_sgl_kernel(n_w13, k_w13, dtype_w13)
+                        and check_cpu_sgl_kernel(n_w2, k_w2, dtype_w2)):
                     packed_w13_weight = torch.ops._C.convert_weight_packed(
                         layer.w13_weight)
                     assert packed_w13_weight.size() == layer.w13_weight.size()
@@ -371,7 +385,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 else:
                     layer.cpu_fused_moe = cpu_fused_moe.IPEXFusedMOE(layer)
             else:
-                raise NotImplementedError("CPU MOE only supports x86 arch.")
+                layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
 
     def apply(
         self,
@@ -387,6 +401,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -414,6 +429,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_map=expert_map,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
@@ -437,6 +453,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -456,6 +473,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
             enable_eplb=enable_eplb,
@@ -474,9 +492,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 expert_map=expert_map,
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input)
-        else:
-            # add w1_bias/w2_bias to kwargs if they exist
-            kwargs = dict(
+        elif self.fused_experts is not None:
+            if self.has_bias:
+                raise ValueError(
+                    "FusedMoEModularKernel does not support bias.")
+            return self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
@@ -488,17 +508,22 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
             )
-            if isinstance(self.fused_experts,
-                          FusedMoEModularKernel) and self.has_bias:
-                raise ValueError(
-                    "FusedMoEModularKernel does not support bias.")
-            if self.has_bias:
-                kwargs.update({
-                    "w1_bias": getattr(layer, "w13_bias", None),
-                    "w2_bias": getattr(layer, "w2_bias", None),
-                })
-
-            return self.fused_experts(**kwargs)
+        else:
+            assert fused_experts is not None
+            return fused_experts(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                w1_bias=layer.w13_bias if self.has_bias else None,
+                w2_bias=layer.w2_bias if self.has_bias else None,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                activation=activation,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+            )
 
     def forward_cpu(
         self,
@@ -514,6 +539,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -540,6 +566,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_map,
             custom_routing_function,
             scoring_func,
+            routed_scaling_factor,
             e_score_correction_bias,
             apply_router_weight_on_input,
             activation,
@@ -559,6 +586,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -597,6 +625,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -617,6 +646,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             raise NotImplementedError(
                 "Expert score correction bias is not supported for TPU.")
         assert activation == "silu", f"{activation} is not supported for TPU."
+        assert routed_scaling_factor == 1.0, \
+            f"routed_scaling_factor {routed_scaling_factor} is not supported " \
+            f"for TPU."
         if enable_eplb is not False or expert_load_view is not None or \
                 logical_to_physical_map is not None or \
                 logical_replica_count is not None:
@@ -635,6 +667,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         forward_native = forward_tpu
     elif current_platform.is_cpu():
         forward_native = forward_cpu
+    elif current_platform.is_xpu():
+        forward_native = forward_xpu
     else:
         forward_native = forward_cuda
 
@@ -682,6 +716,26 @@ def determine_expert_map(
     return (local_num_experts, expert_map)
 
 
+def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
+    """
+        Compresses the expert map by removing any -1 entries.
+
+        Args:
+            expert_map (torch.Tensor): A tensor of shape (global_num_experts,)
+                mapping from global to local index. Contains -1 for experts not
+                assigned to the current rank.
+
+        Returns:
+            str: A string mapping from local to global index.
+                Using str to support hashing for logging once only.
+        """
+    global_indices = torch.where(expert_map != -1)[0]
+    local_indices = expert_map[global_indices]
+    return ", ".join(
+        f"{local_index.item()}->{global_index.item()}"
+        for local_index, global_index in zip(local_indices, global_indices))
+
+
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
@@ -724,6 +778,7 @@ class FusedMoE(CustomOp):
         prefix: str = "",
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -752,17 +807,9 @@ class FusedMoE(CustomOp):
 
         # we padding globally so EP buffer allocation works
         if quant_config and quant_config.get_name() == "mxfp4":
-            if not current_platform.is_device_capability(100):
-                if not is_torch_equal_or_newer("2.8.0"):
-                    raise RuntimeError(
-                        "Mxfp4 on non-blackwell requires torch >= 2.8.0")
-                if not has_triton_kernels():
-                    raise NotImplementedError(
-                        "triton_kernels must be installed for "
-                        "mxfp4 on non-blackwell")
-            if (current_platform.is_rocm()
-                    or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                    or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+            from vllm.model_executor.layers.quantization.mxfp4 import (  # noqa: E501
+                should_use_flashinfer_mxfp4)
+            if current_platform.is_rocm() or should_use_flashinfer_mxfp4():
                 hidden_size = round_up(hidden_size, 256)
 
         # For smuggling this layer into the fused moe custom op
@@ -790,6 +837,12 @@ class FusedMoE(CustomOp):
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts)
+            logger.info_once(
+                "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
+                " number of experts: %s/%s. Experts local to global index map:"
+                " %s.", self.ep_rank, self.ep_size, self.local_num_experts,
+                self.global_num_experts,
+                get_compressed_expert_map(self.expert_map))
         else:
             self.local_num_experts, self.expert_map = (self.global_num_experts,
                                                        None)
@@ -808,6 +861,7 @@ class FusedMoE(CustomOp):
         self.topk_group = topk_group
         self.custom_routing_function = custom_routing_function
         self.scoring_func = scoring_func
+        self.routed_scaling_factor = routed_scaling_factor
         self.e_score_correction_bias = e_score_correction_bias
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
@@ -876,15 +930,13 @@ class FusedMoE(CustomOp):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
-        if isinstance(self.quant_method, FusedMoEMethodBase):
-            self.quant_method.maybe_swap_experts_impl(self.moe_parallel_config)
 
         # Chunked all2all staging tensor
         self.batched_hidden_states: Optional[torch.Tensor] = None
         self.batched_router_logits: Optional[torch.Tensor] = None
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
-                or self.moe_parallel_config.use_flashinfer_cutlass_kernels):
+                or self.moe_config.use_flashinfer_cutlass_kernels):
             self.batched_hidden_states = torch.zeros(
                 (moe.max_num_tokens, self.hidden_size),
                 dtype=moe.in_dtype,
@@ -938,7 +990,7 @@ class FusedMoE(CustomOp):
 
     @property
     def use_flashinfer_cutlass_kernels(self):
-        return self.moe_parallel_config.use_flashinfer_cutlass_kernels
+        return self.moe_config.use_flashinfer_cutlass_kernels
 
     def update_expert_map(self):
         # ep_size and ep_rank should already be updated
@@ -1378,6 +1430,7 @@ class FusedMoE(CustomOp):
         num_expert_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         indices_type: Optional[torch.dtype] = None,
         enable_eplb: bool = False,
@@ -1422,6 +1475,7 @@ class FusedMoE(CustomOp):
                 num_expert_group=num_expert_group,
                 topk_group=topk_group,
                 scoring_func=scoring_func,
+                routed_scaling_factor=routed_scaling_factor,
                 e_score_correction_bias=e_score_correction_bias)
             if indices_type is not None:
                 topk_ids = topk_ids.to(dtype=indices_type)
@@ -1589,6 +1643,7 @@ class FusedMoE(CustomOp):
                 num_expert_group=self.num_expert_group,
                 custom_routing_function=self.custom_routing_function,
                 scoring_func=self.scoring_func,
+                routed_scaling_factor=self.routed_scaling_factor,
                 e_score_correction_bias=self.e_score_correction_bias,
                 activation=self.activation,
                 enable_eplb=self.enable_eplb,
@@ -1629,7 +1684,7 @@ class FusedMoE(CustomOp):
         # only when data parallelism (DP) is enabled.
         use_flashinfer_cutlass_kernels = (
             self.dp_size > 1
-            and self.moe_parallel_config.use_flashinfer_cutlass_kernels)
+            and self.moe_config.use_flashinfer_cutlass_kernels)
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
                 or use_flashinfer_cutlass_kernels):
@@ -1638,7 +1693,7 @@ class FusedMoE(CustomOp):
         do_naive_dispatch_combine: bool = (
             self.dp_size > 1
             and not self.moe_parallel_config.use_deepep_ht_kernels
-            and not self.moe_parallel_config.use_flashinfer_cutlass_kernels)
+            and not self.moe_config.use_flashinfer_cutlass_kernels)
         if do_naive_dispatch_combine:
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
@@ -1657,6 +1712,7 @@ class FusedMoE(CustomOp):
             num_expert_group=self.num_expert_group,
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
+            routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=self.e_score_correction_bias,
             activation=self.activation,
             apply_router_weight_on_input=self.apply_router_weight_on_input,
