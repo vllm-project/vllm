@@ -1436,17 +1436,6 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        # Triton v3.3 has f16 conversion regression issue on Turing and Volta,
-        # which broke fp16 inference
-        # see: https://github.com/triton-lang/triton/issues/6698
-        if (current_platform.is_cuda()
-                and not current_platform.has_device_capability(80)
-                and model_config.dtype == torch.float16):
-            _raise_or_fallback(
-                feature_name="Compute Capability < 8.0 with FP16",
-                recommend_to_remove=False)
-            return False
-
         if self.kv_cache_dtype != "auto":
             supported = current_platform.is_kv_cache_dtype_supported(
                 self.kv_cache_dtype, model_config)
