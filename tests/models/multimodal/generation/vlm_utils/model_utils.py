@@ -657,10 +657,10 @@ def _internvl_generate(
     return outputs
 
 def eagle2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    """Patches and returns an instance of the HfRunner to use for InternVL."""
+    """Patches and returns an instance of the HfRunner to use for Eagle2.5 VL."""
 
     class Eagle2_5_VLProcessor:
-        """A simple processor for InternVL2 which misses a processor."""
+        """A simple processor for Eagle2.5 VL which misses a processor."""
 
         def __init__(self, hf_runner: HfRunner):
             self.num_image_token = hf_runner.model.num_image_token
