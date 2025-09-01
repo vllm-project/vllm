@@ -25,7 +25,7 @@ ImageAssetName = Literal["stop_sign", "cherry_blossom", "hato",
 class ImageAsset:
     name: ImageAssetName
 
-    def get_path(self, ext: str) -> str:
+    def get_path(self, ext: str) -> Path:
         """
         Return s3 path for given image.
         """
