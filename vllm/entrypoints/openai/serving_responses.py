@@ -815,13 +815,15 @@ class OpenAIServingResponses(OpenAIServing):
         starting_after: Optional[int] = None,
     ):
         if response_id not in self.event_store:
-            return
+            raise ValueError(f"Unknown response_id: {response_id}")
 
         event_deque, new_event_signal = self.event_store[response_id]
         start_index = 0 if starting_after is None else starting_after + 1
         current_index = start_index
 
         while True:
+            new_event_signal.clear()
+
             # Yield existing events from start_index
             while current_index < len(event_deque):
                 event = event_deque[current_index]
@@ -830,9 +832,6 @@ class OpenAIServingResponses(OpenAIServing):
                 yield event
                 current_index += 1
 
-            # Clear the event before waiting for new ones
-            new_event_signal.clear()
-            # Wait for new events
             await new_event_signal.wait()
 
     async def retrieve_responses(
