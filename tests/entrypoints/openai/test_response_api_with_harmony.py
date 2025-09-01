@@ -337,8 +337,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                 counter = starting_after
                 async for event in stream:
                     counter += 1
-                    assert event.sequence_number == events[
-                        counter].sequence_number
+                    assert event == events[counter]
 
 
 @pytest.mark.asyncio
