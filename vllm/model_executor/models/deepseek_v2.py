@@ -902,7 +902,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
                     # Determine split axis based on op type
                     # gate/up: ColumnParallel → split along dim 0
                     # down: RowParallel → split along dim 1
-                    split_dim = 1 if name.endswith("down_proj.weight") else 0
+                    split_dim = 1 if "down_proj.weight" in name else 0
                     total = loaded_weight.shape[split_dim]
                     assert total % num_shared == 0, (
                         f"Shared expert weight dim {total} "
