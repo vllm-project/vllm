@@ -1314,7 +1314,7 @@ class LocalAssetServer:
             (self.address, self.port), AssetHandler)
         self.thread = threading.Thread(target=self.server.serve_forever,
                                        daemon=True)
-        self.threading.start()
+        self.thread.start()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
