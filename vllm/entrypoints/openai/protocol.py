@@ -43,10 +43,10 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
 from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam)
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
-from vllm.sequence import Logprob
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
