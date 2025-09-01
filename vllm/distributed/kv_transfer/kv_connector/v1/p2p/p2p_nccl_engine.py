@@ -130,12 +130,10 @@ class P2pNcclEngine:
         if self.send_type == "GET":
             # tensor_id: torch.Tensor
             self.send_store: dict[str, torch.Tensor] = {}
-            self.send_request_id_to_tensor_ids: dict[str, set[str]] = {}
         else:
             # PUT or PUT_ASYNC
             # tensor_id: torch.Tensor
             self.send_queue: deque[SendQueueItem] = deque()
-            self.send_request_id_to_tensor_ids: dict[str, set[str]] = {}
             if self.send_type == "PUT_ASYNC":
                 self._send_thread = threading.Thread(target=self.send_async,
                                                      daemon=True)
@@ -144,6 +142,7 @@ class P2pNcclEngine:
         # tensor_id: torch.Tensor/(addr, dtype, shape)
         self.recv_store: dict[str, Any] = {}
         self.recv_request_id_to_tensor_ids: dict[str, set[str]] = {}
+        self.send_request_id_to_tensor_ids: dict[str, set[str]] = {}
         self.socks: dict[str, Any] = {}  # remote_address: client socket
         self.comms: dict[str, Any] = {}  # remote_address: (ncclComm_t, rank)
 
