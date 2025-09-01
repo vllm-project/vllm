@@ -437,7 +437,7 @@ class ModelConfig:
     from `AutoProcessor.from_pretrained`. The available overrides depend on the
     model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
     """
-    mm_processor_cache_gb: int = 4
+    mm_processor_cache_gb: float = 4
     """The size (in GiB) of the multi-modal processor cache, which is used to
     avoid re-processing past multi-modal inputs.
 
@@ -501,6 +501,8 @@ class ModelConfig:
     logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
     """One or more logits processors' fully-qualified class names or class
     definitions"""
+    io_processor_plugin: Optional[str] = None
+    """IOProcessor plugin name to load at model startup"""
     enable_nano_batch_split: bool = False
     """Enable splitting the input batch into nano-batches for intra-device
     parallelism"""
@@ -882,6 +884,13 @@ class ModelConfig:
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self._model_info.supports_multimodal:
+            if (self.mm_encoder_tp_mode == "data" and
+                    not self._model_info.supports_multimodal_encoder_tp_data):
+                logger.warning_once(
+                    "This model does not support `--mm-encoder-tp-mode data`. "
+                    "Falling back to `--mm-encoder-tp-mode weights`.")
+                self.mm_encoder_tp_mode = "weights"
+
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
@@ -893,12 +902,6 @@ class ModelConfig:
             )
 
         return None
-
-    def set_mm_processor_cache_gb(self, value: int) -> None:
-        mm_config = self.get_multimodal_config()
-
-        self.mm_processor_cache_gb = value
-        mm_config.mm_processor_cache_gb = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -1708,20 +1711,8 @@ class ModelConfig:
         return self.multimodal_config is not None
 
     @property
-    def enable_mm_processor_cache(self) -> bool:
-        """Whether the multi-modal processor cache should be enabled."""
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return False
-
-        return mm_config.mm_processor_cache_gb > 0
-
-    def get_mm_input_cache_gb(self) -> int:
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return 0
-
-        return envs.VLLM_MM_INPUT_CACHE_GIB
+    def is_multimodal_raw_input_only_model(self) -> bool:
+        return self._model_info.supports_multimodal_raw_input_only
 
     @property
     def is_cross_encoder(self) -> bool:
@@ -1731,10 +1722,6 @@ class ModelConfig:
     @property
     def is_pp_supported(self) -> bool:
         return self._model_info.supports_pp
-
-    @property
-    def is_multimodal_raw_input_supported(self) -> bool:
-        return self._model_info.supports_multimodal_raw_input
 
     @property
     def is_attention_free(self) -> bool:
@@ -2464,8 +2451,8 @@ class LoRAConfig:
     lora_dtype: Union[torch.dtype, LoRADType] = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
     lora_extra_vocab_size: int = 256
-    """Maximum size of extra vocabulary that can be present in a LoRA adapter
-    (added to the base model vocabulary)."""
+    """(Deprecated) Maximum size of extra vocabulary that can be present in a 
+    LoRA adapter. Will be removed in v0.12.0."""
     lora_vocab_padding_size: ClassVar[int] = current_platform\
         .get_lora_vocab_padding_size()
 
@@ -2507,6 +2494,12 @@ class LoRAConfig:
         return hash_str
 
     def __post_init__(self):
+        # Deprecation warning for lora_extra_vocab_size
+        logger.warning(
+            "`lora_extra_vocab_size` is deprecated and will be removed "
+            "in v0.12.0. Additional vocabulary support for "
+            "LoRA adapters is being phased out.")
+
         # Setting the maximum rank to 512 should be able to satisfy the vast
         # majority of applications.
         possible_max_ranks = (8, 16, 32, 64, 128, 256, 320, 512)
@@ -2571,7 +2564,7 @@ class MultiModalConfig:
     `{"num_crops": 4}`.
     """
 
-    mm_processor_cache_gb: int = 4
+    mm_processor_cache_gb: float = 4
     """
     The size (in GiB) of the multi-modal processor cache, which is used to
 
@@ -3038,16 +3031,20 @@ def _get_and_verify_max_len(
                 f"User-specified max_model_len ({max_model_len}) is greater "
                 f"than the derived max_model_len ({max_len_key}="
                 f"{derived_max_model_len} or model_max_length="
-                f"{model_max_length} in model's config.json). This may lead "
-                "to incorrect model outputs or CUDA errors.")
+                f"{model_max_length} in model's config.json).")
+            warning = (
+                "VLLM_ALLOW_LONG_MAX_MODEL_LEN must be used with extreme "
+                "caution. If the model uses relative position encoding (RoPE), "
+                "positions exceeding derived_max_model_len lead to nan. If the "
+                "model uses absolute position encoding, positions exceeding "
+                "derived_max_model_len will cause a CUDA array out-of-bounds "
+                "error.")
             if envs.VLLM_ALLOW_LONG_MAX_MODEL_LEN:
-                logger.warning(
-                    "%s Make sure the value is correct and within the "
-                    "model context size.", msg)
+                logger.warning_once("%s %s", msg, warning)
             else:
                 raise ValueError(
                     f"{msg} To allow overriding this maximum, set "
-                    "the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN=1")
+                    f"the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN=1. {warning}")
     return int(max_model_len)
 
 
