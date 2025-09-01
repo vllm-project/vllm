@@ -1431,7 +1431,11 @@ class LLM:
             if isinstance(sp, SamplingParams):
                 # We only care about the final output
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
-        if isinstance(params.guided_decoding, list):
+        if not isinstance(params, Sequence) and isinstance(params.guided_decoding, list):
+            if len(params.guided_decoding) != len(prompts):
+                raise ValueError(
+                    "The number of guided decoding parameters must be the same "
+                    "as the number of prompts.")
             guided_options_list = params.guided_decoding
 
         # Add requests to the engine.
