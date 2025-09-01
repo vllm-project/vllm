@@ -504,7 +504,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
             self, **kwargs: object) -> Optional[MultiModalEmbeddings]:
         embeddings = []
 
-        # NOTE: _parse_and_validate_visual_input has side-effects and pops
+        # NOTE: _parse_and_validate_visual_input has side effects and pops
         # keys from kwargs. We process images first, then videos.
         image_input = self._parse_and_validate_visual_input(False, **kwargs)
         if image_input:
@@ -547,7 +547,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
                                                       vision_embeddings)
             input_ids = None
 
-        # up until here we have a inputs_embeds 100% numerical identity
+        # up until here we have an inputs_embeds 100% numerical identity
         # between the OG HF Transformers implementation and ours
         hidden_states = self.llm(
             input_ids=input_ids,
