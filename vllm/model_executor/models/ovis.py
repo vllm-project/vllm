@@ -209,7 +209,7 @@ class OvisImagePatchInputs(TypedDict):
     `(batch_size * num_patches, patch_size_x * patch_size_y * num_channels)`
     """
 
-    inducator_tokens: torch.Tensor
+    indicator_tokens: torch.Tensor
     """
     Shape: 
     `(batch_size * (num_patches + 1))`
@@ -544,7 +544,7 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
                                                       vision_embeddings)
             input_ids = None
 
-        # up until here we have a inputs_embeds 100% numerical identity
+        # up until here we have an inputs_embeds 100% numerical identity
         # between the OG HF Transformers implementation and ours
         hidden_states = self.llm(
             input_ids=input_ids,
