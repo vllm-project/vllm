@@ -137,6 +137,7 @@ class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
+    reasoning_tokens: Optional[int] = 0 
     prompt_tokens_details: Optional[PromptTokenUsageInfo] = None
 
 

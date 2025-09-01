@@ -481,6 +481,8 @@ class OpenAIServingChat(OpenAIServing):
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
         previous_num_tokens = [0] * num_choices
+        # [新增] 跟踪每个 choice 的推理 token 数量
+        num_reasoning_tokens_per_choice = [0] * num_choices
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
@@ -600,6 +602,7 @@ class OpenAIServingChat(OpenAIServing):
                             chunk.usage = UsageInfo(
                                 prompt_tokens=num_prompt_tokens,
                                 completion_tokens=0,
+                                reasoning_tokens=0,
                                 total_tokens=num_prompt_tokens)
 
                         data = chunk.model_dump_json(exclude_unset=True)
@@ -632,6 +635,7 @@ class OpenAIServingChat(OpenAIServing):
                                     chunk.usage = UsageInfo(
                                         prompt_tokens=num_prompt_tokens,
                                         completion_tokens=0,
+                                        reasoning_tokens=0,
                                         total_tokens=num_prompt_tokens)
 
                                 data = chunk.model_dump_json(
@@ -887,6 +891,14 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         delta_message = DeltaMessage(content=delta_text)
 
+                    if delta_message is not None:
+                        if delta_message.reasoning_content:
+                            num_reasoning_tokens_per_choice[i] += len(output.token_ids)
+                        # Harmony 模式下，如果当前 channel 不是 "final"，也算作 reasoning_tokens
+                        elif self.use_harmony and not harmony_parsers[i].current_channel == "final":
+                            num_reasoning_tokens_per_choice[i] += len(output.token_ids)
+                            
+                    
                     # update the previous values for the next iteration
                     if ((tool_choice_auto or self.reasoning_parser)
                             and not self.use_harmony):
@@ -1015,9 +1027,12 @@ class OpenAIServingChat(OpenAIServing):
                     # handle usage stats if requested & if continuous
                     if include_continuous_usage:
                         completion_tokens = previous_num_tokens[i]
+                        # [修改] 使用每个 choice 的 reasoning_tokens 数量
+                        current_reasoning_tokens = num_reasoning_tokens_per_choice[i] 
                         chunk.usage = UsageInfo(
                             prompt_tokens=num_prompt_tokens,
                             completion_tokens=completion_tokens,
+                            reasoning_tokens=current_reasoning_tokens, 
                             total_tokens=num_prompt_tokens + completion_tokens,
                         )
 
@@ -1028,8 +1043,11 @@ class OpenAIServingChat(OpenAIServing):
             # is sent, send the usage
             if include_usage:
                 completion_tokens = sum(previous_num_tokens)
+                # [修改] 最终使用量，累加所有 choice 的 reasoning_tokens
+                final_reasoning_tokens = sum(num_reasoning_tokens_per_choice)
                 final_usage = UsageInfo(prompt_tokens=num_prompt_tokens,
                                         completion_tokens=completion_tokens,
+                                        reasoning_tokens=final_reasoning_tokens, 
                                         total_tokens=num_prompt_tokens +
                                         completion_tokens)
                 if self.enable_prompt_tokens_details and num_cached_tokens:
@@ -1049,9 +1067,12 @@ class OpenAIServingChat(OpenAIServing):
 
             # report to FastAPI middleware aggregate usage across all choices
             num_completion_tokens = sum(previous_num_tokens)
+            # [修改] 元数据使用量，累加所有 choice 的 reasoning_tokens
+            final_reasoning_tokens_for_metadata = sum(num_reasoning_tokens_per_choice)
             request_metadata.final_usage_info = UsageInfo(
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=num_completion_tokens,
+                reasoning_tokens=final_reasoning_tokens_for_metadata, 
                 total_tokens=num_prompt_tokens + num_completion_tokens,
             )
 
@@ -1062,7 +1083,7 @@ class OpenAIServingChat(OpenAIServing):
                     full_text = (
                         previous_texts[i]
                         if previous_texts and i < len(previous_texts) else
-                        f"<streaming_complete: {previous_num_tokens[i]} tokens>"
+                        f"<streaming_complete: {previous_num_tokens[i]} completion tokens, {num_reasoning_tokens_per_choice[i]} reasoning tokens>" # [修改] 日志输出包含推理tokens
                     )
                     self.request_logger.log_outputs(
                         request_id=request_id,
@@ -1113,6 +1134,7 @@ class OpenAIServingChat(OpenAIServing):
         else:
             history_tool_call_cnt = 0
 
+        num_reasoning_tokens = 0
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
             token_ids = output.token_ids
@@ -1307,6 +1329,9 @@ class OpenAIServingChat(OpenAIServing):
 
             choices.append(choice_data)
 
+            if reasoning_content and self.reasoning_parser:
+                num_reasoning_tokens += len(tokenizer.encode(reasoning_content, add_special_tokens=False))
+                
         if request.echo:
             last_msg_content: Union[str, list[dict[str, str]]] = ""
             if (conversation and "content" in conversation[-1]
@@ -1329,6 +1354,7 @@ class OpenAIServingChat(OpenAIServing):
             len(output.token_ids) for output in final_res.outputs)
         usage = UsageInfo(prompt_tokens=num_prompt_tokens,
                           completion_tokens=num_generated_tokens,
+                          reasoning_tokens=num_reasoning_tokens,
                           total_tokens=num_prompt_tokens +
                           num_generated_tokens)
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
