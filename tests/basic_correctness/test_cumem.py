@@ -120,7 +120,7 @@ def test_cumem_with_cudagraph():
     "model, use_v1",
     [
         # sleep mode with safetensors
-        ("meta-llama/Llama-3.2-1B", True),
+        ("EleutherAI/pythia-14m", True),
         # sleep mode with pytorch checkpoint
         ("facebook/opt-125m", False),
     ])

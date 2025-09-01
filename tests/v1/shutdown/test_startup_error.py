@@ -14,7 +14,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.utils import cuda_device_count_stateless
 from vllm.v1.engine.async_llm import AsyncLLM
 
-MODELS = ["meta-llama/Llama-3.2-1B"]
+MODELS = ["JackFram/llama-68m"]
 
 
 def evil_method(self, *args, **kwargs):
@@ -70,8 +70,10 @@ def test_llm_startup_error(monkeypatch, model: str, tensor_parallel_size: int,
     Test profiling (forward()) and load weights failures.
     TODO(andy) - LLM without multiprocessing.
     """
-    if model != "meta-llama/Llama-3.2-1B":
-        pytest.skip(reason="Only test meta-llama/Llama-3.2-1B")
+    # Skip non-Llama models since we monkeypatch LlamaForCausalLM specifically.
+    # If MODELS list grows, each architecture needs its own test variant.
+    if model != "JackFram/llama-68m":
+        pytest.skip(reason="Only test JackFram/llama-68m")
     if cuda_device_count_stateless() < tensor_parallel_size:
         pytest.skip(reason="Not enough CUDA devices")
 

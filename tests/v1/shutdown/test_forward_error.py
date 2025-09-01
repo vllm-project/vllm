@@ -16,7 +16,7 @@ from vllm.utils import cuda_device_count_stateless
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.exceptions import EngineDeadError
 
-MODELS = ["meta-llama/Llama-3.2-1B"]
+MODELS = ["JackFram/llama-68m"]
 
 
 def evil_forward(self, *args, **kwargs):

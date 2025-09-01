@@ -284,14 +284,14 @@ def _compare_sp(
 
 SP_TEXT_GENERATION_MODELS = {
     # [Decoder-only]
-    "meta-llama/Llama-3.2-1B-Instruct": SPTestSettings.fast(),
+    "gpt2": SPTestSettings.fast(),
     "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8": SPTestSettings.fp8_quant(),
 }
 
 SP_TEST_MODELS = [
     # TODO support other models
     # [LANGUAGE GENERATION]
-    "meta-llama/Llama-3.2-1B-Instruct",
+    "gpt2",
     "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
 ]
 

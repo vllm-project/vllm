@@ -9,7 +9,7 @@ from vllm import LLM
 if os.getenv("VLLM_USE_V1", "0") != "1":
     pytest.skip("Test package requires V1", allow_module_level=True)
 
-MODEL = "meta-llama/Llama-3.2-1B"
+MODEL = "EleutherAI/pythia-14m"
 PROMPT = "Hello my name is Robert and I"
 
 

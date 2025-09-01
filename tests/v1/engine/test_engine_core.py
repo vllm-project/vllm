@@ -25,9 +25,11 @@ if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
                 allow_module_level=True)
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+MODEL_NAME = "EleutherAI/pythia-14m"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
-PROMPT = "Hello my name is Robert and I love quantization kernels"
+# test_engine_core_concurrent_batches assumes exactly 12 tokens per prompt.
+# Adjust prompt if changing model to maintain 12-token length.
+PROMPT = "My name is Gyoubu Masataka Oniwa"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
 
@@ -298,7 +300,7 @@ def test_engine_core_concurrent_batches(monkeypatch: pytest.MonkeyPatch):
                                      executor_class=DummyExecutor)
         assert engine_core.batch_queue is not None
 
-        # Add two requests in a row. Each request have 12 prompt tokens.
+        # Add two requests in a row. Each request has 12 prompt tokens.
         req0 = make_request_with_max_tokens("0", 5)
         engine_core.add_request(*engine_core.preprocess_add_request(req0))
         req1 = make_request_with_max_tokens("1", 5)
