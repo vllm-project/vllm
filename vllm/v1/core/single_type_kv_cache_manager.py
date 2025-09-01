@@ -47,7 +47,7 @@ class SingleTypeKVCacheManager(ABC):
         # {req_id: The number of cached blocks for this given request}
         # This is used to track the number of cached blocks for each request.
         # This is only used to track the RUNNING requests, we do not track the
-        # data for reempted ones.
+        # data for preempted ones.
         self.num_cached_block: dict[str, int] = {}
 
         self.kv_cache_group_id = kv_cache_group_id

@@ -501,6 +501,8 @@ class ModelConfig:
     logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
     """One or more logits processors' fully-qualified class names or class
     definitions"""
+    io_processor_plugin: Optional[str] = None
+    """IOProcessor plugin name to load at model startup"""
 
     def compute_hash(self) -> str:
         """

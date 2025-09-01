@@ -3290,7 +3290,7 @@ def sha256_cbor_64bit(input) -> int:
     return full_hash & ((1 << 64) - 1)
 
 
-def get_hash_fn_by_name(hash_fn_name: str) -> Callable:
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], int]:
     """Get a hash function by name, or raise an error if
     the function is not found.
     Args:
