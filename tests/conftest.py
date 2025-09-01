@@ -1302,11 +1302,16 @@ def _find_free_port() -> int:
 
 class LocalAssetServer:
 
+    address: str
+    port: int
+    server: Optional[http.server.ThreadingHTTPServer]
+    thread: Optional[threading.Thread]
+
     def __init__(self, address: str = "127.0.0.1") -> None:
         self.address = address
-        self.port: int | None = None
+        self.port = -1
         self.server = None
-        self.thread: threading.Thread | None = None
+        self.thread = None
 
     def __enter__(self):
         self.port = _find_free_port()
@@ -1363,7 +1368,7 @@ def image_url(request, local_asset_server) -> str:
 
 
 @pytest.fixture
-def image_ASSETS(request, local_asset_server) -> str:
+def image_ASSETS(request, local_asset_server) -> list[str]:
     """Indirect fixture: takes a list of names, returns list of full URLs."""
     names: list[str] = request.param
     return [local_asset_server.url_for(name) for name in names]
