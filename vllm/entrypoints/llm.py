@@ -1425,10 +1425,14 @@ class LLM:
             raise ValueError("The lengths of prompts and lora_request "
                              "must be the same.")
 
+        guided_options_list = None
+        
         for sp in params if isinstance(params, Sequence) else (params, ):
             if isinstance(sp, SamplingParams):
                 # We only care about the final output
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
+        if isinstance(params.guided_decoding, list):
+            guided_options_list = params.guided_decoding
 
         # Add requests to the engine.
         it = prompts
@@ -1441,6 +1445,9 @@ class LLM:
         for i, prompt in enumerate(it):
 
             param = params[i] if isinstance(params, Sequence) else params
+            if guided_options_list is not None:
+                # We can dynamically change the guided decoding options for each prompt
+                params.exchange_decoding_params(guided_options_list[i])
 
             tokenization_kwargs: dict[str, Any] = {}
             _validate_truncation_size(model_config.max_model_len,
