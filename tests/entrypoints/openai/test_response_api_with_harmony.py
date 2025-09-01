@@ -275,7 +275,8 @@ async def test_stateful_multi_turn(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_streaming(client: OpenAI, model_name: str):
+@pytest.mark.parametrize("background", [True, False])
+async def test_streaming(client: OpenAI, model_name: str, background: bool):
     # TODO: Add back when web search and code interpreter are available in CI
     prompts = [
         "tell me a story about a cat in 20 words",
@@ -300,6 +301,7 @@ async def test_streaming(client: OpenAI, model_name: str):
                 # },
             ],
             stream=True,
+            background=background,
         )
 
         events = []
