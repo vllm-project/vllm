@@ -5,6 +5,7 @@ from typing import Any, Literal, Optional, TypedDict, Union, cast
 
 import numpy as np
 import torch
+# yapf: disable
 from torch import nn
 
 from transformers import AutoModel, BatchFeature
@@ -30,7 +31,6 @@ from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
 from vllm.multimodal.parse import (ImageProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
-# yapf: disable
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo,
                                         MultiModalPromptUpdates,
