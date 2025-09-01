@@ -8,8 +8,8 @@ from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Iterable
 from functools import cached_property, lru_cache, partial
 from pathlib import Path
-from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
-                    cast)
+from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, Optional,
+                    TypeVar, Union, cast)
 
 import jinja2.nodes
 import transformers.utils.chat_template_utils as hf_chat_utils
@@ -41,7 +41,6 @@ from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
 from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.openai.protocol import ResponseInputOutputItem
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
@@ -54,6 +53,9 @@ from vllm.transformers_utils.chat_templates import (
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import random_uuid
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.protocol import ResponseInputOutputItem
 
 logger = init_logger(__name__)
 
