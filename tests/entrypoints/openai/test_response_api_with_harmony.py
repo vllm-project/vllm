@@ -306,7 +306,11 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
 
         events = []
         current_event_mode = None
+        resp_id = None
         async for event in response:
+            if event.type == "response.created":
+                resp_id = event.response.id
+
             if current_event_mode != event.type:
                 current_event_mode = event.type
                 print(f"\n[{event.type}] ", end="", flush=True)
@@ -323,6 +327,18 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
             events.append(event)
 
         assert len(events) > 0
+
+        if background:
+            starting_after = 5
+            async with await client.responses.retrieve(
+                    response_id=resp_id,
+                    stream=True,
+                    starting_after=starting_after) as stream:
+                counter = starting_after
+                async for event in stream:
+                    counter += 1
+                    assert event.sequence_number == events[
+                        counter].sequence_number
 
 
 @pytest.mark.asyncio
