@@ -138,10 +138,10 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
 
 def validate_structured_output_request_lm_format_enforcer(
         params: SamplingParams):
-    if params.guided_decoding is None:
+    if params.structured_outputs is None:
         return
 
-    so_params = params.guided_decoding
+    so_params = params.structured_outputs
 
     if so_params.regex:
         return
