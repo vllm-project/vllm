@@ -106,10 +106,10 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
             # Causing a server error in EBNF grammar parsing
             # https://github.com/vllm-project/vllm/pull/22587#issuecomment-3195253421
             structured_outputs = case.body.get("structured_outputs", {})
-            g = structured_outputs.get("grammar") if isinstance(
+            grammar = structured_outputs.get("grammar") if isinstance(
                 structured_outputs, dict) else None
 
-            if g == '':
+            if grammar == '':
                 # Allow None (will be handled as no grammar)
                 # But skip empty strings
                 return False
