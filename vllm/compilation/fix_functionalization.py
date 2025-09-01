@@ -9,6 +9,7 @@ import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 from .fx_utils import is_func
 from .vllm_inductor_pass import VllmInductorPass
@@ -26,6 +27,13 @@ class FixFunctionalizationPass(VllmInductorPass):
     """
 
     def __call__(self, graph: torch.fx.Graph):
+        # XPU does not support auto-functionalization yet.
+        # Will enable this when switch to vllm-xpu-kernels.
+        if current_platform.is_xpu():
+            logger.debug("XPU platform does not support fix functionalization"
+                         "pass currently.")
+            return
+
         self.begin()
         self.dump_graph(graph, "before_fix_functionalization")
 
@@ -89,6 +97,15 @@ class FixFunctionalizationPass(VllmInductorPass):
                                      node,
                                      mutated_args,
                                      args=('result', 'input', 'scale'))
+            elif hasattr(
+                    torch.ops._C, "silu_and_mul_nvfp4_quant"
+            ) and at_target == torch.ops._C.silu_and_mul_nvfp4_quant.default:
+                mutated_args = {1: 'result', 2: 'result_block_scale'}
+                self.defunctionalize(graph,
+                                     node,
+                                     mutated_args,
+                                     args=('result', 'result_block_scale',
+                                           'input', 'input_global_scale'))
             else:
                 continue  # skip the count
 

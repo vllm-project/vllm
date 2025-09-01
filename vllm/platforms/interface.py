@@ -510,6 +510,14 @@ class Platform:
         return False
 
     @classmethod
+    def opaque_attention_op(cls) -> bool:
+        """
+        Returns True if we register attention as one giant opaque custom op
+        on the current platform
+        """
+        return False
+
+    @classmethod
     def validate_request(
         cls,
         prompt: PromptType,
@@ -529,7 +537,7 @@ class Platform:
 
     def get_global_graph_pool(self) -> Any:
         """
-        Return the global graph pool for the this platform.
+        Return the global graph pool for this platform.
         """
         cls = self.__class__
         if cls._global_graph_pool is None:
