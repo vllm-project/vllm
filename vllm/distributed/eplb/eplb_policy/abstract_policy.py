@@ -1,6 +1,14 @@
 from abc import abstractmethod
 
 
+class DynamicConfig:
+    placement_policy = None
+
+    max_transferred_expert_per_layer = 100
+    ep_worldsize = 64
+    num_die_per_host = 8
+
+
 class EplbPolicy:
 
     @abstractmethod
