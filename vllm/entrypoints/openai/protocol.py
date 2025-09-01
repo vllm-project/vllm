@@ -639,7 +639,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        structured_outputs = StructuredOutputsParams(**self.structured_outputs)
+        structured_outputs = StructuredOutputsParams(
+            **(self.structured_outputs or {}))
         if self.response_format is not None:
             if self.response_format.type == "json_object":
                 structured_outputs.json_object = True
@@ -828,8 +829,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         # you can only use one kind of constraints for structured outputs
         if count > 1:
             raise ValueError(
-                "You can only use one kind of constraints for structured outputs ('json', 'regex' or 'choice')."  # noqa: E501
-            )
+                "You can only use one kind of constraints for structured "
+                "outputs ('json', 'regex' or 'choice').")
         # you can only either use structured outputs or tools, not both
         if count > 1 and data.get("tool_choice", "none") not in (
                 "none",
@@ -837,8 +838,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "required",
         ):
             raise ValueError(
-                "You can only either use constraints for structured outputs or tools, not both."  # noqa: E501
-            )
+                "You can only either use constraints for structured outputs "
+                "or tools, not both.")
         return data
 
     @model_validator(mode="before")
@@ -1125,7 +1126,7 @@ class CompletionRequest(OpenAIBaseModel):
         echo_without_generation = self.echo and self.max_tokens == 0
 
         structured_outputs_kwargs = StructuredOutputsParams(
-            **self.structured_outputs)
+            **(self.structured_outputs or {}))
         if (self.response_format is not None
                 and self.response_format.type == "json_object"):
             structured_outputs_kwargs.json_object = True
@@ -1192,8 +1193,8 @@ class CompletionRequest(OpenAIBaseModel):
         ])
         if count > 1:
             raise ValueError(
-                "You can only use one kind of constraints for structured outputs ('json', 'regex' or 'choice')."  # noqa: E501
-            )
+                "You can only use one kind of constraints for structured "
+                "outputs ('json', 'regex' or 'choice').")
         return data
 
     @model_validator(mode="before")
