@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for the AWQ Triton kernel.
 
-Run `pytest tests/kernels/test_awq_triton.py`.
+Run `pytest tests/kernels/quantization/test_awq_triton.py`.
 """
 import pytest
 import torch
