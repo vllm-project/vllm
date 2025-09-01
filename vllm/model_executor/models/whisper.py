@@ -906,6 +906,10 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
             input_features = torch.cat(
                 [feat.to(self.dtype) for feat in input_features])
 
+            if input_features.size(1) == 80:
+                input_features = torch.nn.functional.pad(
+                    input_features, (0, 0, 0, 48))
+
         return WhisperAudioInputs(input_features=input_features)
 
     def compute_logits(self, hidden_states: torch.Tensor,
