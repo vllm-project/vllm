@@ -40,6 +40,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -328,31 +329,28 @@ class DashengAudioTransformer(nn.Module):
         self.norm = nn.LayerNorm(config.embed_dim, eps=1e-6)
 
     def _init_front_end(self, config):
-        ori_default_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.float32)
+        with set_default_torch_dtype(torch.float32):
+            self.front_end = nn.Sequential(
+                audio_transforms.MelSpectrogram(
+                    f_min=config.f_min,
+                    f_max=config.f_max,
+                    center=config.center,
+                    win_length=config.win_length,
+                    hop_length=config.hop_length,
+                    sample_rate=config.sample_rate,
+                    n_fft=config.n_fft,
+                    n_mels=config.n_mels,
+                ),
+                audio_transforms.AmplitudeToDB(top_db=120),
+            )
 
-        self.front_end = nn.Sequential(
-            audio_transforms.MelSpectrogram(
-                f_min=config.f_min,
-                f_max=config.f_max,
-                center=config.center,
-                win_length=config.win_length,
-                hop_length=config.hop_length,
-                sample_rate=config.sample_rate,
-                n_fft=config.n_fft,
-                n_mels=config.n_mels,
-            ),
-            audio_transforms.AmplitudeToDB(top_db=120),
-        )
-
-        mel_spectrogram = self.front_end[0]
-        fb = mel_spectrogram.mel_scale.fb
-        win = mel_spectrogram.spectrogram.window
-        mel_spectrogram.mel_scale.fb = fb.to(torch.bfloat16).to(torch.float32)
-        mel_spectrogram.spectrogram.window = win.to(torch.bfloat16).to(
-            torch.float32)
-
-        torch.set_default_dtype(ori_default_dtype)
+            mel_spectrogram = self.front_end[0]
+            fb = mel_spectrogram.mel_scale.fb
+            win = mel_spectrogram.spectrogram.window
+            mel_spectrogram.mel_scale.fb = fb.to(torch.bfloat16).to(
+                torch.float32)
+            mel_spectrogram.spectrogram.window = win.to(torch.bfloat16).to(
+                torch.float32)
 
     def forward_features(
         self,
@@ -440,12 +438,14 @@ class AudioProjectorSubsample(nn.Module):
                 output_size=out_dim,
                 quant_config=quant_config,
                 prefix=f"{prefix}.fc1",
+                return_bias=False,
             ), get_act_fn("gelu"),
             RowParallelLinear(
                 input_size=out_dim,
                 output_size=out_dim,
                 quant_config=quant_config,
                 prefix=f"{prefix}.fc2",
+                return_bias=False,
             ))
 
     def forward(self, x, mask=None):
@@ -461,8 +461,6 @@ class AudioProjectorSubsample(nn.Module):
                       dim)  # rearrange(x, "b (s k) d -> b s (k d)", k=self.k)
         for layer in self.net:
             x = layer(x)
-            if isinstance(x, tuple):
-                x, _ = x
         mask = mask.reshape(
             batch_size, -1,
             self.k)  # rearrange(mask, "b (s k) -> b s k", k=self.k)
