@@ -104,6 +104,7 @@ class OpenAIServingPooling(OpenAIServing):
             else:
                 tokenizer = await self.engine_client.get_tokenizer(lora_request
                                                                    )
+            renderer = self._get_renderer(tokenizer)
 
             if getattr(request, "dimensions", None) is not None:
                 return self.create_error_response(
@@ -149,13 +150,13 @@ class OpenAIServingPooling(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             elif isinstance(request, PoolingCompletionRequest):
-                (request_prompts,
-                 engine_prompts) = await self._preprocess_completion(
-                     request,
-                     tokenizer,
-                     request.input,
-                     add_special_tokens=request.add_special_tokens,
-                 )
+                engine_prompts = await renderer.render_prompt(
+                    prompt_or_prompts=request.input,
+                    max_length=self.max_model_len,
+                    truncate_prompt_tokens=truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
+                    cache_salt=getattr(request, 'cache_salt', None),
+                )
             else:
                 raise ValueError(
                     f"Unsupported request of type {type(request)}")
@@ -177,7 +178,7 @@ class OpenAIServingPooling(OpenAIServing):
                 request_id_item = f"{request_id}-{i}"
 
                 self._log_inputs(request_id_item,
-                                 request_prompts[i],
+                                 engine_prompt,
                                  params=pooling_params,
                                  lora_request=lora_request)
 

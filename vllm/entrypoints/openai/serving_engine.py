@@ -62,6 +62,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TranslationRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
+from vllm.entrypoints.renderer import Renderer
 # yapf: enable
 from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
@@ -242,6 +243,15 @@ class OpenAIServing:
         self._async_tokenizer_pool: dict[AnyTokenizer,
                                          AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
+
+    def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> Renderer:
+        """
+        Get a Renderer instance with the provided tokenizer.
+        Uses shared async tokenizer pool for efficiency.
+        """
+        return Renderer(model_config=self.model_config,
+                        tokenizer=tokenizer,
+                        async_tokenizer_pool=self._async_tokenizer_pool)
 
     def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
         """
@@ -1098,7 +1108,7 @@ class OpenAIServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: RequestPrompt,
+        inputs: Union[RequestPrompt, EngineTokensPrompt],
         params: Optional[Union[SamplingParams, PoolingParams,
                                BeamSearchParams]],
         lora_request: Optional[LoRARequest],
@@ -1113,7 +1123,7 @@ class OpenAIServing:
         elif "prompt_embeds" in inputs:
             prompt_embeds = inputs.get("prompt_embeds")
         else:
-            prompt = inputs["prompt"]
+            prompt = getattr(inputs, 'prompt', None)
             prompt_token_ids = inputs["prompt_token_ids"]
 
         self.request_logger.log_inputs(
