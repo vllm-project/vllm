@@ -513,11 +513,6 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
-def random_fc_uuid() -> str:
-    """Generates a random UUID for function call tool outputs."""
-    return str(os.urandom(24).hex())
-
-
 class AsyncMicrobatchTokenizer:
     """Asynchronous tokenizer with micro-batching.
 
