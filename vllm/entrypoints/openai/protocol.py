@@ -1424,9 +1424,10 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     When using plugins IOProcessor plugins, the actual input is processed
     by the plugin itself. Hence, we use a generic type for the request data
     """
+    softmax: bool = True
 
     def to_pooling_params(self):
-        return PoolingParams(task="encode")
+        return PoolingParams(task="encode", softmax=self.softmax)
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
