@@ -167,6 +167,9 @@ class SpecDecodingProm:
         self.counter_spec_decode_num_accepted_tokens_per_pos: dict[
             int, list[prometheus_client.Counter]] = {}
 
+        for idx in labelvalues:
+            self.counter_spec_decode_num_accepted_tokens_per_pos[idx] = []
+
         for pos in range(num_spec_tokens):
             pos_counters = make_for_each_labelvalue(base_counter, labelvalues,
                                                     [str(pos)])
