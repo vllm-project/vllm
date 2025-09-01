@@ -5,6 +5,7 @@ from typing import Any, Optional, TypedDict, Union, cast
 
 import torch
 from torch import nn
+
 from transformers import AutoModel, BatchFeature
 from transformers.models.gemma3n import (Gemma3nAudioConfig,
                                          Gemma3nAudioFeatureExtractor,
@@ -12,7 +13,6 @@ from transformers.models.gemma3n import (Gemma3nAudioConfig,
                                          Gemma3nTextConfig,
                                          Gemma3nVisionConfig)
 from transformers.models.siglip import SiglipImageProcessorFast
-
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -40,7 +40,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal
+from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -410,7 +410,8 @@ class Gemma3nMultimodalEmbedder(nn.Module):
 @MULTIMODAL_REGISTRY.register_processor(Gemma3nMultiModalProcessor,
                                         info=Gemma3nProcessingInfo,
                                         dummy_inputs=Gemma3nDummyInputsBuilder)
-class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal):
+class Gemma3nForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                      SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
