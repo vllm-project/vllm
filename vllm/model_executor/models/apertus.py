@@ -32,6 +32,8 @@ from torch import nn
 
 if TYPE_CHECKING:
     from transformers import ApertusConfig
+else:
+    ApertusConfig = Any
 
 from vllm.attention import Attention, AttentionType
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
