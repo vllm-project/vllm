@@ -403,11 +403,6 @@ class MLP2(nn.Module):
                                     bias=bias,
                                     prefix=maybe_prefix(prefix, "linear_2"))
         self.activation = activation
-        for m in [self.fc0, self.fc1]:
-            nn.init.trunc_normal_(m.weight,
-                                  std=math.sqrt(2 / m.weight.shape[1]))
-            if m.bias is not None:
-                nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x, _ = self.fc0(x)
