@@ -546,6 +546,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -569,6 +570,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 num_expert_group=num_expert_group,
                 custom_routing_function=custom_routing_function,
                 scoring_func=scoring_func,
+                routed_scaling_factor=routed_scaling_factor,
                 e_score_correction_bias=e_score_correction_bias)
 
             return torch.ops.vllm.fused_marlin_moe(
@@ -623,8 +625,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         if should_use_flashinfer_mxfp4():
             from flashinfer import mxfp8_quantize, trtllm_fp4_block_scale_moe
-            assert not self.moe.use_ep, (
-                "EP is not supported for flashinfer mxfp4 moe backend yet.")
             if _should_use_flashinfer_mxfp4_bf16():
                 assert x.dtype == torch.bfloat16
                 x_quant = x
@@ -650,12 +650,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 None,  # output1_scale_scalar
                 None,  # output1_scale_gate_scalar
                 None,  # output2_scale_scalar
-                self.num_experts,
+                global_num_experts,
                 top_k,
                 None,  # n_group
                 None,  # topk_group
                 self.intermediate_size,  # padded to multiple of 256
-                0,  # local_expert_offset
+                layer.ep_rank * layer.local_num_experts,  # local_expert_offset
                 self.num_experts,  # local num experts
                 None,
                 self._get_tile_tokens_dim(x, top_k),
