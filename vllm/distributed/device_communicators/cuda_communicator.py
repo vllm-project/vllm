@@ -44,6 +44,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             PyNcclCommunicator)
         from vllm.distributed.device_communicators.quick_all_reduce import (
             QuickAllReduce)
+        from vllm.distributed.device_communicators.symm_mem import (
+            SymmMemCommunicator)
 
         self.pynccl_comm: Optional[PyNcclCommunicator] = None
         if use_pynccl and self.world_size > 1:
@@ -54,6 +56,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         self.ca_comm: Optional[CustomAllreduce] = None
         self.qr_comm: Optional[QuickAllReduce] = None
+        self.symm_mem_comm: Optional[SymmMemCommunicator] = None
         if use_custom_allreduce and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(
@@ -69,6 +72,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 # currently be an MI300 series.
                 self.qr_comm = QuickAllReduce(group=self.cpu_group,
                                               device=self.device)
+        if envs.VLLM_ALLREDUCE_USE_SYMM_MEM and current_platform.is_cuda():
+            self.symm_mem_comm = SymmMemCommunicator(
+                group=self.cpu_group,
+                device=self.device,
+            )
+
         if self.use_all2all:
             all2all_backend = envs.VLLM_ALL2ALL_BACKEND
             if all2all_backend == "naive":
@@ -105,6 +114,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = ca_comm.custom_all_reduce(input_)
             assert out is not None
             return out
+        symm_mem_comm = self.symm_mem_comm
+        if symm_mem_comm is not None and \
+            symm_mem_comm.should_use_symm_mem(input_):
+            out = symm_mem_comm.all_reduce(input_)
+            assert out is not None
+            return out
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
         out = pynccl_comm.all_reduce(input_)
@@ -137,7 +152,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                              dtype=input_tensor.dtype,
                              device=input_tensor.device)
 
-        pynccl_comm.reduce_scatter(output, input_)
+        pynccl_comm.reduce_scatter(output, input_tensor)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
@@ -171,9 +186,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
                              device=input_tensor.device)
 
         if sizes is not None:
-            pynccl_comm.reduce_scatterv(output, input_, sizes=sizes)
+            pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
         else:
-            pynccl_comm.reduce_scatter(output, input_)
+            pynccl_comm.reduce_scatter(output, input_tensor)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
@@ -236,7 +251,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             input_size = input_.size()
             if sizes is not None:
                 assert len(sizes) == world_size
-                assert input_.shape[dim] == sizes[self.rank_in_group]
+                assert input_.shape[dim] == sizes[self.rank_in_group], (
+                    f"{input_.shape[dim]} != {sizes[self.rank_in_group]}")
                 output_size = (sum(sizes), ) + input_size[1:]
             else:
                 output_size = (input_size[0] * world_size, ) + input_size[1:]

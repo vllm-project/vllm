@@ -21,7 +21,7 @@ class NvFp4Support:
     """Result container for NV-FP4 capability probing."""
 
     cutlass_supported: bool
-    allow_flashinfer_cutlass: bool
+    allow_flashinfer: bool
     use_marlin: bool
 
 
@@ -54,6 +54,6 @@ def detect_nvfp4_moe_support(class_name: str = "") -> NvFp4Support:
 
     return NvFp4Support(
         cutlass_supported=cutlass_supported,
-        allow_flashinfer_cutlass=allow_flashinfer,
+        allow_flashinfer=allow_flashinfer,
         use_marlin=use_marlin,
     )

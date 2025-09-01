@@ -6,8 +6,11 @@ import torch
 
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalFeatureSpec,
+                                    MultiModalKwargsItem, PlaceholderRange)
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
+                                         init_none_hash)
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -112,27 +115,45 @@ def create_scheduler(
     )
 
 
+_none_hash_initialized = False
+
+
 def create_requests(
     num_requests: int,
     num_tokens: int = 10,
-    mm_positions: Optional[list[PlaceholderRange]] = None,
+    mm_positions: Optional[list[list[PlaceholderRange]]] = None,
     max_tokens: int = 16,
     stop_token_ids: Optional[list[int]] = None,
     prompt_logprobs: Optional[int] = None,
     same_prompt: bool = False,
+    block_size: int = 16,
 ) -> list[Request]:
+    global _none_hash_initialized
+    if not _none_hash_initialized:
+        init_none_hash(hash)
+        _none_hash_initialized = True
+
+    block_hasher = get_request_block_hasher(block_size, hash)
     sampling_params = SamplingParams(ignore_eos=False,
                                      max_tokens=max_tokens,
                                      stop_token_ids=stop_token_ids,
                                      prompt_logprobs=prompt_logprobs)
     requests = []
     for i in range(num_requests):
+        mm_features = []
         if mm_positions is not None:
             mm_position = mm_positions[i]
-            mm_inputs = [MultiModalKwargs({})] * len(mm_position)
-        else:
-            mm_position = None
-            mm_inputs = None
+            for j, position in enumerate(mm_position):
+                # Dummy hash for each mm item should be unique
+                # since encoder cache tracks entries by hash
+                identifier = f"hash{i}_{j}"
+                mm_feature = MultiModalFeatureSpec(
+                    data=MultiModalKwargsItem.dummy("dummy_m"),
+                    mm_position=position,
+                    identifier=identifier,
+                    modality="image")
+                mm_features.append(mm_feature)
+
         prompt_token_ids = ([0] * num_tokens if same_prompt else [i] *
                             num_tokens)
         request = Request(
@@ -140,10 +161,9 @@ def create_requests(
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
             pooling_params=None,
-            multi_modal_inputs=mm_inputs,
-            multi_modal_placeholders=mm_position,
-            multi_modal_hashes=None,
+            mm_features=mm_features if mm_features else None,
             eos_token_id=EOS_TOKEN_ID,
+            block_hasher=block_hasher,
         )
         requests.append(request)
     return requests

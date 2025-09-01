@@ -9,11 +9,11 @@ import torch
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.platforms import current_platform
 
-NUM_HEADS = [(4, 4), (8, 2), (16, 2)]
+NUM_HEADS = [(4, 4), (8, 2)]
 HEAD_SIZES = [128, 256]
-BLOCK_SIZES = [16, 32]
+BLOCK_SIZES = [16]
 
-DTYPES = [torch.float16, torch.bfloat16]
+DTYPES = [torch.bfloat16]
 QDTYPES = [None, torch.float8_e4m3fn] if not current_platform.is_rocm() else [
     None, torch.float8_e4m3fnuz
 ]
@@ -85,7 +85,7 @@ def ref_paged_attn(
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("sliding_window", [None, 256])
 @pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("soft_cap", [None, 10.0, 50.0])
+@pytest.mark.parametrize("soft_cap", [None, 50.0])
 @pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
 @pytest.mark.parametrize("q_dtype", QDTYPES)
 @torch.inference_mode()

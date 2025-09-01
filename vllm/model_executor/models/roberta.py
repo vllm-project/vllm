@@ -9,18 +9,21 @@ from torch import nn
 from transformers import RobertaConfig
 
 from vllm.config import VllmConfig
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.pooler import (ClassifierPooler, CLSPool,
                                                DispatchPooler, Pooler)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.models.bert import BertEmbeddingModel, BertModel
+from vllm.model_executor.models.bert import (TOKEN_TYPE_SHIFT,
+                                             BertEmbeddingModel, BertModel,
+                                             _decode_token_type_ids,
+                                             _encode_token_type_ids)
 from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
                                               maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
-from .interfaces import SupportsCrossEncoding, SupportsV0Only
+from .interfaces import SupportsCrossEncoding
+from .interfaces_base import default_pooling_type
 
 
 class RobertaEmbedding(nn.Module):
@@ -53,17 +56,12 @@ class RobertaEmbedding(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        input_shape = input_ids.size()
-        inputs_embeds = self.word_embeddings(input_ids)
 
-        # Position embeddings.
+        token_type_ids = _decode_token_type_ids(input_ids)
+
+        inputs_embeds = self.word_embeddings(input_ids)
         position_embeddings = self.position_embeddings(position_ids)
-        if token_type_ids is None:
-            token_type_ids = torch.zeros(input_shape,
-                                         dtype=torch.long,
-                                         device=inputs_embeds.device)
 
         token_type_embeddings = self.token_type_embeddings(token_type_ids)
         embeddings = inputs_embeds + token_type_embeddings + position_embeddings
@@ -88,6 +86,7 @@ class RobertaClassificationHead(nn.Module):
         return x
 
 
+@default_pooling_type("CLS")
 class RobertaEmbeddingModel(BertEmbeddingModel):
     """A model that uses Roberta to provide embedding functionalities.
 
@@ -101,13 +100,12 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.padding_idx = vllm_config.model_config.hf_config.pad_token_id
+        self.padding_idx: int = vllm_config.model_config.hf_config.pad_token_id
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor,
         positions: torch.Tensor,
-        token_type_ids: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -120,8 +118,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
                                   padding_idx=self.padding_idx)
 
         return self.model(input_ids=input_ids,
-                          position_ids=positions,
-                          token_type_ids=token_type_ids,
+                          positions=positions,
                           inputs_embeds=inputs_embeds,
                           intermediate_tensors=intermediate_tensors)
 
@@ -153,8 +150,8 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         return loader.load_weights(weights_list, mapper=mapper)
 
 
-class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
-                                       SupportsV0Only):
+@default_pooling_type("CLS")
+class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
     """A model that uses Roberta to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for
@@ -181,7 +178,7 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        self.padding_idx = vllm_config.model_config.hf_config.pad_token_id
+        self.padding_idx: int = vllm_config.model_config.hf_config.pad_token_id
 
         self.num_labels = config.num_labels
         self.roberta = BertModel(vllm_config=vllm_config,
@@ -226,65 +223,24 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding,
         replace_roberta_positions(input_ids=input_ids,
                                   position_ids=positions,
                                   padding_idx=self.padding_idx)
+        if token_type_ids is not None:
+            assert self.roberta.config.vocab_size < (1 << TOKEN_TYPE_SHIFT)
+            assert input_ids is not None
+            _encode_token_type_ids(input_ids, token_type_ids)
         return self.roberta(input_ids=input_ids,
-                            position_ids=positions,
+                            positions=positions,
                             inputs_embeds=inputs_embeds,
-                            intermediate_tensors=intermediate_tensors,
-                            token_type_ids=token_type_ids)
-
-
-# Adapted from transformers
-def create_position_ids_from_input_ids(input_ids,
-                                       padding_idx,
-                                       past_key_values_length=0):
-    """
-    Replace non-padding symbols with their position numbers.
-    Position numbers begin at padding_idx+1. Padding symbols
-    are ignored. This is modified from fairseq's `utils.make_positions`.
-
-    Args:
-        x: torch.Tensor x:
-
-    Returns: torch.Tensor
-    """
-    # The series of casts and type-conversions here are carefully
-    # balanced to both work with ONNX export and XLA.
-    mask = input_ids.ne(padding_idx).int()
-
-    incremental_indices = (torch.cumsum(mask, dim=0).type_as(mask) +
-                           past_key_values_length) * mask
-
-    return incremental_indices.long() + padding_idx
+                            intermediate_tensors=intermediate_tensors)
 
 
 def replace_roberta_positions(input_ids: torch.Tensor,
                               position_ids: torch.Tensor,
                               padding_idx: int) -> None:
-
-    seq_lens: Optional[torch.Tensor] = None
-    attn_metadata = get_forward_context().attn_metadata
-    if attn_metadata is not None:  # can be None during warmup
-        if isinstance(attn_metadata, dict):
-            attn_metadata = next(iter(attn_metadata.values()))
-        # TODO: remove "seq_lens_tensor" after V0 is removed
-        seq_lens = getattr(attn_metadata, "seq_lens_tensor",
-                           getattr(attn_metadata, "seq_lens", None))
-
-    if seq_lens is not None:
-        assert isinstance(seq_lens, torch.Tensor)
-
-        # Replace position ids because in RoBERTa models
-        # they have to start at padding_idx + 1 and ignore
-        # existing padding tokens
-        # References:
-        # - https://github.com/huggingface/transformers/blob/a3d69a8994d673899608a7c17fbf4f953f50474e/src/transformers/models/roberta/modeling_roberta.py#L133
-        # - https://github.com/huggingface/transformers/blob/a3d69a8994d673899608a7c17fbf4f953f50474e/src/transformers/models/roberta/modeling_roberta.py#L1669
-        token_list = torch.split(input_ids[:torch.sum(seq_lens)],
-                                 seq_lens.tolist())
-
-        offset = 0
-        for tokens in token_list:
-            length = tokens.shape[0]
-            position_ids[offset:offset+length] = \
-                create_position_ids_from_input_ids(tokens, padding_idx)
-            offset = offset + length
+    # Replace position ids because in RoBERTa models
+    # they have to start at padding_idx + 1 and ignore
+    # existing padding tokens
+    # References:
+    # - https://github.com/huggingface/transformers/blob/a3d69a8994d673899608a7c17fbf4f953f50474e/src/transformers/models/roberta/modeling_roberta.py#L133
+    # - https://github.com/huggingface/transformers/blob/a3d69a8994d673899608a7c17fbf4f953f50474e/src/transformers/models/roberta/modeling_roberta.py#L1669
+    # vllm does not use padding tokens, let's make things simpler
+    position_ids += padding_idx + 1

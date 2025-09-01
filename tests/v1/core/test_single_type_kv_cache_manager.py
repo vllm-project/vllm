@@ -17,7 +17,6 @@ from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
 def get_sliding_window_manager(sliding_window_spec, block_pool):
     return SlidingWindowManager(sliding_window_spec,
                                 block_pool,
-                                caching_hash_fn=lambda x: x,
                                 kv_cache_group_id=0)
 
 
@@ -25,7 +24,6 @@ def get_chunked_local_attention_manager(chunked_local_attention_spec,
                                         block_pool):
     return ChunkedLocalAttentionManager(chunked_local_attention_spec,
                                         block_pool,
-                                        caching_hash_fn=lambda x: x,
                                         kv_cache_group_id=0)
 
 

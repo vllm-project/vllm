@@ -3,13 +3,14 @@
 
 import warnings
 from collections.abc import Sequence
-from typing import Any, NamedTuple, Optional, Union
+from dataclasses import dataclass
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig, RunnerOption
+from vllm.config import ModelConfig, ModelDType, RunnerOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 
@@ -257,11 +258,11 @@ def check_logprobs_close(
 def build_model_context(
     model_id: str,
     runner: RunnerOption = "auto",
-    dtype: Union[str, torch.dtype] = "auto",
+    dtype: ModelDType = "auto",
     model_config_kwargs: Optional[dict[str, Any]] = None,
     mm_processor_kwargs: Optional[dict[str, Any]] = None,
     limit_mm_per_prompt: Optional[dict[str, int]] = None,
-    disable_mm_preprocessor_cache: bool = True,
+    mm_processor_cache_gb: int = 0,
 ):
     """Creates an InputContext for a given model.
 
@@ -279,6 +280,7 @@ def build_model_context(
     model_info.check_transformers_version(on_fail="skip")
 
     model_config_kwargs = model_config_kwargs or {}
+    limit_mm_per_prompt = limit_mm_per_prompt or {}
     model_config = ModelConfig(
         model_id,
         runner=runner,
@@ -290,7 +292,7 @@ def build_model_context(
         seed=0,
         mm_processor_kwargs=mm_processor_kwargs,
         limit_mm_per_prompt=limit_mm_per_prompt,
-        disable_mm_preprocessor_cache=disable_mm_preprocessor_cache,
+        mm_processor_cache_gb=mm_processor_cache_gb,
         hf_overrides=model_info.hf_overrides,
         **model_config_kwargs,
     )
@@ -338,25 +340,51 @@ def softmax(data):
         return F.softmax(data, dim=-1)
 
 
-class EmbedModelInfo(NamedTuple):
+@dataclass
+class ModelInfo:
     name: str
+    architecture: str = ""
+    dtype: str = "auto"
+    hf_overrides: Optional[dict[str, Any]] = None
+    default_pooling_type: str = ""
+    enable_test: bool = True
+
+
+@dataclass
+class EmbedModelInfo(ModelInfo):
     is_matryoshka: bool = False
     matryoshka_dimensions: Optional[list[int]] = None
-    architecture: str = ""
-    dtype: str = "auto"
-    enable_test: bool = True
 
 
-class RerankModelInfo(NamedTuple):
-    name: str
-    architecture: str = ""
-    dtype: str = "auto"
-    enable_test: bool = True
+@dataclass
+class CLSPoolingEmbedModelInfo(EmbedModelInfo):
+    default_pooling_type: str = "CLS"
+
+
+@dataclass
+class LASTPoolingEmbedModelInfo(EmbedModelInfo):
+    default_pooling_type: str = "LAST"
+
+
+@dataclass
+class RerankModelInfo(ModelInfo):
+    pass
+
+
+@dataclass
+class CLSPoolingRerankModelInfo(RerankModelInfo):
+    default_pooling_type: str = "CLS"
+
+
+@dataclass
+class LASTPoolingRerankModelInfo(RerankModelInfo):
+    default_pooling_type: str = "LAST"
 
 
 def dummy_hf_overrides(
     hf_config: PretrainedConfig,
-    model_arch: str,
+    *,
+    model_arch: str = "",
     exist_overrides: Optional[dict[str, Any]] = None,
 ) -> PretrainedConfig:
     """

@@ -244,7 +244,7 @@ class EplbState:
             dtype=torch.int32,
             device=device,
         )
-        expert_load_window_size = parallel_config.eplb_window_size
+        expert_load_window_size = parallel_config.eplb_config.window_size
         expert_load_window = torch.zeros(
             (expert_load_window_size, model.num_moe_layers,
              model.num_physical_experts),
@@ -253,13 +253,12 @@ class EplbState:
         )
 
         # Set the initial progress of rearrangement to 3/4
-        eplb_step_interval = parallel_config.eplb_step_interval
+        eplb_step_interval = parallel_config.eplb_config.step_interval
         expert_rearrangement_step = max(
             0, eplb_step_interval - eplb_step_interval // 4)
 
         if global_expert_load is not None:
             ep_group = get_ep_group().device_group
-            assert ep_group is not None
             assert global_expert_load.shape == (model.num_moe_layers,
                                                 model.num_logical_experts)
             assert global_expert_load.dtype == torch.int64
@@ -366,7 +365,6 @@ class EplbState:
 
             # Collect load metrics from all ranks
             ep_group = get_ep_group().device_group
-            assert ep_group is not None
             all_reduce(total_expert_load_pass, group=ep_group)
 
             # num_tokens_per_rank: (num_moe_layers, num_ranks)
@@ -411,18 +409,19 @@ class EplbState:
             self.expert_rearrangement_step = 0
             self.rearrange(model)
 
-    def rearrange(self,
-                  model: MixtureOfExperts,
-                  is_profile: bool = False,
-                  execute_shuffle: bool = True,
-                  global_expert_load: Optional[torch.Tensor] = None,
-                  rank_mapping: Optional[dict[int, int]] = None) -> None:
+    def rearrange(
+        self,
+        model: MixtureOfExperts,
+        is_profile: bool = False,
+        execute_shuffle: bool = True,
+        global_expert_load: Optional[torch.Tensor] = None,
+        rank_mapping: Optional[dict[int,
+                                    int]] = None) -> Optional[torch.Tensor]:
         """
         Rearrange the experts according to the current load.
         """
 
         ep_group = get_ep_group().device_group
-        assert ep_group is not None
         ep_rank = ep_group.rank()
 
         time_start = None
@@ -551,6 +550,7 @@ class EplbState:
                 " (profile) " if is_profile else " ",
                 time_end - time_start,
             )
+        return None
 
     @staticmethod
     def recv_state() -> tuple[torch.Tensor, torch.Tensor]:

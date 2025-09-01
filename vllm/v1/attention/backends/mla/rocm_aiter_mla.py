@@ -7,6 +7,7 @@ from typing import ClassVar, Optional
 import torch
 
 import vllm.envs as envs
+from vllm.attention.backends.abstract import AttentionLayer
 from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
 from vllm.config import VllmConfig
 from vllm.utils import cdiv
@@ -65,8 +66,10 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 
 
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
-    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.PURE_DECODE_ONLY
+    # TODO(luka, lucas): audit this as part of:
+    #  https://github.com/vllm-project/vllm/issues/22945
+    cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -82,7 +85,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         max_num_pages = max_num_reqs * max_num_pages_per_req
 
         # Preparing persistent buffers
-        if vllm_config.compilation_config.full_cuda_graph:
+        # TODO: we can disambiguate between decode and mixed-prefill decode here
+        # so we can only use the persistent buffer if a cudagraph is actually
+        # being used.
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.paged_kv_indptr = torch.zeros(max_num_reqs + 1,
                                                dtype=torch.int32,
                                                device=device)
@@ -120,7 +126,7 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             block_table_bounds.cumsum(dim=0, dtype=torch.int32)
         ])
 
-        if self.compilation_config.full_cuda_graph:
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
 
             num_actual_pages = paged_kv_indices.size(0)
 
@@ -216,6 +222,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: AiterMLAMetadata,
+        layer: AttentionLayer,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None

@@ -7,15 +7,24 @@ import torch
 
 from tests.conftest import HfRunner
 
-from .mteb_utils import RerankModelInfo, mteb_test_rerank_models
+from ...utils import LASTPoolingRerankModelInfo, RerankModelInfo
+from .mteb_utils import mteb_test_rerank_models
+
+mxbai_rerank_hf_overrides = {
+    "architectures": ["Qwen2ForSequenceClassification"],
+    "classifier_from_token": ["0", "1"],
+    "method": "from_2_way_softmax",
+}
 
 RERANK_MODELS = [
-    RerankModelInfo("mixedbread-ai/mxbai-rerank-base-v2",
-                    architecture="Qwen2ForSequenceClassification",
-                    enable_test=True),
-    RerankModelInfo("mixedbread-ai/mxbai-rerank-large-v2",
-                    architecture="Qwen2ForSequenceClassification",
-                    enable_test=False)
+    LASTPoolingRerankModelInfo("mixedbread-ai/mxbai-rerank-base-v2",
+                               architecture="Qwen2ForSequenceClassification",
+                               hf_overrides=mxbai_rerank_hf_overrides,
+                               enable_test=True),
+    LASTPoolingRerankModelInfo("mixedbread-ai/mxbai-rerank-large-v2",
+                               architecture="Qwen2ForSequenceClassification",
+                               hf_overrides=mxbai_rerank_hf_overrides,
+                               enable_test=False)
 ]
 
 
@@ -70,13 +79,4 @@ class MxbaiRerankerHfRunner(HfRunner):
 
 @pytest.mark.parametrize("model_info", RERANK_MODELS)
 def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
-    vllm_extra_kwargs: dict[str, Any] = {}
-    if model_info.architecture == "Qwen2ForSequenceClassification":
-        vllm_extra_kwargs["hf_overrides"] = {
-            "architectures": ["Qwen2ForSequenceClassification"],
-            "classifier_from_token": ["0", "1"],
-            "method": "from_2_way_softmax",
-        }
-
-    mteb_test_rerank_models(MxbaiRerankerHfRunner, vllm_runner, model_info,
-                            vllm_extra_kwargs)
+    mteb_test_rerank_models(MxbaiRerankerHfRunner, vllm_runner, model_info)

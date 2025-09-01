@@ -31,9 +31,7 @@ from vllm.utils import PlaceholderModule
 
 try:
     from runai_model_streamer import SafetensorsStreamer
-except (ImportError, OSError):
-    # see https://github.com/run-ai/runai-model-streamer/issues/26
-    # OSError will be raised on arm64 platform
+except ImportError:
     runai_model_streamer = PlaceholderModule(
         "runai_model_streamer")  # type: ignore[assignment]
     SafetensorsStreamer = runai_model_streamer.placeholder_attr(
@@ -280,33 +278,48 @@ def download_weights_from_hf(
     Returns:
         str: The path to the downloaded model weights.
     """
+    assert len(allow_patterns) > 0
     local_only = huggingface_hub.constants.HF_HUB_OFFLINE
     if not local_only:
-        # Before we download we look at that is available:
-        fs = HfFileSystem()
-        file_list = fs.ls(model_name_or_path, detail=False, revision=revision)
+        # Attempt to reduce allow_patterns to a single pattern
+        # so we only have to call snapshot_download once.
+        try:
+            fs = HfFileSystem()
+            file_list = fs.ls(model_name_or_path,
+                              detail=False,
+                              revision=revision)
 
-        # depending on what is available we download different things
-        for pattern in allow_patterns:
-            matching = fnmatch.filter(file_list, pattern)
-            if len(matching) > 0:
-                allow_patterns = [pattern]
+            # Use the first pattern found in the HF repo's files.
+            for pattern in allow_patterns:
+                matching = fnmatch.filter(file_list, pattern)
+                if len(matching) > 0:
+                    allow_patterns = [pattern]
                 break
+        except Exception as e:
+            logger.warning(
+                "Failed to get file list for '%s'. Trying each pattern in "
+                "allow_patterns individually until weights have been "
+                "downloaded. Error: %s", model_name_or_path, e)
 
     logger.info("Using model weights format %s", allow_patterns)
     # Use file lock to prevent multiple processes from
     # downloading the same model weights at the same time.
     with get_lock(model_name_or_path, cache_dir):
         start_time = time.perf_counter()
-        hf_folder = snapshot_download(
-            model_name_or_path,
-            allow_patterns=allow_patterns,
-            ignore_patterns=ignore_patterns,
-            cache_dir=cache_dir,
-            tqdm_class=DisabledTqdm,
-            revision=revision,
-            local_files_only=local_only,
-        )
+        for allow_pattern in allow_patterns:
+            hf_folder = snapshot_download(
+                model_name_or_path,
+                allow_patterns=allow_pattern,
+                ignore_patterns=ignore_patterns,
+                cache_dir=cache_dir,
+                tqdm_class=DisabledTqdm,
+                revision=revision,
+                local_files_only=local_only,
+            )
+            # If we have downloaded weights for this allow_pattern,
+            # we don't need to check the rest.
+            if any(Path(hf_folder).glob(allow_pattern)):
+                break
         time_taken = time.perf_counter() - start_time
         if time_taken > 0.5:
             logger.info("Time spent downloading weights for %s: %.6f seconds",
@@ -565,6 +578,18 @@ def get_gguf_extra_tensor_names(
     return [gguf_to_hf_name_map[key] for key in extra_keys]
 
 
+def get_gguf_weight_type_map(
+        gguf_file: str, gguf_to_hf_name_map: dict[str, str]) -> dict[str, str]:
+    """
+    Return GGUF mapped weight's name and its quant type
+    """
+    reader = gguf.GGUFReader(gguf_file)
+    return {
+        gguf_to_hf_name_map[tensor.name]: tensor.tensor_type.name
+        for tensor in reader.tensors if tensor.name in gguf_to_hf_name_map
+    }
+
+
 def gguf_quant_weights_iterator(
     gguf_file: str, gguf_to_hf_name_map: dict[str, str]
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
@@ -764,39 +789,41 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
             return None
         return remapped_name
 
-    possible_scale_names = [".k_scale", ".v_scale"]
-    modelopt_scale_names = [
-        ".self_attn.k_proj.k_scale", ".self_attn.v_proj.v_scale"
+    # Define scale name mapping patterns in order of precedence
+    scale_mapping_patterns = [
+        # ModelOpt format: .self_attn.{k,v}_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (r"\.self_attn\.([kv])_proj\.([kv])_scale$",
+         r".self_attn.attn.\2_scale"),
+        # QKV proj format: .self_attn.qkv_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (r"\.self_attn\.qkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"),
+        # Qwen3 MoE format: .self_attn.qkqkv_proj.{k,v}_scale ->
+        # .self_attn.attn.{k,v}_scale
+        (r"\.self_attn\.qkqkv_proj\.([kv])_scale$", r".self_attn.attn.\1_scale"
+         ),
+        # Default format: .{k,v}_scale -> .attn.{k,v}_scale
+        (r"\.([kv])_scale$", r".attn.\1_scale"),
     ]
-    # Also support qkv_proj scale parameters (from stacked parameter processing)
-    qkv_proj_scale_names = [
-        ".self_attn.qkv_proj.k_scale", ".self_attn.qkv_proj.v_scale"
-    ]
-    for scale_name in possible_scale_names:
-        if name.endswith(scale_name):
-            if any(mo_scale_name in name
-                   for mo_scale_name in modelopt_scale_names):
-                remapped_name = name.replace(
-                    f".self_attn.{scale_name[1]}_proj{scale_name}",
-                    f".self_attn.attn{scale_name}")
-            elif any(qkv_scale_name in name
-                     for qkv_scale_name in qkv_proj_scale_names):
-                # Handle qkv_proj scale parameters
-                remapped_name = name.replace(
-                    f".self_attn.qkv_proj{scale_name}",
-                    f".self_attn.attn{scale_name}")
-            else:
-                remapped_name = name.replace(scale_name, f".attn{scale_name}")
-            if remapped_name not in params_dict:
-                logger.warning_once(
-                    "Found %s in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). %s is not loaded.",  # noqa: E501
-                    scale_name,
-                    name,
-                    remapped_name,
-                    scale_name,
-                )
-                return None
-            return remapped_name
+
+    # Check if name ends with k_scale or v_scale
+    if name.endswith((".k_scale", ".v_scale")):
+        import regex as re
+
+        for pattern, replacement in scale_mapping_patterns:
+            if re.search(pattern, name):
+                remapped_name = re.sub(pattern, replacement, name)
+                if remapped_name not in params_dict:
+                    scale_type = name.split(".")[-1]
+                    logger.warning_once(
+                        "Found %s in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). %s is not loaded.",  # noqa: E501
+                        scale_type,
+                        name,
+                        remapped_name,
+                        scale_type,
+                    )
+                    return None
+                return remapped_name
 
     # If there were no matches, return the untouched param name
     return name

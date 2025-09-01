@@ -48,9 +48,6 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
     # GPTQ/AWQ
     elif hasattr(base_layer, "qweight"):
         return base_layer.qweight.device
-    # marlin
-    elif hasattr(base_layer, "B"):
-        return base_layer.B.device
     # HQQ marlin
     elif hasattr(base_layer, "W_q"):
         return base_layer.W_q.device
@@ -608,7 +605,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
 class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     """ColumnParallelLinear layer that is composed of 2 sublayers (slices)
-    packed together (eg. gate_proj + up_proj -> gate_up_proj).
+    packed together (e.g. gate_proj + up_proj -> gate_up_proj).
 
     This means we have 2 LoRAs, each applied to one half of the layer.
 

@@ -24,7 +24,7 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Callable, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Callable, Literal, Optional, Union
 
 import torch
 from torch import nn
@@ -40,7 +40,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.gptq import GPTQConfig
 from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors)
 from vllm.multimodal.parse import (AudioItem, AudioProcessorItems,
@@ -49,6 +49,7 @@ from vllm.multimodal.parse import (AudioItem, AudioProcessorItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (PromptReplacement, PromptUpdate,
                                         PromptUpdateDetails)
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .minicpmv import (_MAX_FRAMES_PER_VIDEO, MiniCPMV2_6,
                        MiniCPMVDummyInputsBuilder,
@@ -61,35 +62,52 @@ from .utils import (AutoWeightsLoader, cast_overflow_tensors, flatten_bn,
 CPU_DEVICE = torch.device("cpu")
 
 
-class MiniCPMOAudioFeatureInputs(TypedDict):
-    type: Literal["audio_features"]
-    audio_features: Union[torch.Tensor, list[torch.Tensor]]
+class MiniCPMOAudioFeatureInputs(TensorSchema):
     """
-    Shape: `(batch_size * num_audios * num_slices, num_channels, length)`
+    Dimensions:
+        - bns: Batch size * number of audios * number of slices
+        - bn: Batch size * number of audios
+        - c: Number of channels
+        - l: Length
+        - s: Number of slices
+    """
+    type: Literal["audio_features"] = "audio_features"
+
+    audio_features: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bns", "c", "l", dynamic_dims={"l"}),
+    ]
+    """
     Slice here means chunk. Audio that is too long will be split into slices,
-    which is the same as image.
-    Padding is used therefore `audio_features` is `torch.Tensor`.
+    which is the same as image. Padding is used therefore `audio_features` is 
+    `torch.Tensor`.
     """
 
-    audio_feature_lens: Union[torch.Tensor, list[torch.Tensor]]
+    audio_feature_lens: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "s"),
+    ]
     """
-    Shape: `(batch_size * num_audios, num_slices)`
-
     This should be feature length of each audio slice, 
     which equals to `audio_features.shape[-1]`
     """
 
 
-class MiniCPMOAudioEmbeddingInputs(TypedDict):
-    type: Literal["audio_embeds"]
-    audio_embeds: Union[torch.Tensor, list[torch.Tensor]]
+class MiniCPMOAudioEmbeddingInputs(TensorSchema):
     """
-    Shape: `(batch_size * num_audios, num_slices, hidden_size)`
-
-    `hidden_size` must match the hidden size of language model backbone.
-    instead of a batched tensor.
+    Dimensions:
+        - bn: Batch size * number of audios
+        - s: Number of slices
+        - h: Hidden size (must match language model backbone)
+    
     Length of each slice may vary, so pass it as a list.
     """
+    type: Literal["audio_embeds"] = "audio_embeds"
+
+    audio_embeds: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "s", "h", dynamic_dims={"s"}),
+    ]
 
 
 MiniCPMOAudioInputs = Union[MiniCPMOAudioFeatureInputs,
@@ -316,7 +334,7 @@ class MiniCPMOMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         base_updates = super()._get_prompt_updates(
             mm_items=mm_items,
@@ -587,15 +605,28 @@ class MiniCPMO(MiniCPMV2_6):
         num_lookhead: int = 0,
     ) -> torch.Tensor:
         ret = torch.zeros(size, size, device=device, dtype=torch.bool)
-        for i in range(size):
-            if num_left_chunks < 0:
-                start = 0
-            else:
-                start = max((i // chunk_size - num_left_chunks) * chunk_size,
-                            0)
-            ending = min((i // chunk_size + 1) * chunk_size + num_lookhead,
-                         size)
-            ret[i, start:ending] = True
+        # Vectorized computation of row indices and chunk boundaries
+        row_indices = torch.arange(size, device=device)
+        chunk_indices = row_indices // chunk_size
+        if num_left_chunks < 0:
+            # If num_left_chunks < 0, start is always 0 for all rows
+            start_indices = torch.zeros_like(row_indices)
+        else:
+            # Compute start indices vectorially
+            start_chunk_indices = torch.clamp(chunk_indices - num_left_chunks,
+                                              min=0)
+            start_indices = start_chunk_indices * chunk_size
+        # Compute ending indices vectorially
+        end_chunk_indices = chunk_indices + 1
+        end_indices = torch.clamp(end_chunk_indices * chunk_size +
+                                  num_lookhead,
+                                  max=size)
+        # Create column indices for broadcasting
+        col_indices = torch.arange(size, device=device).unsqueeze(0)
+        start_indices = start_indices.unsqueeze(1)
+        end_indices = end_indices.unsqueeze(1)
+        # Vectorized mask creation
+        ret = (col_indices >= start_indices) & (col_indices < end_indices)
         return ret
 
     def _get_feat_extract_output_lengths(self,

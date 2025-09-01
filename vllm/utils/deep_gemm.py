@@ -14,6 +14,7 @@ from typing import Any, Callable, NoReturn
 import torch
 
 import vllm.envs as envs
+from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, has_deep_gemm
 
@@ -26,23 +27,37 @@ def is_deep_gemm_supported() -> bool:
     is_supported_arch = current_platform.is_cuda() and (
         current_platform.is_device_capability(90)
         or current_platform.is_device_capability(100))
-    return has_deep_gemm() and is_supported_arch
+    return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
 
 
 @functools.cache
-def is_blackwell_deep_gemm_used() -> bool:
-    """Return ``True`` if vLLM is configured to use DeepGEMM on a
-    Blackwell-class GPU.
+def is_deep_gemm_e8m0_used() -> bool:
+    """Return ``True`` if vLLM is configured to use DeepGEMM "
+    "E8M0 scale on a Hopper or Blackwell-class GPU.
     """
-    if not (envs.VLLM_USE_DEEP_GEMM and has_deep_gemm()):
+    if not is_deep_gemm_supported():
+        logger.debug_once(
+            "DeepGEMM E8M0 disabled: DeepGEMM not supported on this system.")
         return False
 
     _lazy_init()
+
     if _fp8_gemm_nt_impl is None:
+        logger.info_once("DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found")
         return False
 
-    return (current_platform.is_cuda()
-            and current_platform.is_device_capability(100))
+    if current_platform.is_device_capability(100) and \
+            envs.VLLM_USE_DEEP_GEMM_E8M0:
+        logger.info_once("DeepGEMM E8M0 enabled on Blackwell GPU.")
+        return True
+
+    if current_platform.is_device_capability(90) and \
+            envs.VLLM_USE_DEEP_GEMM_E8M0_HOPPER:
+        logger.info_once("DeepGEMM E8M0 enabled on Hopper GPU.")
+        return True
+
+    logger.info_once("DeepGEMM E8M0 disabled on current configuration.")
+    return False
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
@@ -57,6 +72,14 @@ def _resolve_symbol(module, new: str, old: str) -> Callable[..., Any] | None:
     if hasattr(module, new):
         return getattr(module, new)
     if hasattr(module, old):
+        # TODO(wentao): deprecate old symbol in the future.
+        logger.warning_once(
+            "Found legacy DeepGEMM symbol `%s`. Please upgrade the `deep_gemm` "
+            "package so that `%s` is available. Support for the legacy symbol "
+            "will be removed in a future vLLM release.",
+            old,
+            new,
+        )
         return getattr(module, old)
     return None
 
@@ -100,21 +123,26 @@ def fp8_gemm_nt(*args, **kwargs):
     _lazy_init()
     if _fp8_gemm_nt_impl is None:
         return _missing(*args, **kwargs)
-    return _fp8_gemm_nt_impl(*args, **kwargs)
+    return _fp8_gemm_nt_impl(*args,
+                             disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                             **kwargs)
 
 
 def m_grouped_fp8_gemm_nt_contiguous(*args, **kwargs):
     _lazy_init()
     if _grouped_impl is None:
         return _missing(*args, **kwargs)
-    return _grouped_impl(*args, **kwargs)
+    return _grouped_impl(*args,
+                         disable_ue8m0_cast=not is_deep_gemm_e8m0_used(),
+                         **kwargs)
 
 
 def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
     _lazy_init()
     if _grouped_masked_impl is None:
         return _missing(*args, **kwargs)
-    return _grouped_masked_impl(*args, **kwargs)
+    return _grouped_masked_impl(
+        *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs)
 
 
 def _ceil_to_ue8m0(x: torch.Tensor):
@@ -166,12 +194,19 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
     return 1 - sim
 
 
+def should_use_deepgemm_for_fp8_linear(output_dtype: torch.dtype,
+                                       weight: torch.Tensor):
+    return (is_deep_gemm_supported() and output_dtype == torch.bfloat16
+            and weight.shape[0] % 128 == 0 and weight.shape[1] % 128 == 0)
+
+
 __all__ = [
     "calc_diff",
     "fp8_gemm_nt",
     "m_grouped_fp8_gemm_nt_contiguous",
     "fp8_m_grouped_gemm_nt_masked",
     "per_block_cast_to_fp8",
-    "is_blackwell_deep_gemm_used",
+    "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
+    "should_use_deepgemm_for_fp8_linear",
 ]

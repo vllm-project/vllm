@@ -61,12 +61,6 @@ def test_unsupported_configs(monkeypatch):
         with pytest.raises(NotImplementedError):
             AsyncEngineArgs(
                 model=MODEL,
-                num_scheduler_steps=5,
-            ).create_engine_config()
-
-        with pytest.raises(NotImplementedError):
-            AsyncEngineArgs(
-                model=MODEL,
                 scheduler_delay_factor=1.2,
             ).create_engine_config()
 

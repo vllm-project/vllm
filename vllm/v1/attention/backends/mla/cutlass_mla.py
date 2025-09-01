@@ -2,19 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import Optional
+from typing import ClassVar, Optional
 
 import torch
 
 import vllm._custom_ops as ops
-from vllm.attention.backends.abstract import (AttentionType,
+from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
                                               is_quantized_kv_cache)
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonImpl,
-                                                   MLACommonMetadata)
+                                                   MLACommonMetadata,
+                                                   MLACommonMetadataBuilder)
+from vllm.v1.attention.backends.utils import AttentionCGSupport
 
 logger = init_logger(__name__)
+
+
+class CutlassMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+    # enable full CUDA Graph support for decode-only capture
+    cudagraph_support: ClassVar[
+        AttentionCGSupport] = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
 
 class CutlassMLABackend(MLACommonBackend):
@@ -26,6 +34,10 @@ class CutlassMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["CutlassMLAImpl"]:
         return CutlassMLAImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["CutlassMLAMetadataBuilder"]:
+        return CutlassMLAMetadataBuilder
 
 
 class SM100Workspace:
@@ -103,7 +115,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self._use_old_cutlass_mla = False
         force_old_cutlass = os.environ.get("FORCE_OLD_CUTLASS_MLA", None)
         if force_old_cutlass:
-            logger.warning("Forcing old cutlass mla kernel")
+            logger.warning_once("Forcing old cutlass mla kernel")
             self._use_old_cutlass_mla = True
 
         # TODO: Currently, num_kv_splits is limited to 16 to avoid hanging
@@ -111,8 +123,8 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         #       FORCE_NUM_KV_SPLITS=1
         force_num_kv_splits = os.environ.get("FORCE_NUM_KV_SPLITS", None)
         if force_num_kv_splits:
-            logger.warning("Forcing num_kv_splits to %d",
-                           int(force_num_kv_splits))
+            logger.warning_once("Forcing num_kv_splits to %d",
+                                int(force_num_kv_splits))
             self._num_kv_splits = int(force_num_kv_splits)
         else:
             self._num_kv_splits = -1  # => Auto-detect
@@ -266,6 +278,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
+        layer: AttentionLayer,
     ) -> torch.Tensor:
         if self._use_old_cutlass_mla:
             # TODO: Remove the old cutlass MLA kernel after more extensive

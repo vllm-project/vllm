@@ -76,7 +76,7 @@ class LRUEvictor(Evictor):
     that's recorded in the Block. If there are multiple blocks with
     the same last_accessed time, then the one with the largest num_hashed_tokens
     will be evicted. If two blocks each have the lowest last_accessed time and
-    highest num_hashed_tokens value, then one will be chose arbitrarily
+    highest num_hashed_tokens value, then one will be chosen arbitrarily
     """
 
     # CLEANUP_THRESHOLD determines the maximum allowable size of the priority

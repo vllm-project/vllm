@@ -116,13 +116,8 @@ class SambaYAttention(nn.Module):
             self.Wqkv = nn.Linear(self.hidden_size, op_size, bias=True)
 
         # disable sliding window for the second half of the model
-        sliding_window = config.interleaved_sliding_window[layer_idx]
-        if layer_idx >= config.num_hidden_layers // 2:
-            assert sliding_window is None, \
-                "sliding_window must be none for the second decoder"
-        else:
-            assert sliding_window is not None, \
-                "sliding_window must be set for the first decoder"
+        is_sliding = config.layer_types[layer_idx] == "sliding_attention"
+        sliding_window = config.sliding_window if is_sliding else None
 
         assert self.num_heads % 2 == 0, 'num_heads should be even'
         assert self.num_key_value_heads % 2 == 0, 'num_heads should be even'
@@ -655,8 +650,12 @@ class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsV0Only):
             num_mamba_layers = self.config.num_hidden_layers \
                 // 2 // self.config.mb_per_layer + 1
             self.mamba_cache = MambaCacheManager(
-                self.vllm_config, self.lm_head.weight.dtype, num_mamba_layers,
-                *self._get_mamba_cache_shape())
+                self.vllm_config,
+                num_mamba_layers,
+                *self._get_mamba_cache_shape(),
+                self.lm_head.weight.dtype,
+                self.lm_head.weight.dtype,
+            )
         mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 
         attn_metadata = get_forward_context().attn_metadata

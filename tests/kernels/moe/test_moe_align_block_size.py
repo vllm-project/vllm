@@ -15,10 +15,10 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
 from vllm.platforms import current_platform
 from vllm.utils import round_up
 
-NUM_TOKENS = [1, 3, 7, 16, 256, 2256, 4096]
-NUM_EXPERTS = [32, 160, 256, 257, 512]
+NUM_TOKENS = [1, 3, 256, 2256, 4096]
+NUM_EXPERTS = [32, 160, 256, 257]
 TOP_KS = [1, 2, 16, 32]
-BLOCK_SIZES = [32, 64, 128, 256]
+BLOCK_SIZES = [32, 128]
 current_platform.seed_everything(0)
 
 

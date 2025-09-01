@@ -14,14 +14,6 @@ from ...models.utils import softmax
 MODEL_NAME = "tomaarsen/Qwen3-Reranker-0.6B-seq-cls"
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    # Simple autouse wrapper to run both engines for each test
-    # This can be promoted up to conftest.py to run for every
-    # test in a package
-    pass
-
-
 @pytest.fixture(scope="module")
 def llm():
     # pytest caches the fixture so we use weakref.proxy to
@@ -33,10 +25,9 @@ def llm():
               enforce_eager=True,
               seed=0)
 
-    with llm.deprecate_legacy_api():
-        yield weakref.proxy(llm)
+    yield weakref.proxy(llm)
 
-        del llm
+    del llm
 
     cleanup_dist_env_and_memory()
 

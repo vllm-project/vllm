@@ -6,8 +6,7 @@ from typing import ClassVar, Optional
 
 import torch
 
-from vllm.attention.backends.abstract import (AttentionType,
-                                              is_quantized_kv_cache)
+from vllm.attention.backends.abstract import AttentionLayer, AttentionType
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
@@ -55,8 +54,8 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
-    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.PURE_DECODE_ONLY
+    cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -70,6 +69,22 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         self.cg_buf_tile_scheduler_metadata = None
         self.cg_buf_num_splits = None
 
+        device_properties = torch.cuda.get_device_properties(self.device)
+        num_sms = device_properties.multi_processor_count
+
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            self.cg_buf_tile_scheduler_metadata = torch.zeros(
+                # Upper bound on size (<= #SMs, TileSchedulerMetaDataSize)
+                # TileSchedulerMetaDataSize = 8
+                (num_sms, 8),
+                device=self.device,
+                dtype=torch.int32,
+            )
+            self.cg_buf_num_splits = torch.empty(
+                (vllm_config.scheduler_config.max_num_seqs + 1),
+                device=self.device,
+                dtype=torch.int32)
+
     def _build_decode(self, block_table_tensor: torch.Tensor,
                       seq_lens: torch.Tensor) -> FlashMLADecodeMetadata:
         tile_scheduler_metadata, num_splits = \
@@ -79,29 +94,32 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             1, # MQA for the decode path
         )
 
-        if self.compilation_config.full_cuda_graph:
-            # First time around (CUDAGraph capture), allocate the static buffer
-            if self.cg_buf_tile_scheduler_metadata is None:
-                self.cg_buf_tile_scheduler_metadata = tile_scheduler_metadata
-                self.cg_buf_num_splits = num_splits
-            else:
-                assert self.cg_buf_num_splits is not None
+        # TODO: we can disambiguate between decode and mixed-prefill decode here
+        # so we can only use the persistent buffer if a cudagraph is actually
+        # being used.
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+            assert self.cg_buf_tile_scheduler_metadata is not None
+            assert self.cg_buf_num_splits is not None
 
-                # Metadata per-SM, fixed size (#SMs, TileMetadataSize)
-                assert (self.cg_buf_tile_scheduler_metadata.size() ==
-                        tile_scheduler_metadata.size())
-                self.cg_buf_tile_scheduler_metadata.\
-                    copy_(tile_scheduler_metadata)
-                tile_scheduler_metadata = self.cg_buf_tile_scheduler_metadata
+            sm_parts = tile_scheduler_metadata.size(0)
+            # Metadata per-SM, upper bound on size (<= #SMs, TileMetadataSize)
+            assert sm_parts <= self.cg_buf_tile_scheduler_metadata.size(0)
+            tile_scheduler_metadata_view = \
+                self.cg_buf_tile_scheduler_metadata[:sm_parts]
+            tile_scheduler_metadata_view.copy_(tile_scheduler_metadata)
+            tile_scheduler_metadata = tile_scheduler_metadata_view
 
-                # Num splits is per-batch, varying size (batch_size,)
-                n = num_splits.size(0)
-                # make sure static buffer is large enough
-                assert n <= self.cg_buf_num_splits.size(0)
-                num_splits_view = self.cg_buf_num_splits[:n]
-                num_splits_view.copy_(num_splits)
-                self.cg_buf_num_splits[n:].fill_(0)  # fill the rest with 0s
-                num_splits = num_splits_view
+            # Num splits is per-batch, varying size (batch_size,)
+            n = num_splits.size(0)
+            # make sure static buffer is large enough
+            assert n <= self.cg_buf_num_splits.size(0)
+            num_splits_view = self.cg_buf_num_splits[:n]
+            num_splits_view.copy_(num_splits)
+            # Num splits needs to monotonically increasing
+            # (with: https://github.com/vllm-project/FlashMLA/pull/3, otherwise
+            #  it needs to monotonically increasing by 1)
+            self.cg_buf_num_splits[n:].fill_(num_splits[-1])
+            num_splits = num_splits_view
 
         return FlashMLADecodeMetadata(
             block_table=block_table_tensor,
@@ -147,16 +165,13 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                                       "are not implemented for "
                                       "FlashMLAImpl")
 
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "FlashMLA V1 with FP8 KV cache not yet supported")
-
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLAMetadata,
+        layer: AttentionLayer,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
@@ -175,6 +190,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             num_splits=attn_metadata.decode.num_splits,
             softmax_scale=self.scale,
             causal=True,
+            descale_q=layer._q_scale.reshape(1),
+            descale_k=layer._k_scale.reshape(1),
         )
 
         return self._v_up_proj(o)

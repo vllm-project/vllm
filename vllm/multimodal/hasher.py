@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pickle
-from collections.abc import Iterable, Mapping
+import uuid
+from collections.abc import Iterable
 from typing import Union
 
 import numpy as np
@@ -14,11 +15,6 @@ from vllm.logger import init_logger
 from vllm.multimodal.image import convert_image_mode
 
 logger = init_logger(__name__)
-
-MultiModalHashDict = Mapping[str, list[str]]
-"""
-A dictionary containing hashes for items in each modality.
-"""
 
 
 class MultiModalHasher:
@@ -34,10 +30,33 @@ class MultiModalHasher:
             return np.array(obj).tobytes()
 
         if isinstance(obj, Image.Image):
+            exif = obj.getexif()
+            if Image.ExifTags.Base.ImageID in exif and isinstance(
+                    exif[Image.ExifTags.Base.ImageID], uuid.UUID):
+                # If the image has exif ImageID tag, use that
+                return exif[Image.ExifTags.Base.ImageID].bytes
             return cls.item_to_bytes(
                 "image", np.asarray(convert_image_mode(obj, "RGBA")))
         if isinstance(obj, torch.Tensor):
-            return cls.item_to_bytes("tensor", obj.numpy())
+            tensor_obj: torch.Tensor = obj.cpu()
+            tensor_dtype = tensor_obj.dtype
+            tensor_shape = tensor_obj.shape
+
+            # NumPy does not support bfloat16.
+            # Workaround: View the tensor as a contiguous 1D array of bytes
+            if tensor_dtype == torch.bfloat16:
+                tensor_obj = tensor_obj.contiguous()
+                tensor_obj = tensor_obj.view(
+                    (tensor_obj.numel(), )).view(torch.uint8)
+
+                return cls.item_to_bytes(
+                    "tensor", {
+                        "original_dtype": str(tensor_dtype),
+                        "original_shape": tuple(tensor_shape),
+                        "data": tensor_obj.numpy(),
+                    })
+
+            return cls.item_to_bytes("tensor", tensor_obj.numpy())
         if isinstance(obj, np.ndarray):
             # If the array is non-contiguous, we need to copy it first
             arr_data = obj.data if obj.flags.c_contiguous else obj.tobytes()

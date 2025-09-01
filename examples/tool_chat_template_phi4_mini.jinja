@@ -1,10 +1,14 @@
-{%- if messages %}
-    {%- if system_message or tools %}
-<|system|>
-
-{%- if system_message %}
-{{ system_message }}
+{%- if messages and messages[0]['role'] == 'system' %}
+    {%- set system_message = messages[0]['content']|trim %}
+    {%- set messages = messages[1:] %}
+{%- else %}
+    {%- set system_message = "You are a helpful assistant." %}
 {%- endif %}
+
+{%- if messages %}
+<|system|>
+{{ system_message }}
+{%- if tools %}
 In addition to plain text responses, you can chose to call one or more of the provided functions.
 
 Use the following rule to decide when to call a function:
@@ -19,13 +23,11 @@ If you decide to call functions:
   * make sure you pick the right functions that match the user intent
 
 
-{%- if tools %}
         {%- for t in tools %}
             {{- t | tojson(indent=4) }}
             {{- "\n\n" }}
         {%- endfor %}
 {%- endif %}<|end|>
-    {%- endif %}
 
     {%- for message in messages %}
         {%- if message.role != "system" %}

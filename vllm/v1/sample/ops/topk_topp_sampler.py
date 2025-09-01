@@ -8,6 +8,7 @@ import torch.nn as nn
 from packaging import version
 
 from vllm import envs
+from vllm.config import LogprobsMode
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -28,9 +29,16 @@ class TopKTopPSampler(nn.Module):
     Implementations may update the logits tensor in-place.
     """
 
-    def __init__(self):
+    def __init__(
+            self,
+            logprobs_mode: LogprobsMode = LogprobsMode.RAW_LOGPROBS) -> None:
         super().__init__()
-        if current_platform.is_cuda():
+        self.logprobs_mode = logprobs_mode
+        # flashinfer optimization does not apply if intermediate
+        # logprobs/logits after top_k/top_p need to be returned
+        if logprobs_mode not in (LogprobsMode.PROCESSED_LOGITS,
+                                 LogprobsMode.PROCESSED_LOGPROBS
+                                 ) and current_platform.is_cuda():
             if is_flashinfer_available:
                 flashinfer_version = flashinfer.__version__
                 if version.parse(flashinfer_version) < version.parse("0.2.3"):
@@ -63,10 +71,12 @@ class TopKTopPSampler(nn.Module):
                     "native implementation of top-p & top-k sampling. For the "
                     "best performance, please install FlashInfer.")
                 self.forward = self.forward_native
-        elif current_platform.is_tpu():
-            self.forward = self.forward_tpu
         else:
             self.forward = self.forward_native
+        if current_platform.is_tpu():
+            self.apply_top_k_top_p = apply_top_k_top_p_tpu
+        else:
+            self.apply_top_k_top_p = apply_top_k_top_p
 
     def forward_native(
         self,
@@ -74,15 +84,20 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """
         PyTorch-native implementation of top-k and top-p sampling.
 
         The logits tensor may be updated in-place.
         """
-        logits = apply_top_k_top_p(logits, k, p)
+        logits = self.apply_top_k_top_p(logits, k, p)
+        logits_to_return = None
+        if self.logprobs_mode == LogprobsMode.PROCESSED_LOGITS:
+            logits_to_return = logits
+        elif self.logprobs_mode == LogprobsMode.PROCESSED_LOGPROBS:
+            logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        return random_sample(probs, generators)
+        return random_sample(probs, generators), logits_to_return
 
     def forward_cuda(
         self,
@@ -90,34 +105,24 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: Optional[torch.Tensor],
         p: Optional[torch.Tensor],
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """More optimized implementation for top-k and top-p sampling."""
-        if k is None and p is None:
-            # We prefer `random_sample` over `flashinfer_sample` when sorting is
-            # not needed. This is because `random_sample` does not require
-            # CPU-GPU synchronization while `flashinfer_sample` does.
-            probs = logits.softmax(dim=-1, dtype=torch.float32)
-            return random_sample(probs, generators)
-        if generators:
-            logger.warning_once("FlashInfer 0.2.3+ does not support "
-                                "per-request generators. Falling back to "
-                                "PyTorch-native implementation.")
+        # We prefer `random_sample` over `flashinfer_sample` when sorting is
+        # not needed. This is because `random_sample` does not require
+        # CPU-GPU synchronization while `flashinfer_sample` does.
+        if (k is None and p is None) or generators:
+            if generators:
+                logger.warning_once("FlashInfer 0.2.3+ does not support "
+                                    "per-request generators. Falling back to "
+                                    "PyTorch-native implementation.")
             return self.forward_native(logits, generators, k, p)
+        assert self.logprobs_mode not in (
+            LogprobsMode.PROCESSED_LOGITS, LogprobsMode.PROCESSED_LOGPROBS
+        ), "FlashInfer does not support returning logits/logprobs"
         # flashinfer sampling functions expect contiguous logits.
         # In flex_attn/triton_attn fp32 inference, logits can be non-contiguous
         # because of slicing operation in logits_processor.
-        return flashinfer_sample(logits.contiguous(), k, p, generators)
-
-    def forward_tpu(
-        self,
-        logits: torch.Tensor,
-        generators: dict[int, torch.Generator],
-        k: Optional[torch.Tensor],
-        p: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        logits = apply_top_k_top_p_tpu(logits, k, p)
-        probs = logits.softmax(dim=-1, dtype=torch.float32)
-        return random_sample(probs, generators)
+        return flashinfer_sample(logits.contiguous(), k, p, generators), None
 
 
 def apply_top_k_top_p_tpu(

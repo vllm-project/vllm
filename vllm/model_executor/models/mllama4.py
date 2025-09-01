@@ -19,7 +19,7 @@
 import math
 from collections.abc import Iterable, Mapping
 from itertools import tee
-from typing import Literal, Optional, TypedDict, Union
+from typing import Annotated, Literal, Optional, Union
 
 import torch
 from torch import nn
@@ -44,7 +44,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import (ImageProcessorItems, ImageSize,
                                    MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
@@ -53,6 +53,7 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.multimodal.utils import run_dp_sharded_vision_model
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .llama4 import Llama4ForCausalLM
@@ -60,28 +61,34 @@ from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
 
 
-class Llama4ImagePatchInputs(TypedDict):
-    type: Literal["pixel_values"]
-    flat_data: torch.Tensor
+class Llama4ImagePatchInputs(TensorSchema):
     """
-    Shape:
-    `(batch_size * num_chunks, num_channels, image size, image size)`
+    Dimensions:
+        - batch_size: Batch size
+        - total_num_chunks: Batch size * number of chunks
+        - num_channels: Number of channels
+        - image_size: Size of each image
     """
-    patches_per_image: torch.Tensor
+
+    type: Literal["pixel_values"] = "pixel_values"
+
+    flat_data: Annotated[torch.Tensor,
+                         TensorShape("total_num_chunks", "num_channels",
+                                     "image_size", "image_size")]
+
+    patches_per_image: Annotated[torch.Tensor, TensorShape("batch_size")]
     """
     The number of total patches for each image in the batch.
-
+    
     This is used to split the embeddings which has the first two dimensions
     flattened just like `flat_data`.
     """
 
-    aspect_ratios: Union[torch.Tensor, list[torch.Tensor]]
+    aspect_ratios: Annotated[torch.Tensor, TensorShape("batch_size", 2)]
     """
     A list of aspect ratios corresponding to the number of tiles
     in each dimension that each image in the batch corresponds to.
-
-    Shape:
-    `(batch_size, ratio)` where ratio is a pair `(ratio_h, ratio_w)`
+    Each aspect ratio is a pair (ratio_h, ratio_w).
     """
 
 
@@ -623,7 +630,7 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
                 for (r_h, r_w) in aspect_ratios
             ]
 
-            processed_outputs["aspect_ratios"] = aspect_ratios
+            processed_outputs["aspect_ratios"] = torch.tensor(aspect_ratios)
             processed_outputs["patches_per_image"] = torch.tensor(
                 patches_per_image)
 
@@ -646,13 +653,8 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptUpdate]:
-        assert (
-            mm_items.get_count("image", strict=False) == 0
-            or "aspect_ratios" in out_mm_kwargs
-        ), "Transformers expect to include aspect_ratios in out_mm_kwargs"
-
         config = self.info.get_hf_config()
         vision_config = config.vision_config
 
@@ -662,7 +664,8 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo]
         img_patch_token = hf_processor.img_patch_token
 
         def get_replacement(item_idx: int):
-            aspect_ratio = out_mm_kwargs["aspect_ratios"][item_idx]
+            out_item = out_mm_kwargs["image"][item_idx]
+            aspect_ratio = out_item["aspect_ratios"].data
 
             repl = hf_processor._prompt_split_image(
                 aspect_ratio=aspect_ratio,
@@ -720,6 +723,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
+    supports_encoder_tp_data = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
         if modality.startswith("image"):
@@ -732,21 +737,25 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        self.use_data_parallel = (vllm_config.parallel_config.
-                                  enable_multimodal_encoder_data_parallel)
+        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
+
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
-        self.vision_model = Llama4VisionModel(
-            config.vision_config,
-            None,
-            prefix=maybe_prefix(prefix, "vision_model"),
-            use_data_parallel=self.use_data_parallel,
-        )
-        self.multi_modal_projector = Llama4MultiModalProjector(
-            self.config,
-            None,
-            prefix=maybe_prefix(prefix, "multi_modal_projector"))
+        if multimodal_config.get_limit_per_prompt("image"):
+            self.vision_model = Llama4VisionModel(
+                config.vision_config,
+                None,
+                prefix=maybe_prefix(prefix, "vision_model"),
+                use_data_parallel=self.use_data_parallel,
+            )
+            self.multi_modal_projector = Llama4MultiModalProjector(
+                self.config,
+                None,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"))
+        else:
+            self.vision_model = None
+            self.multi_modal_projector = None
         self.language_model = initialize_model(
             vllm_config=vllm_config.with_hf_config(config.text_config,
                                                    ["LlamaForCausalLM"]),
@@ -768,11 +777,9 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         # TODO: confirm handling for variable lengths
         flat_pixel_values = flatten_bn(pixel_values, concat=True)
         patches_per_image = flatten_bn(kwargs.pop("patches_per_image"))
-
-        aspect_ratios = kwargs.pop("aspect_ratios", None)
-        if not isinstance(aspect_ratios, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of aspect_ratios. "
-                             f"Got type: {type(aspect_ratios)}")
+        aspect_ratios = kwargs.pop("aspect_ratios")
+        if aspect_ratios.ndim == 3:
+            aspect_ratios = aspect_ratios.squeeze(1)
 
         return Llama4ImagePatchInputs(
             type="pixel_values",
@@ -783,6 +790,8 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _process_image_input(
             self, image_input: Llama4ImagePatchInputs) -> MultiModalEmbeddings:
+
+        assert self.vision_model and self.multi_modal_projector
         flat_data = image_input["flat_data"]
         patches_per_image = image_input["patches_per_image"].tolist()
 
@@ -1047,6 +1056,10 @@ class Llama4ForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Separate and rename weights
         language_model_weights, other_weights = (
             self._separate_and_rename_weights(weights))
+
+        # Skip loading vision model and projector if they're not initialized.
+        if self.vision_model is None and self.multi_modal_projector is None:
+            other_weights = []
 
         # Handle expert scale parameters
         regular_weights, expert_scale_weights, updated_params_from_experts = (

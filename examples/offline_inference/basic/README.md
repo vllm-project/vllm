@@ -52,20 +52,6 @@ Try it yourself with the following argument:
 
 ### Quantization
 
-#### AQLM
-
-vLLM supports models that are quantized using AQLM.
-
-Try one yourself by passing one of the following models to the `--model` argument:
-
-- `ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf`
-- `ISTA-DASLab/Llama-2-7b-AQLM-2Bit-2x8-hf`
-- `ISTA-DASLab/Llama-2-13b-AQLM-2Bit-1x16-hf`
-- `ISTA-DASLab/Mixtral-8x7b-AQLM-2Bit-1x16-hf`
-- `BlackSamorez/TinyLlama-1_1B-Chat-v1_0-AQLM-2Bit-1x16-hf`
-
-> Some of these models are likely to be too large for a single GPU. You can split them across multiple GPUs by setting `--tensor-parallel-size` to the number of required GPUs.
-
 #### GGUF
 
 vLLM supports models that are quantized using GGUF.

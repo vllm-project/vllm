@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
+import math
 import os
 import tempfile
 from enum import Enum
-from typing import Any, Callable, Optional, TypedDict, TypeVar, Union
+from typing import Any, Callable, Optional, TypedDict, TypeVar, Union, cast
 
 import numpy as np
 import pytest
@@ -33,6 +34,7 @@ from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
+from vllm.sequence import Logprob
 from vllm.transformers_utils.utils import maybe_model_redirect
 
 logger = init_logger(__name__)
@@ -454,9 +456,16 @@ class HfRunner:
         # output is final logits
         all_inputs = self.get_inputs(prompts)
         outputs = []
+        problem_type = getattr(self.config, "problem_type", "")
+
         for inputs in all_inputs:
             output = self.model(**self.wrap_device(inputs))
-            logits = output.logits.softmax(dim=-1)[0].tolist()
+            if problem_type == "regression":
+                logits = output.logits[0].tolist()
+            elif problem_type == "multi_label_classification":
+                logits = output.logits.sigmoid()[0].tolist()
+            else:
+                logits = output.logits.softmax(dim=-1)[0].tolist()
             outputs.append(logits)
 
         return outputs
@@ -594,7 +603,7 @@ class HfRunner:
     def _hidden_states_to_logprobs(
         self,
         hidden_states: tuple[tuple[torch.Tensor, ...], ...],
-        num_logprobs: int,
+        num_logprobs: Optional[int],
     ) -> tuple[list[dict[int, float]], int]:
         seq_logprobs = self._hidden_states_to_seq_logprobs(hidden_states)
         output_len = len(hidden_states)
@@ -622,7 +631,7 @@ class HfRunner:
         self,
         prompts: list[str],
         max_tokens: int,
-        num_logprobs: int,
+        num_logprobs: Optional[int],
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
         videos: Optional[PromptVideoInput] = None,
@@ -669,7 +678,7 @@ class HfRunner:
         self,
         encoder_decoder_prompts: list[ExplicitEncoderDecoderPrompt[str, str]],
         max_tokens: int,
-        num_logprobs: int,
+        num_logprobs: Optional[int],
         images: Optional[PromptImageInput] = None,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs]:
@@ -958,7 +967,7 @@ class VllmRunner:
         self,
         prompts: list[str],
         max_tokens: int,
-        num_logprobs: int,
+        num_logprobs: Optional[int],
         num_prompt_logprobs: Optional[int] = None,
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
@@ -983,11 +992,40 @@ class VllmRunner:
                                         videos=videos,
                                         **kwargs)
 
+    def generate_prompt_perplexity(self, prompts: list[str]) -> list[float]:
+        """
+        Return the perplexity score associated with generating the prompts
+
+        :param prompts: list of prompts to score
+        :return: perplexity score of each prompt
+        """
+        outputs = self.generate_greedy_logprobs(prompts,
+                                                max_tokens=1,
+                                                num_logprobs=None,
+                                                num_prompt_logprobs=0)
+
+        perplexities = []
+        for output in outputs:
+            output = cast(TokensTextLogprobsPromptLogprobs, output)
+            token_datas = cast(list[Optional[dict[int, Logprob]]], output[3])
+            assert token_datas[0] is None
+            token_log_probs = []
+            for token_data in token_datas[1:]:
+                assert token_data is not None
+                assert len(token_data) == 1
+                token_log_prob = list(token_data.values())[0].logprob
+                token_log_probs.append(token_log_prob)
+
+            perplexity = math.exp(-sum(token_log_probs) / len(token_log_probs))
+            perplexities.append(perplexity)
+
+        return perplexities
+
     def generate_encoder_decoder_greedy_logprobs(
         self,
         encoder_decoder_prompts: list[ExplicitEncoderDecoderPrompt[str, str]],
         max_tokens: int,
-        num_logprobs: int,
+        num_logprobs: Optional[int],
         num_prompt_logprobs: Optional[int] = None,
         skip_special_tokens: bool = True,
     ) -> Union[list[TokensTextLogprobs],
@@ -1014,15 +1052,17 @@ class VllmRunner:
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
+        concurrency_limit: Optional[int] = None,
     ) -> list[tuple[list[list[int]], list[str]]]:
         inputs = self.get_inputs(prompts,
                                  images=images,
                                  videos=videos,
                                  audios=audios)
 
-        outputs = self.llm.beam_search(
-            inputs,
-            BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
+        outputs = self.llm.beam_search(inputs,
+                                       BeamSearchParams(beam_width=beam_width,
+                                                        max_tokens=max_tokens),
+                                       concurrency_limit=concurrency_limit)
         returned_outputs = []
         for output in outputs:
             token_ids = [x.tokens for x in output.sequences]
@@ -1079,6 +1119,9 @@ class VllmRunner:
             return func(self.get_model())
 
         return self.llm.llm_engine.collective_rpc(_apply_model)
+
+    def get_llm(self) -> LLM:
+        return self.llm
 
     def __enter__(self):
         return self

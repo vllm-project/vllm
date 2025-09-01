@@ -1,4 +1,20 @@
 steps:
+  # aarch64 + CUDA builds
+  - label: "Build arm64 wheel - CUDA 12.8"
+    id: build-wheel-arm64-cuda-12-8
+    agents:
+      queue: arm64_cpu_queue_postmerge
+    commands:
+      # #NOTE: torch_cuda_arch_list is derived from upstream PyTorch build files here:
+      # https://github.com/pytorch/pytorch/blob/main/.ci/aarch64_linux/aarch64_ci_build.sh#L7
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.8.1 --build-arg torch_cuda_arch_list='8.7 9.0 10.0+PTX 12.0' --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+      - "mkdir artifacts"
+      - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+      - "bash .buildkite/scripts/upload-wheels.sh"
+    env:
+      DOCKER_BUILDKIT: "1"
+
+  # x86 + CUDA builds
   - label: "Build wheel - CUDA 12.8"
     id: build-wheel-cuda-12-8
     agents:
@@ -11,7 +27,12 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
+  - block: "Build CUDA 12.6 wheel"
+    key: block-build-cu126-wheel
+    depends_on: ~
+
   - label: "Build wheel - CUDA 12.6"
+    depends_on: block-build-cu126-wheel
     id: build-wheel-cuda-12-6
     agents:
       queue: cpu_queue_postmerge
@@ -41,23 +62,45 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
-  - block: "Build release image"
+  - label: "Build release image (x86)"
     depends_on: ~
-    key: block-release-image-build
-
-  - label: "Build release image"
-    depends_on: block-release-image-build
-    id: build-release-image
+    id: build-release-image-x86
     agents:
       queue: cpu_queue_postmerge
     commands:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.8.1 --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT --target vllm-openai --progress plain -f docker/Dockerfile ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.8.1 --build-arg FLASHINFER_AOT_COMPILE=true --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) --target vllm-openai --progress plain -f docker/Dockerfile ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)"
+      # re-tag to default image tag and push, just in case arm64 build fails
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
       - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
+
+  - label: "Build release image (arm64)"
+    depends_on: ~
+    id: build-release-image-arm64
+    agents:
+      queue: arm64_cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.8.1 --build-arg torch_cuda_arch_list='8.7 9.0 10.0+PTX 12.0' --build-arg INSTALL_KV_CONNECTORS=true --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m) --target vllm-openai --progress plain -f docker/Dockerfile ."
+      - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)"
+
+  # Add job to create multi-arch manifest
+  - label: "Create multi-arch manifest"
+    depends_on:
+      - build-release-image-x86
+      - build-release-image-arm64
+    id: create-multi-arch-manifest
+    agents:
+      queue: cpu_queue_postmerge
+    commands:
+      - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+      - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64 --amend"
+      - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
 
   - label: "Annotate release workflow"
     depends_on:
-      - build-release-image
+      - create-multi-arch-manifest
       - build-wheel-cuda-12-8
       - build-wheel-cuda-12-6
       - build-wheel-cuda-11-8

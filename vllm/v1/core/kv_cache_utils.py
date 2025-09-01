@@ -429,8 +429,8 @@ def _gen_mm_extra_hash_keys(request: Request, start_token_idx: int,
     if mm_positions and len(mm_positions) != len(mm_hashes):
         raise ValueError(
             "The number of multi-modal positions and hashes must match. This "
-            "is likely because you do not enable MM preprocessor hashing. "
-            "Please set disable_mm_preprocessor_cache=False.")
+            "is likely because you did not enable MM hashing. "
+            "Please set `mm_processor_cache_gb > 0`.")
 
     # Note that we assume mm_positions is sorted by offset.
     # We do not need to check all mm inputs if the start token index is out of
@@ -527,6 +527,7 @@ def hash_block_tokens(
     hash values for the same block contents.
 
     Args:
+        hash_function: The hash function used to compute block hash.
         parent_block_hash: The hash of the parent block. None
             if this is the first block.
         curr_block_token_ids: A list of token ids in the current
@@ -547,41 +548,61 @@ def hash_block_tokens(
         curr_block_token_ids_tuple, extra_keys)
 
 
-def hash_request_tokens(hash_function: Any, block_size: int,
-                        request: Request) -> list[BlockHash]:
-    """Computes hash values of a chain of blocks given a sequence of
-    token IDs. The hash value is used for prefix caching.
-
-    Args:
-        block_size: The size of each block.
-        request: The request object.
-
-    Returns:
-        The list of computed hash values.
+def get_request_block_hasher(
+    block_size: int,
+    caching_hash_fn: Callable[[Any],
+                              int]) -> Callable[[Request], list[BlockHash]]:
     """
-    token_ids = request.all_token_ids
+    Returns a function which computes the list of un-computed block hashes
+    of a request.
 
-    req_need_extra_keys = need_extra_keys(request)
-    req_extra_keys = None
-    curr_mm_idx = 0
+    Each request holds a list of its block hashes (request.block_hashes).
+    When a request is created, it calls the below function to compute
+    the hashes of all full blocks of the request's initial tokens.
+    The hashes are then stored in request.block_hashes.
+    Later, whenever new tokens are appended to the request, it calls
+    the below function again to compute any new full blocks of tokens.
+    The returned new hashes are appended to request.block_hashes.
+    """
 
-    ret = []
-    parent_block_hash_value = None
-    # Only full blocks will be hashed
-    for start in range(0, len(token_ids) - block_size + 1, block_size):
-        end = start + block_size
-        block_token_ids = token_ids[start:end]
+    def request_block_hasher(request: Request) -> list[BlockHash]:
+        start_token_idx = len(request.block_hashes) * block_size
+        num_tokens = request.num_tokens
 
-        if req_need_extra_keys:
+        curr_mm_idx = 0
+        if start_token_idx > 0:
+            # Set curr_mm_idx = -1 to indicate the last mm input.
+            # Note that since we reach to this branch only when the block is
+            # completed with generated tokens, we only need to consider the
+            # last mm input.
+            curr_mm_idx = -1
+
+        prev_block_hash_value = request.block_hashes[-1].hash_value \
+            if request.block_hashes else None
+        new_block_hashes: list[BlockHash] = []
+        while True:
+            end_token_idx = start_token_idx + block_size
+            if end_token_idx > num_tokens:
+                # We only hash full blocks
+                break
+
             # MM and LoRA requests need extra keys for block-hash computation.
-            req_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                request, start, end, curr_mm_idx)
+            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
+                request, start_token_idx, end_token_idx, curr_mm_idx)
 
-        block_hash = hash_block_tokens(hash_function, parent_block_hash_value,
-                                       block_token_ids, req_extra_keys)
-        ret.append(block_hash)
-        parent_block_hash_value = block_hash.hash_value
-    return ret
+            # Compute the hash of the current block
+            block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
+            block_hash = hash_block_tokens(caching_hash_fn,
+                                           prev_block_hash_value, block_tokens,
+                                           extra_keys)
+
+            new_block_hashes.append(block_hash)
+            start_token_idx += block_size
+            prev_block_hash_value = block_hash.hash_value
+
+        return new_block_hashes
+
+    return request_block_hasher
 
 
 def max_memory_usage_bytes(vllm_config: VllmConfig,
