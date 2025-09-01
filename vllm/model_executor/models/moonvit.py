@@ -397,11 +397,11 @@ class MLP2(nn.Module):
         self.fc0 = ReplicatedLinear(dims[0],
                                     dims[1],
                                     bias=bias,
-                                    prefix=maybe_prefix(prefix, "linear_1"))
+                                    prefix=maybe_prefix(prefix, "fc0"))
         self.fc1 = ReplicatedLinear(dims[1],
                                     dims[2],
                                     bias=bias,
-                                    prefix=maybe_prefix(prefix, "linear_2"))
+                                    prefix=maybe_prefix(prefix, "fc1"))
         self.activation = activation
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
