@@ -249,14 +249,26 @@ class RequestState:
         batch_idx_to_req_idx: torch.Tensor,
     ) -> SamplingMetadata:
         batch_size = batch_idx_to_req_idx.shape[0]
+        if self.top_p_reqs:
+            top_p_buffer = self.top_p.mirror_to_gpu()
+            top_p = self.top_p.gpu
+        else:
+            top_p_buffer = self.top_p.gpu_buffer
+            top_p = None
+        if self.top_k_reqs:
+            top_k_buffer = self.top_k.mirror_to_gpu()
+            top_k = self.top_k.gpu
+        else:
+            top_k_buffer = self.top_k.gpu_buffer
+            top_k = None
         # TODO(woosuk): Use UVA to optimize CPU -> GPU copy.
         _make_sampling_metadata_kernel[(batch_size, )](
             batch_idx_to_req_idx,
             self.temperature.mirror_to_gpu(),
             self.temperature.gpu,
-            self.top_p.mirror_to_gpu(),
+            top_p_buffer,
             self.top_p.gpu,
-            self.top_k.mirror_to_gpu(),
+            top_k_buffer,
             self.top_k.gpu,
             self.frequency_penalties.mirror_to_gpu(),
             self.frequency_penalties.gpu,
@@ -274,8 +286,8 @@ class RequestState:
             temperature=self.temperature.gpu[:batch_size],
             all_greedy=not self.random_reqs,
             all_random=not self.greedy_reqs,
-            top_p=self.top_p.gpu[:batch_size],
-            top_k=self.top_k.gpu[:batch_size],
+            top_p=top_p,
+            top_k=top_k,
             frequency_penalties=self.frequency_penalties.gpu[:batch_size],
             presence_penalties=self.presence_penalties.gpu[:batch_size],
             repetition_penalties=self.repetition_penalties.gpu[:batch_size],
