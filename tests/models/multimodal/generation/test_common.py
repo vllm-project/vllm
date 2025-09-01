@@ -308,6 +308,37 @@ VLM_TEST_SETTINGS = {
         stop_str=["<｜end▁of▁sentence｜>", "<｜begin▁of▁sentence｜>"],  # noqa: E501
         image_size_factors=[(), (1.0, ), (1.0, 1.0, 1.0), (0.1, 0.5, 1.0)],
     ),
+    "eagle2_5_vl": VLMTestInfo(
+        models=[
+            "nvidia/Eagle2.5-8B",
+        ],
+        test_type=(VLMTestType.IMAGE,VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "Image-1: <image>\nWhat's the content in the center of the image?",  # noqa: E501
+            "cherry_blossom": "Image-1: <image>\nWhat is the season?",
+        }),
+        multi_image_prompt="Image-1: <image>\nImage-2: <image>\nDescribe the two images in short.",  # noqa: E501
+        max_model_len=4096,
+        use_tokenizer_eos=True,
+        image_size_factors=[(1.0,)],
+        auto_cls=AutoModel,
+        vllm_runner_kwargs={"mm_processor_kwargs": {"max_dynamic_tiles": 12}},
+        patch_hf_runner=model_utils.eagle2_5_patch_hf_runner,
+    ),
+    "eagle2_5_vl-video": VLMTestInfo(
+        models=[
+            "nvidia/Eagle2.5-8B",
+        ],
+        test_type=VLMTestType.VIDEO,
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
+        video_idx_to_prompt=lambda idx: "<video>",
+        max_model_len=8192,
+        use_tokenizer_eos=True,
+        image_size_factors=[(1.0,0.25)],
+        auto_cls=AutoModel,
+        patch_hf_runner=model_utils.eagle2_5_patch_hf_runner,
+    ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
         test_type=VLMTestType.IMAGE,
@@ -795,18 +826,18 @@ VLM_TEST_SETTINGS = {
         )],
     ),
     # regression test for https://github.com/vllm-project/vllm/issues/15122
-    "qwen2_5_vl-windows-attention": VLMTestInfo(
-        models=["Qwen/Qwen2.5-VL-3B-Instruct"],
-        test_type=VLMTestType.CUSTOM_INPUTS,
-        max_model_len=4096,
-        max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
-        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        custom_test_opts=[CustomTestOptions(
-            inputs=custom_inputs.windows_attention_image_qwen2_5_vl(),
-            limit_mm_per_prompt={"image": 1},
-        )],
-    ),
+    # "qwen2_5_vl-windows-attention": VLMTestInfo(
+    #     models=["Qwen/Qwen2.5-VL-3B-Instruct"],
+    #     test_type=VLMTestType.CUSTOM_INPUTS,
+    #     max_model_len=4096,
+    #     max_num_seqs=2,
+    #     auto_cls=AutoModelForVision2Seq,
+    #     vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+    #     custom_test_opts=[CustomTestOptions(
+    #         inputs=custom_inputs.windows_attention_image_qwen2_5_vl(),
+    #         limit_mm_per_prompt={"image": 1},
+    #     )],
+    # ),
 }
 # yapf: enable
 

@@ -656,6 +656,147 @@ def _internvl_generate(
 
     return outputs
 
+def eagle2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for InternVL."""
+
+    class Eagle2_5_VLProcessor:
+        """A simple processor for InternVL2 which misses a processor."""
+
+        def __init__(self, hf_runner: HfRunner):
+            self.num_image_token = hf_runner.model.num_image_token
+            self.tokenizer = hf_runner.tokenizer
+
+            self.config = AutoConfig.from_pretrained(hf_runner.model_name,
+                                                     trust_remote_code=True)
+            self.vision_config = self.config.vision_config
+            self.use_thumbnail = self.config.use_thumbnail
+            self.min_num = self.config.min_dynamic_tiles
+            self.max_num = self.config.max_dynamic_tiles
+            self.image_size = self.vision_config.image_size
+
+        def __call__(
+            self,
+            text: str,
+            images: Union[Image, list[Image]] = None,
+            videos: Union[npt.NDArray, list[npt.NDArray]] = None,
+            **kwargs,
+        ):
+            from vllm.model_executor.models.eagle2_5_vl import (
+                IMG_CONTEXT, IMG_END, IMG_START,
+                image_to_pixel_values_eagle2_5_vl, video_to_pixel_values_eagle2_5_vl)
+            images = [images] if isinstance(images, Image) else images
+            videos = [videos] if isinstance(videos, np.ndarray) else videos
+            if images is not None:
+                pixel_values_images = [
+                    image_to_pixel_values_eagle2_5_vl(
+                        image,
+                        input_size=self.image_size,
+                        min_num=self.min_num,
+                        max_num=self.max_num,
+                        use_thumbnail=self.use_thumbnail,
+                    ) for image in images
+                ]
+                num_patches_images = [
+                    pixel_value.shape[0] for pixel_value in pixel_values_images
+                ]
+            else:
+                pixel_values_images, num_patches_images = [], []
+
+            if videos is not None:
+                pixel_values_videos = [
+                    video_to_pixel_values_eagle2_5_vl(
+                        video,
+                        input_size=self.image_size,
+                        min_num=1,
+                        max_num=1,
+                        use_thumbnail=False,
+                    ) for video in videos
+                ]
+                num_patches_videos = [
+                    pixel_value.shape[0] for pixel_value in pixel_values_videos
+                ]
+            else:
+                pixel_values_videos, num_patches_videos = [], []
+
+            pixel_values = []
+            while ("<image>" in text) or ("<video>" in text):
+                image_index = text.find("<image>")
+                video_index = text.find("<video>")
+                if image_index == -1 or (video_index > -1
+                                         and video_index < image_index):
+                    num_patches = num_patches_videos.pop(0)
+                    pixel_values.append(pixel_values_videos.pop(0))
+                    context_tokens = IMG_START + \
+                        IMG_CONTEXT * self.num_image_token + IMG_END
+                    video_tokens = ''.join([
+                        f'Frame{i+1}: {context_tokens}'
+                        for i in range(num_patches)
+                    ])
+                    text = text.replace('<video>', video_tokens, 1)
+                else:
+                    num_patches = num_patches_images.pop(0)
+                    pixel_values.append(pixel_values_images.pop(0))
+                    context_tokens = IMG_CONTEXT * self.num_image_token \
+                        * num_patches
+                    image_tokens = IMG_START + context_tokens + IMG_END
+                    text = text.replace('<image>', image_tokens, 1)
+            pixel_values = torch.cat(pixel_values, dim=0)
+
+            prompt = self.tokenizer(text, return_tensors="pt")
+            prompt.update({"pixel_values": pixel_values})
+            return prompt
+
+    img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids(
+        "<IMG_CONTEXT>")
+    hf_model.model.img_context_token_id = img_context_token_id
+    hf_model.processor = Eagle2_5_VLProcessor(hf_model)
+    hf_model.model.get_output_embeddings = lambda: \
+        hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.generate = types.MethodType(_eagle2_5_vl_generate,
+                                               hf_model.model)
+    return hf_model
+
+
+def _eagle2_5_vl_generate(
+    self,
+    pixel_values: torch.FloatTensor,
+    input_ids: torch.FloatTensor,
+    attention_mask: Optional[torch.LongTensor] = None,
+    **generate_kwargs,
+) -> torch.LongTensor:
+    """Generate method for InternVL2 model without fixed use_cache."""
+    assert self.img_context_token_id is not None
+    target_dtype = next(self.parameters()).dtype
+    vit_embeds = self.extract_feature(pixel_values.to(target_dtype))
+    input_embeds = self.language_model.get_input_embeddings()(input_ids)
+    B, N, C = input_embeds.shape
+    input_embeds = input_embeds.reshape(B * N, C)
+
+    input_ids = input_ids.reshape(B * N)
+    selected = (input_ids == self.img_context_token_id)
+    assert selected.sum() != 0
+    input_embeds[selected] = vit_embeds.reshape(-1, C).to(input_embeds.device)
+
+    input_embeds = input_embeds.reshape(B, N, C)
+
+    forward_kwargs = dict(
+        inputs_embeds=input_embeds,
+        attention_mask=attention_mask,
+    )
+    if getattr(self, "use_visual_token_mask", False):
+        visual_token_mask = selected.reshape(B, N, 1).to(input_embeds.dtype)
+        forward_kwargs["visual_token_mask"] = visual_token_mask
+
+    # e.g. InternVL2-2B
+    if not isinstance(self.language_model, GenerationMixin):
+        pytest.skip("HF impl is not compatible with current transformers")
+
+    outputs = self.language_model.generate(
+        **forward_kwargs,
+        **generate_kwargs,
+    )
+
+    return outputs
 
 def mantis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     from mantis.models.mllava import MLlavaProcessor
