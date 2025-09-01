@@ -666,6 +666,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
             h, w = self.config.vision_config.image_size
             return InternS1VideoPixelInputs(
                 type="pixel_values_videos",
+                num_patches=video_num_patches,
                 pixel_values=pixel_values_flat_video,
                 resolve_bindings={
                     "h": h,
