@@ -885,9 +885,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
     ) -> tuple[torch.Tensor, list[torch.Tensor]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        padded_total_num_scheduled_tokens = _get_padded_token_len(
+            self.num_tokens_paddings, total_num_scheduled_tokens)
 
         is_mm_embed = self.is_mm_embed_cpu
-        is_mm_embed[:total_num_scheduled_tokens] = False
+        is_mm_embed[:padded_total_num_scheduled_tokens] = False
         mm_embeds = list[torch.Tensor]()
         req_start_idx = 0
 
@@ -943,7 +945,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             req_start_idx += num_scheduled_tokens
 
-        is_mm_embed = is_mm_embed[:total_num_scheduled_tokens].to(self.device)
+        is_mm_embed = is_mm_embed[:padded_total_num_scheduled_tokens] \
+            .to(self.device)
 
         return is_mm_embed, mm_embeds
 
