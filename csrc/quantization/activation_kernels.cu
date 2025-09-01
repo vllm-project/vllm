@@ -281,11 +281,14 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       results[i] = clip(results[i] / y_s, fp8_min, fp8_max);
     }
 
-    auto local_y_q_ptr = y_q_ptr;
+    auto local_y_q_ptr = reinterpret_cast<unsigned char*>(y_q_ptr);
+    const auto r2 = reinterpret_cast<const float2*>(results);
 #pragma unroll
     for (Idx_t i = 0; i < 2; ++i) {
-      local_y_q_ptr[0] = __nv_fp8_e4m3(results[2 * i]);
-      local_y_q_ptr[1] = __nv_fp8_e4m3(results[2 * i + 1]);
+      auto resultfp8x2 = __nv_fp8x2_e4m3(r2[i]);
+      auto res_u8 = reinterpret_cast<unsigned char*>(&resultfp8x2.__x);
+      local_y_q_ptr[0] = res_u8[0];
+      local_y_q_ptr[1] = res_u8[1];
       local_y_q_ptr += 2 * WARP_SIZE;
     }
 
@@ -357,7 +360,7 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
 
   int stride_counts_e = counts.stride(0);
 
-  static constexpr int NUM_PARALLEL_TOKENS = 4;
+  static constexpr int NUM_PARALLEL_TOKENS = 16;
   dim3 grid(E * G, NUM_PARALLEL_TOKENS);
   dim3 block(NUM_WARPS * 32);
 
