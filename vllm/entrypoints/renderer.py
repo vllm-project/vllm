@@ -80,7 +80,7 @@ class BaseRenderer(ABC):
         raise NotImplementedError
 
 
-class Renderer(BaseRenderer):
+class CompletionRenderer(BaseRenderer):
 
     def __init__(
         self,

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from vllm.entrypoints.renderer import Renderer
+from vllm.entrypoints.renderer import CompletionRenderer
 
 
 @dataclass
@@ -41,9 +41,9 @@ def mock_async_tokenizer():
 
 @pytest.fixture
 def renderer(mock_model_config, mock_tokenizer):
-    return Renderer(model_config=mock_model_config,
-                    tokenizer=mock_tokenizer,
-                    async_tokenizer_pool={})
+    return CompletionRenderer(model_config=mock_model_config,
+                              tokenizer=mock_tokenizer,
+                              async_tokenizer_pool={})
 
 
 class TestRenderPrompt:
@@ -161,9 +161,10 @@ class TestRenderPrompt:
 
     @pytest.mark.asyncio
     async def test_no_tokenizer_for_text(self, mock_model_config):
-        renderer_no_tokenizer = Renderer(model_config=mock_model_config,
-                                         tokenizer=None,
-                                         async_tokenizer_pool={})
+        renderer_no_tokenizer = CompletionRenderer(
+            model_config=mock_model_config,
+            tokenizer=None,
+            async_tokenizer_pool={})
 
         with pytest.raises(ValueError, match="No tokenizer available"):
             await renderer_no_tokenizer.render_prompt(

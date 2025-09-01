@@ -62,7 +62,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TranslationRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
-from vllm.entrypoints.renderer import Renderer
+from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer
 # yapf: enable
 from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
@@ -244,14 +244,15 @@ class OpenAIServing:
                                          AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
 
-    def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> Renderer:
+    def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:
         """
         Get a Renderer instance with the provided tokenizer.
         Uses shared async tokenizer pool for efficiency.
         """
-        return Renderer(model_config=self.model_config,
-                        tokenizer=tokenizer,
-                        async_tokenizer_pool=self._async_tokenizer_pool)
+        return CompletionRenderer(
+            model_config=self.model_config,
+            tokenizer=tokenizer,
+            async_tokenizer_pool=self._async_tokenizer_pool)
 
     def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
         """
