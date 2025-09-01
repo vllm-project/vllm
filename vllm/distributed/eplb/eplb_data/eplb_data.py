@@ -1,44 +1,125 @@
-#
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-# This file is a part of the vllm-ascend project.
-#
+from dataclasses import dataclass
 
-from abc import abstractmethod
-from typing import Any
+import torch
 
 
-class BaseAdaptor:
+@dataclass
+class EplbData:
+    """EPLB metrics."""
 
-    def __init__(self, **args):
-        pass
+    physical_to_logical_map: torch.Tensor
+    """
+    Mapping from physical experts to logical experts.
 
-    @abstractmethod
-    def get_rank_expert_workload(self):
-        raise NotImplementedError
+    Shape: (num_moe_layers, num_physical_experts)
 
-    @abstractmethod
-    def get_init_expert_map(self, num_moe_layers: Any) -> Any:
-        raise NotImplementedError
+    # Example
 
-    @abstractmethod
-    def do_update_expert_map(self, layer_id: Any,
-                             updated_expert_map: Any) -> Any:
-        raise NotImplementedError
+    For a 2-layer MoE model with 6 physical experts and 4 logical experts on 3
+    EP ranks, the mapping could look like this:
 
-    @abstractmethod
-    def do_update_expert_weight(self, layer_id: Any,
-                                local_expert_to_replace: Any,
-                                buffer_tensor_id: Any) -> Any:
-        raise NotImplementedError
+    ```
+    [[0, 1, 2, 3, 0, 1],
+     [0, 2, 0, 1, 0, 3]]
+    ```
+    """
+    logical_to_physical_map: torch.Tensor
+    """
+    Mapping from logical experts to physical experts.
+
+    This is a sparse matrix, where -1 indicates no mapping.
+
+    Shape: (num_moe_layers, num_logical_experts, num_redundant_experts + 1)
+
+    # Example
+
+    For a 2-layer MoE model with 6 physical experts and 4 logical experts on 3
+    EP ranks, the mapping could look like this:
+
+    ```
+    [[[0, 4, -1],
+      [1, 5, -1],
+      [2, -1, -1],
+      [3, -1, -1]],
+     [[0, 2, 4],
+      [3, -1, -1],
+      [1, -1, -1],
+      [5, -1, -1]]]
+    ```
+    """
+    logical_replica_count: torch.Tensor
+    """
+    Number of replicas for each logical expert.
+    This is exactly the non-`-1` count in the `logical_to_physical_map`.
+
+    Shape: (num_moe_layers, num_logical_experts)
+
+    # Example
+    For a 2-layer MoE model with 6 physical experts and 4 logical experts on 3
+    EP ranks, the count could look like this:
+
+    ```
+    [[2, 2, 1, 1],
+     [3, 1, 1, 1]]
+    """
+
+    expert_load_pass: torch.Tensor
+    """
+    Expert load during this forward pass. 
+    We use the token count each expert processes as the load.
+
+    Shape: (num_moe_layers, num_physical_experts)
+    """
+    expert_load_window: torch.Tensor
+    """
+    A sliding window of expert load.
+
+    Shape: (window_size, num_moe_layers, num_physical_experts)
+
+    NOTE: The expert_load_view now records load for all physical experts
+    rather than just local experts. This ensures consistent load statistics
+    across different dispatch methods (naive all-to-all, DeepEP, pplx-kernels).
+    The recorded load will be multiplied by dp_size when using naive all-to-all
+    due to each DP rank contributing the same token set to the calculation.
+    See:
+    https://github.com/vllm-project/vllm/pull/22167#pullrequestreview-3086143856
+    """
+    expert_load_window_step: int = 0
+    """
+    Current step in the sliding window.
+
+    Different from `expert_rearrangement_step`, each EP rank may have its own
+    `expert_load_window_step`.
+    """
+    expert_load_window_size: int = 0
+    """
+    Size of the expert load sliding window.
+    This is a constant and is taken from the config.
+    """
+
+    expert_rearrangement_step: int = 0
+    """
+    Steps after last rearrangement.
+    Will trigger a rearrangement if it exceeds the threshold.
+
+    NOTE: Keep in mind that all EP ranks need to have the same
+    `expert_rearrangement_step` value to ensure synchronization.
+    Otherwise, the rearrangement will hang at collective
+    communication calls.
+    """
+    expert_rearrangement_step_interval: int = 0
+    """
+    Interval for expert rearrangement steps.
+    This is a constant and is taken from the config.
+    """
+
+    num_dense_layers: int = 0
+
+    global_expert_num: int = 0
+
+    num_moe_layers: int = 0
+
+    num_expert_layers: int = 0
+
+    num_wait_worker_iterations: int = 0
+

@@ -6,7 +6,7 @@ from overrides import override
 from torch._C._distributed_c10d import ProcessGroup
 from torch.distributed import P2POp, batch_isend_irecv, get_global_rank
 
-from vllm.distributed.eplb.eplb_loader.abstrat_loader import BaseLoader
+from vllm.distributed.eplb.eplb_loader.abstract_loader import BaseLoader
 from vllm.distributed.eplb.eplb_utils.eplb_utils import idx_local_to_global, get_ep_ranks_with_expert
 
 
