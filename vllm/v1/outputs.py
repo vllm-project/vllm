@@ -4,6 +4,7 @@
 from dataclasses import dataclass
 from typing import NamedTuple, Optional
 
+import numpy as np
 import torch
 
 
@@ -88,11 +89,12 @@ class ModelRunnerOutput:
     # req_id -> index
     req_id_to_index: dict[str, int]
 
-    # num_reqs x num_generated_tokens
-    # num_generated_tokens is the number of tokens
-    # generated in the current step. It can be different for
-    # each request due to speculative/jump decoding.
-    sampled_token_ids: list[list[int]]
+    # [num_reqs]
+    # Number of tokens sampled in the current step. Each request may generate
+    # different number of tokens due to chunked prefilling and spec decoding.
+    num_sampled_tokens: np.ndarray
+    # [num_reqs, max_num_sampled_tokens]
+    sampled_token_ids: np.ndarray
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
@@ -123,10 +125,13 @@ class DraftTokenIds:
     draft_token_ids: list[list[int]]
 
 
-EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
-                                              req_id_to_index={},
-                                              sampled_token_ids=[],
-                                              logprobs=None,
-                                              prompt_logprobs_dict={},
-                                              pooler_output=[],
-                                              num_nans_in_logits=None)
+EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
+    req_ids=[],
+    req_id_to_index={},
+    num_sampled_tokens=np.empty(0, dtype=np.int32),
+    sampled_token_ids=np.empty((0, 0), dtype=np.int32),
+    logprobs=None,
+    prompt_logprobs_dict={},
+    pooler_output=[],
+    num_nans_in_logits=None,
+)

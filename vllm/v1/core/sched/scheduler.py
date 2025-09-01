@@ -842,6 +842,7 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        num_sampled_tokens = model_runner_output.num_sampled_tokens
         sampled_token_ids = model_runner_output.sampled_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
@@ -867,14 +868,17 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            generated_token_ids = sampled_token_ids[
-                req_index] if sampled_token_ids else []
+            num_sampled = num_sampled_tokens[req_index]
+            if num_sampled > 0:
+                generated_token_ids = sampled_token_ids[:num_sampled].tolist()
+            else:
+                generated_token_ids = []
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
                 num_draft_tokens = len(scheduled_spec_token_ids)
-                num_accepted = len(generated_token_ids) - 1
+                num_accepted = num_sampled - 1
                 num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
