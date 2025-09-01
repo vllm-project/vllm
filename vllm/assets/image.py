@@ -35,7 +35,7 @@ class ImageAsset:
     @property
     def pil_image(self, ext="jpg") -> Image.Image:
 
-        image_path = self.path(ext)
+        image_path = self.get_path(ext)
         return Image.open(image_path)
 
     @property
@@ -43,9 +43,9 @@ class ImageAsset:
         """
         Image embeddings, only used for testing purposes with llava 1.5.
         """
-        image_path = self.path('pt')
+        image_path = self.get_path('pt')
         return torch.load(image_path, map_location="cpu", weights_only=True)
 
     def read_bytes(self, ext: str) -> bytes:
-        p = Path(self.path(ext))
+        p = Path(self.get_path(ext))
         return p.read_bytes()
