@@ -631,7 +631,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         num_computed_tokens_cpu = (common_attn_metadata.seq_lens_cpu -
                                    query_seq_lens_cpu)
         decode_threshold = self.reorder_batch_threshold
-        # 添加类型断言，确保不是None
         assert decode_threshold is not None, \
                 "reorder_batch_threshold should not be None"
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
