@@ -1246,27 +1246,23 @@ def compute_hash() -> str:
     """
 
     # Minimal exclude list: logging/diagnostics and service port.
-    exclude_env_vars = {
+    ignored_factors = {
         "VLLM_LOGGING_LEVEL",
         "VLLM_TORCH_PROFILER_DIR",
         "VLLM_PORT",
     }
 
     # Local import to avoid any import-cycle surprises at module import time.
-    from vllm.config.utils import canon_value, hash_items_sha256
+    from vllm.config.utils import hash_factors, normalize_value
 
-    items = []
-    for name in sorted(environment_variables.keys()):
-        if name in exclude_env_vars:
+    factors = []
+    for factor, value in environment_variables.items():
+        if factor in ignored_factors:
             continue
         try:
-            value = environment_variables[name]()
+            factors[factor] = normalize_value(value())
         except Exception:
             # Skip envs that raise during retrieval.
-            continue
-        try:
-            items.append((name, canon_value(value)))
-        except Exception:
             # Skip values we cannot canonicalize deterministically.
             continue
-    return hash_items_sha256(items)
+    return hash_factors(factors)

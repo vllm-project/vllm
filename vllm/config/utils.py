@@ -6,7 +6,9 @@ import hashlib
 import pathlib
 from collections.abc import Mapping, Sequence, Set
 from contextlib import suppress
-from typing import TYPE_CHECKING, Callable, TypeVar
+from dataclasses import fields
+from json import dumps
+from typing import TYPE_CHECKING, TypeVar
 
 from vllm.logger import init_logger
 
@@ -38,7 +40,7 @@ def config(cls: ConfigT) -> ConfigT:
     return cls
 
 
-def canon_value(x):
+def normalize_value(x):
     """Return a stable, JSON-serializable canonical form for hashing.
 
     Order: primitives, special types (Enum, callable, torch.dtype, Path), then
@@ -75,90 +77,53 @@ def canon_value(x):
 
     # Containers (generic)
     if isinstance(x, Mapping):
-        return tuple(sorted((str(k), canon_value(v)) for k, v in x.items()))
+        return tuple(sorted(
+            (str(k), normalize_value(v)) for k, v in x.items()))
     if isinstance(x, Set):
-        return tuple(sorted(repr(canon_value(v)) for v in x))
+        return tuple(sorted(repr(normalize_value(v)) for v in x))
     if isinstance(x, Sequence) and not isinstance(x, (str, bytes, bytearray)):
-        return tuple(canon_value(v) for v in x)
+        return tuple(normalize_value(v) for v in x)
+
+    # Nested configs which provide a uuid() method
+    if hasattr(x, "uuid") and callable(x.uuid):
+        return x.uuid()
+
+    # PretrainedConfig
+    if hasattr(x, "to_json_string") and callable(x.to_json_string):
+        return x.to_json_string()
 
     # Unsupported type
     with suppress(Exception):
-        logger.debug("canon_value: unsupported type '%s'", type(x).__name__)
+        logger.debug("normalize_value: unsupported type '%s'",
+                     type(x).__name__)
     raise TypeError
 
 
-def get_declared_field_names(cfg) -> list[str]:
-    """Declared field names for a config instance.
+def get_hash_factors(config: ConfigT,
+                     ignored_factors: set[str]) -> dict[str, object]:
+    """Gets the factors used for hashing a config class.
 
-    Order: dataclass -> pydantic v2 -> __dict__.
+    - Includes all dataclass fields not in `ignored_factors`.
+    - Skips non-normalizable values.
     """
-    # Dataclass
-    if hasattr(cfg, "__dataclass_fields__"):
-        # type: ignore[attr-defined]
-        return list(cfg.__dataclass_fields__.keys())
-    # Pydantic v2
-    if hasattr(cfg, "model_fields"):
-        try:
-            return list(cfg.model_fields.keys())  # type: ignore[attr-defined]
-        except (AttributeError, TypeError):
-            return list(getattr(cfg, "__dict__", {}).keys())
-    # Fallback
-    return list(getattr(cfg, "__dict__", {}).keys())
-
-
-def build_opt_out_items(cfg, exclude: set[str]) -> list[tuple[str, object]]:
-    """Default-include (opt-out) canonical (key, value) pairs for hashing.
-
-    - Includes declared fields not in `exclude`.
-    - Skips non-canonicalizable values.
-    """
-    items: list[tuple[str, object]] = []
-    for key in sorted(get_declared_field_names(cfg)):
-        if key in exclude:
+    factors: dict[str, object] = {}
+    for field in fields(config):
+        factor = field.name
+        if factor in ignored_factors:
             continue
-        value = getattr(cfg, key, None)
+        value = getattr(config, factor, None)
         try:
-            items.append((key, canon_value(value)))
+            factors[factor] = normalize_value(value)
         except TypeError:
             # Log once per key to surface potential under-hashing without
             # spamming logs. The value will be skipped from the hash.
             with suppress(Exception):
-                logger.debug("Hash skip: unsupported type for key '%s'", key)
+                logger.debug("Hash skip: unsupported type for key '%s'",
+                             factor)
             continue
-    return items
+    return factors
 
 
-def hash_items_sha256(items: list[tuple[str, object]]) -> str:
+def hash_factors(items: dict[str, object]) -> str:
     """Return a SHA-256 hex digest of the canonical items structure."""
-    return hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
-
-
-def build_opt_items_override(
-    cfg,
-    exclude: set[str],
-    overrides: dict[str, Callable[[object], object]],
-) -> list[tuple[str, object]]:
-    """Opt-out items with targeted per-field overrides.
-
-    - Default path uses canon_value.
-    - For keys in `overrides`, call the override to produce a stable value.
-    - Skips values that cannot be canonicalized.
-    """
-    items: list[tuple[str, object]] = []
-    for key in sorted(get_declared_field_names(cfg)):
-        if key in exclude:
-            continue
-        value = getattr(cfg, key, None)
-        if key in overrides:
-            try:
-                items.append((key, overrides[key](value)))
-            except Exception:
-                continue
-            continue
-        try:
-            items.append((key, canon_value(value)))
-        except TypeError:
-            with suppress(Exception):
-                logger.debug("Hash skip: unsupported type for key '%s'", key)
-            continue
-    return items
+    return hashlib.sha256(dumps(items, sort_keys=True).encode()).hexdigest()

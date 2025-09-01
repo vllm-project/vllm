@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
@@ -265,7 +264,7 @@ class ParallelConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        exclude_from_hash = {
+        ignored_factors = {
             # Derived/runtime topology, networking, or launch details
             "data_parallel_rank",
             "data_parallel_rank_local",
@@ -286,13 +285,11 @@ class ParallelConfig:
             "worker_extension_cls",
         }
 
-        from vllm.config.utils import build_opt_out_items
-        items = build_opt_out_items(self, exclude_from_hash)
-
+        from vllm.config.utils import get_hash_factors, hash_factors
+        factors = get_hash_factors(self, ignored_factors)
         # Explicitly include backend affecting env factor as before
-        items.append(("VLLM_ALL2ALL_BACKEND", str(envs.VLLM_ALL2ALL_BACKEND)))
-
-        return hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
+        factors["VLLM_ALL2ALL_BACKEND"] = str(envs.VLLM_ALL2ALL_BACKEND)
+        return hash_factors(factors)
 
     def __post_init__(self) -> None:
         # Forward deprecated fields to their new location

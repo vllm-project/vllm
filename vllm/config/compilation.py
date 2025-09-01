@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
-import hashlib
 from collections import Counter
 from dataclasses import asdict, field
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, Optional, Union
@@ -92,7 +91,7 @@ class PassConfig:
 
     # TODO(luka) better pass enabling system.
 
-    def uuid(self):
+    def uuid(self) -> str:
         """
         Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
@@ -358,7 +357,7 @@ class CompilationConfig:
         # normalize types; keep SHA-256. For nested opaque configs, include a
         # stable identifier (e.g., pass_config.uuid()) instead of object id.
 
-        exclude_from_hash = {
+        ignored_factors = {
             # Paths/dirs and runtime/metrics that don’t affect compiled graph
             "debug_dump_path",
             "cache_dir",
@@ -369,16 +368,9 @@ class CompilationConfig:
             "static_forward_context",
         }
 
-        from vllm.config.utils import build_opt_items_override
-        items = build_opt_items_override(
-            self,
-            exclude_from_hash,
-            overrides={
-                "pass_config": lambda _: self.pass_config.uuid(),
-            },
-        )
-
-        return hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
+        from vllm.config.utils import get_hash_factors, hash_factors
+        factors = get_hash_factors(self, ignored_factors)
+        return hash_factors(factors)
 
     def __repr__(self) -> str:
         exclude = {

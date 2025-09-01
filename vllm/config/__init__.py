@@ -514,17 +514,8 @@ class ModelConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # Opt-out: default-include declared fields so new options aren't missed;
-        # keep a tiny exclude list; normalize types for stable hashes.
-
-        # Shared helpers for canonicalization and field enumeration
-        from vllm.config.utils import build_opt_out_items, hash_items_sha256
-
-        # Default-include; exclude only fields that don't change the compiled
-        # graph or are unstable. See RFC #16501.
-        model_exclude_from_hash = {
+        ignored_factors = {
             "tokenizer",
-            "hf_config",  # hash content via JSON below
             "hf_text_config",
             "encoder_config",
             "hf_image_processor_config",
@@ -539,25 +530,10 @@ class ModelConfig:
             "hf_token",
             "hf_config_path",
         }
-        # Build base items from declared fields using the shared utility
-        items: list[tuple[str,
-                          Any]] = build_opt_out_items(self,
-                                                      model_exclude_from_hash)
-        # Hash hf_config by content; if JSON export is unavailable, include a
-        # minimal stable subset.
-        hf = getattr(self, "hf_config", None)
-        if hf is not None:
-            try:
-                items.append(("hf_config_json", hf.to_json_string()))
-            except (AttributeError, TypeError, ValueError):
-                items.append((
-                    "hf_config_fallback",
-                    {
-                        "model_type": getattr(hf, "model_type", None),
-                        "architectures": getattr(hf, "architectures", None),
-                    },
-                ))
-        return hash_items_sha256(items)
+
+        from vllm.config.utils import get_hash_factors, hash_factors
+        factors = get_hash_factors(self, ignored_factors)
+        return hash_factors(factors)
 
     def __post_init__(self) -> None:
         # Set the default seed to 0 in V1.
@@ -2496,17 +2472,10 @@ class LoRAConfig:
         Opt-out: default-include declared fields; keep a tiny exclude set;
         normalize types; use SHA-256.
         """
-        from vllm.config.utils import build_opt_out_items
-
-        exclude_from_hash: set[str] = {
-            # (none at present, placeholder to keep policy explicit)
-        }
-
-        items = build_opt_out_items(self, exclude_from_hash)
-
-        import hashlib
-        hash_str = hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
-        return hash_str
+        from vllm.config.utils import get_hash_factors, hash_factors
+        ignored_factors: set[str] = set()
+        factors = get_hash_factors(self, ignored_factors)
+        return hash_factors(factors)
 
     def __post_init__(self):
         # Deprecation warning for lora_extra_vocab_size

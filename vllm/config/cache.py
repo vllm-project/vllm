@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Optional, get_args
 
@@ -131,10 +130,7 @@ class CacheConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # Opt-out: default-include declared fields; keep a tiny exclude list;
-        # normalize types for deterministic hashing; keep MD5 for compatibility.
-
-        exclude_from_hash = {
+        ignored_factors = {
             # Runtime/derived knobs that don't affect compiled graph shape
             "gpu_memory_utilization",
             "swap_space",
@@ -153,11 +149,9 @@ class CacheConfig:
             "kv_sharing_fast_prefill",
         }
 
-        from vllm.config.utils import build_opt_out_items
-        items = build_opt_out_items(self, exclude_from_hash)
-
-        hash_str = hashlib.sha256(repr(tuple(items)).encode()).hexdigest()
-        return hash_str
+        from vllm.config.utils import get_hash_factors, hash_factors
+        factors = get_hash_factors(self, ignored_factors)
+        return hash_factors(factors)
 
     def __post_init__(self) -> None:
         self.swap_space_bytes = self.swap_space * GiB_bytes
