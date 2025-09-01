@@ -6,7 +6,8 @@
 import json
 import time
 from http import HTTPStatus
-from typing import Annotated, Any, ClassVar, Literal, Optional, Union
+from typing import (Annotated, Any, ClassVar, Generic, Literal, Optional,
+                    TypeVar, Union)
 
 import regex as re
 import torch
@@ -452,7 +453,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
     prompt_logprobs: Optional[int] = None
     allowed_token_ids: Optional[list[int]] = None
     bad_words: list[str] = Field(default_factory=list)
@@ -995,7 +996,7 @@ class CompletionRequest(OpenAIBaseModel):
     min_tokens: int = 0
     skip_special_tokens: bool = True
     spaces_between_special_tokens: bool = True
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
     allowed_token_ids: Optional[list[int]] = None
     prompt_logprobs: Optional[int] = None
     # --8<-- [end:completion-sampling-params]
@@ -1325,8 +1326,10 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
     # --8<-- [end:embedding-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions,
-                             normalize=self.normalize)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
+            normalize=self.normalize)
 
 
 class EmbeddingChatRequest(OpenAIBaseModel):
@@ -1393,15 +1396,56 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         return data
 
     def to_pooling_params(self):
-        return PoolingParams(dimensions=self.dimensions,
-                             normalize=self.normalize)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            dimensions=self.dimensions,
+            normalize=self.normalize)
 
 
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
 
 PoolingCompletionRequest = EmbeddingCompletionRequest
 PoolingChatRequest = EmbeddingChatRequest
-PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest]
+
+T = TypeVar("T")
+
+
+class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
+    model: Optional[str] = None
+
+    priority: int = Field(default=0)
+    """
+    The priority of the request (lower means earlier handling;
+    default: 0). Any priority other than 0 will raise an error
+    if the served model does not use priority scheduling.
+    """
+    data: T
+    """
+    When using plugins IOProcessor plugins, the actual input is processed
+    by the plugin itself. Hence, we use a generic type for the request data
+    """
+
+    def to_pooling_params(self):
+        return PoolingParams(task="encode")
+
+
+class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
+
+    request_id: Optional[str] = None
+    """
+    The request_id associated with this response
+    """
+    created_at: int = Field(default_factory=lambda: int(time.time()))
+
+    data: T
+    """
+    When using plugins IOProcessor plugins, the actual output is generated
+    by the plugin itself. Hence, we use a generic type for the response data
+    """
+
+
+PoolingRequest = Union[PoolingCompletionRequest, PoolingChatRequest,
+                       IOProcessorRequest]
 
 
 class ScoreRequest(OpenAIBaseModel):
@@ -1430,7 +1474,9 @@ class ScoreRequest(OpenAIBaseModel):
     # --8<-- [end:score-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            activation=self.activation)
 
 
 class RerankRequest(OpenAIBaseModel):
@@ -1460,7 +1506,9 @@ class RerankRequest(OpenAIBaseModel):
     # --8<-- [end:rerank-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            activation=self.activation)
 
 
 class RerankDocument(BaseModel):
@@ -1618,7 +1666,9 @@ class ClassificationRequest(OpenAIBaseModel):
     # --8<-- [end:classification-extra-params]
 
     def to_pooling_params(self):
-        return PoolingParams(activation=self.activation)
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            activation=self.activation)
 
 
 class ClassificationData(OpenAIBaseModel):
