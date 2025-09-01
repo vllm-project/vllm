@@ -266,11 +266,13 @@ class ServingScores(OpenAIServing):
         request: Union[ScoreRequest, RerankRequest],
         request_id: str,
         raw_request: Optional[Request] = None,
-        truncate_prompt_tokens: Optional[int] = None,
     ) -> Union[list[PoolingRequestOutput], ErrorResponse]:
         lora_request = self._maybe_get_adapters(request)
 
         tokenizer = await self.engine_client.get_tokenizer(lora_request)
+
+        truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens",
+                                         None)
 
         tokenization_kwargs: dict[str, Any] = {}
         _validate_truncation_size(self.max_model_len, truncate_prompt_tokens,
@@ -343,7 +345,6 @@ class ServingScores(OpenAIServing):
                 request,
                 request_id,
                 raw_request,
-                request.truncate_prompt_tokens,
             )
             if isinstance(final_res_batch, ErrorResponse):
                 return final_res_batch
@@ -391,7 +392,6 @@ class ServingScores(OpenAIServing):
                 request,
                 request_id,
                 raw_request,
-                request.truncate_prompt_tokens,
             )
             if isinstance(final_res_batch, ErrorResponse):
                 return final_res_batch
