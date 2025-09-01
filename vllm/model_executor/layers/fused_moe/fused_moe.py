@@ -701,32 +701,59 @@ def get_moe_configs(
     block_shape = [block_n, block_k] if block_n and block_k else None
     json_file_name = get_config_file_name(E, N, dtype, block_shape)
 
-    config_file_paths = []
+    def _check_config_file_path(path: str,
+                                extra_info: str = ""
+                                ) -> Optional[dict[int, Any]]:
+        if os.path.exists(path):
+            with open(path) as f:
+                logger.info(
+                    "Using configuration from %s for MoE layer. %s",
+                    path,
+                    extra_info,
+                )
+                return {int(key): val for key, val in json.load(f).items()}
+        return None
 
-    # note that we prioritize user defined config
+    # P1 User-specified configuration (highest priority)
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
     if user_defined_config_folder is not None:
         user_defined_config_file_path = os.path.join(
             user_defined_config_folder, json_file_name)
-        config_file_paths.append(user_defined_config_file_path)
-
+        if val := _check_config_file_path(user_defined_config_file_path):
+            return val
+    # P2 Current Triton version configuration
+    triton_version = triton.__version__
+    triton_version_name = f"triton_{triton_version.replace('.', '_')}"
+    cur_triton_file_path = os.path.join(
+        os.path.dirname(os.path.realpath(__file__)),
+        "configs",
+        triton_version_name,
+        json_file_name,
+    )
+    if val := _check_config_file_path(cur_triton_file_path):
+        return val
+    # P3 Legacy configuration
     default_config_file_path = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)), "configs", json_file_name)
-    config_file_paths.append(default_config_file_path)
+        os.path.dirname(os.path.realpath(__file__)),
+        "configs",
+        "legacy_configs",
+        json_file_name,
+    )
 
-    for config_file_path in config_file_paths:
-        if os.path.exists(config_file_path):
-            with open(config_file_path) as f:
-                logger.info("Using configuration from %s for MoE layer.",
-                            config_file_path)
-                # If a configuration has been found, return it
-                return {int(key): val for key, val in json.load(f).items()}
+    if val := _check_config_file_path(
+            default_config_file_path,
+            extra_info=
+            "Loading config from the legacy configuration may be suboptimal, please update the corresponding config.",  # noqa: E501
+    ):
+        return val
 
     # If no optimized configuration is available, we will use the default
     # configuration
+    cur_triton_dir = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                                  "configs", triton_version_name)
     logger.warning(
         ("Using default MoE config. Performance might be sub-optimal! "
-         "Config file not found at %s"), config_file_paths)
+         "Config file not found at %s"), cur_triton_dir)
     return None
 
 
