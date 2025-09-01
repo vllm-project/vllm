@@ -68,7 +68,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import Logprob as SampleLogprob
 from vllm.sequence import SampleLogprobs
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import random_fc_uuid, random_uuid
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
@@ -664,7 +664,7 @@ class OpenAIServingResponses(OpenAIServing):
         if function_calls:
             outputs.extend([
                 ResponseFunctionToolCall(
-                    id=f"fc_{random_fc_uuid()}",
+                    id=f"fc_{random_uuid()}",
                     call_id=f"call_{random_uuid()}",
                     type="function_call",
                     status="completed",
