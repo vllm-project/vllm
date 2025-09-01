@@ -95,7 +95,8 @@ def vision_llm():
 
 
 @pytest.mark.parametrize("image_urls",
-                         [[TEST_IMAGE_URLS[0], TEST_IMAGE_URLS[1]]])
+                         [[TEST_IMAGE_URLS[0], TEST_IMAGE_URLS[1]]],
+                         indirect=True)
 def test_chat_multi_image(vision_llm, image_urls: list[str]):
     messages = [{
         "role":
