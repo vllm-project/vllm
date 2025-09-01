@@ -100,7 +100,7 @@ class OpenAIServingTokenization(OpenAIServing):
         input_ids: list[int] = []
         for i, engine_prompt in enumerate(engine_prompts):
             self._log_inputs(request_id,
-                             engine_prompts,
+                             engine_prompt,
                              params=None,
                              lora_request=lora_request)
 

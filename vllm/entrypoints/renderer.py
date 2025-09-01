@@ -18,8 +18,9 @@ class BaseRenderer(ABC):
     """
     Base class for unified input processing and rendering.
     
-    The Renderer serves as a unified input processor that consolidates tokenization,
-    chat template formatting, and multimodal input handling into a single component.
+    The Renderer serves as a unified input processor that consolidates
+    tokenization, chat template formatting, and multimodal input handling
+    into a single component.
     It converts high-level API requests (OpenAI-style JSON) into token IDs and
     multimodal features ready for engine consumption.
     
@@ -51,9 +52,10 @@ class BaseRenderer(ABC):
         """
         Convert input prompts into tokenized format for engine processing.
         
-        This is the core method that transforms various input formats into standardized
-        TokensPrompt objects. Implementations should handle tokenization, special token
-        insertion, truncation, and validation according to model requirements.
+        This is the core method that transforms various input formats into
+        standardized TokensPrompt objects. Implementations should handle
+        tokenization, special token insertion, truncation, and validation
+        according to model requirements.
         
         Args:
             prompt_or_prompts: Input data in various formats:
@@ -62,8 +64,10 @@ class BaseRenderer(ABC):
                 - list[int]: Pre-tokenized sequence
                 - list[list[int]]: Batch of pre-tokenized sequences
             max_length: Maximum sequence length (endpoint-specific behavior)
-            truncate_prompt_tokens: Truncate to last N tokens (None=no truncation, 0=empty)
-            add_special_tokens: Add model-specific tokens (e.g., [CLS], [SEP]) to text inputs
+            truncate_prompt_tokens: Truncate to last N tokens
+                (None=no truncation, 0=empty)
+            add_special_tokens: Add model-specific tokens (e.g., [CLS], [SEP])
+                to text inputs
             cache_salt: Optional string to disambiguate cached prompts
             
         Returns:
@@ -86,7 +90,7 @@ class Renderer(BaseRenderer):
     ):
         super().__init__(model_config, tokenizer)
         self.async_tokenizer_pool = async_tokenizer_pool or {}
-        self.async_tokenizer = None
+        self.async_tokenizer: Optional[AsyncMicrobatchTokenizer] = None
 
     async def render_prompt(
         self,
@@ -98,12 +102,13 @@ class Renderer(BaseRenderer):
     ) -> list[TokensPrompt]:
         """Implementation of prompt rendering for completion-style requests.
         
-        Uses async tokenizer pooling for improved performance. See base class for
-        detailed parameter documentation.
+        Uses async tokenizer pooling for improved performance. See base class
+        for detailed parameter documentation.
         """
         if truncate_prompt_tokens is not None:
             if max_length is not None:
-                assert truncate_prompt_tokens >= 0 and truncate_prompt_tokens <= max_length
+                assert (truncate_prompt_tokens >= 0
+                        and truncate_prompt_tokens <= max_length)
             if truncate_prompt_tokens == 0:
                 return []
 
@@ -150,7 +155,7 @@ class Renderer(BaseRenderer):
         text: str,
         max_length: Optional[int],
         truncate_prompt_tokens: Optional[int],
-        add_special_tokens: bool,
+        add_special_tokens: Optional[bool],
         cache_salt: Optional[str],
     ) -> TokensPrompt:
         """Tokenize text input asynchronously."""
@@ -206,4 +211,7 @@ class Renderer(BaseRenderer):
                 f"However, your request has {len(token_ids)} input tokens. "
                 "Please reduce the length of the input messages.")
 
-        return TokensPrompt(prompt_token_ids=token_ids, cache_salt=cache_salt)
+        tokens_prompt = TokensPrompt(prompt_token_ids=token_ids)
+        if cache_salt is not None:
+            tokens_prompt["cache_salt"] = cache_salt
+        return tokens_prompt
