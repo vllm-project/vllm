@@ -1,26 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""This example demonstrates wrapping a request-level logits processor to be
-compatible with vLLM's batch-level logits processing
+"""This example demonstrates a special case of wrapping a request-level logits
+processor, namely the case where it is necessary to utilize engine config or
+environment info passed to the constructor. The subclass must override the
+wrapper base class `__init__()` method to access the engine config, the device
+identifier, or the flag which indicates whether pinned memory is available.
 
-For demo purposes, a dummy logits processor is employed which, if
-`target_token` is passed as a keyword argument to `SamplingParams.extra_args`,
-will mask out all tokens except `target_token`. This logits processor can be
-applied to a vector of logits associated with a single decode step for a single
-request. The logits processor cannot be applied to a request which does not
-pass in a `target_token` custom argument.
+For demo purposes, a request-level dummy logits processor is employed which
+causes the same token (`target_token`) to be decoded in each step. The
+request-level dummy logits processor is wrapped to create a batch-level logits
+processor, which can apply the logits processor to output logits from all
+requests in the persistent batch in a given decode step.
 
-The request-level dummy logits processor is wrapped to create a batch-level
-logits processor, which can apply the logits processor to output logits from
-all requests in the persistent batch in a given decode step. For requests which
-do not provide a `target_token` argument, the corresponding row of `logits`
-will not be modified.
+The wrapped dummy logits processor below models a scenario where we must
+disable the logits processor on non-"cuda" platforms. The wrapper base class
+`__init__()` is overridden in order to check this condition and set a flag.
 
 A batch is constructed with `temperature=0.0` and 50% of requests specifying
 `target_token`, and for these requests - and *only* these requests - we
-expect the `target_token` to be decoded in each step, yielding an output
-similar to that shown below:
+expect that on a "cuda" device the output will look something like:
 
 Generated Outputs:
 ------------------------------------------------------------
@@ -37,6 +36,9 @@ Output:    ' also also also also also also also also also also also also also
 Prompt:    'The future of AI is'
 Output:    ' in the hands of the people.\n\nThe future of AI is in the'
 ------------------------------------------------------------
+
+which indicates that the logits processor is running. However, on a non-"cuda"
+device, the first and third requests would not repeat the same token.
 """
 
 from typing import Optional
@@ -44,6 +46,7 @@ from typing import Optional
 import torch
 
 from vllm import LLM, SamplingParams
+from vllm.config import VllmConfig
 from vllm.v1.sample.logits_processor import (
     AdapterLogitsProcessor,
     RequestLogitsProcessor,
@@ -70,8 +73,14 @@ class DummyPerReqLogitsProcessor:
 
 
 class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
-    """Example of wrapping a fake request-level logit processor to create a
-    batch-level logits processor"""
+    """Example of overriding the wrapper class `__init__()` in order to utilize
+    info about the device type"""
+
+    def __init__(
+        self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
+    ):
+        super().__init__(vllm_config, device, is_pin_memory)
+        self.is_cuda = device.type == "cuda"
 
     def is_argmax_invariant(self) -> bool:
         return False
@@ -85,7 +94,8 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
 
         Returns None if the logits processor should not be applied to the
         particular request. To use the logits processor the request must have
-        a "target_token" custom argument with an integer value.
+        a "target_token" custom argument with an integer value, and the device
+        must be "cuda"-type
 
         Args:
           params: per-request sampling params
@@ -93,7 +103,11 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
         Returns:
           `Callable` request logits processor, or None
         """
-        if not params.extra_args or "target_token" not in params.extra_args:
+        if (
+            not self.is_cuda
+            or not params.extra_args
+            or "target_token" not in params.extra_args
+        ):
             return None
         return DummyPerReqLogitsProcessor(params.extra_args["target_token"])
 
