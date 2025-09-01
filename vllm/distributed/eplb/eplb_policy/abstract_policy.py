@@ -11,6 +11,9 @@ class DynamicConfig:
 
 class EplbPolicy:
 
+    def __init__(self, config: DynamicConfig):
+        self.config = config
+
     @abstractmethod
     def rebalance_experts(self, old_global_expert_indices, weight, num_replicas, num_groups, num_nodes, num_ranks):
         """
