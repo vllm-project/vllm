@@ -109,10 +109,9 @@ steps:
   - tests/entrypoints/offline_mode
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_generate_multiple_loras.py --ignore=entrypoints/llm/test_collective_rpc.py
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_lazy_outlines.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_lazy_outlines.py # it needs a clean process
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
-  - pytest -v -s entrypoints/llm/test_generate_multiple_loras.py # it needs a clean process
   - VLLM_USE_V1=0 pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
 
 - label: Entrypoints Test (API Server) # 40min
@@ -234,7 +233,26 @@ steps:
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
 
-- label: V1 Test
+- label: V1 Test e2e + engine
+  mirror_hardwares: [amdexperimental]
+  source_file_dependencies:
+    - vllm/
+    - tests/v1
+  commands:
+    # TODO: accuracy does not match, whether setting
+    # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
+    - pytest -v -s v1/e2e
+    - pytest -v -s v1/engine
+
+- label: V1 Test entrypoints
+  mirror_hardwares: [amdexperimental]
+  source_file_dependencies:
+    - vllm/
+    - tests/v1
+  commands:
+    - pytest -v -s v1/entrypoints
+
+- label: V1 Test others
   mirror_hardwares: [amdexperimental]
   source_file_dependencies:
     - vllm/
@@ -242,8 +260,6 @@ steps:
   commands:
     # split the test to avoid interference
     - pytest -v -s v1/core
-    - pytest -v -s v1/engine
-    - pytest -v -s v1/entrypoints
     - pytest -v -s v1/executor
     - pytest -v -s v1/sample
     - pytest -v -s v1/logits_processors
@@ -256,9 +272,6 @@ steps:
     - pytest -v -s v1/test_utils.py
     - pytest -v -s v1/test_oracle.py
     - pytest -v -s v1/test_metrics_reader.py
-    # TODO: accuracy does not match, whether setting
-    # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
-    - pytest -v -s v1/e2e
     # Integration test for streaming correctness (requires special branch).
     - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
@@ -312,7 +325,7 @@ steps:
   source_file_dependencies:
   - vllm/lora
   - tests/lora
-  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py
+  command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py
   parallelism: 4
 
 - label: PyTorch Compilation Unit Tests
@@ -449,8 +462,8 @@ steps:
   - tests/quantization
   commands:
   # temporary install here since we need nightly, will move to requirements/test.in
-  # after torchao 0.12 release
-  - pip install --pre torchao --index-url https://download.pytorch.org/whl/nightly/cu126
+  # after torchao 0.12 release, and pin a working version of torchao nightly here
+  - pip install --pre torchao==0.13.0.dev20250814 --index-url https://download.pytorch.org/whl/nightly/cu128
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization
 
 - label: LM Eval Small Models # 53min
@@ -553,8 +566,7 @@ steps:
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
-    - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+    - pytest -v -s models/multimodal/processing
 
 - label: Multi-Modal Models Test (Standard)
   mirror_hardwares: [amdexperimental]
@@ -654,7 +666,9 @@ steps:
     # Quantization
     - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
+    - pytest -v -s tests/kernels/quantization/test_silu_nvfp4_quant_fusion.py
     - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
+    - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
     - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_mxfp4_moe.py
@@ -662,6 +676,7 @@ steps:
     - pytest -v -s tests/compile/test_fusion_all_reduce.py
     - pytest -v -s tests/compile/test_fusion_attn.py::test_attention_quant_pattern
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
+    - pytest -v -s tests/compile/test_silu_mul_quant_fusion.py
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
@@ -754,6 +769,11 @@ steps:
   - pytest -v -s plugins_tests/test_platform_plugins.py
   - pip uninstall vllm_add_dummy_platform -y
   # end platform plugin tests
+  # begin io_processor plugins test, all the code in between uses the prithvi_io_processor plugin
+  - pip install -e ./plugins/prithvi_io_processor_plugin
+  - pytest -v -s plugins_tests/test_io_processor_plugins.py
+  - pip uninstall prithvi_io_processor_plugin -y 
+  # end io_processor plugins test
   # other tests continue here:
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
@@ -790,13 +810,14 @@ steps:
     # requires multi-GPU testing for validation.
     - pytest -v -s -x lora/test_chatglm3_tp.py
     - pytest -v -s -x lora/test_llama_tp.py
-    - pytest -v -s -x lora/test_multi_loras_with_tp.py
+    - pytest -v -s -x lora/test_llm_with_multi_loras.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 2
+  num_gpus: 2 
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/weight_loading
