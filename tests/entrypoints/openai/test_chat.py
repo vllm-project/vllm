@@ -505,7 +505,7 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI, sample_choices,
         messages=messages,
         max_completion_tokens=10,
         temperature=0.7,
-        extra_body=dict(guided_choice=sample_choices))
+        extra_body=dict(structured_outputs={"choice": sample_choices}))
     choice1 = chat_completion.choices[0].message.content
     assert choice1 in sample_choices
 
@@ -519,7 +519,7 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI, sample_choices,
         messages=messages,
         max_completion_tokens=10,
         temperature=0.7,
-        extra_body=dict(guided_choice=sample_choices))
+        extra_body=dict(structured_outputs={"choice": sample_choices}))
     choice2 = chat_completion.choices[0].message.content
     assert choice2 in sample_choices
     assert choice1 != choice2
@@ -545,7 +545,7 @@ async def test_guided_json_chat(client: openai.AsyncOpenAI, sample_json_schema,
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=1000,
-        extra_body=dict(guided_json=sample_json_schema))
+        extra_body=dict(structured_outputs={"json": sample_json_schema}))
     message = chat_completion.choices[0].message
     assert message.content is not None
     json1 = json.loads(message.content)
@@ -562,7 +562,7 @@ async def test_guided_json_chat(client: openai.AsyncOpenAI, sample_json_schema,
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=1000,
-        extra_body=dict(guided_json=sample_json_schema))
+        extra_body=dict(structured_outputs={"json": sample_json_schema}))
     message = chat_completion.choices[0].message
     assert message.content is not None
     json2 = json.loads(message.content)
@@ -590,7 +590,7 @@ async def test_guided_regex_chat(client: openai.AsyncOpenAI, sample_regex,
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=20,
-        extra_body=dict(guided_regex=sample_regex))
+        extra_body=dict(structured_outputs={"regex": sample_regex}))
     ip1 = chat_completion.choices[0].message.content
     assert ip1 is not None
     assert re.fullmatch(sample_regex, ip1) is not None
@@ -601,7 +601,7 @@ async def test_guided_regex_chat(client: openai.AsyncOpenAI, sample_regex,
         model=MODEL_NAME,
         messages=messages,
         max_completion_tokens=20,
-        extra_body=dict(guided_regex=sample_regex))
+        extra_body=dict(structured_outputs={"regex": sample_regex}))
     ip2 = chat_completion.choices[0].message.content
     assert ip2 is not None
     assert re.fullmatch(sample_regex, ip2) is not None
@@ -621,12 +621,14 @@ async def test_structured_outputs_type_error(client: openai.AsyncOpenAI):
     }]
 
     with pytest.raises(openai.BadRequestError):
-        _ = await client.chat.completions.create(model=MODEL_NAME,
-                                                 messages=messages,
-                                                 extra_body=dict(guided_regex={
-                                                     1: "Python",
-                                                     2: "C++"
-                                                 }))
+        _ = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            extra_body=dict(
+                structured_outputs={"regex": {
+                    1: "Python",
+                    2: "C++"
+                }}))
 
 
 @pytest.mark.asyncio
@@ -648,7 +650,7 @@ async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
         max_completion_tokens=10,
         logprobs=True,
         top_logprobs=5,
-        extra_body=dict(guided_choice=sample_choices))
+        extra_body=dict(structured_outputs={"choice": sample_choices}))
 
     assert chat_completion.choices[0].logprobs is not None
     assert chat_completion.choices[0].logprobs.content is not None

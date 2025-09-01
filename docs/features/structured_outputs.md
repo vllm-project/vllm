@@ -45,7 +45,7 @@ Now let´s see an example for each of the cases, starting with the `choice`, as 
         messages=[
             {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
         ],
-        extra_body={"structured_outputs": {"choices": ["positive", "negative"]}},
+        extra_body={"structured_outputs": {"choice": ["positive", "negative"]}},
     )
     print(completion.choices[0].message.content)
     ```

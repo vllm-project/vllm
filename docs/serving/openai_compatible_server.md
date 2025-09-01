@@ -133,7 +133,7 @@ completion = client.chat.completions.create(
         {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
     ],
     extra_body={
-        "structured_outputs": {"choices": ["positive", "negative"]}
+        "structured_outputs": {"choice": ["positive", "negative"]}
     }
 )
 ```
