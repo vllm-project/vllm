@@ -294,56 +294,7 @@ def video_to_pixel_values_eagle2_5_vl(
 
     pixel_values = torch.stack([transform(image) for image in frames_list])
     return pixel_values
-
-
-class BaseEagle2_5_VLProcessor(BaseInternVLProcessor):
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        tokenizer: AnyTokenizer,
-        *,
-        min_dynamic_tiles: Optional[int] = None,
-        max_dynamic_tiles: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-    ) -> None:
-        if min_dynamic_tiles is None:
-            min_dynamic_tiles = config.min_dynamic_tiles
-        assert isinstance(min_dynamic_tiles, int)
-
-        if max_dynamic_tiles is None:
-            max_dynamic_tiles = config.max_dynamic_tiles
-        assert isinstance(max_dynamic_tiles, int)
-        super().__init__(config,
-                         tokenizer,
-                         min_dynamic_tiles=min_dynamic_tiles,
-                         max_dynamic_tiles=max_dynamic_tiles,
-                         dynamic_image_size=dynamic_image_size)
-
-    def _images_to_pixel_values_lst(
-        self,
-        images: list[Image.Image],
-        min_dynamic_patch: Optional[int] = None,
-        max_dynamic_patch: Optional[int] = None,
-        dynamic_image_size: Optional[bool] = None,
-    ) -> list[torch.Tensor]:
-        min_num, max_num = self.resolve_min_max_num(
-            min_dynamic_patch=min_dynamic_patch,
-            max_dynamic_patch=max_dynamic_patch,
-            dynamic_image_size=dynamic_image_size,
-            use_thumbnail=False,  # Applied in image_to_pixel_values
-        )
-
-        return [
-            image_to_pixel_values_eagle2_5_vl(
-                image,
-                input_size=self.image_size,
-                min_num=min_num,
-                max_num=max_num,
-                use_thumbnail=self.use_thumbnail,
-            ) for image in images
-        ]
-
+    
 
 class Eagle2_5_VLProcessor(InternVLProcessor):
     """
