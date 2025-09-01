@@ -101,7 +101,8 @@ class QuarkConfig(QuantizationConfig):
             layer_quant_names = list(layer_quant_config.keys())
             layer_quant_set = set(layer_quant_names)
 
-            if not kv_cache_set.issubset(layer_quant_set):
+            if not (kv_cache_set.issubset(layer_quant_set) or \
+                any(fnmatch.fnmatchcase(layer_quant, pat) for layer_quant in list(layer_quant_set) for pat in list(kv_cache_set))):
                 raise ValueError("The Quark quantized model has the "
                                  "kv_cache_group parameter setting, "
                                  "but no kv_cache quantization settings "
@@ -112,8 +113,15 @@ class QuarkConfig(QuantizationConfig):
                 cast(dict[str, Any], layer_quant_config.get(name))
                 for name in kv_cache_group
             ]
+            if None in q_configs:
+                while None in q_configs:
+                    q_configs.remove(None)
+                for name, quant_cfg in layer_quant_config.items():
+                    if any(fnmatch.fnmatchcase(name, kv_pattern) for kv_pattern in kv_cache_group):
+                        q_configs.append(quant_cfg)
+
             if not all(
-                    deep_compare(q_config, q_configs[0])
+                    deep_compare(q_config["output_tensors"], q_configs[0]["output_tensors"])
                     for q_config in q_configs):
                 raise ValueError(
                     "The quantization method used for kv_cache should "
@@ -254,7 +262,7 @@ class QuarkConfig(QuantizationConfig):
 
     def _find_matched_config(self, layer_name: str,
                              module: torch.nn.Module) -> dict[str, Any]:
-
+        
         proj_name = layer_name.split(".")[-1]
         if proj_name in self.packed_modules_mapping:
             shard_proj_names = self.packed_modules_mapping[proj_name]
@@ -279,9 +287,11 @@ class QuarkConfig(QuantizationConfig):
         else:
             layer_quant_config = cast(
                 dict[str, Any], self.quant_config.get("layer_quant_config"))
+            layer_quant_configs = list()
             for name_pattern in layer_quant_config:
-                if fnmatch.fnmatch(layer_name, name_pattern):
-                    return layer_quant_config[name_pattern]
+                if layer_name in name_pattern:
+                    layer_quant_configs.append(layer_quant_config[name_pattern])
+                    return layer_quant_configs[0]
 
             layer_type = cast(str, type(module))
             layer_type_quant_config = cast(
