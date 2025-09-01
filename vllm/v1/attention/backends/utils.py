@@ -222,7 +222,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         raise NotImplementedError
 
     def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
+                      scheduler_output: "SchedulerOutput") -> tuple[bool, int]:
         """
         Update the order of requests in the batch based on the attention
         backend's needs. For example, some attention backends (namely MLA) may
