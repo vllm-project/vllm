@@ -3064,10 +3064,10 @@ class StructuredOutputsConfig:
     """Dataclass which contains structured outputs config for the engine."""
 
     backend: StructuredOutputsBackend = "auto"
-    """Which engine will be used for structured outputs (JSON schema / regex etc)
-    by default. With "auto", we will make opinionated choices based on request
-    contents and what the backend libraries currently support, so the behavior
-    is subject to change in each release."""  # noqa: E501
+    """Which engine will be used for structured outputs (e.g. JSON schema,
+    regex, etc) by default. With "auto", we will make opinionated choices
+    based on request contents and what the backend libraries currently support,
+    so the behavior is subject to change in each release."""
 
     disable_fallback: bool = False
     """If `True`, vLLM will not fallback to a different backend on error."""
@@ -3915,7 +3915,7 @@ class VllmConfig:
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
             f"device_config={self.device_config.device}, "
-            f"decoding_config={self.structured_outputs_config!r}, "
+            f"structured_outputs_config={self.structured_outputs_config!r}, "
             f"observability_config={self.observability_config!r}, "
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "
