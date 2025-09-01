@@ -489,30 +489,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                        sampling_metadata, **kwargs)
         return logits
 
-    def _consolidate_qkv_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        qkv_idx_mappings = {
-            ".self_attn.q_proj": 0,
-            ".self_attn.k_proj": 1,
-            ".self_attn.v_proj": 2,
-        }
-        qkv_weights = {}
-        for name, loaded_weight in weights:
-            for weight_name, idx in qkv_idx_mappings.items():
-                if weight_name not in name:
-                    continue
-                new_name = name.replace(weight_name, ".self_attn.qkv_proj")
-                if new_name not in qkv_weights:
-                    qkv_weights[new_name] = [None] * 3
-                qkv_weights[new_name][idx] = loaded_weight
-                break
-            else:
-                yield name, loaded_weight
-        for key, weight in qkv_weights.items():
-            qkv_weight = torch.cat(weight, dim=0)
-            yield key, qkv_weight
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         config = self.config.text_config
         _KEYS_TO_MODIFY_MAPPING = {
