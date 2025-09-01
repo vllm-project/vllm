@@ -658,7 +658,7 @@ class ClassifierPooler(Pooler):
             pooled_data = self.classifier(pooled_data)
         # pooled_data shape: [batchsize, num_labels]
 
-        if self.logit_bias:
+        if self.logit_bias is not None:
             pooled_data -= self.logit_bias
 
         pooling_params = get_pooling_params(pooling_metadata)
