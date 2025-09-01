@@ -174,13 +174,16 @@ class RequestState:
         num_computed_tokens: int,
         sampling_params: SamplingParams,
     ) -> None:
+        assert len(self.free_indices) > 0, "No free space in GPU worker states"
         req_idx = self.free_indices.pop()
         self.req_id_to_index[req_id] = req_idx
         self.index_to_req_id[req_idx] = req_id
 
-        self.num_prompt_tokens.np[req_idx] = len(prompt_token_ids)
+        prompt_len = len(prompt_token_ids)
+        self.num_prompt_tokens.np[req_idx] = prompt_len
+        self.num_tokens.np[req_idx] = prompt_len
+        self.token_ids.np[req_idx, :prompt_len] = prompt_token_ids
         self.num_computed_tokens.np[req_idx] = num_computed_tokens
-        self.append_token_ids(req_idx, prompt_token_ids)
 
         self.temperature.np[req_idx] = sampling_params.temperature
         if sampling_params.sampling_type == SamplingType.GREEDY:
