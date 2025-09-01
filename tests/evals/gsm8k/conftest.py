@@ -43,7 +43,8 @@ def pytest_generate_tests(metafunc):
         config_files = []
         if config_file:
             config_path = Path(__file__).parent / "configs" / config_file
-            assert config_path.exists(), f"Config file({config_path}) not found"
+            assert config_path.exists(
+            ), f"Config file({config_path}) not found"
             config_files.append(config_path)
         elif config_list_path.exists():
             # Determine config directory (same directory as the list file)
