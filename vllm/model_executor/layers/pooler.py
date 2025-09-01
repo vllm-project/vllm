@@ -639,7 +639,8 @@ class ClassifierPooler(Pooler):
         self.pooling = pooling
         self.classifier = classifier
         self.act_fn = act_fn or PoolerClassify()
-        self.logit_bias: Optional[float] = vllm_config.model_config.pooler_config.logit_bias
+        self.logit_bias: Optional[
+            float] = vllm_config.model_config.pooler_config.logit_bias
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"classify", "score"}
