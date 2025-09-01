@@ -106,7 +106,7 @@ class ApertusAttention(nn.Module):
 
     def __init__(
         self,
-        config: 'ApertusConfig',
+        config: ApertusConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
