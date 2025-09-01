@@ -48,6 +48,9 @@ docker run --rm \
             --dtype=bfloat16 \
             other vLLM OpenAI server arguments
 ```
+
+!!! note
+    If you see `get_mempolicy: Operation not permitted` inside Docker, add `--cap-add SYS_NICE --security-opt seccomp=unconfined` to the `docker run` command to permit NUMA-related syscalls so memory/thread affinity optimizations can take effect. `--privileged=true` also works but is broader and generally not recommended.
 # --8<-- [end:build-image-from-source]
 # --8<-- [start:extra-information]
 # --8<-- [end:extra-information]
