@@ -67,7 +67,7 @@ class BlockTables:
                                                dtype=torch.int32,
                                                device=self.device)
         self.num_blocks = torch.zeros(self.num_kv_cache_groups,
-                                      self.max_num_reqs,
+                                      self.max_num_cached_reqs,
                                       dtype=torch.int32,
                                       device=self.device)
         self.slot_mappings = torch.zeros(self.num_kv_cache_groups,
@@ -119,8 +119,7 @@ class BlockTables:
         self.overwrite.np[:num_reqs] = overwrite
         for i in range(self.num_kv_cache_groups):
             self.cu_num_new_blocks.np[i, :num_reqs + 1] = cu_num_new_blocks[i]
-            n = len(new_block_ids[i])
-            self.new_block_ids.np[i, :n] = new_block_ids[i]
+            self.new_block_ids.np[i, :len(new_block_ids[i])] = new_block_ids[i]
 
         _append_block_ids_kernel[(num_reqs, self.num_kv_cache_groups)](
             self.req_indices.copy_to_gpu(num_reqs),
@@ -154,17 +153,17 @@ class BlockTables:
 
     def compute_slot_mappings(
         self,
-        cu_num_tokens: torch.Tensor,
-        pos: torch.Tensor,
-        num_tokens: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
-        num_reqs = cu_num_tokens.shape[0] - 1
+        num_reqs = query_start_loc.shape[0] - 1
+        num_tokens = positions.shape[0]
         num_groups = self.num_kv_cache_groups
         _compute_slot_mappings_kernel[(num_reqs + 1, num_groups)](
             num_tokens,
             self.max_num_batched_tokens,
-            cu_num_tokens,
-            pos,
+            query_start_loc,
+            positions,
             self.block_table_ptrs,
             self.block_table_strides,
             self.block_sizes_tensor,
@@ -188,7 +187,7 @@ def _append_block_ids_kernel(
     block_table_strides,  # [num_kv_cache_groups]
     # Outputs
     block_table_buffer_ptrs,  # [num_kv_cache_groups]
-    num_blocks_ptr,  # [num_kv_cache_groups, max_num_reqs]
+    num_blocks_ptr,  # [num_kv_cache_groups, max_num_cached_reqs]
     num_blocks_stride,
     # Constants
     BLOCK_SIZE: tl.constexpr,
@@ -235,7 +234,7 @@ def _compute_block_tables_kernel(
     src_block_table_ptrs,  # [num_kv_cache_groups]
     dst_block_table_ptrs,  # [num_kv_cache_groups]
     block_table_strides,  # [num_kv_cache_groups]
-    num_blocks_ptr,  # [num_kv_cache_groups, max_num_reqs]
+    num_blocks_ptr,  # [num_kv_cache_groups, max_num_cached_reqs]
     num_blocks_stride,
     BLOCK_SIZE: tl.constexpr,
 ):

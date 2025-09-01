@@ -16,8 +16,8 @@ class SamplingMetadata:
     all_greedy: bool
     all_random: bool
 
-    top_p: torch.Tensor
-    top_k: torch.Tensor
+    top_p: Optional[torch.Tensor]
+    top_k: Optional[torch.Tensor]
 
     generators: dict[int, torch.Generator]
 

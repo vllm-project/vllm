@@ -227,16 +227,6 @@ class RequestState:
         self.token_ids.np[req_idx, start_idx:end_idx] = token_ids
         self.num_tokens.np[req_idx] = end_idx
 
-    def append_sampled_token_ids(
-        self,
-        idx_mapping: np.ndarray,
-        sampled_token_ids: np.ndarray,
-    ) -> None:
-        num_reqs = idx_mapping.shape[0]
-        for i in range(num_reqs):
-            req_idx = idx_mapping[i]
-            self.append_token_ids(req_idx, sampled_token_ids[i])
-
     def remove_request(self, req_id: str) -> None:
         req_idx = self.req_id_to_index.pop(req_id, None)
         if req_idx is None:

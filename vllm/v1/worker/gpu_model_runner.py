@@ -262,15 +262,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
 
-        self.block_tables = BlockTables(
-            block_sizes=[self.cache_config.block_size],
-            max_num_reqs=self.max_num_reqs,
-            max_num_cached_reqs=2 * self.max_num_reqs,
-            max_num_batched_tokens=self.max_num_tokens,
-            max_model_len=self.max_model_len,
-            device=self.device,
-            pin_memory=self.pin_memory,
-        )
         self.idx_mapping = self._make_buffer(self.max_num_reqs,
                                              dtype=torch.int32)
 
@@ -581,7 +572,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Compute the slot mappings on GPUs.
         slot_mappings = self.block_tables.compute_slot_mappings(
-            query_start_loc, self.positions.gpu, total_num_scheduled_tokens)
+            query_start_loc, self.positions.gpu[:total_num_scheduled_tokens])
 
         if self.uses_mrope:
             self._calc_mrope_positions(req_ids, num_scheduled_tokens)
@@ -635,8 +626,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Used in the below loop.
         query_start_loc_cpu = self.query_start_loc.cpu[:num_reqs + 1]
         seq_lens_cpu = self.seq_lens.cpu[:num_reqs]
-        num_computed_tokens_cpu = (
-            self.requests.num_computed_tokens.cpu[:num_reqs])
+        num_computed_tokens_np = self.requests.num_computed_tokens.np[
+            idx_mapping_np]
+        num_computed_tokens_cpu = torch.from_numpy(num_computed_tokens_np)
         spec_decode_common_attn_metadata = None
 
         attn_metadata: dict[str, Any] = {}
@@ -1444,15 +1436,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             sampler_output.sampled_token_ids = output_token_ids
 
-        for i in range(input_batch.num_reqs):
-            req_idx = input_batch.idx_mapping_np[i]
-            num_tokens = input_batch.num_scheduled_tokens[i]
-            self.requests.num_computed_tokens.np[req_idx] += num_tokens
-
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             num_nans_in_logits = self._get_nans_in_logits(
                 input_batch.req_ids, logits)
+
+        # TODO(woosuk): The following loop can be slow since it iterates over
+        # the requests one by one. Optimize.
+        discard_sampled_tokens_req_indices: list[int] = []
+        for i, req_id in enumerate(input_batch.req_ids):
+            req_idx = self.requests.req_id_to_index[req_id]
+            seq_len = (self.requests.num_computed_tokens.np[req_idx] +
+                       input_batch.num_scheduled_tokens[i])
+            if seq_len < self.requests.num_tokens.np[req_idx]:
+                # Ignore the sampled token for partial prefills.
+                # Rewind the generator state as if the token was not sampled.
+                # This relies on cuda-specific torch-internal impl details
+                generator = self.requests.generators.get(req_idx)
+                if generator is not None:
+                    generator.set_offset(generator.get_offset() - 4)
+                # Record the index of the request that should not be sampled,
+                # so that we could clear the sampled tokens before returning.
+                discard_sampled_tokens_req_indices.append(i)
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
@@ -1471,23 +1476,36 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         max_gen_len = sampled_token_ids.shape[-1]
         if max_gen_len == 1:
             # No spec decode tokens.
-            valid_sampled_token_ids_np = sampled_token_ids.cpu().numpy()
-            valid_sampled_token_ids = valid_sampled_token_ids_np.tolist()
-            # valid_sampled_token_ids = self._to_list(sampled_token_ids)
+            valid_sampled_token_ids = self._to_list(sampled_token_ids)
         else:
             # Includes spec decode tokens.
             valid_sampled_token_ids = self.rejection_sampler.parse_output(
                 sampled_token_ids, self.vocab_size)
+        # Mask out the sampled tokens that should not be sampled.
+        for i in discard_sampled_tokens_req_indices:
+            valid_sampled_token_ids[i].clear()
 
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
         # NOTE(woosuk): As an exception, when using PP, the scheduler sends
         # the sampled tokens back, because there's no direct communication
         # between the first-stage worker and the last-stage worker.
-        self.requests.append_sampled_token_ids(
-            input_batch.idx_mapping_np,
-            valid_sampled_token_ids,
-        )
+        for i, req_id in enumerate(input_batch.req_ids):
+            sampled_ids = valid_sampled_token_ids[i]
+            if not sampled_ids:
+                continue
+            req_idx = self.requests.req_id_to_index[req_id]
+
+            start_idx = self.requests.num_tokens.np[req_idx]
+            end_idx = start_idx + len(sampled_ids)
+            assert end_idx <= self.max_model_len, (
+                "Sampled token IDs exceed the max model length. "
+                f"Total number of tokens: {end_idx} > max_model_len: "
+                f"{self.max_model_len}")
+
+            self.requests.token_ids.np[req_idx,
+                                       start_idx:end_idx] = sampled_ids
+            self.requests.num_tokens.np[req_idx] = end_idx
 
         if self.speculative_config:
             assert input_batch.spec_decode_common_attn_metadata is not None
@@ -1648,14 +1666,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 draft_token_ids.append([])
                 continue
 
-            # Skip requests that require sampling parameters that are not
-            # supported with speculative decoding.
-            req_id = input_batch.req_ids[i]
-            if req_id in self.requests.spec_decode_unsupported_reqs:
-                draft_token_ids.append([])
-                continue
+            # # Skip requests that require sampling parameters that are not
+            # # supported with speculative decoding.
+            # req_id = input_batch.req_ids[i]
+            # if req_id in self.requests.spec_decode_unsupported_reqs:
+            #     draft_token_ids.append([])
+            #     continue
 
-            num_tokens = self.requests.num_tokens_no_spec[i]
+            num_tokens = self.requests.num_tokens.np[i]
             if num_tokens >= self.max_model_len:
                 # Skip requests that have already reached the max model length.
                 draft_token_ids.append([])
@@ -2824,6 +2842,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 else:
                     break
 
+    def init_block_tables(self, kv_cache_config: KVCacheConfig) -> None:
+        block_sizes = [
+            kv_cache_group.kv_cache_spec.block_size
+            for kv_cache_group in kv_cache_config.kv_cache_groups
+        ]
+        self.block_tables = BlockTables(
+            block_sizes=block_sizes,
+            max_num_reqs=self.max_num_reqs,
+            max_num_cached_reqs=2 * self.max_num_reqs,
+            max_num_batched_tokens=self.max_num_tokens,
+            max_model_len=self.max_model_len,
+            device=self.device,
+            pin_memory=self.pin_memory,
+        )
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -2833,6 +2866,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        self.init_block_tables(kv_cache_config)
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
