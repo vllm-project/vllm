@@ -3,7 +3,7 @@
 
 from collections.abc import Iterable, Mapping, MutableSequence
 from typing import (TYPE_CHECKING, ClassVar, Literal, Optional, Protocol,
-                    TypeVar, Union, overload, runtime_checkable)
+                    Union, overload, runtime_checkable)
 
 import numpy as np
 import torch
@@ -50,6 +50,18 @@ class SupportsMultiModal(Protocol):
     Note:
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
+    """
+
+    supports_multimodal_raw_input_only: ClassVar[bool] = False
+    """
+    A flag that indicates this model supports multi-modal inputs and processes
+    them in their raw form and not embeddings.
+    """
+
+    supports_encoder_tp_data: ClassVar[bool] = False
+    """
+    A flag that indicates whether this model supports
+    `multimodal_config.mm_encoder_tp_mode="data"`.
     """
 
     @classmethod
@@ -137,38 +149,14 @@ def supports_multimodal(
     return getattr(model, "supports_multimodal", False)
 
 
-@runtime_checkable
-class SupportsMultiModalWithRawInput(SupportsMultiModal, Protocol):
-    """The interface required for all multi-modal models."""
-
-    supports_multimodal_raw_input: ClassVar[Literal[True]] = True
-    """
-    A flag that indicates this model supports multi-modal inputs and processes
-    them in their raw form and not embeddings.
-
-    Note:
-        There is no need to redefine this flag if this class is in the
-        MRO of your model class.
-    """
+def supports_multimodal_raw_input_only(
+        model: Union[type[object], object]) -> bool:
+    return getattr(model, "supports_multimodal_raw_input_only", False)
 
 
-@overload
-def supports_multimodal_raw_input(
-        model: object) -> TypeIs[SupportsMultiModalWithRawInput]:
-    ...
-
-
-@overload
-def supports_multimodal_raw_input(
-        model: type[object]) -> TypeIs[type[SupportsMultiModalWithRawInput]]:
-    ...
-
-
-def supports_multimodal_raw_input(
-    model: Union[type[object], object]
-) -> Union[TypeIs[type[SupportsMultiModalWithRawInput]],
-           TypeIs[SupportsMultiModalWithRawInput]]:
-    return getattr(model, "supports_multimodal_raw_input", False)
+def supports_multimodal_encoder_tp_data(
+        model: Union[type[object], object]) -> bool:
+    return getattr(model, "supports_encoder_tp_data", False)
 
 
 @runtime_checkable
@@ -639,23 +627,6 @@ def supports_cross_encoding(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
     return is_pooling_model(model) and _supports_cross_encoding(model)
-
-
-_T = TypeVar("_T", bound=type[torch.nn.Module])
-
-
-def default_pooling_type(pooling_type: str):
-    """Set default_pooling_type decorator. """
-
-    def func(model: _T) -> _T:
-        model.default_pooling_type = pooling_type  # type: ignore
-        return model
-
-    return func
-
-
-def get_default_pooling_type(model: Union[type[object], object]) -> str:
-    return getattr(model, "default_pooling_type", "LAST")
 
 
 class SupportsQuant:

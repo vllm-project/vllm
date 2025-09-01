@@ -53,8 +53,11 @@ async def test_basic_audio(mary_had_lamb, model_name):
             language="en",
             response_format="text",
             temperature=0.0)
-        out = json.loads(transcription)['text']
-        assert "Mary had a little lamb," in out
+        out = json.loads(transcription)
+        out_text = out['text']
+        out_usage = out['usage']
+        assert "Mary had a little lamb," in out_text
+        assert out_usage["seconds"] == 16, out_usage["seconds"]
 
 
 @pytest.mark.asyncio
@@ -119,9 +122,12 @@ async def test_long_audio_request(mary_had_lamb, client):
         language="en",
         response_format="text",
         temperature=0.0)
-    out = json.loads(transcription)['text']
-    counts = out.count("Mary had a little lamb")
+    out = json.loads(transcription)
+    out_text = out['text']
+    out_usage = out['usage']
+    counts = out_text.count("Mary had a little lamb")
     assert counts == 10, counts
+    assert out_usage["seconds"] == 161, out_usage["seconds"]
 
 
 @pytest.mark.asyncio
