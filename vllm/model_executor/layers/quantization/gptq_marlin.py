@@ -701,32 +701,27 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias)
 
-        import time
-        start_time = time.time()
-        for _ in range(1000):
-            res = fused_marlin_moe(
-                x,
-                layer.w13_qweight,
-                layer.w2_qweight,
-                getattr(layer, "w13_bias", None),
-                getattr(layer, "w2_bias", None),
-                layer.w13_scales,
-                layer.w2_scales,
-                router_logits,
-                topk_weights,
-                topk_ids,
-                input_global_scale1=getattr(layer, "w13_input_global_scale", None),
-                input_global_scale2=getattr(layer, "w2_input_global_scale", None),
-                quant_type_id=self.quant_type.id,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                g_idx1=layer.w13_g_idx,
-                g_idx2=layer.w2_g_idx,
-                sort_indices1=layer.w13_g_idx_sort_indices,
-                sort_indices2=layer.w2_g_idx_sort_indices,
-                workspace=layer.workspace,
-                is_k_full=self.is_k_full,
-                input_dtype=self.input_dtype)
-        print(time.time() - start_time)
-        return res
+        return torch.ops.vllm.fused_marlin_moe(
+            x,
+            layer.w13_qweight,
+            layer.w2_qweight,
+            getattr(layer, "w13_bias", None),
+            getattr(layer, "w2_bias", None),
+            layer.w13_scales,
+            layer.w2_scales,
+            router_logits,
+            topk_weights,
+            topk_ids,
+            input_global_scale1=getattr(layer, "w13_input_global_scale", None),
+            input_global_scale2=getattr(layer, "w2_input_global_scale", None),
+            quant_type_id=self.quant_type.id,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            g_idx1=layer.w13_g_idx,
+            g_idx2=layer.w2_g_idx,
+            sort_indices1=layer.w13_g_idx_sort_indices,
+            sort_indices2=layer.w2_g_idx_sort_indices,
+            workspace=layer.workspace,
+            is_k_full=self.is_k_full,
+            input_dtype=self.input_dtype)

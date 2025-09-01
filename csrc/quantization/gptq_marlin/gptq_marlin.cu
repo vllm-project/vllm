@@ -433,8 +433,13 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       thread_tfg = exec_cfg.tb_cfg;
       if (thread_tfg.thread_n != -1) {
         if (prob_n / thread_tfg.thread_n * div_ceil(prob_m_split, thread_m_blocks * 16) * 4 <= sms) {
-          thread_tfg = {128, 64, 128};
-          exec_cfg = {1, thread_tfg};
+
+          if (is_valid_config({128, 64, 128}, thread_m_blocks, prob_m_split, prob_n,
+                        prob_k, num_bits, group_size, has_act_order, is_k_full,
+                        has_zp, is_zp_float, max_shared_mem_new)) {
+            thread_tfg = {128, 64, 128};
+            exec_cfg = {1, thread_tfg};
+          }
         }
       }
 

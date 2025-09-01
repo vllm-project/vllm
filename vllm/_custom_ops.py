@@ -1587,15 +1587,13 @@ def moe_wna16_marlin_gemm(input: torch.Tensor,
                           is_k_full: bool,
                           use_atomic_add: bool,
                           use_fp32_reduce: bool,
-                          is_zp_float: bool,
-                          moe_blocks_per_exec: int = -1) -> torch.Tensor:
+                          is_zp_float: bool) -> torch.Tensor:
     return torch.ops._moe_C.moe_wna16_marlin_gemm(
         input, output, b_qweight, b_bias, b_scales, a_scales, global_scale,
         b_qzeros, g_idx, perm, workspace, sorted_token_ids, expert_ids,
         num_tokens_past_padded, topk_weights, moe_block_size, top_k,
         mul_topk_weights, is_ep, b_q_type.id, size_m, size_n, size_k,
-        is_k_full, use_atomic_add, use_fp32_reduce, is_zp_float,
-        moe_blocks_per_exec)
+        is_k_full, use_atomic_add, use_fp32_reduce, is_zp_float)
 
 
 if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
@@ -1643,8 +1641,7 @@ if supports_moe_ops and hasattr(torch.ops._moe_C, "marlin_gemm_moe"):
                                    is_k_full: bool,
                                    use_atomic_add: bool,
                                    use_fp32_reduce: bool,
-                                   is_zp_float: bool,
-                                   moe_blocks_per_exec: int = -1):
+                                   is_zp_float: bool):
         return torch.empty((size_m * top_k, size_n),
                            dtype=input.dtype,
                            device=input.device)

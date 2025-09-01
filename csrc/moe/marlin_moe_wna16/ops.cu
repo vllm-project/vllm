@@ -525,7 +525,6 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
                 ", num_bits = ", num_bits);
   }
 
-  max_shared_mem = 90000;
   cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                        max_shared_mem);
   // avoid ">>>" being formatted to "> > >"

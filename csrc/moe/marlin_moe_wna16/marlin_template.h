@@ -502,16 +502,16 @@ __global__ void Marlin(
   int n_tiles = prob_n / 16 / thread_n_blocks;
 
   int global_mn_tiles = parallel * n_tiles;
-  int part1_mn_tiles = global_mn_tiles;
-  int part2_mn_iters = 0;
+  int part2_mn_tiles = global_mn_tiles;
+  int part1_mn_iters = 0;
   bool in_part2 = false;
 
   if (global_mn_tiles > gridDim.x) {
-    part1_mn_tiles = global_mn_tiles % gridDim.x + gridDim.x;
-    part2_mn_iters = (global_mn_tiles - part1_mn_tiles) / gridDim.x;
+    part2_mn_tiles = global_mn_tiles % gridDim.x;
+    part1_mn_iters = (global_mn_tiles - part2_mn_tiles) / gridDim.x;
   }
 
-  int iters = div_ceil(k_tiles * part1_mn_tiles, gridDim.x);
+  int iters = div_ceil(k_tiles * part2_mn_tiles, gridDim.x);
 
   if constexpr (!has_act_order && group_blocks != -1) {
     if (group_blocks >= thread_k_blocks) {
@@ -523,14 +523,14 @@ __global__ void Marlin(
     }
   }
 
-  int slice_row = (iters * blockIdx.x) % k_tiles;
-  int slice_col_par = (iters * blockIdx.x) / k_tiles;
-  int slice_col = slice_col_par;
-  int slice_iters;  // number of threadblock tiles in the current slice
-  int slice_count =
-      0;          // total number of active threadblocks in the current slice
-  int slice_idx;  // index of threadblock in current slice; numbered bottom to
-                  // top
+  int slice_row = 0;
+  int slice_col_par = blockIdx.x;
+  int slice_col;
+  int slice_iters = k_tiles;  // number of threadblock tiles in the current slice
+  // total number of active threadblocks in the current slice
+  int slice_count = 1;
+  // index of threadblock in current slice; numbered bottom to top
+  int slice_idx = 0;
 
   int par_id = 0;
   int block_id = -1;
@@ -560,12 +560,8 @@ __global__ void Marlin(
 
   // We can easily implement parallel problem execution by just remapping
   // indices and advancing global pointers
-  if (slice_col_par >= n_tiles) {
-    slice_col = slice_col_par % n_tiles;
-    par_id = slice_col_par / n_tiles;
-  }
-  if (part1_mn_tiles >= gridDim.x) {
-    // when part1_mn_tiles >= sms
+  if (part2_mn_tiles >= gridDim.x) {
+    // when part2_mn_tiles >= sms
     // then there are at most $sms$ conflict tile blocks
     locks_off = blockIdx.x;
   } else {
@@ -606,8 +602,12 @@ __global__ void Marlin(
       sh_rd_block_sorted_ids[threadIdx.x] = idx / top_k;
 
       if (mul_topk_weights) {
-        sh_block_topk_weights[threadIdx.x] = Cdtype::num2num2(
+        c_scalar_t2 topk_weight_val = Cdtype::num2num2(
             Cdtype::float2num(topk_weights_ptr[idx]));
+        if constexpr (b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn) {
+          topk_weight_val = __hmul2(topk_weight_val, global_scale);
+        }
+        sh_block_topk_weights[threadIdx.x] = topk_weight_val;
       }
     }
 
@@ -662,10 +662,11 @@ __global__ void Marlin(
 
   // Compute all information about the current slice which is required for
   // synchronization.
-  auto init_part1_slice = [&](bool first_init = false) {
+  bool first_init = true;
+  auto init_part2_slice = [&]() {
     slice_iters =
         iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
-    if (slice_iters < 0 || slice_col_par >= part1_mn_tiles) slice_iters = 0;
+    if (slice_iters < 0 || slice_col_par >= part2_mn_tiles) slice_iters = 0;
     if (slice_iters == 0) return;
     if (slice_row + slice_iters > k_tiles) slice_iters = k_tiles - slice_row;
     slice_count = 1;
@@ -683,7 +684,7 @@ __global__ void Marlin(
         if (col_off > 0) slice_idx--;
       }
     }
-    if (part1_mn_tiles >= gridDim.x) {
+    if (part2_mn_tiles >= gridDim.x) {
       if (slice_count > 1 && slice_idx == slice_count - 1) {
         locks_off++;
       }
@@ -725,9 +726,9 @@ __global__ void Marlin(
     }
   };
 
-  auto init_part2_slice = [&]() {
-    if (part2_mn_iters) {
-      part2_mn_iters--;
+  auto init_part1_slice = [&]() {
+    if (part1_mn_iters) {
+      part1_mn_iters--;
       par_id = slice_col_par / n_tiles;
       slice_col = slice_col_par % n_tiles;
       slice_iters = k_tiles;
@@ -741,23 +742,24 @@ __global__ void Marlin(
     }
   };
 
-  auto init_slice = [&](bool first_init = false) {
-    if (in_part2) {
-      init_part2_slice();
+  auto init_slice = [&]() {
+    if (!in_part2 && !part1_mn_iters) {
+      in_part2 = true;
+      slice_col_par = (iters * blockIdx.x) / k_tiles;
+      slice_row = (iters * blockIdx.x) % k_tiles;
+      slice_col = (slice_col_par + global_mn_tiles - part2_mn_tiles) % n_tiles;
+      par_id = (slice_col_par + global_mn_tiles - part2_mn_tiles) / n_tiles;
+      update_next_moe_block_data();
+    }
+    if (!in_part2) {
+      init_part1_slice();
     } else {
-      init_part1_slice(first_init);
-      if (slice_iters == 0 && part2_mn_iters) {
-        in_part2 = true;
-        slice_col_par = part1_mn_tiles + blockIdx.x;
-        slice_count = 1;
-        slice_idx = 0;
-        init_part2_slice();
-      }
+      init_part2_slice();
+      first_init = false;
     }
   };
 
-  update_next_moe_block_data();
-  init_slice(true);
+  init_slice();
 
   // A sizes/strides
 
@@ -1069,7 +1071,7 @@ __global__ void Marlin(
   // shared memory pipeline location.
   auto fetch_to_shared = [&](int pipe, int a_off, bool pred = true) {
     if (pred) {
-      int4* sh_a_stage = sh_a + a_sh_stage * pipe;
+      int4* sh_a_stage = sh_a + moe_block_size * a_sh_stride * pipe;
   #pragma unroll
       for (int i = 0; i < a_sh_wr_iters; i++) {
         int row = a_gl_rd_delta_i / a_gl_stride * i + a_gl_rd_row;
@@ -1937,18 +1939,19 @@ __global__ void Marlin(
           c_scalar_t2* sh_red_half2 =
               reinterpret_cast<c_scalar_t2*>(&sh_red[c_sh_rd]);
           if (mul_topk_weights) {
-            c_scalar_t2 res[4];
   #pragma unroll
             for (int a = 0; a < 4; a++) {
-              res[a] = __hmul2(sh_red_half2[a], topk_weight_score);
+              sh_red_half2[a] = __hmul2(sh_red_half2[a], topk_weight_score);
             }
-            C[true_idx] = *reinterpret_cast<int4*>(res);
+          }
 
-          } else if (use_atomic_add && slice_count > 1) {
+          if (use_atomic_add && slice_count > 1) {
   #pragma unroll
             for (int a = 0; a < 4; a++) {
               atomicAdd(&C_half2[a], sh_red_half2[a]);
             }
+          } else {
+            C[true_idx] = *reinterpret_cast<int4*>(sh_red_half2);
           }
         } else {
           C[true_idx] = sh_red[c_sh_rd];
@@ -2221,7 +2224,7 @@ __global__ void Marlin(
         // only the last block in a slice actually writes the result
         write_result(last);
       slice_row = 0;
-      if (in_part2) {
+      if (!in_part2) {
         slice_col_par += gridDim.x;
       } else {
         slice_col_par++;
@@ -2231,10 +2234,10 @@ __global__ void Marlin(
       init_slice();
 
       if (slice_iters) {
-        a_gl_rd_col = (threadIdx.x % a_gl_rd_delta_o);
+        a_gl_rd_col = a_gl_rd_delta_o * slice_row + threadIdx.x % a_gl_rd_delta_o;
         b_gl_rd = B_expert_off + b_gl_stride * (threadIdx.x / b_sh_stride) +
                   (threadIdx.x % b_sh_stride);
-        b_gl_rd += b_sh_stride * slice_col;
+        b_gl_rd += b_sh_stride * slice_col + b_gl_rd_delta_o * slice_row;
 
         bias_gl_rd = (thread_n_blocks * 16 / 8) * slice_col + threadIdx.x;
         // Update slice k/n for scales loading
@@ -2244,14 +2247,21 @@ __global__ void Marlin(
           slice_k_start_shared_fetch = slice_k_start;
           slice_n_offset = act_s_col_tb_stride * slice_col;
         } else {
-          if constexpr (group_blocks >= thread_k_blocks || group_blocks == -1) {
+          if constexpr (group_blocks == -1) {
             s_gl_rd = s_sh_stride * slice_col + threadIdx.x;
             zp_gl_rd = zp_sh_stride * slice_col + threadIdx.x;
+          } else if constexpr (group_blocks >= thread_k_blocks) {
+            s_gl_rd = s_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) +
+                      s_sh_stride * slice_col + threadIdx.x;
+            zp_gl_rd = zp_gl_stride * ((thread_k_blocks * slice_row) / group_blocks) +
+                      zp_sh_stride * slice_col + threadIdx.x;
           } else {
-            s_gl_rd = s_gl_stride * (threadIdx.x / s_sh_stride) +
+            s_gl_rd = s_gl_stride * ((thread_k_blocks * slice_row) / group_blocks +
+                                    threadIdx.x / s_sh_stride) +
                       s_sh_stride * slice_col + threadIdx.x % s_sh_stride;
-            zp_gl_rd = zp_gl_stride * (threadIdx.x / zp_sh_stride) +
-                       zp_sh_stride * slice_col + threadIdx.x % zp_sh_stride;
+            zp_gl_rd = zp_gl_stride * ((thread_k_blocks * slice_row) / group_blocks +
+                                      threadIdx.x / zp_sh_stride) +
+                      zp_sh_stride * slice_col + threadIdx.x % zp_sh_stride;
           }
         }
         start_pipes();

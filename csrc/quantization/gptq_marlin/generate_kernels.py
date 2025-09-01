@@ -42,65 +42,86 @@ THREAD_CONFIGS = [(128, 128, 256), (64, 256, 256), (64, 128, 128),
 THREAD_M_BLOCKS = [0.5, 1, 2, 3, 4]
 
 
-QUANT_CONFIGS = [{
-    "b_type": "kU4",
-    "thread_configs": THREAD_CONFIGS,
-    "thread_m_blocks": THREAD_M_BLOCKS,
-    "group_blocks": [-1, 2, 4, 8]
-}, {
-    "a_type": ["kFloat16"],
-    "b_type": "kU4",
-    "thread_configs": THREAD_CONFIGS,
-    "thread_m_blocks": THREAD_M_BLOCKS,
-    "group_blocks": [4],
-    "is_zp_float": True
-}, {
-    "b_type": "kU4B8",
-    "thread_configs": THREAD_CONFIGS,
-    "thread_m_blocks": THREAD_M_BLOCKS,
-    "group_blocks": [-1, 0, 2, 4, 8]
-}, {
-    "b_type": "kU8B128",
-    "thread_configs": THREAD_CONFIGS,
-    "thread_m_blocks": THREAD_M_BLOCKS,
-    "group_blocks": [-1, 0, 2, 4, 8]
-}, {
-    "b_type": "kFE4M3fn",
-    "thread_configs": THREAD_CONFIGS,
-    "thread_m_blocks": THREAD_M_BLOCKS,
-    "group_blocks": [-1, 8]
-}, {
-    "b_type": "kFE2M1f",
-    "s_type": "kFE4M3fn",
-    "thread_configs": THREAD_CONFIGS,
-    "thread_m_blocks": THREAD_M_BLOCKS,
-    "group_blocks": [1]
-}, {
-    "a_type": ["kBFloat16"],
-    "b_type": "kFE2M1f",
-    "s_type": "kFE8M0fnu",
-    "thread_configs": THREAD_CONFIGS,
-    "thread_m_blocks": THREAD_M_BLOCKS,
-    "group_blocks": [2]
-}, {
-    "a_type": ["kS8"],
-    "b_type": "kU4",
-    "thread_configs": THREAD_CONFIGS,
-    "thread_m_blocks": [1, 2, 3, 4],
-    "group_blocks": [-1, 2, 4, 8]
-}, {
-    "a_type": ["kS8"],
-    "b_type": "kU4B8",
-    "thread_configs": THREAD_CONFIGS,
-    "thread_m_blocks": [1, 2, 3, 4],
-    "group_blocks": [-1, 2, 4, 8]
-}, {
-    "a_type": ["kS8"],
-    "b_type": "kS8",
-    "thread_configs": THREAD_CONFIGS,
-    "thread_m_blocks": [1, 2, 3, 4],
-    "group_blocks": [-1, 2, 4, 8]
-}]
+QUANT_CONFIGS = [
+    # AWQ-INT4
+    {
+        "b_type": "kU4",
+        "thread_configs": THREAD_CONFIGS,
+        "thread_m_blocks": THREAD_M_BLOCKS,
+        "group_blocks": [-1, 2, 4, 8]
+    },
+    # HQQ
+    {
+        "a_type": ["kFloat16"],
+        "b_type": "kU4",
+        "thread_configs": THREAD_CONFIGS,
+        "thread_m_blocks": THREAD_M_BLOCKS,
+        "group_blocks": [4],
+        "is_zp_float": True
+    },
+    # GPTQ-INT4
+    {
+        "b_type": "kU4B8",
+        "thread_configs": THREAD_CONFIGS,
+        "thread_m_blocks": THREAD_M_BLOCKS,
+        "group_blocks": [-1, 0, 2, 4, 8]
+    },
+    # GPTQ-INT8
+    {
+        "b_type": "kU8B128",
+        "thread_configs": THREAD_CONFIGS,
+        "thread_m_blocks": THREAD_M_BLOCKS,
+        "group_blocks": [-1, 0, 2, 4, 8]
+    },
+    # FP8
+    {
+        "b_type": "kFE4M3fn",
+        "thread_configs": THREAD_CONFIGS,
+        "thread_m_blocks": THREAD_M_BLOCKS,
+        "group_blocks": [-1, 8]
+    },
+    # NVFP4
+    {
+        "b_type": "kFE2M1f",
+        "s_type": "kFE4M3fn",
+        "thread_configs": THREAD_CONFIGS,
+        "thread_m_blocks": THREAD_M_BLOCKS,
+        "group_blocks": [1]
+    },
+    # MXFP4
+    {
+        "a_type": ["kBFloat16"],
+        "b_type": "kFE2M1f",
+        "s_type": "kFE8M0fnu",
+        "thread_configs": THREAD_CONFIGS,
+        "thread_m_blocks": THREAD_M_BLOCKS,
+        "group_blocks": [2]
+    },
+    # AWQ-INT4 with INT8 activation
+    {
+        "a_type": ["kS8"],
+        "b_type": "kU4",
+        "thread_configs": THREAD_CONFIGS,
+        "thread_m_blocks": [1, 2, 3, 4],
+        "group_blocks": [-1, 2, 4, 8]
+    },
+    # GPTQ-INT4 with INT8 activation
+    {
+        "a_type": ["kS8"],
+        "b_type": "kU4B8",
+        "thread_configs": THREAD_CONFIGS,
+        "thread_m_blocks": [1, 2, 3, 4],
+        "group_blocks": [-1, 2, 4, 8]
+    },
+    # GPTQ-INT8 with INT8 activation
+    {
+        "a_type": ["kS8"],
+        "b_type": "kS8",
+        "thread_configs": THREAD_CONFIGS,
+        "thread_m_blocks": [1, 2, 3, 4],
+        "group_blocks": [-1, 2, 4, 8]
+    }
+]
 
 
 def remove_old_kernels():
