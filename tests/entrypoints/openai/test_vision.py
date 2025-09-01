@@ -17,10 +17,10 @@ MAXIMUM_IMAGES = 2
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_URLS = [
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/f/fa/Grayscale_8bits_palette_sample_image.png",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/9/91/Venn_diagram_rgb.svg/1280px-Venn_diagram_rgb.svg.png",
-    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
+    "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+    "Grayscale_8bits_palette_sample_image.png",  # "https://upload.wikimedia.org/wikipedia/commons/f/fa/Grayscale_8bits_palette_sample_image.png",
+    "1280px-Venn_diagram_rgb.svg.png",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/9/91/Venn_diagram_rgb.svg/1280px-Venn_diagram_rgb.svg.png",
+    "RGBA_comp.png",  # "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
 ]
 
 EXPECTED_MM_BEAM_SEARCH_RES = [
@@ -69,9 +69,10 @@ async def client(server):
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image() -> dict[str, str]:
+def base64_encoded_image(local_asset_server) -> dict[str, str]:
     return {
-        image_url: encode_image_base64(fetch_image(image_url))
+        image_url:
+        encode_image_base64(local_asset_server.get_image_data(image_url))
         for image_url in TEST_IMAGE_URLS
     }
 
@@ -97,7 +98,7 @@ def get_hf_prompt_tokens(model_name, content, image_url):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS, indirect=True)
 async def test_single_chat_session_image(client: openai.AsyncOpenAI,
                                          model_name: str, image_url: str):
     content_text = "What's in this image?"
@@ -157,7 +158,7 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS, indirect=True)
 async def test_error_on_invalid_image_url_type(client: openai.AsyncOpenAI,
                                                model_name: str,
                                                image_url: str):
@@ -187,7 +188,7 @@ async def test_error_on_invalid_image_url_type(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS, indirect=True)
 async def test_single_chat_session_image_beamsearch(client: openai.AsyncOpenAI,
                                                     model_name: str,
                                                     image_url: str):
@@ -223,7 +224,7 @@ async def test_single_chat_session_image_beamsearch(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS, indirect=True)
 async def test_single_chat_session_image_base64encoded(
         client: openai.AsyncOpenAI, model_name: str, image_url: str,
         base64_encoded_image: dict[str, str]):
@@ -287,13 +288,13 @@ async def test_single_chat_session_image_base64encoded(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_idx", list(range(len(TEST_IMAGE_URLS))))
+@pytest.mark.parametrize(("image_url", "expected_res"),
+                         zip(TEST_IMAGE_URLS, EXPECTED_MM_BEAM_SEARCH_RES),
+                         indirect=True)
 async def test_single_chat_session_image_base64encoded_beamsearch(
-        client: openai.AsyncOpenAI, model_name: str, image_idx: int,
-        base64_encoded_image: dict[str, str]):
+        client: openai.AsyncOpenAI, model_name: str, image_url: str,
+        expected_res: list[str], base64_encoded_image: dict[str, str]):
     # NOTE: This test also validates that we pass MM data through beam search
-    image_url = TEST_IMAGE_URLS[image_idx]
-    expected_res = EXPECTED_MM_BEAM_SEARCH_RES[image_idx]
 
     messages = [{
         "role":
@@ -326,7 +327,7 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS, indirect=True)
 async def test_chat_streaming_image(client: openai.AsyncOpenAI,
                                     model_name: str, image_url: str):
     messages = [{
@@ -385,7 +386,8 @@ async def test_chat_streaming_image(client: openai.AsyncOpenAI,
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
     "image_urls",
-    [TEST_IMAGE_URLS[:i] for i in range(2, len(TEST_IMAGE_URLS))])
+    [TEST_IMAGE_URLS[:i] for i in range(2, len(TEST_IMAGE_URLS))],
+    indirect=True)
 async def test_multi_image_input(client: openai.AsyncOpenAI, model_name: str,
                                  image_urls: list[str]):
 

@@ -48,7 +48,7 @@ TEST_VIDEO_URLS = [
 def url_images(local_asset_server) -> dict[str, Image.Image]:
 
     return {
-        image_url: local_asset_server.fetch_image(image_url)
+        image_url: local_asset_server.get_image_asset(image_url)
         for image_url in TEST_IMAGE_URLS
     }
 

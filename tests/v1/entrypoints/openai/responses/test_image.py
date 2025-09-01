@@ -8,17 +8,17 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
-from vllm.multimodal.utils import encode_image_base64, fetch_image
+from vllm.multimodal.utils import encode_image_base64
 
 # Use a small vision model for testing
 MODEL_NAME = "Qwen/Qwen2.5-VL-3B-Instruct"
 MAXIMUM_IMAGES = 2
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_URLS = [
-    "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
-    "Grayscale_8bits_palette_sample_image.png",
-    "1280px-Venn_diagram_rgb.svg.png",
-    "RGBA_comp.png",
+    "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+    "Grayscale_8bits_palette_sample_image.png",  # "https://upload.wikimedia.org/wikipedia/commons/f/fa/Grayscale_8bits_palette_sample_image.png",
+    "1280px-Venn_diagram_rgb.svg.png",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/9/91/Venn_diagram_rgb.svg/1280px-Venn_diagram_rgb.svg.png",
+    "RGBA_comp.png",  # "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
 ]
 
 
@@ -55,7 +55,7 @@ async def client(image_server):
 def base64_encoded_image(local_asset_server) -> dict[str, str]:
     return {
         image_url:
-        encode_image_base64(fetch_image(local_asset_server.url_for(image_url)))
+        encode_image_base64(local_asset_server.get_image_asset(image_url))
         for image_url in TEST_IMAGE_URLS
     }
 
@@ -128,7 +128,8 @@ async def test_single_chat_session_image_base64encoded(
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
     "image_urls",
-    [TEST_IMAGE_URLS[:i] for i in range(2, len(TEST_IMAGE_URLS))])
+    [TEST_IMAGE_URLS[:i] for i in range(2, len(TEST_IMAGE_URLS))],
+    indirect=True)
 async def test_multi_image_input(client: openai.AsyncOpenAI, model_name: str,
                                  image_urls: list[str]):
     messages = [{
