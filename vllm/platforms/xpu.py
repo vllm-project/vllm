@@ -186,7 +186,7 @@ class XPUPlatform(Platform):
     @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
-    
+
     @classmethod
     def insert_blocks_to_device(
         cls,
