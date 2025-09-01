@@ -130,6 +130,7 @@ class P2pNcclEngine:
         if self.send_type == "GET":
             # tensor_id: torch.Tensor
             self.send_store: dict[str, torch.Tensor] = {}
+            self.send_request_id_to_tensor_ids: dict[str, set[str]] = {}
         else:
             # PUT or PUT_ASYNC
             # tensor_id: torch.Tensor
