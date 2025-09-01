@@ -121,6 +121,10 @@ class Request:
             self.get_hash_new_full_blocks = partial(block_hasher, self)
             self.block_hashes = self.get_hash_new_full_blocks()
 
+        # Delayed iterations is number of iterations that this
+        # request has been waiting in scheduler.queued.
+        self.delayed_iterations = 0
+
     @classmethod
     def from_engine_core_request(
         cls, request: EngineCoreRequest,

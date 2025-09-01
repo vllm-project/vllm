@@ -34,6 +34,8 @@ def create_scheduler(
     num_speculative_tokens: Optional[int] = None,
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
+    max_delayed_iterations: int = 0,
+    max_num_delayed_tokens: int = 0,
 ) -> Union[Scheduler, AsyncScheduler]:
     '''Create scheduler under test.
 
@@ -58,6 +60,8 @@ def create_scheduler(
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=True,
         async_scheduling=async_scheduling,
+        max_delayed_iterations=max_delayed_iterations,
+        max_num_delayed_tokens=max_num_delayed_tokens,
     )
     model_config = ModelConfig(
         model=model,

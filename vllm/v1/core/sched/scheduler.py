@@ -110,9 +110,23 @@ class Scheduler(SchedulerInterface):
         else:
             raise ValueError(
                 f"Unknown scheduling policy: {self.scheduler_config.policy}")
-        # Priority queues for requests.
-        self.waiting = create_request_queue(self.policy)
+
+        self.queued = create_request_queue(self.policy)
         self.running: list[Request] = []
+
+        if self.delayed_batching_enabled():
+            assert self.policy == SchedulingPolicy.FCFS, \
+                "Delayed batching is only supported with FCFS policy"
+
+            # If delayed batching is enabled, waiting contains the
+            # requests ready to be scheduled, while queued contains the
+            # requests pending to graduate to waiting.
+            # See also graduate_delayed_requests().
+            self.waiting = create_request_queue(self.policy)
+        else:
+            # If delayed batching is disabled, waiting is the
+            # same as queued.
+            self.waiting = self.queued
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -333,6 +347,10 @@ class Scheduler(SchedulerInterface):
         if skipped_waiting_requests:
             self.waiting.prepend_requests(skipped_waiting_requests)
 
+        if self.delayed_batching_enabled():
+            for request in self.queued:
+                request.delayed_iterations += 1
+
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
@@ -419,6 +437,9 @@ class Scheduler(SchedulerInterface):
         scheduled_encoder_inputs: dict[str, list[int]],
         encoder_compute_budget: int,
     ) -> tuple[int, int, int]:
+        if self.delayed_batching_enabled():
+            self.graduate_delayed_requests()
+
         while self.waiting and token_budget > 0:
             if len(self.running) == self.max_num_running_reqs:
                 break
@@ -618,6 +639,34 @@ class Scheduler(SchedulerInterface):
                 encoder_compute_budget = new_encoder_compute_budget
 
         return token_budget, req_index, encoder_compute_budget
+
+    def delayed_batching_enabled(self) -> bool:
+        return self.scheduler_config.max_delayed_iterations > 0 and \
+            self.scheduler_config.max_num_delayed_tokens > 0
+
+    def graduate_delayed_requests(self) -> None:
+        """Graduate delayed requests in queued to waiting if
+        any of the following criteria are met:
+        - The running queue is empty.
+        - The total tokens in the queued queue exceeds the
+            max_num_delayed_tokens.
+        - Any request in the queued queue has been delayed more than
+            the max_delayed_iterations.
+        """
+        tokens_exceeded = lambda: sum(
+            request.num_tokens for request in self.queued
+        ) > self.scheduler_config.max_num_delayed_tokens
+
+        iterations_exceeded = lambda: any(
+            request.delayed_iterations > self.scheduler_config.
+            max_delayed_iterations for request in self.queued)
+
+        graduate = len(self.running) == 0 or tokens_exceeded() or \
+            iterations_exceeded()
+
+        if graduate:
+            self.waiting.extend(self.queued)  # type: ignore
+            self.queued.clear()  # type: ignore
 
     def _update_after_schedule(
         self,
@@ -1071,10 +1120,13 @@ class Scheduler(SchedulerInterface):
 
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
-        return len(self.running), len(self.waiting)
+        if self.delayed_batching_enabled():
+            return len(self.running), len(self.queued) + len(self.waiting)
+        else:
+            return len(self.running), len(self.queued)
 
     def add_request(self, request: Request) -> None:
-        self.waiting.add_request(request)
+        self.queued.add_request(request)
         self.requests[request.request_id] = request
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
@@ -1116,7 +1168,7 @@ class Scheduler(SchedulerInterface):
         if running_requests_to_remove:
             self.running = remove_all(self.running, running_requests_to_remove)
         if waiting_requests_to_remove:
-            self.waiting.remove_requests(waiting_requests_to_remove)
+            self.queued.remove_requests(waiting_requests_to_remove)
 
         # Second pass: set status and free requests
         for request in valid_requests:
@@ -1144,7 +1196,10 @@ class Scheduler(SchedulerInterface):
         del self.requests[request.request_id]
 
     def get_num_unfinished_requests(self) -> int:
-        return len(self.waiting) + len(self.running)
+        if self.delayed_batching_enabled():
+            return len(self.queued) + len(self.waiting) + len(self.running)
+        else:
+            return len(self.queued) + len(self.running)
 
     def has_finished_requests(self) -> bool:
         return len(self.finished_req_ids) > 0
@@ -1160,9 +1215,14 @@ class Scheduler(SchedulerInterface):
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
+        if self.delayed_batching_enabled():
+            num_waiting_reqs = len(self.queued) + len(self.waiting)
+        else:
+            num_waiting_reqs = len(self.queued)
+
         return SchedulerStats(
             num_running_reqs=len(self.running),
-            num_waiting_reqs=len(self.waiting),
+            num_waiting_reqs=num_waiting_reqs,
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
