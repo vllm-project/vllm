@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.distributed.kv_events import KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -208,6 +210,10 @@ class MultiConnector(KVConnectorBase_V1):
 
         return async_saves > 0, kv_txfer_params
 
+    def take_events(self) -> Iterable[KVCacheEvent]:
+        for c in self._connectors:
+            yield from c.take_events()
+
     @classmethod
     def get_required_kvcache_layout(
             cls, vllm_config: "VllmConfig") -> Optional[str]:
@@ -228,9 +234,10 @@ class MultiConnector(KVConnectorBase_V1):
         for ktc in ktcs:
             kv_transfer_config = KVTransferConfig(**ktc)
             temp_vllm_config.kv_transfer_config = kv_transfer_config
+            connector_cls = KVConnectorFactory.get_connector_class(
+                kv_transfer_config)
             required_kvcache_layout = (
-                KVConnectorBase_V1.get_required_kvcache_layout(
-                    temp_vllm_config))
+                connector_cls.get_required_kvcache_layout(temp_vllm_config))
             if required_kvcache_layout is not None:
                 layouts.add(required_kvcache_layout)
 

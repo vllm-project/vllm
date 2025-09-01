@@ -18,7 +18,7 @@ vllm serve Qwen/Qwen1.5-32B-Chat-AWQ --max-model-len 4096
 
 - Download and install [Anything LLM desktop](https://anythingllm.com/desktop).
 
-- On the bottom left of open settings, AI Prooviders --> LLM:
+- On the bottom left of open settings, AI Providers --> LLM:
     - LLM Provider: Generic OpenAI
     - Base URL: http://{vllm server host}:{vllm server port}/v1
     - Chat Model Name: `Qwen/Qwen1.5-32B-Chat-AWQ`

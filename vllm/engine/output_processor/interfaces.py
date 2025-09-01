@@ -36,27 +36,13 @@ class SequenceGroupOutputProcessor(ABC):
     ):
         """Create an output processor.
 
-        This returns a single-step output processor if num_lookahead_slots is
-        zero, else returns a multi-step output processor.
+        Multi-step scheduling is no longer supported. Always return a
+        single-step output processor.
         """
-        if scheduler_config.num_lookahead_slots == 0:
-            # Importing here to avoid cycle.
-            from vllm.engine.output_processor.single_step import (
-                SingleStepOutputProcessor)
-            return SingleStepOutputProcessor(scheduler_config, detokenizer,
-                                             scheduler, seq_counter,
-                                             stop_checker)
-        else:
-            # Importing here to avoid cycle.
-            from vllm.engine.output_processor.multi_step import (
-                MultiStepOutputProcessor)
-            return MultiStepOutputProcessor(
-                detokenizer,
-                scheduler,
-                seq_counter,
-                get_tokenizer_for_seq,
-                stop_checker,
-            )
+        from vllm.engine.output_processor.single_step import (
+            SingleStepOutputProcessor)
+        return SingleStepOutputProcessor(scheduler_config, detokenizer,
+                                         scheduler, seq_counter, stop_checker)
 
     @abstractmethod
     def process_outputs(self, sequence_group: SequenceGroup,

@@ -42,7 +42,7 @@ from vllm.model_executor.models.utils import (AutoWeightsLoader, flatten_bn,
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement)
@@ -209,7 +209,7 @@ class OvisImagePatchInputs(TypedDict):
     `(batch_size * num_patches, patch_size_x * patch_size_y * num_channels)`
     """
 
-    inducator_tokens: torch.Tensor
+    indicator_tokens: torch.Tensor
     """
     Shape: 
     `(batch_size * (num_patches + 1))`
@@ -375,11 +375,12 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptReplacement]:
 
-        def get_replacement_ovis(item_idx):
-            grid = out_mm_kwargs["grids"][item_idx]
+        def get_replacement_ovis(item_idx: int):
+            out_item = out_mm_kwargs["image"][item_idx]
+            grid = out_item["grids"].data
 
             hf_processor = self.info.get_hf_processor()
             return hf_processor.construct_image_placeholders(grid)
@@ -543,7 +544,7 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
                                                       vision_embeddings)
             input_ids = None
 
-        # up until here we have a inputs_embeds 100% numerical identity
+        # up until here we have an inputs_embeds 100% numerical identity
         # between the OG HF Transformers implementation and ours
         hidden_states = self.llm(
             input_ids=input_ids,

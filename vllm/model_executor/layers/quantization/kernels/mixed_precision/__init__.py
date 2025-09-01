@@ -10,6 +10,8 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision.bitblas imp
     BitBLASLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.conch import (  # noqa: E501
     ConchLinearKernel)
+from vllm.model_executor.layers.quantization.kernels.mixed_precision.cutlass import (  # noqa: E501
+    CutlassW4A8LinearKernel)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.dynamic_4bit import (  # noqa: E501
     Dynamic4bitLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.mixed_precision.exllama import (  # noqa: E501
@@ -24,6 +26,7 @@ from vllm.platforms import current_platform
 
 # in priority/performance order (when available)
 _POSSIBLE_KERNELS: list[type[MPLinearKernel]] = [
+    CutlassW4A8LinearKernel,
     MacheteLinearKernel,
     AllSparkLinearKernel,
     MarlinLinearKernel,

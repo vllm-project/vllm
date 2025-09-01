@@ -1,4 +1,3 @@
-# ruff: noqa: E501
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
@@ -15,6 +14,8 @@ from pydantic import BaseModel
 from vllm import LLM, SamplingParams
 from vllm.sampling_params import StructuredOutputsParams
 
+MAX_TOKENS = 50
+
 # Structured outputs by Choice (list of possible options)
 structured_outputs_params_choice = StructuredOutputsParams(
     choice=["Positive", "Negative"]
@@ -27,7 +28,9 @@ prompt_choice = "Classify this sentiment: vLLM is wonderful!"
 # Structured outputs by Regex
 structured_outputs_params_regex = StructuredOutputsParams(regex=r"\w+@\w+\.com\n")
 sampling_params_regex = SamplingParams(
-    structured_outputs=structured_outputs_params_regex, stop=["\n"]
+    structured_outputs=structured_outputs_params_regex,
+    stop=["\n"],
+    max_tokens=MAX_TOKENS,
 )
 prompt_regex = (
     "Generate an email address for Alan Turing, who works in Enigma."
@@ -52,8 +55,13 @@ class CarDescription(BaseModel):
 
 json_schema = CarDescription.model_json_schema()
 structured_outputs_params_json = StructuredOutputsParams(json=json_schema)
-sampling_params_json = SamplingParams(structured_outputs=structured_outputs_params_json)
-prompt_json = "Generate a JSON with the brand, model and car_type ofthe most iconic car from the 90's"
+sampling_params_json = SamplingParams(
+    structured_outputs=structured_outputs_params_json, max_tokens=MAX_TOKENS
+)
+prompt_json = (
+    "Generate a JSON with the brand, model and car_type of "
+    "the most iconic car from the 90's"
+)
 
 # Structured outputs by Grammar
 simplified_sql_grammar = """
@@ -68,10 +76,11 @@ structured_outputs_params_grammar = StructuredOutputsParams(
     grammar=simplified_sql_grammar
 )
 sampling_params_grammar = SamplingParams(
-    structured_outputs=structured_outputs_params_grammar
+    structured_outputs=structured_outputs_params_grammar,
+    max_tokens=MAX_TOKENS,
 )
 prompt_grammar = (
-    "Generate an SQL query to show the 'username' and 'email'from the 'users' table."
+    "Generate an SQL query to show the 'username' and 'email' from the 'users' table."
 )
 
 
@@ -80,7 +89,7 @@ def format_output(title: str, output: str):
 
 
 def generate_output(prompt: str, sampling_params: SamplingParams, llm: LLM):
-    outputs = llm.generate(prompts=prompt, sampling_params=sampling_params)
+    outputs = llm.generate(prompt, sampling_params=sampling_params)
     return outputs[0].outputs[0].text
 
 
