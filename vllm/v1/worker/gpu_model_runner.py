@@ -145,6 +145,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.max_model_len = model_config.max_model_len
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
+        self.cudagraph_capture_prefill_size = self.compilation_config.\
+            cudagraph_capture_prefill_size
 
         # Model-related.
         self.num_query_heads = model_config.get_num_attention_heads(
@@ -2258,8 +2260,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # When setting max_query_len = 1, we switch to and capture the optimized
         # routine of FA2 for pure decode, i.e., Flashdecode + an optimization
         # for GQA/MQA.
-        max_query_len = self.uniform_decode_query_len if uniform_decode else \
-                                                                num_tokens
+        if uniform_decode:
+            max_query_len = self.uniform_decode_query_len
+        else:
+            # Determine the request num and the max prefill size for 
+            # mixed batch(non-uniform batch) when prefill capture size is specified,
+            # otherwise, use the max model len
+            single_prefill_request: bool = False
+            if self.cudagraph_capture_prefill_size:
+                assert self.cudagraph_capture_prefill_size <= self.scheduler_config.max_model_len, \
+                    "cudagraph_capture_prefill_size must be less than or equal to max_model_len"
+                max_query_len = self.compilation_config.cudagraph_capture_prefill_size
+            else:
+                max_query_len = self.scheduler_config.max_model_len
+
+            # There is only one request computing the prefill if the specified
+            # tokens are less than or equal to the max prefill size
+            if num_tokens <= max_query_len:
+                max_query_len = num_tokens
+                single_prefill_request = True
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
@@ -2274,10 +2293,36 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if num_tokens % max_query_len != 0:
                 num_scheduled_tokens_list[-1] = num_tokens % max_query_len
         else:
-            num_reqs = min(num_tokens, max_num_reqs)
-            min_tokens_per_req = num_tokens // num_reqs
-            num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
-            num_scheduled_tokens_list[-1] += num_tokens % num_reqs
+            if single_prefill_request:
+                num_reqs = 1
+                prefill_tokens_per_req = num_tokens
+                num_scheduled_tokens_list = [prefill_tokens_per_req]
+            else:
+                # Construct the mixed batch of prefill and decode
+                # for example, num_tokens is 1028 and cudagraph_capture_prefill_size
+                # has been specified as 1024, then the num_scheduled_tokens_list of this 
+                # mixed batch will be: [1024, 1, 1, 1, 1]
+                # one prefill request and four decode requests
+                num_reqs = num_tokens // max_query_len
+                prefill_tokens_per_req = max_query_len
+                decode_tokens_per_req = 1
+                num_scheduled_tokens_list = [prefill_tokens_per_req] * num_reqs
+
+                # for profile run, the batch are constructed with pure prefill requests
+                # for cudagraph capture dummy run, the batch are constructed with mixed
+                # prefill and decode requests
+                if is_profile:
+                    num_scheduled_tokens_list[-1] += num_tokens % prefill_tokens_per_req
+                else:
+                    remaining_tokens_for_decode = num_tokens % prefill_tokens_per_req
+                    if remaining_tokens_for_decode:
+                        for _ in range(remaining_tokens_for_decode):
+                            num_scheduled_tokens_list.append(decode_tokens_per_req)
+                            num_reqs += 1
+            assert num_reqs <= max_num_reqs, \
+                f"""requests' num in prefill-decode mixed batch must be less than or 
+                equal to max_num_reqs. please adjust cudagraph_capture_sizes or 
+                cudagraph_capture_prefill_size."""
 
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
