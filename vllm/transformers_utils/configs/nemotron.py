@@ -26,7 +26,7 @@ logger = logging.get_logger(__name__)
 class NemotronConfig(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a
-    [`NemotronModel`]. It is used to instantiate an Nemotron model
+    [`NemotronModel`]. It is used to instantiate a Nemotron model
     according to the specified arguments, defining the model architecture.
     Instantiating a configuration with the defaults will yield a similar
     configuration to that of the Nemotron-8B.

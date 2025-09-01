@@ -43,7 +43,7 @@ class ConformerEncoderLayer(nn.Module):
             if set different to 0, the number of 
              depthwise_seperable_out_channel will be used as a
              channel_out of the second conv1d layer. 
-             otherwise, it equal to 0, the second conv1d layer is skipped.
+             otherwise, it equals to 0, the second conv1d layer is skipped.
         depthwise_multiplier: int
             number of input_dim channels duplication. this value
              will be used to compute the hidden channels of the Conv1D.
@@ -115,7 +115,7 @@ class ConformerEncoderLayer(nn.Module):
                     we recalculate activation in backward.
             default "".
         export: bool, optional
-            if set to True, it remove the padding from convolutional layers
+            if set to True, it removes the padding from convolutional layers
              and allow the onnx conversion for inference.
               default False.
         use_pt_scaled_dot_product_attention: bool, optional
@@ -686,7 +686,7 @@ class ConformerEncoder(TransformerEncoderBase):
             only work for glu_in_attention !=0
             default "swish".
         export: bool, optional
-            if set to True, it remove the padding from convolutional layers
+            if set to True, it removes the padding from convolutional layers
              and allow the onnx conversion for inference.
               default False.
         activation_checkpointing: str, optional
