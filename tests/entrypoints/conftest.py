@@ -207,8 +207,7 @@ number: "1" | "2"
 def zephyr_lora_files():
     """Download zephyr LoRA files once per test session."""
     from huggingface_hub import snapshot_download
-    return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora",
-                             local_files_only=True)
+    return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
 
 
 @pytest.fixture(scope="session")
