@@ -211,7 +211,7 @@ class ApertusAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
-    def _init_rotary_emb(self, config: 'ApertusConfig',
+    def _init_rotary_emb(self, config: ApertusConfig,
                          rope_scaling: Optional[dict[str, Any]],
                          quant_config: Optional[QuantizationConfig]) -> None:
         is_neox_style = True
