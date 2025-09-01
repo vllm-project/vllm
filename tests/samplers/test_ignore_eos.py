@@ -9,13 +9,6 @@ import pytest
 
 from vllm import SamplingParams
 
-
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    """We can run both engines for this test."""
-    pass
-
-
 # We also test with llama because it has generation_config to specify EOS
 # (past regression).
 MODELS = ["distilbert/distilgpt2", "meta-llama/Llama-3.2-1B"]
@@ -31,7 +24,7 @@ def test_ignore_eos(
     dtype: str,
     max_tokens: int,
 ) -> None:
-    with vllm_runner(model, dtype=dtype) as vllm_model:
+    with vllm_runner(model, enforce_eager=True, dtype=dtype) as vllm_model:
         sampling_params = SamplingParams(max_tokens=max_tokens,
                                          ignore_eos=True)
 

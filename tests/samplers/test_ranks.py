@@ -8,12 +8,6 @@ from vllm import SamplingParams
 MODELS = ["distilbert/distilgpt2"]
 
 
-@pytest.fixture(autouse=True)
-def v1(run_with_both_engines):
-    """We can run both engines for this test."""
-    pass
-
-
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_ranks(
@@ -26,7 +20,9 @@ def test_ranks(
     num_top_logprobs = 5
     num_prompt_logprobs = 5
 
-    with vllm_runner(model, dtype=dtype,
+    with vllm_runner(model,
+                     dtype=dtype,
+                     enforce_eager=True,
                      max_logprobs=num_top_logprobs) as vllm_model:
 
         ## Test greedy logprobs ranks
