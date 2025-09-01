@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from typing import Optional
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,7 +13,7 @@ from vllm.entrypoints.renderer import Renderer
 @dataclass
 class MockModelConfig:
     max_model_len: int = 100
-    encoder_config: dict = None
+    encoder_config: Optional[dict] = None
 
 
 class MockTokenizerResult:
