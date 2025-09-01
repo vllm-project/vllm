@@ -234,7 +234,7 @@ class ApertusDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: 'ApertusConfig',
+        config: ApertusConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
