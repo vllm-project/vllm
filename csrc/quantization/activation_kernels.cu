@@ -102,7 +102,7 @@ __device__ __forceinline__ float2 silu2(float2 x) {
 
 __device__ __forceinline__ float warp_max(float v) {
   static constexpr unsigned FULL_MASK = 0xffffffffu;
-  for (int offset = 1; offset < WARP_SIZE; offset *= 2u) {
+  for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
     v = fmaxf(v, __shfl_xor_sync(FULL_MASK, v, offset));
   }
   return v;
@@ -139,8 +139,9 @@ __device__ __forceinline__ float clip(float v, float mmin, float mmax) {
   return fminf(mmax, fmaxf(v, mmin));
 }
 
-template <typename scalar_t, uint32_t NUM_WARPS, typename Idx_t, bool USE_UE8M0,
-          int GROUP_SIZE = 128, int NUM_STAGES = 3>
+template <typename scalar_t, uint32_t NUM_WARPS, typename Idx_t,
+          int NUM_PARALLEL_TOKENS, bool USE_UE8M0, int GROUP_SIZE = 128,
+          int NUM_STAGES = 3>
 __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     const scalar_t* __restrict__ _input, __nv_fp8_e4m3* __restrict__ _y_q,
     float* __restrict__ _y_s, const uint32_t* __restrict__ counts,
@@ -182,6 +183,14 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
   const Idx_t stride_i_t_128 = stride_i_t / 8u;
 
+  __syncthreads();
+  const Idx_t n_tokens = s_counts[0];
+
+  auto par_id = blockIdx.y;
+  auto chunk_size = (n_tokens + NUM_PARALLEL_TOKENS - 1) / NUM_PARALLEL_TOKENS;
+  auto n_tokens_lower = par_id * chunk_size;
+  auto n_tokens_upper = min(n_tokens, (par_id + 1) * chunk_size);
+
   // base offsets (element-based)
   const Idx_t base_i = e * stride_i_e + NUM_WARPS * g * GROUP_SIZE * stride_i_h;
   const Idx_t base_ys = e * stride_ys_e + NUM_WARPS * g * stride_ys_g;
@@ -189,25 +198,23 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       e * stride_yq_e + NUM_WARPS * g * GROUP_SIZE * stride_yq_h;
 
   Idx_t gate_off_128 = (base_i / 8u);
-
   auto input_128_ptr = reinterpret_cast<const __int128_t*>(_input);
-
-  auto gate_128_ptr = input_128_ptr + gate_off_128 + (tid % 64);
+  auto gate_128_ptr = input_128_ptr + gate_off_128 + (tid % 64) +
+                      stride_i_t_128 * n_tokens_lower;
   auto up_128_ptr = gate_128_ptr + (H * stride_i_h) / 8u;
 
-  auto y_s_ptr = _y_s + base_ys + warp_id;
+  auto y_s_ptr = _y_s + base_ys + warp_id + stride_ys_t * n_tokens_lower;
 
-  auto y_q_ptr = _y_q + base_yq + warp_id * GROUP_SIZE + 2 * lane_id;
+  auto y_q_ptr = _y_q + base_yq + warp_id * GROUP_SIZE + 2 * lane_id +
+                 stride_yq_t * n_tokens_lower;
 
-  __syncthreads();
-  const Idx_t n_tokens = s_counts[0];
-
-  Idx_t t_load = 0, stage = 0;
+  Idx_t t_load = n_tokens_lower, load_stage_id = 0;
   auto s_buff_gate_load_128 = s_buff_128 + (tid % HALF_THREAD_COUNT);
   auto s_buff_up_load_128 = s_buff_gate_load_128 + S_NUM_128 / 2u;
   auto load_and_advance_y_pred = [&] {
-    if (t_load < n_tokens) {
-      auto stage_offset = (stage % NUM_STAGES) * (NUM_WARPS * WARP_SIZE / 2);
+    if (t_load < n_tokens_upper) {
+      auto stage_offset =
+          (load_stage_id % NUM_STAGES) * (NUM_WARPS * WARP_SIZE / 2);
 
       auto s_gate_stage_128_staged_ptr = s_buff_gate_load_128 + stage_offset;
       auto s_up_stage_128_staged_ptr = s_buff_up_load_128 + stage_offset;
@@ -220,7 +227,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
         up_128_ptr += stride_i_t_128;
       }
       ++t_load;
-      ++stage;
+      ++load_stage_id;
     }
     cp_async_fence();
   };
@@ -233,7 +240,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   auto s_gate_ptr = s_buff_compute_32 + warp_id * (GROUP_SIZE / 2) + lane_id;
   auto s_up_ptr = s_gate_ptr + S_NUM_32 / 2;
 
-  for (Idx_t t = 0; t < n_tokens; ++t) {
+  Idx_t stage_id{};
+  for (Idx_t t = n_tokens_lower; t < n_tokens_upper; ++t) {
     float y_max = EPS;
     float results[4];
 
@@ -243,7 +251,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     load_and_advance_y_pred();
 
     const auto compute_pipeline_offset =
-        (t % NUM_STAGES) * (GROUP_SIZE / 2u) * NUM_WARPS;
+        ((stage_id++) % NUM_STAGES) * (GROUP_SIZE / 2u) * NUM_WARPS;
 
     auto s_gate_compute = s_gate_ptr + compute_pipeline_offset;
     auto s_up_compute = s_up_ptr + compute_pipeline_offset;
@@ -349,28 +357,31 @@ void silu_mul_fp8_quant_deep_gemm_cuda(
 
   int stride_counts_e = counts.stride(0);
 
-  dim3 grid(E * G);
+  static constexpr int NUM_PARALLEL_TOKENS = 4;
+  dim3 grid(E * G, NUM_PARALLEL_TOKENS);
   dim3 block(NUM_WARPS * 32);
 
   if (use_ue8m0) {
     vllm::silu_mul_fp8_quant_deep_gemm_kernel<__nv_bfloat16, NUM_WARPS, Idx_t,
-                                              true><<<grid, block>>>(
-        reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),
-        reinterpret_cast<__nv_fp8_e4m3*>(y_q.data_ptr<at::Float8_e4m3fn>()),
-        y_s.data_ptr<float>(),
-        reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), H, G, stride_i_e,
-        stride_i_t, stride_i_h, stride_yq_e, stride_yq_t, stride_yq_h,
-        stride_ys_e, stride_ys_t, stride_ys_g, stride_counts_e,
-        static_cast<float>(fp8_min), static_cast<float>(fp8_max));
+                                              NUM_PARALLEL_TOKENS, true>
+        <<<grid, block>>>(
+            reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<__nv_fp8_e4m3*>(y_q.data_ptr<at::Float8_e4m3fn>()),
+            y_s.data_ptr<float>(),
+            reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), H, G,
+            stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t,
+            stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g, stride_counts_e,
+            static_cast<float>(fp8_min), static_cast<float>(fp8_max));
   } else {
     vllm::silu_mul_fp8_quant_deep_gemm_kernel<__nv_bfloat16, NUM_WARPS, Idx_t,
-                                              false><<<grid, block>>>(
-        reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),
-        reinterpret_cast<__nv_fp8_e4m3*>(y_q.data_ptr<at::Float8_e4m3fn>()),
-        y_s.data_ptr<float>(),
-        reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), H, G, stride_i_e,
-        stride_i_t, stride_i_h, stride_yq_e, stride_yq_t, stride_yq_h,
-        stride_ys_e, stride_ys_t, stride_ys_g, stride_counts_e,
-        static_cast<float>(fp8_min), static_cast<float>(fp8_max));
+                                              NUM_PARALLEL_TOKENS, false>
+        <<<grid, block>>>(
+            reinterpret_cast<__nv_bfloat16*>(input.data_ptr()),
+            reinterpret_cast<__nv_fp8_e4m3*>(y_q.data_ptr<at::Float8_e4m3fn>()),
+            y_s.data_ptr<float>(),
+            reinterpret_cast<uint32_t*>(counts.data_ptr<int>()), H, G,
+            stride_i_e, stride_i_t, stride_i_h, stride_yq_e, stride_yq_t,
+            stride_yq_h, stride_ys_e, stride_ys_t, stride_ys_g, stride_counts_e,
+            static_cast<float>(fp8_min), static_cast<float>(fp8_max));
   }
 }
