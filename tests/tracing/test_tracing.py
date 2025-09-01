@@ -79,7 +79,7 @@ def test_traces(
 ):
     with monkeypatch.context() as m:
         m.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
-        m.setenv("VLLM_USE_V1", "0")
+        m.setenv("VLLM_USE_V1", "1")
         sampling_params = SamplingParams(
             temperature=0.01,
             top_p=0.1,
@@ -91,6 +91,7 @@ def test_traces(
                   gpu_memory_utilization=0.3)
         prompts = ["This is a short prompt"]
         outputs = llm.generate(prompts, sampling_params=sampling_params)
+        print(f"test_traces outputs is : {outputs}")
 
         timeout = 10
         if not trace_service.evt.wait(timeout):
@@ -151,7 +152,7 @@ def test_traces_with_detailed_steps(
 ):
     with monkeypatch.context() as m:
         m.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
-        m.setenv("VLLM_USE_V1", "0")
+        m.setenv("VLLM_USE_V1", "1")
         sampling_params = SamplingParams(
             temperature=0.01,
             top_p=0.1,

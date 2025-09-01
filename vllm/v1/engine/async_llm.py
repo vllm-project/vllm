@@ -125,6 +125,7 @@ class AsyncLLM(EngineClient):
             tracer = init_tracer(
                 "vllm.llm_engine",
                 self.observability_config.otlp_traces_endpoint)
+            logger.debug("Tracer initialized. tracer: %s", tracer)
             self.output_processor.tracer = tracer
 
         # EngineCore (starts the engine in background process).
