@@ -293,9 +293,7 @@ class DashengAudioTransformer(nn.Module):
         super().__init__()
 
         self.target_length = config.target_length
-        self.embed_dim = config.embed_dim
         self.hop_length = config.hop_length
-        self.gradient_checkpointing = False
 
         self._init_front_end(config)
 
@@ -364,10 +362,7 @@ class DashengAudioTransformer(nn.Module):
         x = torch.permute(torch.flatten(x, 2, 3),
                           (0, 2, 1))  # rearrange(x, "b c f t -> b (f t) c")
         for block in self.blocks:
-            if self.gradient_checkpointing and self.training:
-                x = self._gradient_checkpointing_func(block, x, mask)
-            else:
-                x = block(x, mask)
+            x = block(x, mask)
         x = self.norm(x)
         return x
 
@@ -437,14 +432,14 @@ class AudioProjectorSubsample(nn.Module):
                 input_size=in_dim * self.k,
                 output_size=out_dim,
                 quant_config=quant_config,
-                prefix=f"{prefix}.fc1",
+                prefix=f"{prefix}.net.0",
                 return_bias=False,
             ), get_act_fn("gelu"),
             RowParallelLinear(
                 input_size=out_dim,
                 output_size=out_dim,
                 quant_config=quant_config,
-                prefix=f"{prefix}.fc2",
+                prefix=f"{prefix}.net.1",
                 return_bias=False,
             ))
 
@@ -637,7 +632,7 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
             prefix=maybe_prefix(prefix, "audio_encoder"),
         )
         self.audio_projector = AudioProjectorSubsample(
-            in_dim=self.audio_encoder.embed_dim,
+            in_dim=config.audio_encoder_config.embed_dim,
             out_dim=config.text_config.hidden_size,
             downsample_rate=config.subsample_factor,
             quant_config=quant_config,
