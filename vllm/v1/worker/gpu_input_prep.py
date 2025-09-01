@@ -23,15 +23,15 @@ from numba import types
     cache=True,
 )
 def prepare_inputs(
-    # Inputs
-    token_ids: np.ndarray,  # [num_reqs, max_model_len]
-    num_computed_tokens: np.ndarray,  # [num_reqs]
-    num_scheduled_tokens: np.ndarray,  # [num_reqs]
-    # Outputs
+        # Inputs
+        token_ids: np.ndarray,  # [num_reqs, max_model_len]
+        num_computed_tokens: np.ndarray,  # [num_reqs]
+        num_scheduled_tokens: np.ndarray,  # [num_reqs]
+        # Outputs
     input_ids: np.ndarray,  # [num_input_tokens]
-    query_start_loc: np.ndarray,  # [num_reqs + 1]
-    seq_lens: np.ndarray,  # [num_reqs]
-    positions: np.ndarray,  # [num_input_tokens]
+        query_start_loc: np.ndarray,  # [num_reqs + 1]
+        seq_lens: np.ndarray,  # [num_reqs]
+        positions: np.ndarray,  # [num_input_tokens]
 ) -> int:
     num_reqs = num_scheduled_tokens.shape[0]
     query_start_loc[0] = 0
@@ -56,45 +56,69 @@ def prepare_inputs(
     query_start_loc[num_reqs + 1:].fill(cu_num_tokens)
     # Fill unused with 0 for full cuda graph mode.
     seq_lens[num_reqs:].fill(0)
+
     return num_scheduled_tokens.max()
 
 
-# NOTE: With the type annotations, this function is pre-compiled
-# before the first call.
 @numba.jit(
     [
-        types.none(
-            types.int64[:],  # positions
+        types.int32(
             types.int32[:],  # query_start_loc
-            types.int32[:, :],  # block_table
-            types.int32,  # block_size
-            types.int64[:],  # slot_mapping
+            types.int32[:],  # num_draft_tokens
+            types.int32[:],  # cu_num_draft_tokens
+            types.int32[:],  # logits_indices
+            types.int32[:],  # target_logits_indices
+            types.int32[:],  # bonus_logits_indices
         )
     ],
     nopython=True,
     cache=True,
 )
-def compute_slot_mapping(
-    # Inputs
-    positions: np.ndarray,  # [num_input_tokens]
-    query_start_loc: np.ndarray,  # [num_reqs + 1]
-    block_table: np.ndarray,  # [num_reqs, max_num_blocks_per_req]
-    block_size: int,
-    # Outputs
-    slot_mapping: np.ndarray,  # [num_input_tokens]
-) -> None:
-    num_reqs = block_table.shape[0]
+def prepare_spec_decode(
+        # Inputs
+        query_start_loc: np.ndarray,  # [B + 1]
+        num_draft_tokens: np.ndarray,  # [B]
+        # Outputs
+    cu_num_draft_tokens: np.ndarray,  # [B]
+        logits_indices: np.ndarray,  # [N + B]
+        target_logits_indices: np.ndarray,  # [N]
+        bonus_logits_indices: np.ndarray,  # [B]
+) -> int:  # N
+    # Inputs:
+    # query_start_loc:          [  0,   4, 104, 107, 207, 209]
+    # num_draft_tokens:         [  3,   0,   2,   0,   1]
+    # Outputs:
+    # cu_num_draft_tokens:      [  3,   3,   5,   5,   6]
+    # logits_indices:           [  0,   1,   2,   3, 103, 104, 105, 106,
+    #                            206, 207, 208]
+    # target_logits_indices:    [  0,   1,   2,   5,   6,   9]
+    # bonus_logits_indices:     [  3,   4,   7,   8,  10]
+    # return:                   6 (total number of draft tokens)
+
+    cu_num_draft = 0
+    cu_num_sample = 0
+    num_reqs = num_draft_tokens.shape[0]
     for i in range(num_reqs):
-        start_idx = query_start_loc[i]
-        end_idx = query_start_loc[i + 1]
+        q_end_idx = query_start_loc[i + 1]
+        draft_len = num_draft_tokens[i]
 
-        pos = positions[start_idx:end_idx]
-        block_ids = pos // block_size
-        block_numbers = block_table[i, block_ids]
-        block_offsets = pos % block_size
-        slot_mapping[start_idx:end_idx] = (block_numbers * block_size +
-                                           block_offsets)
+        # The last draft_len + 1 query tokens are used for sampling.
+        sample_len = draft_len + 1
+        sample_start_idx = cu_num_sample
+        sample_end_idx = sample_start_idx + sample_len
+        logits_indices[sample_start_idx:sample_end_idx] = (np.arange(
+            q_end_idx - sample_len, q_end_idx))
 
-    # Fill unused with -1.
-    # Needed for reshape_and_cache in full cuda graph mode.
-    slot_mapping[end_idx:].fill(-1)
+        # For each query, the first draft_len tokens need target logits for
+        # rejection sampling. The draft_len + 1th token is used for bonus token.
+        draft_start_idx = cu_num_draft
+        draft_end_idx = draft_start_idx + draft_len
+        target_logits_indices[draft_start_idx:draft_end_idx] = (np.arange(
+            sample_start_idx, sample_end_idx - 1))
+        bonus_logits_indices[i] = sample_end_idx - 1
+
+        cu_num_draft += draft_len
+        cu_num_draft_tokens[i] = cu_num_draft
+        cu_num_sample += sample_len
+
+    return cu_num_draft
