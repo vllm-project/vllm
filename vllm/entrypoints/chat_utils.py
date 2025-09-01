@@ -41,6 +41,7 @@ from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
 from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.openai.protocol import ResponseInputOutputItem
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
@@ -1537,27 +1538,27 @@ def make_tool_call_id(id_type: str = "random", func_name=None, idx=None):
         return f"chatcmpl-tool-{random_uuid()}"
 
 
-def parse_chat_tool_call(item: dict[str, Any]) -> ChatCompletionMessageParam:
-    if item.get("type") == "function_call":
+def parse_chat_tool_call(item: ResponseInputOutputItem) -> ChatCompletionMessageParam:
+    if item.type == "function_call":
         # Append the function call as a tool call.
         return ChatCompletionAssistantMessageParam(
                 role="assistant",
                 tool_calls=[
                     ChatCompletionMessageToolCallParam(
-                        id=item.get("call_id"),
+                        id=item.call_id,
                         function=FunctionCallTool(
-                            name=item.get("name"),
-                            arguments=item.get("arguments", "{}"),
+                            name=item.name,
+                            arguments=item.arguments,
                         ),
                         type="function",
                     )
                 ],
             )
-    elif item.get("type") == "function_call_output":
+    elif item.type == "function_call_output":
         # Append the function call output as a tool message.
         return ChatCompletionToolMessageParam(
                 role="tool",
-                content=item.get("output", ""),
-                tool_call_id=item.get("call_id"),
+                content=item.output,
+                tool_call_id=item.call_id,
             )
     return item  # type: ignore
