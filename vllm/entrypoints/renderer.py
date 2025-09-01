@@ -107,8 +107,7 @@ class Renderer(BaseRenderer):
         """
         if truncate_prompt_tokens is not None:
             if max_length is not None:
-                assert (truncate_prompt_tokens >= 0
-                        and truncate_prompt_tokens <= max_length)
+                assert 0 <= truncate_prompt_tokens <= max_length
             if truncate_prompt_tokens == 0:
                 return []
 
@@ -127,10 +126,11 @@ class Renderer(BaseRenderer):
                                                cache_salt))
             else:
                 # Text input
-                tokenize_tasks.append(
+                tokenize_task = asyncio.create_task(
                     self._tokenize(prompt_input["content"], max_length,
                                    truncate_prompt_tokens, add_special_tokens,
                                    cache_salt))
+                tokenize_tasks.append(tokenize_task)
 
         # Wait for all text tokenization to finish
         if tokenize_tasks:
