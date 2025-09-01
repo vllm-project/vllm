@@ -106,7 +106,8 @@ class DeepseekV2MoE(nn.Module):
         seq_len = x.size(0)
         assert (seq_len % self.tp_size == 0)
         chunk = seq_len // self.tp_size
-        start = self.tp_rank * chunk
+        #start = self.tp_rank * chunk
+        start = 0
         return x.narrow(0, start, chunk).contiguous()
 
     def __init__(
@@ -193,48 +194,22 @@ class DeepseekV2MoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        if self.n_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
-        # router_logits: (num_tokens, n_experts)
+
+        shared_output = self.shared_experts(hidden_states)
 
         # **************************************************
         sp_hidden_states = self.sp_chunk(hidden_states)
-        gathered_sp_hidden_states = tensor_model_parallel_all_gather(
-            sp_hidden_states, 0).contiguous()
-        assert torch.allclose(hidden_states,
-                              gathered_sp_hidden_states,
-                              atol=5e-4,
-                              rtol=5e-4)
-
         sp_router_logits, _ = self.gate(sp_hidden_states)
 
-        if hidden_states.dtype != torch.float16:
-            final_sp_hidden_states = self.experts(
-                hidden_states=sp_hidden_states,
-                router_logits=sp_router_logits) * self.routed_scaling_factor
-        else:
-            # Fix FP16 overflow
-            # See DeepseekV2DecoderLayer for more details.
-            final_sp_hidden_states = self.experts(
-                hidden_states=sp_hidden_states, router_logits=sp_router_logits)
+        final_sp_hidden_states = self.experts(
+            hidden_states=sp_hidden_states,
+            router_logits=sp_router_logits) * self.routed_scaling_factor
 
         final_hidden_states = tensor_model_parallel_all_gather(
             final_sp_hidden_states, 0).contiguous()
         # **************************************************
 
-        if shared_output is not None:
-            if hidden_states.dtype != torch.float16:
-                final_hidden_states = final_hidden_states + shared_output
-            else:
-                # Fix FP16 overflow
-                # See DeepseekV2DecoderLayer for more details.
-                final_hidden_states = final_hidden_states + shared_output \
-                    * (1. / self.routed_scaling_factor)
-
-        #if self.tp_size > 1:
-        #    final_hidden_states = (
-        #        self.experts.maybe_all_reduce_tensor_model_parallel(
-        #            final_hidden_states))
+        final_hidden_states = final_hidden_states + shared_output
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 

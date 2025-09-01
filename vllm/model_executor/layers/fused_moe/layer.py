@@ -111,6 +111,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             "Must be created in modelopt.py"
 
         if moe.use_pplx_kernels:
+            raise AssertionError
+
             hidden_dim_bytes, hidden_scale_bytes = pplx_hidden_dim_scale_bytes(
                 moe.max_num_tokens,
                 moe.hidden_dim,
@@ -1564,6 +1566,7 @@ class FusedMoE(CustomOp):
                 or self.use_deepep_ll_kernels):
             return final_hidden_states
         else:
+            raise AssertionError
             return tensor_model_parallel_all_reduce(final_hidden_states)
 
     def forward(self, hidden_states: torch.Tensor,
@@ -1585,6 +1588,7 @@ class FusedMoE(CustomOp):
 
     def forward_impl_chunked(self, full_hidden_states: torch.Tensor,
                              full_router_logits: torch.Tensor):
+        raise AssertionError
         assert self.batched_hidden_states is not None
         assert self.batched_router_logits is not None
         assert self.batched_hidden_states.dtype == full_hidden_states.dtype
@@ -1665,19 +1669,21 @@ class FusedMoE(CustomOp):
         assert self.quant_method is not None
         # Route to the chunked forward path using the FlashInfer Cutlass kernel
         # only when data parallelism (DP) is enabled.
-        use_flashinfer_cutlass_kernels = (
-            self.dp_size > 1
-            and self.moe_config.use_flashinfer_cutlass_kernels)
-        if (self.moe_parallel_config.use_pplx_kernels
-                or self.moe_parallel_config.use_deepep_ll_kernels
-                or use_flashinfer_cutlass_kernels):
-            return self.forward_impl_chunked(hidden_states, router_logits)
+        #use_flashinfer_cutlass_kernels = (
+        #    self.dp_size > 1
+        #    and self.moe_config.use_flashinfer_cutlass_kernels)
+        #if (self.moe_parallel_config.use_pplx_kernels
+        #        or self.moe_parallel_config.use_deepep_ll_kernels
+        #        or use_flashinfer_cutlass_kernels):
+        #    return self.forward_impl_chunked(hidden_states, router_logits)
 
         do_naive_dispatch_combine: bool = (
             self.dp_size > 1
+            and not self.moe_parallel_config.use_deepep_ll_kernels
             and not self.moe_parallel_config.use_deepep_ht_kernels
             and not self.moe_config.use_flashinfer_cutlass_kernels)
         if do_naive_dispatch_combine:
+            raise AssertionError
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
 
@@ -1705,8 +1711,10 @@ class FusedMoE(CustomOp):
         )
 
         if do_naive_dispatch_combine:
+            raise AssertionError
             final_hidden_states = get_ep_group().combine(final_hidden_states)
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+            raise AssertionError
             # Default set to False. (May have to add shared expert outputs.
             final_hidden_states = self.maybe_all_reduce_tensor_model_parallel(
                 final_hidden_states)
