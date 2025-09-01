@@ -873,19 +873,19 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
+                num_draft_tokens = len(scheduled_spec_token_ids)
+                num_accepted = len(generated_token_ids) - 1
+                num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
                 # num_computed_tokens is decreased by the number of rejected
-                # tokens, where is given by:
-                # len(scheduled_spec_token_ids) + 1 - len(generated_token_ids).
-                num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
-                                       len(generated_token_ids))
-                request.num_computed_tokens -= num_tokens_rejected
+                # tokens.
+                request.num_computed_tokens -= num_rejected
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
-                    num_draft_tokens=len(scheduled_spec_token_ids),
-                    num_accepted_tokens=len(generated_token_ids) - 1)
+                    num_draft_tokens=num_draft_tokens,
+                    num_accepted_tokens=num_accepted)
 
             stopped = False
             new_logprobs = None
