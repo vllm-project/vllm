@@ -52,7 +52,8 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
-from .interfaces import SupportsLoRA, SupportsPP, SupportsQuant
+from .interfaces import (SupportsLoRA, SupportsMultiModal, SupportsPP,
+                         SupportsQuant)
 from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
                     flatten_bn, make_empty_intermediate_tensors_factory,
                     maybe_prefix)
