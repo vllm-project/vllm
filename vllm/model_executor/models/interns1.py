@@ -70,9 +70,11 @@ class InternS1ImagePixelInputs(TensorSchema):
         - c: Number of channels (3)
         - h: Height
         - w: Width
+        - bn: Batch size * number of images
     """
     type: Literal["pixel_values"] = "pixel_values"
     pixel_values: Annotated[torch.Tensor, TensorShape("bnp", 3, "h", "w")]
+    num_patches: Annotated[torch.Tensor, TensorShape("bn")]
 
 
 class InternS1ImageEmbeddingInputs(TensorSchema):
@@ -619,6 +621,7 @@ class InternS1ForConditionalGeneration(nn.Module, SupportsMultiModal,
             return InternS1ImagePixelInputs(
                 type="pixel_values",
                 pixel_values=pixel_values,
+                num_patches=image_num_patches,
                 resolve_bindings={
                     "h": h,
                     "w": w,
