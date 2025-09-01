@@ -527,7 +527,8 @@ class WorkerWrapperBase:
         self.shutdown()
 
     def shutdown(self) -> None:
-        self.worker.shutdown()
+        if self.worker is not None:
+            self.worker.shutdown()
 
     def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
         """
