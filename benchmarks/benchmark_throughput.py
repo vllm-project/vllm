@@ -96,7 +96,6 @@ def run_vllm(
         end = time.perf_counter()
     else:
         assert lora_requests is None, "BeamSearch API does not support LoRA"
-        prompts = [request.prompt for request in requests]
         # output_len should be the same for all requests.
         output_len = requests[0].expected_output_len
         for request in requests:
@@ -597,8 +596,8 @@ def validate_args(args):
     # https://github.com/vllm-project/vllm/issues/16222
     if args.data_parallel_size > 1:
         raise ValueError(
-            "Data parallel is not supported in offline benchmark, \
-            please use benchmark serving instead"
+            "Data parallel is not supported in offline benchmark, "
+            "please use benchmark serving instead"
         )
 
 

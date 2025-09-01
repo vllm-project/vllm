@@ -58,11 +58,13 @@ class OpenAIServingPooling(OpenAIServing):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
+        log_error_stack: bool = False,
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
-                         request_logger=request_logger)
+                         request_logger=request_logger,
+                         log_error_stack=log_error_stack)
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -118,7 +120,6 @@ class OpenAIServingPooling(OpenAIServing):
                     # so there is no need to append extra tokens to the input
                     add_generation_prompt=False,
                     continue_final_message=False,
-                    truncate_prompt_tokens=truncate_prompt_tokens,
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
@@ -127,7 +128,6 @@ class OpenAIServingPooling(OpenAIServing):
                      request,
                      tokenizer,
                      request.input,
-                     truncate_prompt_tokens=truncate_prompt_tokens,
                      add_special_tokens=request.add_special_tokens,
                  )
         except (ValueError, TypeError, jinja2.TemplateError) as e:
