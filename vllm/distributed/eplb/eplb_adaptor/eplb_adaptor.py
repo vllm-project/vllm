@@ -54,6 +54,8 @@ class EplbAdaptor(BaseAdaptor):
 
         self.all_topk_ids = []
 
+        self.buffer_tensor_list = []
+
     def init_buffer_tensor(self, num_buffer_tensor):
         for name in self.expert_weight_names:
             complete_name = "model.layers." + str(
