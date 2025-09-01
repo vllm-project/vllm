@@ -165,17 +165,13 @@ class SpecDecodingProm:
             labelnames=pos_labelnames,
         )
         self.counter_spec_decode_num_accepted_tokens_per_pos: dict[
-            int, list[prometheus_client.Counter]] = {}
-
-        for idx in labelvalues:
-            self.counter_spec_decode_num_accepted_tokens_per_pos[idx] = []
-
-        for pos in range(num_spec_tokens):
-            pos_counters = make_for_each_labelvalue(base_counter, labelvalues,
-                                                    [str(pos)])
-            for idx, pos_counter in pos_counters.items():
-                self.counter_spec_decode_num_accepted_tokens_per_pos[
-                    idx].append(pos_counter)
+            int, list[prometheus_client.Counter]] = {
+                idx: [
+                    base_counter.labels(*lv, str(pos))
+                    for pos in range(num_spec_tokens)
+                ]
+                for idx, lv in labelvalues.items()
+            }
 
     def observe(self,
                 spec_decoding_stats: SpecDecodingStats,
@@ -194,11 +190,9 @@ class SpecDecodingProm:
             counter.inc(spec_decoding_stats.num_accepted_tokens_per_pos[pos])
 
 
-def make_for_each_labelvalue(counter, labelvalues, append_labelvalues=None):
+def make_for_each_labelvalue(counter, labelvalues):
     """Create a counter for each label value."""
-    if append_labelvalues is None:
-        append_labelvalues = []
     return {
-        idx: counter.labels(*labelvalue, *append_labelvalues)
+        idx: counter.labels(*labelvalue)
         for idx, labelvalue in labelvalues.items()
     }
