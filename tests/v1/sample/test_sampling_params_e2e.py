@@ -9,16 +9,13 @@ from vllm import LLM, SamplingParams
 if os.getenv("VLLM_USE_V1", "0") != "1":
     pytest.skip("Test package requires V1", allow_module_level=True)
 
-MODEL = "meta-llama/Llama-3.2-1B"
+MODEL = "EleutherAI/pythia-14m"
 PROMPT = "Hello my name is Robert and I"
 
 
 @pytest.fixture(scope="module")
 def llm() -> LLM:
-    # Disable prefix caching so that we can test prompt logprobs.
-    # TODO remove this after https://github.com/vllm-project/vllm/pull/13949
-    # is merged
-    return LLM(MODEL, enforce_eager=True, enable_prefix_caching=False)
+    return LLM(MODEL, enforce_eager=True)
 
 
 def test_n_gt_1(llm):
