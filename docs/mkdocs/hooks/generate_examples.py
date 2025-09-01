@@ -132,11 +132,11 @@ class Example:
             link_text = match.group(1)
             relative_path = match.group(2)
 
-            # Convert relative path to gh-file format
-            main_file_dir = self.main_file.parent.relative_to(ROOT_DIR)
-            gh_file_path = main_file_dir / relative_path
+            # Make relative to repo root
+            gh_file = (self.main_file.parent / relative_path).resolve()
+            gh_file = gh_file.relative_to(ROOT_DIR)
 
-            return f'[{link_text}](gh-file:{gh_file_path})'
+            return f'[{link_text}](gh-file:{gh_file})'
 
         return re.sub(link_pattern, replace_link, content)
 
