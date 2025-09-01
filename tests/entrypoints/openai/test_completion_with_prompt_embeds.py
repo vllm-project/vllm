@@ -16,7 +16,6 @@ from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
-LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
 

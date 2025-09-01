@@ -22,7 +22,6 @@ from ...utils import RemoteOpenAIServer
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 # technically these adapters use a different base model,
 # but we're not testing generation quality here
-LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 GUIDED_DECODING_BACKENDS = ["outlines", "xgrammar", "guidance"]
 
