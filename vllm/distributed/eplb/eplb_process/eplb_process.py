@@ -5,7 +5,7 @@ import multiprocessing as mp
 from vllm.logger import logger
 
 
-class EPLBProcess:
+class EplbProcess:
     """
     Encapsulates lifecycle management for asynchronous expert
     rearrangement processes
