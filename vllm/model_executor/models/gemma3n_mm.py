@@ -65,7 +65,7 @@ class Gemma3nAudioInputs(TypedDict):
     input_features: Union[torch.Tensor, list[torch.Tensor]]
     input_features_padded: torch.Tensor
     """Shape: `(batch_size * num_audio, seq_length, num_features)`"""
-    input_features_mask: Union[torch.Tensor, list[torch.Tensor]]
+    input_features_mask: torch.Tensor
     """Shape: `(batch_size * num_audio, seq_length)`"""
 
 
