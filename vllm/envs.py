@@ -1255,7 +1255,7 @@ def compute_hash() -> str:
     # Local import to avoid any import-cycle surprises at module import time.
     from vllm.config.utils import hash_factors, normalize_value
 
-    factors = []
+    factors = dict()
     for factor, value in environment_variables.items():
         if factor in ignored_factors:
             continue
