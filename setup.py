@@ -520,7 +520,12 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
-    version = get_version(write_to="vllm/_version.py")
+    version = get_version(
+        write_to="vllm/_version.py",
+        # allow 3 minor versions (by default, only 2)
+        tag_regex=re.compile(
+            r"^(?:[\w-]+-)?(?P<version>[vV]?\d+(?:\.\d+){0,3}[^\+]*)(?:\+.*)?$"
+        ))
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
     if _no_device():
