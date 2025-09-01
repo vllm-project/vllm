@@ -116,17 +116,20 @@ def generate_continuous_batched_examples(example_lens_by_batch,
                                          d_head,
                                          itype,
                                          device='cuda',
-                                         return_ref=True):
+                                         return_naive_ref=True):
 
     # this function generates a random examples of certain length
     # and then cut according to "example_lens_by_batch" and feed
-    # them in continuous batches to the kernels
+    # them in continuous batches to the kernels.
+    # If if return_naive_ref=True, the naive torch implementation
+    # ssd_minimal_discrete will be used to compute and return
+    # reference output.
 
     # generate the full-length example
     A, dt, X, B, C = generate_random_inputs(num_examples, full_length, n_heads,
                                             d_head, itype)
 
-    if return_ref:
+    if return_naive_ref:
         Y_min, final_state_min = ssd_minimal_discrete(X * dt.unsqueeze(-1),
                                                       A * dt,
                                                       B,
@@ -183,7 +186,7 @@ def generate_continuous_batched_examples(example_lens_by_batch,
         IND_E = [end_boundary(x + y) for x, y in zip(IND_S, spec)]
 
         yield ([Y_min[s, IND_S[s]:IND_E[s]]
-                for s in range(num_examples)] if return_ref else None,
+                for s in range(num_examples)] if return_naive_ref else None,
                cu_seqlens, seq_idx.unsqueeze(0), (A, dt2, X2, B2, C2))
 
 
@@ -362,7 +365,7 @@ def test_mamba_chunk_scan_cont_batch_prefill_chunking(chunk_size, seqlens):
                                              n_heads,
                                              d_head,
                                              itype,
-                                             return_ref=False))
+                                             return_naive_ref=False))
     seqlens = torch.tensor(seqlens, dtype=torch.int32, device=X.device)
     device = X.device
 
