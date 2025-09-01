@@ -1,20 +1,12 @@
-from abc import abstractmethod
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-<<<<<<< HEAD
+from abc import ABC, abstractmethod
+
 import torch
 
-=======
->>>>>>> 233623c37 (eplb update)
 
-class DynamicConfig:
-    placement_policy = None
-
-    max_transferred_expert_per_layer = 100
-    ep_worldsize = 64
-    num_die_per_host = 8
-
-
-class EplbPolicy:
+class EplbPolicy(ABC):
 
     @abstractmethod
     def rebalance_experts(self, old_global_expert_indices, weight, num_replicas, num_groups, num_nodes, num_ranks):
@@ -40,7 +32,6 @@ class EplbPolicy:
             expert_count: [layers, num_logical_experts], number of
             physical replicas for each logical expert
         """
-<<<<<<< HEAD
         pass
 
     @staticmethod
@@ -56,6 +47,3 @@ class EplbPolicy:
     @staticmethod
     def convert_table(current_expert_table, num_layer):
         return current_expert_table.reshape(num_layer, -1)
-=======
-        pass
->>>>>>> 233623c37 (eplb update)
