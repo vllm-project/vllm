@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import asyncio
 import json
 from abc import ABC, abstractmethod
@@ -1540,7 +1542,7 @@ def make_tool_call_id(id_type: str = "random", func_name=None, idx=None):
         return f"chatcmpl-tool-{random_uuid()}"
 
 
-def parse_chat_tool_call(item: ResponseInputOutputItem) -> ChatCompletionMessageParam:
+def parse_chat_tool_call(item: "ResponseInputOutputItem") -> ChatCompletionMessageParam:
     if item.type == "function_call":
         # Append the function call as a tool call.
         return ChatCompletionAssistantMessageParam(
