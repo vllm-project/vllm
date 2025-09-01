@@ -20,7 +20,7 @@ import torch
 import torch.distributed as dist
 from vllm.logger import logger
 
-from vllm.distributed.eplb.eplb_adaptor import BaseAdaptor
+from vllm.distributed.eplb.eplb_adaptor.abstract_adaptor import BaseAdaptor
 
 
 class EplbAdaptor(BaseAdaptor):
