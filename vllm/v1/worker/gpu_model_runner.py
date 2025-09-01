@@ -687,6 +687,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if self.cascade_attn_enabled:
                     common_prefix_len = self._compute_cascade_attn_prefix_len(
                         num_scheduled_tokens,
+                        num_computed_tokens_np,
                         num_common_prefix_blocks,
                         kv_cache_group_spec.kv_cache_spec,
                         builder,
@@ -722,6 +723,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _compute_cascade_attn_prefix_len(
         self,
         num_scheduled_tokens: np.ndarray,
+        num_computed_tokens: np.ndarray,
         num_common_prefix_blocks: int,
         kv_cache_spec: KVCacheSpec,
         attn_metadata_builder: AttentionMetadataBuilder,
@@ -787,10 +789,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # and the second kernel will get an empty input. While this is not
         # a fundamental problem, our current implementation does not support
         # this case.
-        num_reqs = len(num_scheduled_tokens)
-        common_prefix_len = min(
-            common_prefix_len,
-            self.requests.num_computed_tokens.np[:num_reqs].min())
+        common_prefix_len = min(common_prefix_len, num_computed_tokens.min())
         # common_prefix_len should be a multiple of the block size.
         common_prefix_len = (common_prefix_len // kv_cache_spec.block_size *
                              kv_cache_spec.block_size)

@@ -305,4 +305,5 @@ def _compute_slot_mappings_kernel(
 @triton.jit
 def _load_ptr(ptr_to_ptr, elem_dtype):
     ptr = tl.load(ptr_to_ptr)
-    return tl.cast(ptr, tl.pointer_type(elem_dtype))
+    ptr = tl.cast(ptr, tl.pointer_type(elem_dtype))
+    return tl.multiple_of(ptr, 16)
