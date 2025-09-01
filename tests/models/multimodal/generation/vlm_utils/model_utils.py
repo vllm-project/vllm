@@ -658,7 +658,7 @@ def _internvl_generate(
 
 
 def eagle2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
-    """Patches and returns an instance of the HfRunner to use for Eagle2.5 VL."""
+    """Patches and returns an instance of the HfRunner for Eagle2.5 VL."""
 
     class Eagle2_5_VLProcessor:
         """A simple processor for Eagle2.5 VL which misses a processor."""

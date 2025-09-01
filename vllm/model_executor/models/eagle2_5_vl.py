@@ -130,13 +130,16 @@ def find_closest_aspect_ratio_v2(aspect_ratio, target_ratios, width, height,
     area = width * height
     for ratio in target_ratios:
         target_aspect_ratio = ratio[0] / ratio[1]
-        ratio_diff = abs(aspect_ratio - target_aspect_ratio)
-        area_ratio = (ratio[0] * ratio[1] * image_size * image_size) / area
         """
         new area > 60% of original image area is enough.
         """
-        factor_based_on_area_n_ratio = min((ratio[0]*ratio[1]*image_size*image_size)/ area, 0.6)* \
-                                     min(target_aspect_ratio/aspect_ratio, aspect_ratio/target_aspect_ratio)
+        factor_area = (ratio[0] * ratio[1] * image_size * image_size) / area
+        factor_area = min(factor_area, 0.6)
+        factor_ratio = min(
+            target_aspect_ratio / aspect_ratio,
+            aspect_ratio / target_aspect_ratio,
+        )
+        factor_based_on_area_n_ratio = factor_area * factor_ratio
 
         if factor_based_on_area_n_ratio > best_factor:
             best_factor = factor_based_on_area_n_ratio
