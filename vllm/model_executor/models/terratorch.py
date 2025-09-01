@@ -23,8 +23,6 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 import torch.nn as nn
-from terratorch.vllm import (DummyDataGenerator, InferenceRunner,
-                             InputDefinition, InputTypeEnum)
 from transformers import BatchFeature
 
 from vllm.config import VllmConfig
@@ -50,6 +48,7 @@ from .interfaces_base import default_pooling_type
 
 
 def _terratorch_field_names(pretrained_cfg: dict):
+    from terratorch.vllm import InputDefinition
     input_definition = InputDefinition(**pretrained_cfg["input"])
     return set(input_definition.data.keys())
 
@@ -62,6 +61,7 @@ def _terratorch_field_factory(
 ]:
 
     def _terratorch_field_config(hf_inputs: Mapping[str, torch.Tensor]):
+        from terratorch.vllm import InputDefinition, InputTypeEnum
         input_definition = InputDefinition(**pretrained_cfg["input"])
         fields = {}
         for input_name, input in input_definition.data.items():
@@ -87,6 +87,7 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
 
     def __init__(self, info: TerratorchProcessingInfo):
         super().__init__(info)
+        from terratorch.vllm import DummyDataGenerator
         self.dummy_data_generator = DummyDataGenerator(
             self.info.get_hf_config().to_dict()["pretrained_cfg"])
 
@@ -217,6 +218,7 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        from terratorch.vllm import InferenceRunner
 
         config = vllm_config.model_config.hf_config.to_dict()["pretrained_cfg"]
 
