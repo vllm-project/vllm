@@ -4,8 +4,6 @@
 from concurrent.futures import Future
 from typing import Optional, Union
 
-from vllm.distributed.kv_transfer import (get_kv_transfer_group,
-                                          has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.executor.ray_distributed_executor import (  # noqa
     RayDistributedExecutor as RayDistributedExecutorV0)
@@ -107,12 +105,3 @@ class RayDistributedExecutor(RayDistributedExecutorV0, Executor):
         ReconfigureRankType.SHUTDOWN_CURRENT_RANK:
             self.shutdown()
         return
-
-    def init_kv_output_aggregator(self) -> None:
-        if has_kv_transfer_group():
-            kv_connector = get_kv_transfer_group()
-            self.kv_output_aggregator = KVOutputAggregator(
-                kv_connector.get_finished_count() or self.parallel_config.world_size)
-        else:
-            self.kv_output_aggregator = KVOutputAggregator(
-                self.parallel_config.world_size)

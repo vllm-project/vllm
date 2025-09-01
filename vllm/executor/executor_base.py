@@ -13,6 +13,9 @@ from typing_extensions import TypeVar
 
 import vllm.platforms
 from vllm.config import VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -254,7 +257,14 @@ class ExecutorBase(ABC):
         self.check_health()
 
     def init_kv_output_aggregator(self) -> None:
-        pass
+        """Init KVOutputAggregator"""
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            self.kv_output_aggregator = KVOutputAggregator(
+                kv_connector.get_finished_count() or self.parallel_config.world_size)
+        else:
+            self.kv_output_aggregator = KVOutputAggregator(
+                self.parallel_config.world_size)
 
 
 class DistributedExecutorBase(ExecutorBase):
