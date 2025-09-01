@@ -37,6 +37,7 @@ class BaseRenderer(ABC):
         model_config: ModelConfig,
         tokenizer: Optional[AnyTokenizer] = None,
     ):
+        super().__init__()
         self.model_config = model_config
         self.tokenizer = tokenizer
 
@@ -76,7 +77,7 @@ class BaseRenderer(ABC):
         Raises:
             ValueError: If input format is invalid or length limits exceeded
         """
-        pass
+        raise NotImplementedError
 
 
 class Renderer(BaseRenderer):
