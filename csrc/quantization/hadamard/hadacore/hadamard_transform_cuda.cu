@@ -6,6 +6,13 @@
 #include <cuda/annotated_ptr>
 #include <c10/cuda/CUDAException.h>
 
+#include <torch/all.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+
+#include "core/scalar_type.hpp"  // TODO: remove
+#include "core/registration.h"
+
 namespace hadacore {
 
 #ifndef __CUDACC__
@@ -751,4 +758,54 @@ void run_fht(void* a_mat_ptr, void* out_ptr, uint32_t numel, uint32_t had_size, 
 template void run_fht<torch::ScalarType::Half>(void* a_mat_ptr, void* out_ptr, uint32_t numel, uint32_t had_size, cudaStream_t stream);
 template void run_fht<torch::ScalarType::BFloat16>(void* a_mat_ptr, void* out_ptr, uint32_t numel, uint32_t had_size, cudaStream_t stream);
 
+}  // end hadacore namespace
+
+//template <torch::ScalarType dtype>
+//void hadacore::run_fht(void* a, void* out, uint32_t numel, uint32_t had_size, cudaStream_t stream);
+
+constexpr bool is_power_of_two(uint32_t x) {
+    return x && !(x & (x - 1));
+}
+
+void hadacore_transform(torch::Tensor& x) {
+    auto dtype = x.scalar_type();
+    TORCH_CHECK(dtype == torch::ScalarType::Half || dtype == torch::ScalarType::BFloat16, "Only fp16 and bf16 supported currently");
+    // TODO
+    // TORCH_CHECK(xid_newobjectfunc.is_cuda());
+    
+    const int had_size = x.size(-1);
+    TORCH_CHECK(is_power_of_two(had_size) && (had_size <= (1U << 15)),
+        "Only power of two Hadamard sizes up to 2^15 are supported, got ", had_size);
+    
+    const auto res_shape = x.sizes();
+    x = x.reshape({-1, had_size});
+    
+    // TODO: consider erroring here
+    auto numel = x.numel();
+    if (numel % 256 != 0) {
+        x = torch::nn::functional::pad(x, torch::nn::functional::PadFuncOptions({0, 0, 0, (256 - numel % 256) / had_size}));
+    }
+    
+    if (x.stride(-1) != 1) {
+        x = x.contiguous();
+    }
+
+    at::cuda::CUDAGuard device_guard{(char)x.get_device()};
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+
+    if (dtype == torch::ScalarType::Half) {
+        hadacore::run_fht<torch::ScalarType::Half>(x.data_ptr(), x.data_ptr(), x.numel(), had_size, stream);
+    } else {
+        hadacore::run_fht<torch::ScalarType::BFloat16>(x.data_ptr(), x.data_ptr(), x.numel(), had_size, stream);
+    }
+
+    if (numel % 256 != 0) {
+        x = x.index({torch::indexing::Slice(0, numel / had_size)});
+    }
+
+    x = x.reshape(res_shape);
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("hadacore_transform", &hadacore_transform);
 }

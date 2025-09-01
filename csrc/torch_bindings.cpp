@@ -33,9 +33,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
   // Applied AI hadamard transform
-  ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
+  ops.def("hadacore_transform(Tensor! x) -> ()");
   // TODO: conditional generation
-  ops.impl("hadacore_transform", torch::kCUDA, &hadacore_transform);
+  //  conditionally compiled so impl in source file
+  // ops.impl("hadacore_transform", torch::kCUDA, &hadacore_transform);
 
   ops.def("weak_ref_tensor(Tensor input) -> Tensor");
   ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);

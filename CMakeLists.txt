@@ -285,6 +285,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
   FetchContent_MakeAvailable(cutlass)
 
+  # TODO
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/permute_cols.cu"
@@ -295,6 +296,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
     "csrc/cutlass_extensions/common.cpp"
     "csrc/attention/mla/cutlass_mla_entry.cu"
+    "csrc/quantization/hadamard/hadacore/hadamard_transform_cuda.cu"
     "csrc/quantization/fp8/per_token_group_quant.cu")
 
   set_gencode_flags_for_srcs(
@@ -780,14 +782,26 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # TODO
   # note: CUDA synchronization primitives are only supported for sm_70 and up.
   #cuda_archs_loose_intersection(W4A8_ARCHS "7.0" "${CUDA_ARCHS}")
+
+
+
+
+
   set(SRCS
     "csrc/quantization/hadamard/hadacore/hadamard_transform_cuda.cu"
-    "csrc/quantization/hadamard/hadacore/hadamard_transform.cpp")
+  )
+  #"csrc/quantization/hadamard/hadacore/hadamard_transform.cpp")
   set_gencode_flags_for_srcs(
     SRCS "${SRCS}"
     CUDA_ARCHS "${CUDA_ARCHS}")
   list(APPEND VLLM_EXT_SRC "${SRCS}")
+
   message(STATUS "Building hadacore")
+
+
+
+
+
 
   # cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a;" "${CUDA_ARCHS}")
   # if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.2 AND SCALED_MM_ARCHS)

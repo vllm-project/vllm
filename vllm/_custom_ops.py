@@ -386,6 +386,14 @@ def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor,
                  bit: int) -> None:
     torch.ops._C.gptq_shuffle(q_weight, q_perm, bit)
 
+# hadacore
+def hadacore_transform(x: torch.Tensor) -> torch.Tensor:
+    return torch.ops._C.hadacore_transform(x)
+if hasattr(torch.ops._C, "hadacore_transform"):
+    @register_fake("_C::hadacore_transform")
+    def _hadacore_transform_fake(x: torch.Tensor) -> torch.Tensor:
+        return torch.empty(x.shape, device=x.device, dtype=x.dtype)
+
 
 # marlin_24
 def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
@@ -1973,7 +1981,3 @@ def onednn_scaled_mm(
                                   input_zp_adj, bias, dnnl_handler.handler)
 
     return output
-
-
-def hadacore_transform(x: torch.Tensor, inplace: bool = True) -> torch.Tensor:
-    return torch.ops._C.hadacore_transform(x, inplace)

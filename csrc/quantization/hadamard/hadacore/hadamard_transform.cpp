@@ -3,12 +3,12 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 // TODO: consider including here?
-// #include "csrc/quantization/hadamard/hadacore/hadamard_transform_cuda.cu"
+// #include "hadamard_transform_cuda.cu"
 
 using namespace torch::indexing;
 
 template <torch::ScalarType dtype>
-void run_fht(void* a, void* out, uint32_t numel, uint32_t had_size, cudaStream_t stream);
+void hadacore::run_fht(void* a, void* out, uint32_t numel, uint32_t had_size, cudaStream_t stream);
 
 constexpr bool is_power_of_two(uint32_t x) {
     return x && !(x & (x - 1));
@@ -41,9 +41,9 @@ torch::Tensor hadacore_transform(at::Tensor& x, bool inplace) {
     auto stream = at::cuda::getCurrentCUDAStream().stream();
 
     if (dtype == torch::ScalarType::Half) {
-        run_fht<torch::ScalarType::Half>(x.data_ptr(), out.data_ptr(), x.numel(), had_size, stream);
+        hadacore::run_fht<torch::ScalarType::Half>(x.data_ptr(), out.data_ptr(), x.numel(), had_size, stream);
     } else {
-        run_fht<torch::ScalarType::BFloat16>(x.data_ptr(), out.data_ptr(), x.numel(), had_size, stream);
+        hadacore::run_fht<torch::ScalarType::BFloat16>(x.data_ptr(), out.data_ptr(), x.numel(), had_size, stream);
     }
 
     if (numel % 256 != 0) {
