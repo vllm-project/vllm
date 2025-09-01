@@ -1120,6 +1120,9 @@ class VllmRunner:
 
         return self.llm.llm_engine.collective_rpc(_apply_model)
 
+    def get_llm(self) -> LLM:
+        return self.llm
+
     def __enter__(self):
         return self
 

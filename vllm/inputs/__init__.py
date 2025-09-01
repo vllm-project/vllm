@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from .data import (DecoderOnlyInputs, EmbedsInputs, EmbedsPrompt,
+from .data import (DataPrompt, DecoderOnlyInputs, EmbedsInputs, EmbedsPrompt,
                    EncoderDecoderInputs, ExplicitEncoderDecoderPrompt,
                    ProcessorInputs, PromptType, SingletonInputs,
                    SingletonPrompt, TextPrompt, TokenInputs, TokensPrompt,
@@ -18,6 +18,7 @@ target model.
 """
 
 __all__ = [
+    "DataPrompt",
     "TextPrompt",
     "TokensPrompt",
     "PromptType",
