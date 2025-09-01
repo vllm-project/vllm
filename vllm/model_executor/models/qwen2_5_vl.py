@@ -37,7 +37,6 @@ from transformers import BatchFeature
 from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
-from transformers.models.qwen2_vl import Qwen2VLImageProcessor
 
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
@@ -836,33 +835,6 @@ class Qwen2_5_VLProcessingInfo(Qwen2VLProcessingInfo):
             use_fast=kwargs.pop("use_fast", True),
             **kwargs,
         )
-
-    def get_num_video_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        num_frames: int,
-        image_processor: Optional[Qwen2VLImageProcessor],
-    ) -> int:
-        _, num_video_tokens = self._get_vision_info(
-            image_width=image_width,
-            image_height=image_height,
-            num_frames=num_frames,
-            image_processor=image_processor,
-        )
-        # Intentionally commented - although it's tempting to write:
-        # mm_config = self.ctx.model_config.get_multimodal_config()
-        # video_pruning_rate = mm_config.video_pruning_rate
-        # if video_pruning_rate is not None and video_pruning_rate > 0:
-        #     retain_faction = 1 - video_pruning_rate
-        #     num_video_tokens = int(num_video_tokens * retain_faction)
-        # This logic would not be handled correctly by a scheduler.
-        # The maximum number of video frames and encoder budged should be
-        # deducted from the _input_ media size (and not the number of output
-        # tokens as it is now)
-
-        return num_video_tokens
 
 
 class Qwen2_5_VLMultiModalProcessor(Qwen2VLMultiModalProcessor):
