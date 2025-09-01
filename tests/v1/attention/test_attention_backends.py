@@ -428,7 +428,7 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     # Note: flex_attention has known Triton kernel compatibility issues
     # with test infrastructures
     for backend_name in BACKENDS_TO_TEST:
-        # FlashAttentionm + FlexAttention:
+        # FlashAttention + FlexAttention:
         #   [2, num_blocks, block_size, num_kv_heads, head_size]
         # FlashInfer:
         #   [num_blocks, 2, block_size, num_kv_heads, head_size]
