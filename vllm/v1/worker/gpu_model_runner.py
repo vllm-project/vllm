@@ -1254,7 +1254,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
                 mm_embeds_req.append(mm_embeds_item)
 
-            if self.is_multimodal_pruning_enabled:
+            if self.is_multimodal_pruning_enabled and self.uses_mrope:
                 should_sync_mrope_positions = True
                 mm_embeds_req, new_mrope_positions, new_delta = (
                     self.model.recompute_mrope_positions(
