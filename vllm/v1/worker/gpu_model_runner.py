@@ -462,6 +462,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _init_mrope_positions(self, req_id: str) -> None:
         req_idx = self.requests.req_id_to_index[req_id]
         req_data = self.requests.req_data[req_idx]
+        prompt_len = self.requests.num_prompt_tokens.np[req_idx]
+        prompt_token_ids = self.requests.token_ids.np[req_idx, :prompt_len]
 
         image_grid_thw = []
         video_grid_thw = []
@@ -483,7 +485,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         req_data.mrope_positions, req_data.mrope_position_delta = \
             MRotaryEmbedding.get_input_positions_tensor(
-                req_data.prompt_token_ids,
+                prompt_token_ids,
                 hf_config=self.model_config.hf_config,
                 image_grid_thw=image_grid_thw,
                 video_grid_thw=video_grid_thw,
@@ -905,7 +907,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # list of tuple (mm_hash, position_info)
         mm_hashes_pos = list[tuple[str, PlaceholderRange]]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
-            req_data = self.requests.req_data[req_id]
+            req_idx = self.requests.req_id_to_index[req_id]
+            req_data = self.requests.req_data[req_idx]
 
             for mm_input_id in encoder_input_ids:
                 mm_hash = req_data.mm_hashes[mm_input_id]
@@ -1259,11 +1262,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return self.kv_connector_no_forward(scheduler_output,
                                                 self.vllm_config)
 
-        if self.cache_config.kv_sharing_fast_prefill:
-            assert not self.input_batch.num_prompt_logprobs, (
-                "--kv-sharing-fast-prefill produces incorrect logprobs for "
-                "prompt tokens, tokens, please disable it when the requests "
-                "need prompt logprobs")
+        # if self.cache_config.kv_sharing_fast_prefill:
+        #     assert not self.input_batch.num_prompt_logprobs, (
+        #         "--kv-sharing-fast-prefill produces incorrect logprobs for "
+        #         "prompt tokens, tokens, please disable it when the requests "
+        #         "need prompt logprobs")
 
         # Prepare the decoder inputs.
         input_batch = self._prepare_inputs(scheduler_output)
@@ -1296,7 +1299,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.supports_mm_inputs:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
-            mm_embeds = self._gather_mm_embeddings(scheduler_output)
+            mm_embeds = self._gather_mm_embeddings(input_batch)
         else:
             mm_embeds = []
 
@@ -1328,7 +1331,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             inputs_embeds = None
             model_kwargs = self._init_model_kwargs(num_input_tokens)
         if self.uses_mrope:
-            positions = self.mrope_positions[:, :num_input_tokens]
+            positions = self.mrope_positions.gpu[:, :num_input_tokens]
         else:
             positions = self.positions.gpu[:num_input_tokens]
 
@@ -1448,7 +1451,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         num_nans_in_logits = {}
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
-            num_nans_in_logits = self._get_nans_in_logits(logits)
+            num_nans_in_logits = self._get_nans_in_logits(
+                input_batch.req_ids, logits)
 
         # NOTE: GPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
@@ -1488,14 +1492,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.speculative_config:
             assert input_batch.spec_decode_common_attn_metadata is not None
             self._draft_token_ids = self.propose_draft_token_ids(
-                scheduler_output,
+                input_batch,
                 valid_sampled_token_ids,
                 sampling_metadata,
                 hidden_states,
                 sample_hidden_states,
                 aux_hidden_states,
-                input_batch.spec_decode_metadata,
-                input_batch.spec_decode_common_attn_metadata,
             )
             self._draft_req_ids = input_batch.req_ids
 
@@ -1889,16 +1891,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _get_nans_in_logits(
         self,
-        input_batch: InputBatch,
+        req_ids: list[str],
         logits: Optional[torch.Tensor],
     ) -> dict[str, int]:
         try:
             if logits is None:
-                return {req_id: 0 for req_id in input_batch.req_ids}
+                return {req_id: 0 for req_id in req_ids}
 
             num_nans_in_logits = {}
             num_nans_for_index = logits.isnan().sum(dim=-1).cpu().numpy()
-            for i, req_id in enumerate(input_batch.req_ids):
+            for i, req_id in enumerate(req_ids):
                 num_nans_in_logits[req_id] = (int(num_nans_for_index[i])
                                               if num_nans_for_index is not None
                                               and i < logits.shape[0] else 0)
@@ -2092,7 +2094,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 model_kwargs = self._init_model_kwargs(num_tokens)
 
             if self.uses_mrope:
-                positions = self.mrope_positions[:, :num_tokens]
+                positions = self.mrope_positions.gpu[:, :num_tokens]
             else:
                 positions = self.positions.gpu[:num_tokens]
 

@@ -110,7 +110,7 @@ class RequestState:
         self.is_spec_decode = is_spec_decode
         self.pooling_params = None
         self.block_sizes = block_sizes
-        self.num_prompt_logprobs = {}
+        self.num_prompt_logprobs: dict[int, int] = {}
 
         self.req_id_to_index: dict[str, int] = {}
         self.index_to_req_id: dict[int, str] = {}
@@ -378,6 +378,7 @@ def _make_sampling_metadata_kernel(
     tl.store(dst_repetition_penalties + batch_idx, repetition_penalties)
 
 
+@triton.jit
 def _prepare_spec_decode_kernel(
     query_start_loc,  # [B + 1]
     cu_num_draft_tokens,  # [B]
