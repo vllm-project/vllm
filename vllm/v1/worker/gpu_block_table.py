@@ -156,8 +156,8 @@ class BlockTables:
         self,
         cu_num_tokens: torch.Tensor,
         pos: torch.Tensor,
+        num_tokens: int,
     ) -> tuple[torch.Tensor, ...]:
-        num_tokens = pos.shape[0]
         num_reqs = cu_num_tokens.shape[0] - 1
         num_groups = self.num_kv_cache_groups
         _compute_slot_mappings_kernel[(num_reqs + 1, num_groups)](

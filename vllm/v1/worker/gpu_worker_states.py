@@ -5,10 +5,12 @@
 from dataclasses import dataclass
 from typing import Optional, Union
 
+import numba
 import numpy as np
 import torch
 import triton
 import triton.language as tl
+from numba import types
 from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
@@ -18,6 +20,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 
 @dataclass
@@ -158,6 +161,10 @@ class RequestState:
             is_scalar=num_cols == 1,
         )
 
+    @property
+    def num_cached_reqs(self) -> int:
+        return len(self.req_id_to_index)
+
     def add_request(
         self,
         req_id: str,
@@ -292,9 +299,43 @@ class RequestState:
             logitsprocs=None,
         )
 
-    @property
-    def num_cached_reqs(self) -> int:
-        return len(self.req_id_to_index)
+    def make_spec_decode_metadata(
+        self,
+        query_start_loc: torch.Tensor,
+        cu_num_draft_tokens: torch.Tensor,
+        cu_num_draft_tokens_np: np.ndarray,
+        input_ids: torch.Tensor,
+    ) -> SpecDecodeMetadata:
+        batch_size = query_start_loc.shape[0] - 1
+        total_num_draft_tokens = cu_num_draft_tokens_np[batch_size - 1]
+        logits_indices = torch.empty(total_num_draft_tokens + batch_size,
+                                     dtype=torch.int32,
+                                     device=self.device)
+        target_logits_indices = torch.empty(total_num_draft_tokens,
+                                            dtype=torch.int32,
+                                            device=self.device)
+        bonus_logits_indices = torch.empty(batch_size,
+                                           dtype=torch.int32,
+                                           device=self.device)
+        _prepare_spec_decode_kernel[(batch_size, )](
+            query_start_loc,
+            cu_num_draft_tokens,
+            logits_indices,
+            target_logits_indices,
+            bonus_logits_indices,
+            BLOCK_SIZE=triton.next_power_of_2(32 + 1),
+        )
+
+        draft_token_ids = input_ids[logits_indices]
+        draft_token_ids = draft_token_ids[target_logits_indices + 1]
+        return SpecDecodeMetadata(
+            draft_token_ids=draft_token_ids,
+            num_draft_tokens=cu_num_draft_tokens_np.tolist(),
+            cu_num_draft_tokens=cu_num_draft_tokens,
+            target_logits_indices=target_logits_indices,
+            bonus_logits_indices=bonus_logits_indices,
+            logits_indices=logits_indices,
+        )
 
 
 @triton.jit
@@ -333,3 +374,90 @@ def _make_sampling_metadata_kernel(
 
     repetition_penalties = tl.load(src_repetition_penalties + req_idx)
     tl.store(dst_repetition_penalties + batch_idx, repetition_penalties)
+
+
+def _prepare_spec_decode_kernel(
+    query_start_loc,  # [B + 1]
+    cu_num_draft_tokens,  # [B]
+    logits_indices,  # [N + B]
+    target_logits_indices,  # [N]
+    bonus_logits_indices,  # [B]
+    BLOCK_SIZE: tl.constexpr,
+):
+    batch_idx = tl.program_id(0)
+
+    if batch_idx == 0:
+        draft_start_idx = 0
+    else:
+        draft_start_idx = tl.load(cu_num_draft_tokens + batch_idx - 1)
+    draft_end_idx = tl.load(cu_num_draft_tokens + batch_idx)
+    draft_len = draft_end_idx - draft_start_idx
+    sample_len = draft_len + 1
+
+    q_end_idx = tl.load(query_start_loc + batch_idx + 1)
+
+    sample_start_idx = draft_start_idx + batch_idx
+    sample_end_idx = sample_start_idx + sample_len
+    offset = tl.arange(0, BLOCK_SIZE)
+    tl.store(logits_indices + sample_start_idx + offset,
+             q_end_idx - sample_len + offset,
+             mask=offset < sample_len)
+    tl.store(target_logits_indices + draft_start_idx + offset,
+             sample_start_idx + offset,
+             mask=offset < draft_len)
+    tl.store(bonus_logits_indices + batch_idx, sample_end_idx - 1)
+
+
+# NOTE: With the type annotations, this function is pre-compiled
+# before the first call.
+@numba.jit(
+    [
+        types.none(
+            types.int32[:],  # idx_mapping
+            types.int32[:, :],  # token_ids
+            types.int32[:],  # num_computed_tokens
+            types.int32[:],  # num_scheduled_tokens
+            types.int32[:],  # input_ids
+            types.int32[:],  # query_start_loc
+            types.int32[:],  # seq_lens
+            types.int64[:],  # positions
+        )
+    ],
+    nopython=True,
+    cache=True,
+)
+def prepare_inputs(
+        idx_mapping: np.ndarray,  # batch_idx -> req_idx
+        token_ids: np.ndarray,  # [N, max_model_len]
+        num_computed_tokens: np.ndarray,  # [N]
+        num_scheduled_tokens: np.ndarray,  # [B]
+        input_ids: np.ndarray,  # [num_input_tokens]
+        query_start_loc: np.ndarray,  # [B + 1]
+        seq_lens: np.ndarray,  # [B]
+        positions: np.ndarray,  # [num_input_tokens]
+) -> None:
+    num_reqs = num_scheduled_tokens.shape[0]
+    query_start_loc[0] = 0
+
+    cu_num_tokens = 0
+    for i in range(num_reqs):
+        req_idx = idx_mapping[i]
+        query_len = num_scheduled_tokens[i]
+        start = num_computed_tokens[req_idx]
+        end = start + query_len
+        seq_lens[i] = end
+
+        start_idx = cu_num_tokens
+        end_idx = start_idx + query_len
+        input_ids[start_idx:end_idx] = token_ids[req_idx, start:end]
+        positions[start_idx:end_idx] = np.arange(start, end, dtype=np.int64)
+
+        cu_num_tokens = end_idx
+        query_start_loc[i + 1] = cu_num_tokens
+
+    # Pad the inputs for CUDA graphs.
+    # Note: pad query_start_loc to be non-decreasing, as kernels
+    # like FlashAttention requires that
+    query_start_loc[num_reqs + 1:].fill(cu_num_tokens)
+    # Fill unused with 0 for full cuda graph mode.
+    seq_lens[num_reqs:].fill(0)
