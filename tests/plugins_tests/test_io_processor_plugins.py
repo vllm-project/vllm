@@ -113,6 +113,7 @@ async def test_prithvi_mae_plugin_online(
         },
         "priority": 0,
         "model": model_name,
+        "softmax": False
     }
 
     ret = requests.post(
