@@ -220,6 +220,7 @@ class EagleProposer:
             )
             if self.method in ("deepseek_mtp", "ernie_mtp"):
                 last_hidden_states = ret_hidden_states
+                hidden_states = last_hidden_states
             else:
                 last_hidden_states, hidden_states = ret_hidden_states
         sample_hidden_states = last_hidden_states[last_token_indices]
