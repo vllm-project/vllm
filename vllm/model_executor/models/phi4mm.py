@@ -1031,8 +1031,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         ]
         return audio_embeds
 
-    def _parse_and_validate_image_input(self,
-                                        **kwargs: object) -> Optional[dict]:
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[Phi4MMImagePixelInputs]:
         input_image_embeds: NestedTensors = kwargs.get("input_image_embeds")
         if input_image_embeds is None:
             return None
