@@ -108,6 +108,14 @@ __device__ __forceinline__ float warp_max(float v) {
   return v;
 }
 
+__device__ __forceinline__ __nv_bfloat16 warp_max(__nv_bfloat16 v) {
+  static constexpr unsigned FULL_MASK = 0xffffffffu;
+  for (int offset = 1; offset < WARP_SIZE; offset *= 2) {
+    v = __hmax(v, __shfl_xor_sync(FULL_MASK, v, offset));
+  }
+  return v;
+}
+
 template <typename T, typename U>
 __device__ __forceinline__ void cp_async4(T* _smem_ptr, const U* _glob_ptr) {
   auto smem_ptr = reinterpret_cast<void*>(_smem_ptr);
@@ -137,6 +145,18 @@ __device__ __forceinline__ void cp_async_wait<0>() {
 
 __device__ __forceinline__ float clip(float v, float mmin, float mmax) {
   return fminf(mmax, fmaxf(v, mmin));
+}
+
+__device__ __forceinline__ __nv_bfloat16 clip(__nv_bfloat16 v,
+                                              __nv_bfloat16 mmin,
+                                              __nv_bfloat16 mmax) {
+  return __hmin(mmax, __hmax(v, mmin));
+}
+
+__device__ __forceinline__ __nv_bfloat162 clip(__nv_bfloat162 v,
+                                               __nv_bfloat162 mmin,
+                                               __nv_bfloat162 mmax) {
+  return __hmin2(mmax, __hmax2(v, mmin));
 }
 
 template <typename scalar_t, uint32_t NUM_WARPS, typename Idx_t,
@@ -282,10 +302,176 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     }
 
     auto local_y_q_ptr = reinterpret_cast<unsigned char*>(y_q_ptr);
-    const auto r2 = reinterpret_cast<const float2*>(results);
+    const auto r4 = reinterpret_cast<const float4*>(results);
+    auto fp8x4 = __nv_fp8x4_e4m3(*r4);
+    auto resultfp8x2 = reinterpret_cast<__nv_fp8x2_e4m3*>(&fp8x4.__x);
+
 #pragma unroll
     for (Idx_t i = 0; i < 2; ++i) {
-      auto resultfp8x2 = __nv_fp8x2_e4m3(r2[i]);
+      auto res_u8 = reinterpret_cast<unsigned char*>(&resultfp8x2[i].__x);
+      local_y_q_ptr[0] = res_u8[0];
+      local_y_q_ptr[1] = res_u8[1];
+      local_y_q_ptr += 2 * WARP_SIZE;
+    }
+
+    y_q_ptr += stride_yq_t;
+
+    if (lane_id == 0) {
+      *y_s_ptr = y_s;
+      y_s_ptr += stride_ys_t;
+    }
+  }
+}
+
+template <typename scalar_t, uint32_t NUM_WARPS, typename Idx_t,
+          int NUM_PARALLEL_TOKENS, bool USE_UE8M0, int GROUP_SIZE = 128,
+          int NUM_STAGES = 3>
+__global__ void __silu_mul_fp8_quant_deep_gemm_kernel(
+    const scalar_t* __restrict__ _input, __nv_fp8_e4m3* __restrict__ _y_q,
+    float* __restrict__ _y_s, const uint32_t* __restrict__ counts,
+
+    // sizes
+    Idx_t H, Idx_t G,
+
+    // strides (in elements)
+    Idx_t stride_i_e, Idx_t stride_i_t, Idx_t stride_i_h, Idx_t stride_yq_e,
+    Idx_t stride_yq_t, Idx_t stride_yq_h, Idx_t stride_ys_e, Idx_t stride_ys_t,
+    Idx_t stride_ys_g, Idx_t stride_counts_e,
+
+    // quant params
+    float fp8_min, float fp8_max) {
+  static constexpr float EPS = 1e-10;
+  static constexpr uint32_t S_NUM_128 =
+      2 * (GROUP_SIZE / 8) * NUM_WARPS * NUM_STAGES;
+  static constexpr auto THREAD_COUNT = NUM_WARPS * WARP_SIZE;
+  static constexpr int HALF_THREAD_COUNT = THREAD_COUNT / 2;
+  static constexpr uint32_t S_NUM_64 = S_NUM_128 * 2;
+  static constexpr uint32_t S_NUM_32 = S_NUM_64 * 2;
+  __shared__ __int128_t __align__(16) s_buff_128[S_NUM_128];
+  __shared__ Idx_t s_counts[1];
+
+  const Idx_t tid = threadIdx.x;
+  const Idx_t warp_id = tid / WARP_SIZE;
+  const Idx_t lane_id = tid % WARP_SIZE;
+
+  auto s_buff_compute_32 = reinterpret_cast<__nv_bfloat162*>(s_buff_128);
+
+  // block handles one (expert e, group g)
+  Idx_t pid = blockIdx.x;
+  Idx_t e = pid / G;
+  Idx_t g = pid % G;
+
+  if (!tid) {
+    s_counts[0] = counts[e * stride_counts_e];
+  }
+
+  const Idx_t stride_i_t_128 = stride_i_t / 8u;
+
+  __syncthreads();
+  const Idx_t n_tokens = s_counts[0];
+
+  auto par_id = blockIdx.y;
+  auto chunk_size = (n_tokens + NUM_PARALLEL_TOKENS - 1) / NUM_PARALLEL_TOKENS;
+  auto n_tokens_lower = par_id * chunk_size;
+  auto n_tokens_upper = min(n_tokens, (par_id + 1) * chunk_size);
+
+  // base offsets (element-based)
+  const Idx_t base_i = e * stride_i_e + NUM_WARPS * g * GROUP_SIZE * stride_i_h;
+  const Idx_t base_ys = e * stride_ys_e + NUM_WARPS * g * stride_ys_g;
+  const Idx_t base_yq =
+      e * stride_yq_e + NUM_WARPS * g * GROUP_SIZE * stride_yq_h;
+
+  Idx_t gate_off_128 = (base_i / 8u);
+  auto input_128_ptr = reinterpret_cast<const __int128_t*>(_input);
+  auto gate_128_ptr = input_128_ptr + gate_off_128 + (tid % 64) +
+                      stride_i_t_128 * n_tokens_lower;
+  auto up_128_ptr = gate_128_ptr + (H * stride_i_h) / 8u;
+
+  auto y_s_ptr = _y_s + base_ys + warp_id + stride_ys_t * n_tokens_lower;
+
+  auto y_q_ptr = _y_q + base_yq + warp_id * GROUP_SIZE + 2 * lane_id +
+                 stride_yq_t * n_tokens_lower;
+
+  Idx_t t_load = n_tokens_lower, load_stage_id = 0;
+  auto s_buff_gate_load_128 = s_buff_128 + (tid % HALF_THREAD_COUNT);
+  auto s_buff_up_load_128 = s_buff_gate_load_128 + S_NUM_128 / 2u;
+  auto load_and_advance_y_pred = [&] {
+    if (t_load < n_tokens_upper) {
+      auto stage_offset =
+          (load_stage_id % NUM_STAGES) * (NUM_WARPS * WARP_SIZE / 2);
+
+      auto s_gate_stage_128_staged_ptr = s_buff_gate_load_128 + stage_offset;
+      auto s_up_stage_128_staged_ptr = s_buff_up_load_128 + stage_offset;
+
+      if (tid < HALF_THREAD_COUNT) {
+        cp_async4(s_gate_stage_128_staged_ptr, gate_128_ptr);
+        gate_128_ptr += stride_i_t_128;
+      } else {
+        cp_async4(s_up_stage_128_staged_ptr, up_128_ptr);
+        up_128_ptr += stride_i_t_128;
+      }
+      ++t_load;
+      ++load_stage_id;
+    }
+    cp_async_fence();
+  };
+
+#pragma unroll
+  for (int i = 0; i < NUM_STAGES - 1; i++) {
+    load_and_advance_y_pred();
+  }
+
+  auto s_gate_ptr = s_buff_compute_32 + warp_id * (GROUP_SIZE / 2) + lane_id;
+  auto s_up_ptr = s_gate_ptr + S_NUM_32 / 2;
+  using bf16x2 = __nv_bfloat162;
+  using bf16 = __nv_bfloat16;
+
+  Idx_t stage_id{};
+  for (Idx_t t = n_tokens_lower; t < n_tokens_upper; ++t) {
+    bf16 y_max = EPS;
+    bf16x2 results[2];
+
+    cp_async_wait<NUM_STAGES - 2>();
+    __syncthreads();
+
+    load_and_advance_y_pred();
+
+    const auto compute_pipeline_offset =
+        ((stage_id++) % NUM_STAGES) * (GROUP_SIZE / 2u) * NUM_WARPS;
+
+    auto s_gate_compute = s_gate_ptr + compute_pipeline_offset;
+    auto s_up_compute = s_up_ptr + compute_pipeline_offset;
+
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+      bf16x2 gate = __float22bfloat162_rn(__bfloat1622float2(*s_gate_compute));
+      bf16x2 upv = *s_up_compute;
+
+      results[i] = __hmul2(gate, upv);
+
+      s_gate_compute += WARP_SIZE;
+      s_up_compute += WARP_SIZE;
+    }
+
+    auto hmx2 = __hmax2(results[0], results[1]);
+    y_max = __hmax(hmx2.x, hmx2.y);
+
+    auto y_s = warp_max(y_max) / bf16(fp8_max);
+
+    const auto fp8min2 = make_bfloat162(fp8_min, fp8_min);
+    const auto fp8max2 = make_bfloat162(fp8_max, fp8_max);
+
+    auto y_s2 = make_bfloat162(y_s, y_s);
+#pragma unroll
+    for (Idx_t i = 0; i < 2; ++i) {
+      results[i] /= y_s2;
+      results[i] = clip(results[i], fp8min2, fp8max2);
+    }
+
+    auto local_y_q_ptr = reinterpret_cast<unsigned char*>(y_q_ptr);
+#pragma unroll
+    for (Idx_t i = 0; i < 2; ++i) {
+      auto resultfp8x2 = __nv_fp8x2_e4m3(results[i]);
       auto res_u8 = reinterpret_cast<unsigned char*>(&resultfp8x2.__x);
       local_y_q_ptr[0] = res_u8[0];
       local_y_q_ptr[1] = res_u8[1];
@@ -300,6 +486,7 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     }
   }
 }
+
 }  // namespace vllm
 
 // Launch activation, gating, and quantize kernel.
