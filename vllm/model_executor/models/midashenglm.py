@@ -776,8 +776,5 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["audio_encoder.front_end."],
-        )
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
