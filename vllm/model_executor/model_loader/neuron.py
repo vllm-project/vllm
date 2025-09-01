@@ -14,12 +14,12 @@ from transformers import PretrainedConfig
 
 from vllm.config import (ModelConfig, ParallelConfig, SchedulerConfig,
                          SpeculativeConfig)
+from vllm.logprobs import Logprob
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import get_quantization_config
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import (CompletionSequenceGroupOutput, Logprob,
-                           SequenceOutput)
+from vllm.sequence import CompletionSequenceGroupOutput, SequenceOutput
 
 TORCH_DTYPE_TO_NEURON_AMP = {
     "auto": "f32",
