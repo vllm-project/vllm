@@ -138,8 +138,15 @@ class AutoRoundConfig(QuantizationConfig):
                     cfg.get("sym", self.sym if quantized else True),
                 )
             
-            # If there is no exact match, try a regular expression match
+            # A heuristic to identify regex patterns and avoid misinterpreting literals.
+            # We only treat patterns with special regex characters as regexes.
+            # The '.' character is excluded as it's common in layer names.
+            REGEX_SPECIAL_CHARS = set(r"*+?^$()[]{}|\\")
             for pattern, cfg in self.extra_config.items():
+                if not isinstance(pattern, str) or not any(
+                        c in REGEX_SPECIAL_CHARS for c in pattern):
+                    continue
+
                 try:
                     if re.fullmatch(pattern, name):
                         return (
@@ -149,8 +156,8 @@ class AutoRoundConfig(QuantizationConfig):
                                     self.group_size if quantized else -1),
                             cfg.get("sym", self.sym if quantized else True),
                         )
-                except (re.error, TypeError):
-                    # If the regular expression is invalid or the key is not a string, skip
+                except re.error:
+                    # Invalid regex, ignore.
                     continue
             
             return (
