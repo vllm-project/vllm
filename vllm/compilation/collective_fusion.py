@@ -21,6 +21,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils import (_FI_ALLREDUCE_ONE_SHOT_MAX_SIZES,
                         direct_register_custom_op, flashinfer_max_size)
+
 from .inductor_pass import enable_fake_mode
 from .vllm_inductor_pass import VllmInductorPass
 
@@ -1004,8 +1005,6 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
 
         def get_inputs():
             input = torch.empty([4, 4], device=self.device, dtype=self.dtype)
-        def get_inputs():
-            input = torch.empty([4, 4], device=self.device, dtype=self.dtype)
 
             residual = torch.empty(
                 [4, 4],
@@ -1460,8 +1459,7 @@ class AllReduceFusionPass(VllmInductorPass):
             )
             return
         element_size = 4 if use_fp32_lamport else 2
-        max_token_num = (max_size //
-                         (self.hidden_dim * element_size))
+        max_token_num = (max_size // (self.hidden_dim * element_size))
         # take the min to save workspace size and we'll never use more
         # than max_num_batched_tokens anyways
         max_token_num = min(max_token_num,
@@ -1485,8 +1483,10 @@ class AllReduceFusionPass(VllmInductorPass):
             use_fp32_lamport=use_fp32_lamport,
             max_token_num=max_token_num,
         )
-        is_custom_ops = ("+rms_norm"  in config.compilation_config.custom_ops, 
-                         "+quant_fp8" in config.compilation_config.custom_ops)
+        self.is_custom_ops = ("+rms_norm"
+                              in config.compilation_config.custom_ops,
+                              "+quant_fp8"
+                              in config.compilation_config.custom_ops)
         with set_current_vllm_config(config), torch.device(self.device):
             self.register_patterns()
 
@@ -1513,28 +1513,28 @@ class AllReduceFusionPass(VllmInductorPass):
                     self.model_dtype,
                     self.device,
                     self.allreduce_params,
-                        self.is_custom_ops,
+                    self.is_custom_ops,
                 ).register(self.patterns)
                 AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(
                     epsilon,
                     self.model_dtype,
                     self.device,
                     self.allreduce_params,
-                        self.is_custom_ops,
+                    self.is_custom_ops,
                 ).register(self.patterns)
             AllReduceRMSNormPattern(
                 epsilon,
                 self.model_dtype,
                 self.device,
                 self.allreduce_params,
-                    self.is_custom_ops,
+                self.is_custom_ops,
             ).register(self.patterns)
             AllReduceFusedAddRMSNormPattern(
                 epsilon,
                 self.model_dtype,
                 self.device,
                 self.allreduce_params,
-                    self.is_custom_ops,
+                self.is_custom_ops,
             ).register(self.patterns)
 
             # WARNING: This is a hack to clear the pattern matcher cache
