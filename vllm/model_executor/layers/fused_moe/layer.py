@@ -212,6 +212,16 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 f"Attempt to override experts for {id(self)}!"
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
             experts = self.select_gemm_impl(prepare_finalize, self.moe, layer)
+
+            # Log which expert implementation was selected
+            allow = getattr(experts, "allow_deep_gemm", None)
+            use_fp8 = getattr(experts, "use_fp8_w8a8", None)
+            block_shape = getattr(experts, "block_shape", None)
+            logger.info(
+                "[MoE Debug] Expert implementation selected: %s, "
+                "allow_deep_gemm=%s, use_fp8_w8a8=%s, block_shape=%s",
+                type(experts).__name__, allow, use_fp8, block_shape)
+
             self.fused_experts = FusedMoEModularKernel(
                 prepare_finalize,
                 experts,
@@ -276,15 +286,22 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         moe: FusedMoEConfig,
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
+        logger.info(
+            "[MoE Debug] select_gemm_impl called, activation_format=%s, "
+            "prepare_finalize=%s", prepare_finalize.activation_format,
+            type(prepare_finalize).__name__)
         if (prepare_finalize.activation_format ==
                 FusedMoEActivationFormat.BatchedExperts):
-            logger.debug("BatchedTritonExperts %s", self.moe)
+            logger.info(
+                "[MoE Debug] Creating BatchedTritonExperts with moe=%s",
+                self.moe)
             return BatchedTritonExperts(
                 max_num_tokens=self.moe.max_num_tokens,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
             )
         else:
-            logger.debug("TritonExperts %s", self.moe)
+            logger.info("[MoE Debug] Creating TritonExperts with moe=%s",
+                        self.moe)
             return TritonExperts()
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -773,6 +790,14 @@ class FusedMoE(CustomOp):
         num_redundant_experts: int = 0,
         has_bias: bool = False,
     ):
+        logger.info(
+            "[MoE Debug] *** FusedMoE.__init__ ENTRY *** "
+            "Creating MoE layer with num_experts=%s, prefix='%s', "
+            "quant_config=%s, tp_size=%s, dp_size=%s, ep_size=%s", num_experts,
+            prefix,
+            type(quant_config).__name__ if quant_config else None, tp_size,
+            dp_size, ep_size)
+
         super().__init__()
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -875,15 +900,32 @@ class FusedMoE(CustomOp):
         self.moe_config = moe
         self.quant_config = quant_config
 
+        logger.info(
+            "[MoE Debug] MoE Config created: global_experts=%s, "
+            "local_experts=%s, max_tokens=%s, parallel_config=%s, "
+            "use_pplx=%s, use_deepep_ht=%s, use_deepep_ll=%s, "
+            "use_flashinfer_cutlass=%s", self.global_num_experts,
+            self.local_num_experts, moe.max_num_tokens,
+            f"tp={self.tp_size},dp={self.dp_size},ep={self.ep_size}",
+            moe.use_pplx_kernels, moe.use_deepep_ht_kernels,
+            moe.use_deepep_ll_kernels, moe.use_flashinfer_cutlass_kernels)
+
         # Note: get_quant_method will look at the layer's local_num_experts
         # for heuristic purposes, so it must be initialized first.
         quant_method: Optional[QuantizeMethodBase] = None
+        logger.info(
+            "[MoE Debug] Selecting quantization method: quant_config=%s",
+            type(quant_config).__name__ if quant_config else "None")
+
         quant_method = (UnquantizedFusedMoEMethod(moe) if quant_config is None
                         else quant_config.get_quant_method(self, prefix))
 
         assert quant_method is not None
         assert isinstance(quant_method, FusedMoEMethodBase)
         self.quant_method = quant_method
+
+        logger.info("[MoE Debug] Quantization method selected: %s",
+                    type(quant_method).__name__)
 
         if self.enable_eplb:
             from vllm.model_executor.layers.quantization.fp8 import (
@@ -1568,6 +1610,13 @@ class FusedMoE(CustomOp):
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
+        logger.info(
+            "[MoE Debug] *** FusedMoE.forward() ENTRY *** "
+            "layer_name='%s', hidden_states.shape=%s, router_logits.shape=%s, "
+            "quant_method=%s", self.layer_name, hidden_states.shape,
+            router_logits.shape,
+            type(self.quant_method).__name__)
+
         og_hidden_states = hidden_states.shape[-1]
         if self.hidden_size != og_hidden_states:
             hidden_states = F.pad(hidden_states,
@@ -1577,8 +1626,10 @@ class FusedMoE(CustomOp):
         # TODO: Once the OOM issue for the TPU backend is resolved, we will
         # switch to using the moe_forward custom op.
         if current_platform.is_tpu():
+            logger.info("[MoE Debug] Using TPU forward_impl")
             return self.forward_impl(hidden_states, router_logits)
         else:
+            logger.info("[MoE Debug] Using moe_forward custom op")
             return torch.ops.vllm.moe_forward(
                 hidden_states, router_logits,
                 self.layer_name)[..., :og_hidden_states]
@@ -1662,6 +1713,15 @@ class FusedMoE(CustomOp):
 
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
+        logger.info(
+            "[MoE Debug] *** FusedMoE.forward_impl() ENTRY *** "
+            "dp_size=%s, use_pplx=%s, use_deepep_ht=%s, use_deepep_ll=%s, "
+            "use_flashinfer_cutlass=%s", self.dp_size,
+            self.moe_parallel_config.use_pplx_kernels,
+            self.moe_parallel_config.use_deepep_ht_kernels,
+            self.moe_parallel_config.use_deepep_ll_kernels,
+            self.moe_config.use_flashinfer_cutlass_kernels)
+
         assert self.quant_method is not None
         # Route to the chunked forward path using the FlashInfer Cutlass kernel
         # only when data parallelism (DP) is enabled.
@@ -1671,6 +1731,7 @@ class FusedMoE(CustomOp):
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
                 or use_flashinfer_cutlass_kernels):
+            logger.info("[MoE Debug] Using forward_impl_chunked")
             return self.forward_impl_chunked(hidden_states, router_logits)
 
         do_naive_dispatch_combine: bool = (
@@ -1678,10 +1739,18 @@ class FusedMoE(CustomOp):
             and not self.moe_parallel_config.use_deepep_ht_kernels
             and not self.moe_config.use_flashinfer_cutlass_kernels)
         if do_naive_dispatch_combine:
+            logger.info("[MoE Debug] Using naive dispatch combine")
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
+        else:
+            logger.info("[MoE Debug] Skipping naive dispatch combine")
 
         # Matrix multiply.
+        logger.info(
+            "[MoE Debug] *** Calling quant_method.apply() *** "
+            "method=%s, global_num_experts=%s, local_experts=%s",
+            type(self.quant_method).__name__, self.global_num_experts,
+            self.local_num_experts)
         final_hidden_states = self.quant_method.apply(
             layer=self,
             x=hidden_states,
@@ -1768,9 +1837,19 @@ class FusedMoE(CustomOp):
 
 def moe_forward(hidden_states: torch.Tensor, router_logits: torch.Tensor,
                 layer_name: str) -> torch.Tensor:
+    logger.info(
+        "[MoE Debug] *** moe_forward() CUSTOM OP ENTRY *** "
+        "layer_name='%s', hidden_states.shape=%s", layer_name,
+        hidden_states.shape)
+
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     assert self.quant_method is not None
+
+    logger.info(
+        "[MoE Debug] Calling forward_impl from moe_forward custom op, "
+        "layer quant_method=%s",
+        type(self.quant_method).__name__)
 
     return self.forward_impl(hidden_states, router_logits)
 

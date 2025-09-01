@@ -205,6 +205,13 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         block_shape: Block quantization block shape.
         per_act_token_quant: Per activation token quantization flag.
         """
+        logger.info(
+            "[MoE Debug] BatchedDeepGemmExperts.__init__ called with: "
+            "max_num_tokens=%s, num_dispatchers=%s, block_shape=%s, "
+            "per_act_token_quant=%s, DEEPGEMM_BLOCK_SHAPE=%s", max_num_tokens,
+            num_dispatchers, block_shape, per_act_token_quant,
+            self.DEEPGEMM_BLOCK_SHAPE)
+
         super().__init__(
             FusedMoEQuantConfig(
                 quant_dtype=torch.float8_e4m3fn,
@@ -214,6 +221,10 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert self.block_shape == self.DEEPGEMM_BLOCK_SHAPE
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
+
+        logger.info(
+            "[MoE Debug] BatchedDeepGemmExperts initialized successfully with "
+            "final block_shape=%s", self.block_shape)
 
     @property
     def activation_formats(
@@ -330,8 +341,13 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
-        logger.debug("[MoE Debug] BatchedDeepGemmExperts.apply() called - "
-                     "monitoring logs should appear below")
+        logger.info("[MoE Debug] *** BatchedDeepGemmExperts.apply() ENTRY *** "
+                    "THIS IS THE DEEP GEMM IMPLEMENTATION BEING CALLED!")
+        logger.info(
+            "[MoE Debug] BatchedDeepGemmExperts.apply() parameters: "
+            "hidden_states.shape=%s, global_num_experts=%s, activation=%s",
+            hidden_states.shape, global_num_experts, activation)
+
         assert expert_tokens_meta is not None
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
@@ -354,17 +370,27 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         E, max_num_tokens, N, K, top_k_num = mk._moe_problem_size(
             hidden_states, w1, w2, topk_ids)
 
+        logger.info(
+            "[MoE Debug] Problem size: E=%s, max_num_tokens=%s, N=%s, K=%s, "
+            "top_k_num=%s", E, max_num_tokens, N, K, top_k_num)
+
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
 
         # (from deepgemm docs) : A value hint (which is a value on CPU)
         # for the M expectation of each batch, correctly setting this value
         # may lead to better performance.
         expected_m = max_num_tokens
+
+        logger.info("[MoE Debug] Calling first fp8_m_grouped_gemm_nt_masked")
         fp8_m_grouped_gemm_nt_masked((a1q, a1q_scale), (w1, w1_scale),
                                      workspace1, expert_num_tokens, expected_m)
 
+        logger.info("[MoE Debug] Calling silu_mul_fp8_quant_deep_gemm")
         a2q, a2q_scale = silu_mul_fp8_quant_deep_gemm(workspace1,
                                                       expert_num_tokens)
 
+        logger.info("[MoE Debug] Calling second fp8_m_grouped_gemm_nt_masked")
         fp8_m_grouped_gemm_nt_masked((a2q, a2q_scale), (w2, w2_scale), output,
                                      expert_num_tokens, expected_m)
+
+        logger.info("[MoE Debug] *** BatchedDeepGemmExperts.apply() EXIT ***")

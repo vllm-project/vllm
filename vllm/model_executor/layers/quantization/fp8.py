@@ -510,26 +510,34 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
         # Check for DeepGemm support.
         self.allow_deep_gemm = False
-        logger.debug(
-            "[MoE Debug] VLLM_USE_DEEP_GEMM=%s, block_quant=%s, "
-            "weight_block_size=%s", envs.VLLM_USE_DEEP_GEMM, self.block_quant,
+        logger.info(
+            "[MoE Debug] *** Fp8MoEMethod DeepGEMM Condition Check *** "
+            "VLLM_USE_DEEP_GEMM=%s, block_quant=%s, weight_block_size=%s",
+            envs.VLLM_USE_DEEP_GEMM, self.block_quant,
             self.quant_config.weight_block_size)
 
         if envs.VLLM_USE_DEEP_GEMM:
+            logger.info(
+                "[MoE Debug] VLLM_USE_DEEP_GEMM=True, checking conditions...")
             if not has_deep_gemm():
-                logger.warning_once("Failed to import DeepGemm kernels.")
+                logger.warning(
+                    "[MoE Debug] FAILED: DeepGemm kernels not available")
             elif not self.block_quant:
-                logger.warning_once("Model is not block quantized. Not using "
-                                    "DeepGemm kernels")
+                logger.warning(
+                    "[MoE Debug] FAILED: Model is not block quantized")
             elif (is_deep_gemm_supported()):
-                logger.info_once("Using DeepGemm kernels for Fp8MoEMethod.")
+                logger.info(
+                    "[MoE Debug] SUCCESS: All DeepGEMM conditions met!")
                 self.allow_deep_gemm = True
             else:
-                logger.warning_once(
-                    "DeepGemm not supported on the current platform.")
+                logger.warning(
+                    "[MoE Debug] FAILED: DeepGemm not supported on platform")
+        else:
+            logger.info(
+                "[MoE Debug] VLLM_USE_DEEP_GEMM=False, skipping DeepGEMM")
 
-        logger.debug("[MoE Debug] Final allow_deep_gemm=%s",
-                     self.allow_deep_gemm)
+        logger.info("[MoE Debug] *** FINAL DECISION: allow_deep_gemm=%s ***",
+                    self.allow_deep_gemm)
 
         # Check for CutlassBlockScaledGroupedGemm support.
         self.allow_cutlass_block_scaled_grouped_gemm = False
@@ -907,6 +915,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         moe: FusedMoEConfig,
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
+        logger.info(
+            "[MoE Debug] Fp8MoEMethod.select_gemm_impl() ENTRY: "
+            "activation_format=%s, allow_deep_gemm=%s, "
+            "block_size=%s", prepare_finalize.activation_format,
+            self.allow_deep_gemm, self.quant_config.weight_block_size)
+
         from vllm.model_executor.layers.fused_moe import (
             BatchedTritonOrDeepGemmExperts, TritonOrDeepGemmExperts)
 
@@ -918,11 +932,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             max_num_tokens_per_rank = (
                 prepare_finalize.max_num_tokens_per_rank())
             assert max_num_tokens_per_rank is not None
-            logger.debug(
-                "BatchedTritonOrDeepGemmExperts(%s): "
-                "max_tokens_per_rank=%s, block_size=%s, per_act_token=%s",
-                self.__class__.__name__, max_num_tokens_per_rank,
-                self.quant_config.weight_block_size, False)
+            logger.info(
+                "[MoE Debug] Creating BatchedTritonOrDeepGemmExperts with: "
+                "max_tokens_per_rank=%s, block_size=%s, allow_deep_gemm=%s, "
+                "num_dispatchers=%s", max_num_tokens_per_rank,
+                self.quant_config.weight_block_size, self.allow_deep_gemm,
+                prepare_finalize.num_dispatchers())
             return BatchedTritonOrDeepGemmExperts(
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),

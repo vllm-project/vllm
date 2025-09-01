@@ -27,6 +27,11 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                  block_shape: Optional[list[int]] = None,
                  per_act_token_quant: bool = False,
                  allow_deep_gemm: bool = False):
+        logger.info(
+            "[MoE Debug] BatchedTritonOrDeepGemmExperts.__init__ called with: "
+            "max_num_tokens=%s, num_dispatchers=%s, use_fp8_w8a8=%s, "
+            "allow_deep_gemm=%s, block_shape=%s", max_num_tokens,
+            num_dispatchers, use_fp8_w8a8, allow_deep_gemm, block_shape)
         assert not use_int8_w8a8, "NYI"
         assert not use_int8_w8a16, "NYI"
         assert not use_int4_w4a16, "NYI"
@@ -175,15 +180,20 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: bool,
     ):
+        logger.info(
+            "[MoE Debug] BatchedTritonOrDeepGemmExperts.apply() ENTRY: "
+            "allow_deep_gemm=%s, hidden_states.shape=%s, global_num_experts=%s",
+            self.allow_deep_gemm, hidden_states.shape, global_num_experts)
+
         experts = (self.batched_deep_gemm_experts
                    if self.allow_deep_gemm else self.batched_triton_experts)
 
         # Log which expert implementation is being used
         if self.allow_deep_gemm:
-            logger.debug(
+            logger.info(
                 "[MoE Debug] Using BatchedDeepGemmExperts for forward pass")
         else:
-            logger.debug(
+            logger.info(
                 "[MoE Debug] Using BatchedTritonExperts for forward pass")
 
         assert experts is not None
@@ -192,3 +202,5 @@ class BatchedTritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
                       w2_scale, w1_zp, w2_zp, a1q_scale, a2_scale, workspace13,
                       workspace2, expert_tokens_meta,
                       apply_router_weight_on_input)
+
+        logger.info("[MoE Debug] BatchedTritonOrDeepGemmExperts.apply() EXIT")
