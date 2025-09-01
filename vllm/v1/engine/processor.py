@@ -207,7 +207,7 @@ class Processor:
                 "Structured outputs requires a tokenizer so it can't be used with 'skip_tokenizer_init'"  # noqa: E501
             )
 
-        engine_level_backend = self.structured_outputs_config.backend
+        backend = self.structured_outputs_config.backend
 
         # Request content validation
         if (isinstance(params.structured_outputs.choice, list)
@@ -217,23 +217,23 @@ class Processor:
                 f"Choice '{params.structured_outputs.choice}' cannot be an empty list"  # noqa: E501
             )
 
-        if engine_level_backend.startswith("xgrammar"):
+        if backend.startswith("xgrammar"):
             # xgrammar with no fallback
             validate_xgrammar_grammar(params)
-        elif engine_level_backend.startswith("guidance"):
+        elif backend.startswith("guidance"):
             # TODO: ideally we would have the LLTokenizer here as Lark syntax
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
             validate_guidance_grammar(params, tokenizer=None)
-        elif engine_level_backend == "outlines":
+        elif backend == "outlines":
             # outlines backend
             validate_structured_output_request_outlines(params)
-        elif engine_level_backend == "lm-format-enforcer":
+        elif backend == "lm-format-enforcer":
             # lm format enforcer backend
             validate_structured_output_request_lm_format_enforcer(params)
         else:
-            # NOTE: engine_level_backend must be "auto" here, because we have
+            # NOTE: backend must be "auto" here, because we have
             # checked supported_backends above.
             # "auto" is an opt-in to opinionated behavior where we try to
             # choose a backend based on request contents. This is not the
