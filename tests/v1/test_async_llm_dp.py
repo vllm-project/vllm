@@ -25,7 +25,6 @@ DP_SIZE = int(os.getenv("DP_SIZE", 2))
 engine_args = AsyncEngineArgs(
     model="ibm-research/PowerMoE-3b",
     enforce_eager=True,
-    disable_log_requests=True,
     tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
     data_parallel_size=DP_SIZE,
 )
@@ -76,9 +75,10 @@ async def generate(
     ],
 )
 @pytest.mark.parametrize("data_parallel_backend", ["mp", "ray"])
+@pytest.mark.parametrize("async_scheduling", [True, False])
 @pytest.mark.asyncio
-async def test_load(output_kind: RequestOutputKind,
-                    data_parallel_backend: str):
+async def test_load(output_kind: RequestOutputKind, data_parallel_backend: str,
+                    async_scheduling: bool):
 
     stats_loggers = {}
 
@@ -106,6 +106,7 @@ async def test_load(output_kind: RequestOutputKind,
         prompt = "This is a test of data parallel"
 
         engine_args.data_parallel_backend = data_parallel_backend
+        engine_args.async_scheduling = async_scheduling
         engine = AsyncLLM.from_engine_args(engine_args,
                                            stat_loggers=[SimpleStatsLogger])
         after.callback(engine.shutdown)

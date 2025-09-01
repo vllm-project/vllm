@@ -4,8 +4,10 @@
 from typing import Any, Callable, Optional, Union
 
 import torch
+from packaging import version
 
 from vllm.model_executor.layers.fused_moe.layer import (FusedMoE,
+                                                        FusedMoEConfig,
                                                         FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod,
@@ -131,7 +133,7 @@ class BitsAndBytesConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return BitsAndBytesLinearMethod(self)
         elif isinstance(layer, FusedMoE):
-            return BitsAndBytesMoEMethod(self)
+            return BitsAndBytesMoEMethod(self, layer.moe_config)
         return None
 
 
@@ -169,7 +171,8 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
     def __init__(self, quant_config: BitsAndBytesConfig):
         try:
             import bitsandbytes
-            if bitsandbytes.__version__ < "0.46.1":
+            if version.parse(
+                    bitsandbytes.__version__) < version.parse("0.46.1"):
                 raise ImportError("bitsandbytes version is wrong. Please "
                                   "install bitsandbytes>=0.46.1.")
         except ImportError as err:
@@ -409,17 +412,22 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
        quant_config: The BitsAndBytes quantization config.
     """
 
-    def __init__(self, quant_config: BitsAndBytesConfig):
+    def __init__(
+        self,
+        quant_config: BitsAndBytesConfig,
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         try:
             import bitsandbytes
-            if bitsandbytes.__version__ < "0.45.3":
+            if version.parse(
+                    bitsandbytes.__version__) < version.parse("0.46.1"):
                 raise ImportError("bitsandbytes version is wrong. Please "
-                                  "install bitsandbytes>=0.45.3.")
+                                  "install bitsandbytes>=0.46.1.")
         except ImportError as err:
-            raise ImportError("Please install bitsandbytes>=0.45.3 via "
-                              "`pip install bitsandbytes>=0.45.3` to use "
+            raise ImportError("Please install bitsandbytes>=0.46.1 via "
+                              "`pip install bitsandbytes>=0.46.1` to use "
                               "bitsandbytes quantizer.") from err
-        self.topk_indices_dtype = None
         self.quant_config = quant_config
 
     def create_weights(
@@ -458,6 +466,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -467,6 +476,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
+        assert self.fused_experts is None
 
         if enable_eplb:
             raise NotImplementedError(
@@ -481,6 +491,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
         if self.quant_config.load_in_8bit:

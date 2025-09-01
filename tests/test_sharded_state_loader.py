@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import fnmatch
 import multiprocessing as mp
 import os
 import shutil
@@ -64,9 +65,10 @@ def _run_writer(input_dir, output_dir, weights_patterns, **kwargs):
     # Copy metadata files to output directory
     for file in os.listdir(input_dir):
         if os.path.isdir(os.path.join(input_dir, file)):
-            continue
-        if not any(file.endswith(ext) for ext in weights_patterns):
-            shutil.copy(f"{input_dir}/{file}", output_dir)
+            shutil.copytree(os.path.join(input_dir, file),
+                            os.path.join(output_dir, file))
+        elif not any(fnmatch.fnmatch(file, ext) for ext in weights_patterns):
+            shutil.copy(os.path.join(input_dir, file), output_dir)
 
 
 def _run_generate(input_dir, queue: mp.Queue, **kwargs):
@@ -116,8 +118,17 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
                             tensor_parallel_size=tp_size,
                         ))
         p.start()
-        p.join()
+        # Call queue.get() before p.join() to prevent deadlock:
+        # If p.join() is called before queue.get() and the queue is full,
+        # the child process may block while writing to the queue and never
+        # terminate, causing the parent to wait indefinitely on p.join().
+        # See: https://github.com/vllm-project/vllm/pull/22371#discussion_r2257773814
         out_before = queue.get()
+        p.join()
+        queue.close()
+        queue.join_thread()
+
+        queue = ctx.Queue()
 
         p = ctx.Process(target=_run_generate,
                         args=(output_dir, queue),
@@ -129,7 +140,14 @@ def test_sharded_state_loader(enable_lora, tp_size, num_gpus_available,
                             load_format="sharded_state",
                         ))
         p.start()
-        p.join()
+        # Call queue.get() before p.join() to prevent deadlock:
+        # If p.join() is called before queue.get() and the queue is full,
+        # the child process may block while writing to the queue and never
+        # terminate, causing the parent to wait indefinitely on p.join().
+        # See: https://github.com/vllm-project/vllm/pull/22371#discussion_r2257773814
         out_after = queue.get()
+        p.join()
+        queue.close()
+        queue.join_thread()
 
         assert out_before == out_after

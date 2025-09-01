@@ -103,7 +103,8 @@ When tool_choice='required' is set, the model is guaranteed to generate one or m
 
 vLLM supports the `tool_choice='none'` option in the chat completion API. When this option is set, the model will not generate any tool calls and will respond with regular text content only, even if tools are defined in the request.
 
-However, when `tool_choice='none'` is specified, vLLM includes tool definitions from the prompt.
+!!! note
+    When tools are specified in the request, vLLM includes tool definitions in the prompt by default, regardless of the `tool_choice` setting. To exclude tool definitions when `tool_choice='none'`, use the `--exclude-tools-when-tool-choice-none` option.
 
 ## Automatic Function Calling
 
@@ -282,6 +283,14 @@ Supported models:
 * `deepseek-ai/DeepSeek-R1-0528` (use with <gh-file:examples/tool_chat_template_deepseekr1.jinja>)
 
 Flags: `--tool-call-parser deepseek_v3 --chat-template {see_above}`
+
+### DeepSeek-V3.1 Models (`deepseek_v31`)
+
+Supported models:
+
+* `deepseek-ai/DeepSeek-V3.1` (use with <gh-file:examples/tool_chat_template_deepseekv31.jinja>)
+
+Flags: `--tool-call-parser deepseek_v31 --chat-template {see_above}`
 
 ### Kimi-K2 Models (`kimi_k2`)
 

@@ -44,7 +44,7 @@ def _run_test(
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-    with vllm_runner(model, task="embed", dtype=dtype,
+    with vllm_runner(model, runner="pooling", dtype=dtype,
                      enforce_eager=True) as vllm_model:
         vllm_outputs = vllm_model.embed(input_texts, images=input_images)
 

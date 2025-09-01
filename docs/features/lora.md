@@ -52,7 +52,7 @@ Check out <gh-file:examples/offline_inference/multilora_inference.py> for an exa
 ## Serving LoRA Adapters
 
 LoRA adapted models can also be served with the Open-AI compatible vLLM server. To do so, we use
-`--lora-modules {name}={path} {name}={path}` to specify each LoRA module when we kickoff the server:
+`--lora-modules {name}={path} {name}={path}` to specify each LoRA module when we kick off the server:
 
 ```bash
 vllm serve meta-llama/Llama-2-7b-hf \
@@ -119,6 +119,7 @@ export VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 ```
 
 ### Using API Endpoints
+
 Loading a LoRA Adapter:
 
 To dynamically load a LoRA adapter, send a POST request to the `/v1/load_lora_adapter` endpoint with the necessary
@@ -156,6 +157,7 @@ curl -X POST http://localhost:8000/v1/unload_lora_adapter \
 ```
 
 ### Using Plugins
+
 Alternatively, you can use the LoRAResolver plugin to dynamically load LoRA adapters. LoRAResolver plugins enable you to load LoRA adapters from both local and remote sources such as local file system and S3. On every request, when there's a new model name that hasn't been loaded yet, the LoRAResolver will try to resolve and load the corresponding LoRA adapter.
 
 You can set up multiple LoRAResolver plugins if you want to load LoRA adapters from different sources. For example, you might have one resolver for local files and another for S3 storage. vLLM will load the first LoRA adapter that it finds.
@@ -349,3 +351,22 @@ vllm serve ibm-granite/granite-speech-3.3-2b \
 ```
 
 Note: Default multimodal LoRAs are currently only available for `.generate` and chat completions.
+
+## Using Tips
+
+### Configuring `max_lora_rank`
+
+The `--max-lora-rank` parameter controls the maximum rank allowed for LoRA adapters. This setting affects memory allocation and performance:
+
+- **Set it to the maximum rank** among all LoRA adapters you plan to use
+- **Avoid setting it too high** - using a value much larger than needed wastes memory and can cause performance issues
+
+For example, if your LoRA adapters have ranks [16, 32, 64], use `--max-lora-rank 64` rather than 256
+
+```bash
+# Good: matches actual maximum rank
+vllm serve model --enable-lora --max-lora-rank 64
+
+# Bad: unnecessarily high, wastes memory
+vllm serve model --enable-lora --max-lora-rank 256
+```

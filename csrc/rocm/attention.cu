@@ -19,7 +19,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <hip/hip_fp8.h>
 #include <hip/hip_bf16.h>
-#include "cuda_compat.h"
+#include "../cuda_compat.h"
 
 #include <algorithm>
 #include "../attention/dtype_fp8.cuh"
@@ -302,7 +302,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int num_kv_heads,   
     const float scale,    
     const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
-    const int* __restrict__ context_lens,   // [num_seqs]
+    const int* __restrict__ seq_lens,   // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,   // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes, // [num_heads]
@@ -336,12 +336,12 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
   const auto max_num_partitions = gridDim.y;
 
-  const int context_len = context_lens[seq_idx];
+  const int seq_len = seq_lens[seq_idx];
 
   const int partition_start_token_idx =
       partition_idx * T_PAR_SIZE;  // partition_size;
   // exit if partition is out of context for seq
-  if (partition_start_token_idx >= context_len) {
+  if (partition_start_token_idx >= seq_len) {
     return;
   }
 
@@ -393,8 +393,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   // output layout from QKmfma : QH16xT4x4 16 qheads across 16 lanes, 16 tokens
   // across 4 rows x 4 tokens per lane
 
-  const int num_context_blocks = DIVIDE_ROUND_UP(context_len, BLOCK_SIZE);
-  const int last_ctx_block = num_context_blocks - 1;
+  const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
+  const int last_seq_block = num_seq_blocks - 1;
 
   const int* block_table_seq = block_tables + seq_idx * max_num_blocks_per_seq;
 
@@ -405,9 +405,9 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int klocal_token_idx =
         TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
     const int kglobal_token_idx = partition_start_token_idx + klocal_token_idx;
-    const int kblock_idx = (kglobal_token_idx < context_len)
+    const int kblock_idx = (kglobal_token_idx < seq_len)
                                ? kglobal_token_idx / BLOCK_SIZE
-                               : last_ctx_block;
+                               : last_seq_block;
     kphysical_block_number[token_depth] = block_table_seq[kblock_idx];
   }
 
@@ -508,9 +508,9 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
       // tokens
       const int vglobal_token_idx =
           partition_start_token_idx + vlocal_token_idx;
-      const int vblock_idx = (vglobal_token_idx < context_len)
+      const int vblock_idx = (vglobal_token_idx < seq_len)
                                  ? vglobal_token_idx / BLOCK_SIZE
-                                 : last_ctx_block;
+                                 : last_seq_block;
       vphysical_block_number[vtoken_depth][vblock_depth] =
           block_table_seq[vblock_idx];
     }
@@ -586,7 +586,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   if constexpr (ALIBI_ENABLED) {
     for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
       const int local_token_idx = qkout_token_idx + token_depth * 16;
-      const int alibi_offset = local_token_idx - context_len + 1;
+      const int alibi_offset = local_token_idx - seq_len + 1;
       for (int i = 0; i < 4; i++) {
         d_out[token_depth][i] += alibi_slope * (alibi_offset + i);
       }
@@ -600,9 +600,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     const int local_token_idx = qkout_token_idx + token_depth * 16;
     for (int i = 0; i < 4; i++) {
-      const float tmp = (local_token_idx + i < context_len)
-                            ? d_out[token_depth][i]
-                            : -FLT_MAX;
+      const float tmp =
+          (local_token_idx + i < seq_len) ? d_out[token_depth][i] : -FLT_MAX;
       qk_max = fmaxf(qk_max, tmp);
     }
   }
@@ -614,7 +613,7 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     const int local_token_idx = qkout_token_idx + token_depth * 16;
     for (int i = 0; i < 4; i++) {
-      const float tmp = (local_token_idx + i < context_len)
+      const float tmp = (local_token_idx + i < seq_len)
                             ? __expf(d_out[token_depth][i] - qk_max)
                             : 0.0f;
       d_out[token_depth][i] = tmp;
@@ -812,7 +811,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int num_kv_heads,
     const float scale,
     const int* __restrict__ block_tables,   // [num_seqs, max_num_blocks_per_seq]
-    const int* __restrict__ context_lens,   // [num_seqs]
+    const int* __restrict__ seq_lens,   // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,   // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes, // [num_heads]
@@ -841,10 +840,10 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
   const auto partition_size = blockDim.x;
   const auto max_num_partitions = gridDim.y;
 
-  const int context_len = context_lens[seq_idx];
+  const int seq_len = seq_lens[seq_idx];
   const int partition_start_token_idx = partition_idx * partition_size;
   // exit if partition is out of context for seq
-  if (partition_start_token_idx >= context_len) {
+  if (partition_start_token_idx >= seq_len) {
     return;
   }
   // every 4 lanes fetch 4 different qheads
@@ -887,7 +886,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
   const int warp_start_token_idx =
       partition_start_token_idx + warpid * WARP_SIZE;
 
-  if (warp_start_token_idx >= context_len) {  // warp out of context
+  if (warp_start_token_idx >= seq_len) {  // warp out of context
   #pragma unroll
     for (int h = 0; h < GQA_RATIO4; h++) {
       shared_qk_max[warpid][h] = -FLT_MAX;
@@ -895,8 +894,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     }
   } else {  // warp within context
 
-    const int num_context_blocks = DIVIDE_ROUND_UP(context_len, BLOCK_SIZE);
-    const int last_ctx_block = num_context_blocks - 1;
+    const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
+    const int last_seq_block = num_seq_blocks - 1;
 
     const int* block_table = block_tables + seq_idx * max_num_blocks_per_seq;
     // token id within partition
@@ -905,9 +904,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int global_token_idx = partition_start_token_idx + local_token_idx;
 
     // fetch block number for k
-    const int block_idx = (global_token_idx < context_len)
+    const int block_idx = (global_token_idx < seq_len)
                               ? global_token_idx / BLOCK_SIZE
-                              : last_ctx_block;
+                              : last_seq_block;
 
     // fetch k physical block number
     //  int32 physical_block_number leads to overflow when multiplied with
@@ -920,7 +919,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     for (int b = 0; b < VBLOCKS; b++) {
       const int vblock_idx = warp_start_block_idx + b;
       const int vblock_idx_ctx =
-          (vblock_idx <= last_ctx_block) ? vblock_idx : last_ctx_block;
+          (vblock_idx <= last_seq_block) ? vblock_idx : last_seq_block;
       vphysical_blocks[b] = block_table[vblock_idx_ctx];
     }
 
@@ -1089,7 +1088,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int lane4_token_idx = 4 * (global_token_idx >> 2);
 
     if constexpr (ALIBI_ENABLED) {
-      const int alibi_offset = lane4_token_idx - context_len + 1;
+      const int alibi_offset = lane4_token_idx - seq_len + 1;
       for (int h = 0; h < QHLOOP; h++) {
         for (int i = 0; i < 4; i++) {
           d_out[h][i] += alibi_slope[h] * (alibi_offset + i);
@@ -1102,7 +1101,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     for (int h = 0; h < QHLOOP; h++) {
       qk_max[h] = -FLT_MAX;
       for (int i = 0; i < 4; i++) {
-        qk_max[h] = (lane4_token_idx + i < context_len)
+        qk_max[h] = (lane4_token_idx + i < seq_len)
                         ? fmaxf(qk_max[h], d_out[h][i])
                         : qk_max[h];
       }
@@ -1133,7 +1132,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     for (int h = 0; h < QHLOOP; h++) {
       exp_sum[h] = 0.0f;
       for (int i = 0; i < 4; i++) {
-        d_out[h][i] = (lane4_token_idx + i < context_len)
+        d_out[h][i] = (lane4_token_idx + i < seq_len)
                           ? __expf(d_out[h][i] - qk_max[h])
                           : 0.0f;
         exp_sum[h] += d_out[h][i];
@@ -1213,7 +1212,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     }
   }
 
-  if (warp_start_token_idx >= context_len) {  // warp out of context
+  if (warp_start_token_idx >= seq_len) {  // warp out of context
     for (int qh = 0; qh < QHLOOP; qh++) {
       for (int vh = 0; vh < VHELOOP; vh++) {
         vout_shared[qh][vh][laneid][warpid] = {0};
@@ -1311,7 +1310,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                            // max_num_partitions]
     const scalar_t* __restrict__ tmp_out,  // [num_seqs, num_heads,
                                            // max_num_partitions, head_size]
-    const int* __restrict__ context_lens,  // [num_seqs]
+    const int* __restrict__ seq_lens,      // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
     const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr) {
   const auto num_heads = gridDim.x;
@@ -1325,8 +1324,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     return;
   }
 
-  const int context_len = context_lens[seq_idx];
-  const int num_partitions = DIVIDE_ROUND_UP(context_len, PARTITION_SIZE);
+  const int seq_len = seq_lens[seq_idx];
+  const int num_partitions = DIVIDE_ROUND_UP(seq_len, PARTITION_SIZE);
   const auto warpid = threadIdx.x / WARP_SIZE;
 
   __shared__ float shared_global_exp_sum;
@@ -1613,7 +1612,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
                                           // head_size, block_size]
     const int num_kv_heads, const float scale,
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
-    const int* __restrict__ context_lens,  // [num_seqs]
+    const int* __restrict__ seq_lens,  // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,   // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
@@ -1647,11 +1646,11 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
   const int max_num_partitions = gridDim.y;
 
-  const int context_len = context_lens[seq_idx];  // length of a seq
+  const int seq_len = seq_lens[seq_idx];  // length of a seq
 
   const int partition_start_token_idx = partition_idx * T_PAR_SIZE;
   // exit if partition is out of context for seq
-  if (partition_start_token_idx >= context_len) {
+  if (partition_start_token_idx >= seq_len) {
     return;
   }
 
@@ -1747,8 +1746,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     }
   }
 
-  const int num_context_blocks = DIVIDE_ROUND_UP(context_len, BLOCK_SIZE);
-  const int last_ctx_block = num_context_blocks - 1;
+  const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
+  const int last_seq_block = num_seq_blocks - 1;
 
   const int* block_table_seq = block_tables + seq_idx * max_num_blocks_per_seq;
 
@@ -1759,9 +1758,9 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int klocal_token_idx =
         TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
     const int kglobal_token_idx = partition_start_token_idx + klocal_token_idx;
-    const int kblock_idx = (kglobal_token_idx < context_len)
+    const int kblock_idx = (kglobal_token_idx < seq_len)
                                ? kglobal_token_idx / BLOCK_SIZE
-                               : last_ctx_block;
+                               : last_seq_block;
     kphysical_block_number[token_depth] = block_table_seq[kblock_idx];
   }
 
@@ -1813,9 +1812,9 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
           vblock_depth * BLOCK_SIZE;
       const int vglobal_token_idx =
           partition_start_token_idx + vlocal_token_idx;
-      const int vblock_idx = (vglobal_token_idx < context_len)
+      const int vblock_idx = (vglobal_token_idx < seq_len)
                                  ? vglobal_token_idx / BLOCK_SIZE
-                                 : last_ctx_block;
+                                 : last_seq_block;
       vphysical_block_number[vtoken_depth][vblock_depth] =
           block_table_seq[vblock_idx];
     }
@@ -1868,9 +1867,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     const int local_token_idx = qkout_token_idx + token_depth * 16;
     for (int i = 0; i < 8; i++) {
-      const float tmp = (local_token_idx + 2 * i < context_len)
-                            ? dout[token_depth][i]
-                            : -FLT_MAX;
+      const float tmp =
+          (local_token_idx + 2 * i < seq_len) ? dout[token_depth][i] : -FLT_MAX;
       qk_max = fmaxf(qk_max, tmp);
     }
   }
@@ -1880,7 +1878,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     const int local_token_idx = qkout_token_idx + token_depth * 16;
     for (int i = 0; i < 8; i++) {
-      const float tmp = (local_token_idx + 2 * i < context_len)
+      const float tmp = (local_token_idx + 2 * i < seq_len)
                             ? __expf(dout[token_depth][i] - qk_max)
                             : 0.0f;
       dout[token_depth][i] = tmp;
@@ -2051,7 +2049,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
                                           // head_size, block_size]
     const int num_kv_heads, const float scale,
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
-    const int* __restrict__ context_lens,  // [num_seqs]
+    const int* __restrict__ seq_lens,      // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
@@ -2078,7 +2076,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                            // max_num_partitions]
     const scalar_t* __restrict__ tmp_out,  // [num_seqs, num_heads,
                                            // max_num_partitions, head_size]
-    const int* __restrict__ context_lens,  // [num_seqs]
+    const int* __restrict__ seq_lens,      // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
     const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr) {
   const auto num_heads = gridDim.x;
@@ -2092,8 +2090,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     return;
   }
 
-  const int context_len = context_lens[seq_idx];
-  const int num_partitions = DIVIDE_ROUND_UP(context_len, PARTITION_SIZE);
+  const int seq_len = seq_lens[seq_idx];
+  const int num_partitions = DIVIDE_ROUND_UP(seq_len, PARTITION_SIZE);
   const int warpid = threadIdx.x / WARP_SIZE;
 
   __shared__ float shared_global_exp_sum;
@@ -2381,7 +2379,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
                                           // head_size, block_size]
     const int num_kv_heads, const float scale,
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
-    const int* __restrict__ context_lens,  // [num_seqs]
+    const int* __restrict__ seq_lens,  // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,   // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
@@ -2414,11 +2412,11 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
   const int max_num_partitions = gridDim.y;
 
-  const int context_len = context_lens[seq_idx];  // length of a seq
+  const int seq_len = seq_lens[seq_idx];  // length of a seq
 
   const int partition_start_token_idx = partition_idx * T_PAR_SIZE;
   // exit if partition is out of context for seq
-  if (partition_start_token_idx >= context_len) {
+  if (partition_start_token_idx >= seq_len) {
     return;
   }
 
@@ -2514,8 +2512,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     }
   }
 
-  const int num_context_blocks = DIVIDE_ROUND_UP(context_len, BLOCK_SIZE);
-  const int last_ctx_block = num_context_blocks - 1;
+  const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
+  const int last_seq_block = num_seq_blocks - 1;
 
   const int* block_table_seq = block_tables + seq_idx * max_num_blocks_per_seq;
 
@@ -2526,9 +2524,9 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int klocal_token_idx =
         TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
     const int kglobal_token_idx = partition_start_token_idx + klocal_token_idx;
-    const int kblock_idx = (kglobal_token_idx < context_len)
+    const int kblock_idx = (kglobal_token_idx < seq_len)
                                ? kglobal_token_idx / BLOCK_SIZE
-                               : last_ctx_block;
+                               : last_seq_block;
     kphysical_block_number[token_depth] = block_table_seq[kblock_idx];
   }
 
@@ -2580,9 +2578,9 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
           rowid * VTOKENS_PER_LANE + vblock_depth * BLOCK_SIZE;
       const int vglobal_token_idx =
           partition_start_token_idx + vlocal_token_idx;
-      const int vblock_idx = (vglobal_token_idx < context_len)
+      const int vblock_idx = (vglobal_token_idx < seq_len)
                                  ? vglobal_token_idx / BLOCK_SIZE
-                                 : last_ctx_block;
+                                 : last_seq_block;
       vphysical_block_number[vtoken_depth][vblock_depth] =
           block_table_seq[vblock_idx];
     }
@@ -2636,7 +2634,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int local_token_idx = qkout_token_idx + token_depth * 16;
     for (int i = 0; i < 8; i++) {
       const float tmp =
-          (local_token_idx + i < context_len) ? dout[token_depth][i] : -FLT_MAX;
+          (local_token_idx + i < seq_len) ? dout[token_depth][i] : -FLT_MAX;
       qk_max = fmaxf(qk_max, tmp);
     }
   }
@@ -2646,7 +2644,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     const int local_token_idx = qkout_token_idx + token_depth * 16;
     for (int i = 0; i < 8; i++) {
-      const float tmp = (local_token_idx + i < context_len)
+      const float tmp = (local_token_idx + i < seq_len)
                             ? __expf(dout[token_depth][i] - qk_max)
                             : 0.0f;
       dout[token_depth][i] = tmp;
@@ -2783,7 +2781,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
                                           // head_size, block_size]
     const int num_kv_heads, const float scale,
     const int* __restrict__ block_tables,  // [num_seqs, max_num_blocks_per_seq]
-    const int* __restrict__ context_lens,  // [num_seqs]
+    const int* __restrict__ seq_lens,      // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
@@ -2810,7 +2808,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                            // max_num_partitions]
     const scalar_t* __restrict__ tmp_out,  // [num_seqs, num_heads,
                                            // max_num_partitions, head_size]
-    const int* __restrict__ context_lens,  // [num_seqs]
+    const int* __restrict__ seq_lens,      // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
     const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr) {
   const auto num_heads = gridDim.x;
@@ -2824,8 +2822,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     return;
   }
 
-  const int context_len = context_lens[seq_idx];
-  const int num_partitions = DIVIDE_ROUND_UP(context_len, PARTITION_SIZE);
+  const int seq_len = seq_lens[seq_idx];
+  const int num_partitions = DIVIDE_ROUND_UP(seq_len, PARTITION_SIZE);
   const int warpid = threadIdx.x / WARP_SIZE;
 
   __shared__ float shared_global_exp_sum;
@@ -3012,7 +3010,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int num_kv_heads,
     const float scale,
     const int* __restrict__ block_tables,    // [num_seqs, max_num_blocks_per_seq]
-    const int* __restrict__ context_lens,    // [num_seqs]
+    const int* __restrict__ seq_lens,    // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
@@ -3039,7 +3037,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int num_kv_heads,
     const float scale,
     const int* __restrict__ block_tables,    // [num_seqs, max_num_blocks_per_seq]
-    const int* __restrict__ context_lens,    // [num_seqs]
+    const int* __restrict__ seq_lens,    // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
@@ -3063,7 +3061,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
     const float* __restrict__ exp_sums,    // [num_seqs, num_heads, max_num_partitions]
     const float* __restrict__ max_logits,  // [num_seqs, num_heads, max_num_partitions]
     const scalar_t* __restrict__ tmp_out,  // [num_seqs, num_heads, max_num_partitions, head_size]
-    const int* __restrict__ context_lens,  // [num_seqs]
+    const int* __restrict__ seq_lens,  // [num_seqs]
     const int* __restrict__ query_start_loc_ptr,  // [num_seqs]
     const int max_num_partitions, const float* __restrict__ fp8_out_scale_ptr) {
   UNREACHABLE_CODE
@@ -3078,7 +3076,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                           GQA_RATIO>                           \
       <<<grid, block, 0, stream>>>(                                            \
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
-          block_tables_ptr, context_lens_ptr, query_start_loc_ptr,             \
+          block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
           max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride, \
           kv_head_stride, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,  \
           max_ctx_blocks, k_scale_ptr, v_scale_ptr);
@@ -3089,18 +3087,17 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
                                          GQA_RATIO>                            \
       <<<grid, block, 0, stream>>>(                                            \
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
-          block_tables_ptr, context_lens_ptr, query_start_loc_ptr,             \
+          block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
           max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride, \
           kv_head_stride, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,  \
           max_ctx_blocks, k_scale_ptr, v_scale_ptr);
 
-#define LAUNCH_CUSTOM_REDUCTION(NPAR_LOOPS)                          \
-  paged_attention_ll4mi_reduce_kernel<T, OUTT, HEAD_SIZE, HEAD_SIZE, \
-                                      PARTITION_SIZE, NPAR_LOOPS>    \
-      <<<reduce_grid, reduce_block, 0, stream>>>(                    \
-          out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr,        \
-          context_lens_ptr, query_start_loc_ptr, max_num_partitions, \
-          fp8_out_scale_ptr);
+#define LAUNCH_CUSTOM_REDUCTION(NPAR_LOOPS)                                 \
+  paged_attention_ll4mi_reduce_kernel<T, OUTT, HEAD_SIZE, HEAD_SIZE,        \
+                                      PARTITION_SIZE, NPAR_LOOPS>           \
+      <<<reduce_grid, reduce_block, 0, stream>>>(                           \
+          out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, seq_lens_ptr, \
+          query_start_loc_ptr, max_num_partitions, fp8_out_scale_ptr);
 
 template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
           int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
@@ -3109,8 +3106,8 @@ void paged_attention_custom_launcher(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, const int num_kv_heads, float scale,
-    torch::Tensor& block_tables, torch::Tensor& context_lens,
-    const std::optional<torch::Tensor>& query_start_loc, int max_context_len,
+    torch::Tensor& block_tables, torch::Tensor& seq_lens,
+    const std::optional<torch::Tensor>& query_start_loc, int max_seq_len,
     const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
     torch::Tensor& v_scale, const std::optional<torch::Tensor>& fp8_out_scale) {
   int num_seqs = block_tables.size(0);
@@ -3141,7 +3138,7 @@ void paged_attention_custom_launcher(
   KVT* key_cache_ptr = reinterpret_cast<KVT*>(key_cache.data_ptr());
   KVT* value_cache_ptr = reinterpret_cast<KVT*>(value_cache.data_ptr());
   int* block_tables_ptr = block_tables.data_ptr<int>();
-  int* context_lens_ptr = context_lens.data_ptr<int>();
+  int* seq_lens_ptr = seq_lens.data_ptr<int>();
   const float* k_scale_ptr = reinterpret_cast<const float*>(k_scale.data_ptr());
   const float* v_scale_ptr = reinterpret_cast<const float*>(v_scale.data_ptr());
   // NOTE: fp8_out_scale is optional.
@@ -3151,13 +3148,12 @@ void paged_attention_custom_launcher(
           : nullptr;
   OUTT* out_ptr = reinterpret_cast<OUTT*>(out.data_ptr());
 
-  const int max_ctx_blocks = DIVIDE_ROUND_UP(max_context_len, BLOCK_SIZE);
+  const int max_ctx_blocks = DIVIDE_ROUND_UP(max_seq_len, BLOCK_SIZE);
 
   // partition size is fixed at 256 since both mfma4 and mfma16 kernels support
   // it mfma4 kernel also supports partition size 512
   constexpr int PARTITION_SIZE = 256;
-  const int max_num_partitions =
-      DIVIDE_ROUND_UP(max_context_len, PARTITION_SIZE);
+  const int max_num_partitions = DIVIDE_ROUND_UP(max_seq_len, PARTITION_SIZE);
   const int gqa_ratio = num_heads / num_kv_heads;
   assert(num_heads % num_kv_heads == 0);
   assert(head_size == HEAD_SIZE);
@@ -3266,8 +3262,8 @@ void paged_attention_custom_launcher_navi(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, const int num_kv_heads, float scale,
-    torch::Tensor& block_tables, torch::Tensor& context_lens,
-    const std::optional<torch::Tensor>& query_start_loc, int max_context_len,
+    torch::Tensor& block_tables, torch::Tensor& seq_lens,
+    const std::optional<torch::Tensor>& query_start_loc, int max_seq_len,
     const std::optional<torch::Tensor>& alibi_slopes, torch::Tensor& k_scale,
     torch::Tensor& v_scale) {
   int num_seqs = block_tables.size(0);
@@ -3295,7 +3291,7 @@ void paged_attention_custom_launcher_navi(
   KVT* key_cache_ptr = reinterpret_cast<KVT*>(key_cache.data_ptr());
   KVT* value_cache_ptr = reinterpret_cast<KVT*>(value_cache.data_ptr());
   int* block_tables_ptr = block_tables.data_ptr<int>();
-  int* context_lens_ptr = context_lens.data_ptr<int>();
+  int* seq_lens_ptr = seq_lens.data_ptr<int>();
 
   const float* k_scale_ptr = reinterpret_cast<const float*>(k_scale.data_ptr());
   const float* v_scale_ptr = reinterpret_cast<const float*>(v_scale.data_ptr());
@@ -3303,11 +3299,10 @@ void paged_attention_custom_launcher_navi(
   const auto fp8_out_scale_ptr = nullptr;
   OUTT* out_ptr = reinterpret_cast<OUTT*>(out.data_ptr());
 
-  const int max_ctx_blocks = DIVIDE_ROUND_UP(max_context_len, BLOCK_SIZE);
+  const int max_ctx_blocks = DIVIDE_ROUND_UP(max_seq_len, BLOCK_SIZE);
 
   constexpr int PARTITION_SIZE = 256;
-  const int max_num_partitions =
-      DIVIDE_ROUND_UP(max_context_len, PARTITION_SIZE);
+  const int max_num_partitions = DIVIDE_ROUND_UP(max_seq_len, PARTITION_SIZE);
   const int gqa_ratio = num_heads / num_kv_heads;
   assert(num_heads % num_kv_heads == 0);
   assert(head_size == HEAD_SIZE);
@@ -3439,14 +3434,14 @@ void paged_attention_custom_launcher_navi(
     paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
                                     OUTT, PSIZE, ALIBI_ENABLED>(            \
         out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
-        num_kv_heads, scale, block_tables, context_lens, query_start_loc,   \
-        max_context_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);    \
+        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
+        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);        \
   } else {                                                                  \
     paged_attention_custom_launcher_navi<                                   \
         T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT, PSIZE, ALIBI_ENABLED>( \
         out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
-        num_kv_heads, scale, block_tables, context_lens, query_start_loc,   \
-        max_context_len, alibi_slopes, k_scale, v_scale);                   \
+        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
+        max_seq_len, alibi_slopes, k_scale, v_scale);                       \
   }
 
 #define CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
@@ -3534,9 +3529,9 @@ void paged_attention(
     int64_t num_kv_heads, 
     double scale,
     torch::Tensor& block_tables, // [num_seqs, max_num_blocks_per_seq]
-    torch::Tensor& context_lens, // [num_seqs]
+    torch::Tensor& seq_lens, // [num_seqs]
     const std::optional<torch::Tensor>& query_start_loc, // [num_seqs]
-    int64_t block_size, int64_t max_context_len,
+    int64_t block_size, int64_t max_seq_len,
     const std::optional<torch::Tensor>& alibi_slopes,
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale,

@@ -5,8 +5,7 @@ r"""Benchmark online serving throughput.
 On the server side, run one of the following commands:
     vLLM OpenAI API server
     vllm serve <your_model> \
-        --swap-space 16 \
-        --disable-log-requests
+        --swap-space 16
 
 On the client side, run:
     python benchmarks/benchmark_serving.py \
@@ -38,6 +37,7 @@ from typing import Any, Literal, Optional
 import numpy as np
 from tqdm.asyncio import tqdm
 from transformers import PreTrainedTokenizerBase
+from typing_extensions import deprecated
 
 from backend_request_func import (
     ASYNC_REQUEST_FUNCS,
@@ -263,7 +263,14 @@ async def benchmark(
         input_requests[0].multi_modal_data,
     )
 
-    assert test_mm_content is None or isinstance(test_mm_content, dict)
+    assert (
+        test_mm_content is None
+        or isinstance(test_mm_content, dict)
+        or (
+            isinstance(test_mm_content, list)
+            and all(isinstance(item, dict) for item in test_mm_content)
+        )
+    ), "multi_modal_data must be a dict or list[dict]"
     test_input = RequestFuncInput(
         model=model_id,
         model_name=model_name,
@@ -368,11 +375,12 @@ async def benchmark(
                     rps_change_events.append({"rps": rps_val, "timestamp": timestamp})
                 last_int_rps = current_int_rps
 
-        prompt, prompt_len, output_len, mm_content = (
+        prompt, prompt_len, output_len, mm_content, request_id = (
             request.prompt,
             request.prompt_len,
             request.expected_output_len,
             request.multi_modal_data,
+            request.request_id,
         )
         req_model_id, req_model_name = model_id, model_name
         if lora_modules:
@@ -390,24 +398,11 @@ async def benchmark(
             multi_modal_content=mm_content,
             ignore_eos=ignore_eos,
             extra_body=extra_body,
+            request_id=request_id,
         )
         task = limited_request_func(request_func_input=request_func_input, pbar=pbar)
         tasks.append(asyncio.create_task(task))
     outputs: list[RequestFuncOutput] = await asyncio.gather(*tasks)
-
-    if profile:
-        print("Stopping profiler...")
-        profile_input = RequestFuncInput(
-            model=model_id,
-            prompt=test_prompt,
-            api_url=base_url + "/stop_profile",
-            prompt_len=test_prompt_len,
-            output_len=test_output_len,
-            logprobs=logprobs,
-        )
-        profile_output = await request_func(request_func_input=profile_input)
-        if profile_output.success:
-            print("Profiler stopped")
 
     if pbar is not None:
         pbar.close()
@@ -426,6 +421,10 @@ async def benchmark(
 
     print("{s:{c}^{n}}".format(s=" Serving Benchmark Result ", n=50, c="="))
     print("{:<40} {:<10}".format("Successful requests:", metrics.completed))
+    if max_concurrency is not None:
+        print("{:<40} {:<10}".format("Maximum request concurrency:", max_concurrency))
+    if request_rate != float("inf"):
+        print("{:<40} {:<10.2f}".format("Request rate configured (RPS):", request_rate))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
     print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
@@ -517,6 +516,20 @@ async def benchmark(
 
     print("=" * 50)
 
+    if profile:
+        print("Stopping profiler...")
+        profile_input = RequestFuncInput(
+            model=model_id,
+            prompt=test_prompt,
+            api_url=base_url + "/stop_profile",
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            logprobs=logprobs,
+        )
+        profile_output = await request_func(request_func_input=profile_input)
+        if profile_output.success:
+            print("Profiler stopped")
+
     return result
 
 
@@ -593,6 +606,10 @@ def save_to_pytorch_benchmark_format(
         write_to_json(pt_file, pt_records)
 
 
+@deprecated(
+    "benchmark_serving.py is deprecated and will be removed in a future "
+    "version. Please use 'vllm bench serve' instead.",
+)
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
@@ -650,6 +667,7 @@ def main(args: argparse.Namespace):
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
             skip_chat_template=args.custom_skip_chat_template,
+            request_id_prefix=args.request_id_prefix,
         )
 
     elif args.dataset_name == "sonnet":
@@ -663,6 +681,7 @@ def main(args: argparse.Namespace):
                 prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
                 return_prompt_formatted=False,
+                request_id_prefix=args.request_id_prefix,
             )
         else:
             assert tokenizer.chat_template or tokenizer.default_chat_template, (
@@ -675,6 +694,7 @@ def main(args: argparse.Namespace):
                 prefix_len=args.sonnet_prefix_len,
                 tokenizer=tokenizer,
                 return_prompt_formatted=True,
+                request_id_prefix=args.request_id_prefix,
             )
 
     elif args.dataset_name == "hf":
@@ -736,6 +756,7 @@ def main(args: argparse.Namespace):
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             output_len=args.hf_output_len,
+            request_id_prefix=args.request_id_prefix,
         )
 
     else:
@@ -747,10 +768,15 @@ def main(args: argparse.Namespace):
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
                 output_len=args.sharegpt_output_len,
+                request_id_prefix=args.request_id_prefix,
             ),
             "burstgpt": lambda: BurstGPTDataset(
                 random_seed=args.seed, dataset_path=args.dataset_path
-            ).sample(tokenizer=tokenizer, num_requests=args.num_prompts),
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                request_id_prefix=args.request_id_prefix,
+            ),
             "random": lambda: RandomDataset(dataset_path=args.dataset_path).sample(
                 tokenizer=tokenizer,
                 num_requests=args.num_prompts,
@@ -758,6 +784,7 @@ def main(args: argparse.Namespace):
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
                 range_ratio=args.random_range_ratio,
+                request_id_prefix=args.request_id_prefix,
             ),
         }
 
@@ -1102,6 +1129,13 @@ def create_argument_parser():
         '"ttft", "tpot", "e2el". For more context on the definition of '
         "goodput, refer to DistServe paper: https://arxiv.org/pdf/2401.09670 "
         "and the blog: https://hao-ai-lab.github.io/blogs/distserve",
+    )
+    parser.add_argument(
+        "--request-id-prefix",
+        type=str,
+        required=False,
+        default="benchmark-serving",
+        help="Specify the prefix of request id.",
     )
 
     # group for dataset specific arguments

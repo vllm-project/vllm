@@ -3,7 +3,8 @@
 
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
-from typing import Any, Literal, Optional, TypedDict, Union
+from itertools import islice
+from typing import Annotated, Any, Literal, Optional, Union
 
 import torch
 import torch.nn as nn
@@ -31,13 +32,14 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
                          SupportsQuant)
@@ -48,10 +50,16 @@ from .utils import (flatten_bn, is_pp_missing_parameter,
 logger = init_logger(__name__)
 
 
-class ChameleonImagePixelInputs(TypedDict):
+class ChameleonImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - c: Number of channels (3)
+        - h: Height of each image
+        - w: Width of each image
+    """
     type: Literal["pixel_values"]
-    data: torch.Tensor
-    """Shape: `(batch_size * num_images, num_channels, height, width)`"""
+    data: Annotated[torch.Tensor, TensorShape("bn", 3, "h", "w")]
 
 
 class ChameleonProcessingInfo(BaseProcessingInfo):
@@ -144,7 +152,7 @@ class ChameleonMultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         tokenizer = self.info.get_tokenizer()
@@ -907,7 +915,7 @@ class ChameleonModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
@@ -962,19 +970,6 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
-        vq_config: ChameleonVQVAEConfig = self.config.vq_config
-        expected_dims = (3, vq_config.resolution, vq_config.resolution)
-        actual_dims = tuple(data.shape[1:])
-
-        if actual_dims != expected_dims:
-            expected_expr = ("batch_size", *map(str, expected_dims))
-            raise ValueError(
-                f"The expected shape of pixel values is {expected_expr}. "
-                f"You supplied {tuple(data.shape)}.")
-
-        return data
-
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[ChameleonImagePixelInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -982,16 +977,16 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         if pixel_values is None:
             return None
 
-        if not isinstance(pixel_values, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of pixel values. "
-                             f"Got type: {type(pixel_values)}")
+        vq_config: ChameleonVQVAEConfig = self.config.vq_config
+        expected_h = expected_w = vq_config.resolution
 
-        pixel_values = flatten_bn(pixel_values, concat=True)
-
-        return ChameleonImagePixelInputs(
-            type="pixel_values",
-            data=self._validate_pixel_values(pixel_values),
-        )
+        return ChameleonImagePixelInputs(type="pixel_values",
+                                         data=flatten_bn(pixel_values,
+                                                         concat=True),
+                                         resolve_bindings={
+                                             "h": expected_h,
+                                             "w": expected_w
+                                         })
 
     def get_language_model(self) -> torch.nn.Module:
         return self.model

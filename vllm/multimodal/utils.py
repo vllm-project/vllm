@@ -1,15 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+import atexit
+import itertools
+import math
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional, TypeVar, Union
 from urllib.parse import ParseResult, urlparse
+from urllib.request import url2pathname
 
 import numpy as np
 import numpy.typing as npt
 import torch
 from PIL import Image, UnidentifiedImageError
+from typing_extensions import deprecated
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
@@ -20,18 +28,24 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
 from .audio import AudioMediaIO
 from .base import MediaIO
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
-from .inputs import PlaceholderRange
 from .video import VideoMediaIO
 
 _M = TypeVar("_M")
 
 if TYPE_CHECKING:
-    from .hasher import MultiModalHashDict
-    from .inputs import MultiModalKwargs, MultiModalPlaceholderDict
+    from .inputs import (BatchedTensorInputs, MultiModalKwargs,
+                         MultiModalKwargsItem, MultiModalKwargsItems,
+                         MultiModalPlaceholderDict)
 else:
-    MultiModalHashDict = Any
+    BatchedTensorInputs = Any
     MultiModalKwargs = Any
+    MultiModalKwargsItem = Any
+    MultiModalKwargsItems = Any
     MultiModalPlaceholderDict = Any
+
+global_thread_pool = ThreadPoolExecutor(
+    max_workers=envs.VLLM_MEDIA_LOADING_THREAD_COUNT)
+atexit.register(global_thread_pool.shutdown)
 
 
 class MediaConnector:
@@ -99,7 +113,7 @@ class MediaConnector:
             raise RuntimeError("Cannot load local files without "
                                "`--allowed-local-media-path`.")
 
-        filepath = Path(url_spec.path)
+        filepath = Path(url2pathname(url_spec.path))
         if allowed_local_media_path not in filepath.resolve().parents:
             raise ValueError(
                 f"The file path {filepath} must be a subpath "
@@ -139,19 +153,26 @@ class MediaConnector:
         fetch_timeout: Optional[int] = None,
     ) -> _M:
         url_spec = urlparse(url)
+        loop = asyncio.get_running_loop()
 
         if url_spec.scheme.startswith("http"):
             connection = self.connection
             data = await connection.async_get_bytes(url, timeout=fetch_timeout)
-
-            return media_io.load_bytes(data)
+            future = loop.run_in_executor(global_thread_pool,
+                                          media_io.load_bytes, data)
+            return await future
 
         if url_spec.scheme == "data":
-            return self._load_data_url(url_spec, media_io)
+            future = loop.run_in_executor(global_thread_pool,
+                                          self._load_data_url, url_spec,
+                                          media_io)
+            return await future
 
         if url_spec.scheme == "file":
-            return self._load_file_url(url_spec, media_io)
-
+            future = loop.run_in_executor(global_thread_pool,
+                                          self._load_file_url, url_spec,
+                                          media_io)
+            return await future
         msg = "The URL must be either a HTTP, data or file URL."
         raise ValueError(msg)
 
@@ -317,90 +338,45 @@ def encode_video_base64(frames: npt.NDArray) -> str:
     return video_io.encode_base64(frames)
 
 
-def merge_and_sort_multimodal_metadata(
-    mm_positions: MultiModalPlaceholderDict,
-    mm_hashes: Optional[MultiModalHashDict],
-) -> tuple[list[str], list[PlaceholderRange], Optional[list[str]]]:
-    """Given a MultiModalPlaceholderDict, merge all PlaceholderRange
-    objects from all available modalities into a single list of 
-    PlaceholderRange, sorted by their offset (starting index in the input
-    sequence) in the ascending order.
-
-    Optionally if a `MultiModalHashDict` is given, same operation will be
-    applied to the object and the sorted list of hashes will be returned.
-    
-    Returns:
-        list[str]: List of item modalities in order of their positions in the
-        input sequence.
-        list[PlaceholderRange]: Sorted list of all PlaceholderRanges from
-        mm_positions.
-        Optional[list[str]]: Sorted list of all hashes from mm_hashes if given,
-        None otherwise.
+def argsort_mm_positions(
+        mm_positions: MultiModalPlaceholderDict) -> list[tuple[str, int]]:
     """
+    Given a `MultiModalPlaceholderDict`, output a sequence of keys to
+    sort the dictionary by `offset` (starting index in the input sequence)
+    in ascending order.
 
-    modalities = list(mm_positions.keys())
+    Returns:
+        A list of `(modality, idx)`, which can be used to access an item
+        by `mm_positions[modality][idx]`.
+    """
+    flat_items = ((modality, idx, item)
+                  for modality, items in mm_positions.items()
+                  for idx, item in enumerate(items))
 
-    assert len(modalities) > 0, "No modalities found in the mm_positions."
+    sorted_flat_items = sorted(flat_items, key=lambda x: x[2].offset)
 
-    # For single modality, placeholder ranges and hashes are already sorted
-    # so we can return the list directly.
-    if len(modalities) == 1:
-        modality = modalities[0]
-        placeholder_list = list(mm_positions[modality])
-
-        return [modality] * len(
-            placeholder_list
-        ), placeholder_list, None if not mm_hashes else mm_hashes[modality]
-
-    # Create a list of (modality, placeholder, hash) tuples for all placeholders
-    all_items = []
-    for modality in modalities:
-        placeholder_list = list(mm_positions[modality])
-        hash_list: list[Optional[str]] = list(
-            mm_hashes[modality]) if mm_hashes and modality in mm_hashes else [
-                None
-            ] * len(placeholder_list)
-
-        for placeholder, hash_value in zip(placeholder_list, hash_list):
-            all_items.append((modality, placeholder, hash_value))
-
-    # Sort all items by offset
-    all_items.sort(key=lambda x: x[1].offset)
-
-    # Split into separate lists
-    sorted_modalities = [item[0] for item in all_items]
-    merged_placeholders = [item[1] for item in all_items]
-    merged_hashes = [str(item[2])
-                     for item in all_items] if mm_hashes is not None else None
-
-    return sorted_modalities, merged_placeholders, merged_hashes
+    return [(modality, idx) for modality, idx, _ in sorted_flat_items]
 
 
+# Temporary back-compatibility for plugins that define model runner
+@deprecated("`group_mm_inputs_by_modality` is superseded by "
+            "`group_mm_kwargs_by_modality` and will be removed in v0.13. "
+            "Please use `group_mm_kwargs_by_modality` instead.")
 def group_mm_inputs_by_modality(
-        mm_inputs: list[MultiModalKwargs]) -> list[list[MultiModalKwargs]]:
-    """Group consecutive MultiModalKwargs from mm_inputs with the same modality
-    together into the same list for batching purpose. For MultiModalKwargs with
-    multiple modalities, put them into their own list.
-
-    Args:
-        mm_inputs: List of MultiModalKwargs.
-
-    Returns:
-        list[list[vllm.multimodal.MultiModalKwargs]]: List of list of
-        `MultiModalKwargs`, each inner list contains consecutive
-        `MultiModalKwargs` with same modality.
-    """
+    mm_inputs: list[MultiModalKwargsItems]
+) -> list[list[MultiModalKwargsItems]]:
     if not mm_inputs:
         return []
 
-    def modality_group_func(mm_input: MultiModalKwargs) -> Union[str, int]:
+    def modality_group_func(
+            mm_input: MultiModalKwargsItems) -> Union[str, int]:
         # If the input has multiple modalities, return a id as the unique key
         # for the mm_input input.
-        if len(mm_input.modalities) > 1:
+        if len(mm_input) > 1:
             return id(mm_input)
 
-        elif len(mm_input.modalities) == 1:
-            return list(mm_input.modalities)[0]
+        elif len(mm_input) == 1:
+            return next(iter(mm_input.keys()))
 
         # FIXME(Isotr0py): Modality of mm_input from legacy pipeline is empty,
         # this is used to make InternVL with legacy pipeline still work with v1.
@@ -412,6 +388,53 @@ def group_mm_inputs_by_modality(
     ]
 
 
+def group_mm_kwargs_by_modality(
+    mm_kwargs: list[MultiModalKwargsItem],
+    *,
+    device: torch.types.Device = None,
+    pin_memory: bool = False,
+) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
+    """Group consecutive `MultiModalKwargsItem`s from `mm_kwargs` with the same
+    modality together into the same `MultiModalKwargs` instance.
+
+    Args:
+        mm_inputs: List of `MultiModalKwargsItem`.
+
+    Yields:
+        A tuple `(modality, num_items, grouped_kwargs)`.
+    """
+    from vllm.multimodal.inputs import MultiModalKwargs, MultiModalKwargsItems
+
+    for modality, items in groupby(mm_kwargs, key=lambda item: item.modality):
+        items_lst = list(items)
+
+        # mm_kwargs_group = MultiModalKwargsItems.from_items(items_lst) \
+        #    .get_data(pin_memory=pin_memory)
+
+        # if device is not None:
+        #     mm_kwargs_group = json_map_leaves(
+        #         lambda x: x.to(device=device),
+        #         mm_kwargs_group,
+        #     )
+
+        # TODO: Once V0 is removed, we can use the merging logic above
+        # to avoid creating an extra batch dimension (except for fields
+        # that are meant to be stacked anyway).
+        # We will also need to update each model to remove `flatten_bn`.
+        mm_kwargs_group = MultiModalKwargs.as_kwargs(
+            MultiModalKwargs.batch(
+                [
+                    MultiModalKwargsItems.from_seq([item]).get_data()
+                    for item in items_lst
+                ],
+                pin_memory=pin_memory,
+            ),
+            device=device,
+        )
+
+        yield modality, len(items_lst), mm_kwargs_group
+
+
 def run_dp_sharded_vision_model(image_input: torch.Tensor,
                                 vision_model: torch.nn.Module) -> torch.Tensor:
     """Run a vision model with data parallelism (DP) sharding. The function 
@@ -421,7 +444,6 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
     Args:
         image_input (torch.Tensor): Image input tensor.
         vision_model (torch.nn.Module): Vision model.
-
     Returns:
         torch.Tensor: Output image embeddings
     """
@@ -438,10 +460,253 @@ def run_dp_sharded_vision_model(image_input: torch.Tensor,
                                               num_chunks_per_rank, ...]
 
     vision_embeddings = vision_model(image_input_per_rank)
+    # Ensure tensor is contiguous before all_gather
+    vision_embeddings = vision_embeddings.contiguous()
     vision_embeddings = tensor_model_parallel_all_gather(vision_embeddings,
                                                          dim=0)
     vision_embeddings = vision_embeddings[:num_chunks, ...]
     return vision_embeddings
+
+
+def get_load_balance_assignment(
+    sizes: list[int],
+    num_gpus: int = 2,
+) -> tuple[list[int], list[int], list[int]]:
+    """
+    Generate load balancing assignment and metadata 
+    for distributing data across GPUs.
+    The load is determined by the total image sizes,
+    not the number of images.
+    
+    Args:
+        sizes: The size of each image
+        num_gpus: Number of GPUs to balance across
+    
+    Returns:
+        shuffle_indices: 
+            Indices to reorder data for balanced loading
+        gpu_sample_counts: 
+            Number of samples assigned to each GPU
+        grouped_sizes_per_gpu: 
+            Total size assigned to each GPU
+    
+    Example:
+        ```
+        sizes = [1000, 100, 200, 50]
+        num_gpus=2
+        ```
+
+    """
+
+    n_samples = len(sizes)
+
+    # Handle edge cases
+    if n_samples == 0:
+        return [], [0] * num_gpus, [0] * num_gpus
+
+    # Use greedy algorithm - balance by total size, not sample count
+    gpu_assignments = [list[int]() for _ in range(num_gpus)]
+    gpu_loads = [0] * num_gpus  # This tracks total SIZE, not sample count
+
+    # Sort indices by size (largest first for better load balancing)
+    # sizes = [1000, 100, 200, 50]
+    # large_to_small_indices = [0, 2, 1, 3]
+    large_to_small_indices = sorted(range(n_samples),
+                                    key=lambda i: sizes[i],
+                                    reverse=True)
+
+    for idx in large_to_small_indices:
+        # Find GPU with minimum current load (by total size)
+        min_gpu = min(range(num_gpus), key=lambda i: gpu_loads[i])
+        gpu_assignments[min_gpu].append(idx)
+        gpu_loads[min_gpu] += sizes[idx]
+
+    # Create shuffle indices and counts
+    shuffle_indices = list[int]()
+    gpu_sample_counts = list[int]()
+    for gpu_id in range(num_gpus):
+        # GPU_0 = [1000] = [0]
+        # GPU_1 = [200, 100, 50] = [2, 1, 3]
+        # shuffle_indices = [0, 2, 1, 3]
+        shuffle_indices.extend(gpu_assignments[gpu_id])
+        # GPU_0 = [1]
+        # GPU_1 = [3]
+        # gpu_sample_counts = [1, 3]
+        gpu_sample_counts.append(len(gpu_assignments[gpu_id]))
+
+    return (shuffle_indices, gpu_sample_counts, gpu_loads)
+
+
+def run_dp_sharded_mrope_vision_model(
+    vision_model: torch.nn.Module,
+    pixel_values: torch.Tensor,
+    grid_thw_list: list[list[int]],
+    *,
+    rope_type: Literal["rope_3d", "rope_2d"],
+) -> tuple[torch.Tensor, ...]:
+    """Run a vision model with data parallelism (DP) sharding. 
+    The function will shard the input image tensor on the 
+    first dimension and run the vision model.
+    This function is used to run the vision model with mrope.
+    
+    Args:
+        vision_model (torch.nn.Module): Vision model.
+        pixel_values (torch.Tensor): Image/Video input tensor.
+        grid_thw_list: List of grid dimensions for each image
+        rope_type: Type of rope used in the vision model.
+                   Different rope types have different dimension to do ViT.
+                   "rope_3d" for 3D rope (e.g., Qwen2.5-VL)
+                   "rope_2d" for 2D rope (e.g., Kimi-VL)
+    Returns:
+        torch.Tensor: Output image embeddings
+
+    Example:
+        ```
+        vision_model.out_hidden_size = 64
+        vision_model.spatial_merge_size = 2
+        pixel_values.shape = (1350, channel)
+        grid_thw_list = [[1, 10, 100], [1, 10, 10], [1, 10, 20], [1, 50]]
+        tp_size=2
+        ```
+
+    """
+    tp_size = get_tensor_model_parallel_world_size()
+
+    # GPU_0 tp_rank_local = 0
+    # GPU_1 tp_rank_local = 1
+    tp_rank_local = get_tensor_model_parallel_rank()
+
+    # patches_per_image = [1000, 100, 200, 50]
+    patches_per_image = [math.prod(grid_thw) for grid_thw in grid_thw_list]
+    # patches_per_image = [0, 1000, 1100, 1300, 1350]
+    cum_patches_per_image = [0, *itertools.accumulate(patches_per_image)]
+
+    # Get load balancing assignment with all metadata
+    # image_to_tp_rank = [0, 2, 1, 3]
+    # gpu_sample_counts = [1, 3]
+    # grouped_pixel_values_len = [1000, 350]
+    (image_to_tp_rank, gpu_sample_counts,
+     grouped_pixel_values_len) = get_load_balance_assignment(
+         patches_per_image, tp_size)
+
+    # cu_gpu_sample_counts = [0, 1, 4]
+    cum_gpu_sample_counts = [0, *itertools.accumulate(gpu_sample_counts)]
+
+    # GPU_0 image_idxs_local = [0]
+    # GPU_1 image_idxs_local = [2, 1, 3]
+    image_idxs_local = image_to_tp_rank[cum_gpu_sample_counts[tp_rank_local]:
+                                        cum_gpu_sample_counts[tp_rank_local +
+                                                              1]]
+
+    # Get the pixel values for the local images based on the image_idxs_local
+    if len(image_idxs_local) > 0:
+        pixel_values_local = torch.cat([
+            pixel_values[cum_patches_per_image[i]:cum_patches_per_image[i + 1]]
+            for i in image_idxs_local
+        ])
+    else:
+        # Handle case where this rank has no images
+        pixel_values_local = torch.empty((0, pixel_values.shape[1]),
+                                         device=pixel_values.device,
+                                         dtype=pixel_values.dtype)
+    # embed_dim_reduction_factor = 2 * 2
+    if rope_type == "rope_2d":
+        embed_dim_reduction_factor = (vision_model.merge_kernel_size[0] *
+                                      vision_model.merge_kernel_size[1])
+    else:
+        embed_dim_reduction_factor = (vision_model.spatial_merge_size *
+                                      vision_model.spatial_merge_size)
+
+    # Find the max length across all ranks
+    # The output embedding of every DP rank has to be
+    # padded to this length for tensor_model_parallel_all_gather
+    # to work
+    max_len_per_rank = max(
+        grouped_pixel_values_len) // embed_dim_reduction_factor
+    local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
+
+    # Run the vision model on the local pixel_values_local
+    if rope_type == "rope_2d":
+        if pixel_values_local.shape[0] > 0:
+            image_embeds_local = vision_model(
+                pixel_values_local, torch.tensor(local_grid_thw_list))
+            if isinstance(image_embeds_local, list):
+                image_embeds_local = torch.cat(image_embeds_local, dim=0)
+        else:
+            out_dim = getattr(vision_model.config, "hidden_size", None)
+            image_embeds_local = torch.empty(
+                (0, embed_dim_reduction_factor, out_dim),
+                device=pixel_values.device,
+                dtype=pixel_values.dtype)
+    else:
+        if pixel_values_local.shape[0] > 0:
+            image_embeds_local = vision_model(pixel_values_local,
+                                              local_grid_thw_list)
+        else:
+            # Handle empty case
+            image_embeds_local = torch.empty((0, vision_model.out_hidden_size),
+                                             device=pixel_values.device,
+                                             dtype=pixel_values.dtype)
+
+    # Pad the output based on max_len_per_rank
+    # for tensor_model_parallel_all_gather to work
+    current_len = image_embeds_local.shape[0]
+    if current_len < max_len_per_rank:
+        padding_size = max_len_per_rank - current_len
+        if rope_type == "rope_2d":
+            padding = torch.empty((padding_size, image_embeds_local.shape[1],
+                                   image_embeds_local.shape[2]),
+                                  dtype=image_embeds_local.dtype,
+                                  device=image_embeds_local.device)
+        else:
+            padding = torch.empty((padding_size, image_embeds_local.shape[1]),
+                                  dtype=image_embeds_local.dtype,
+                                  device=image_embeds_local.device)
+        image_embeds_local_padded = torch.cat([image_embeds_local, padding],
+                                              dim=0)
+    else:
+        image_embeds_local_padded = image_embeds_local
+
+    # Do all_gather to collect embeddings from all ranks
+    gathered_embeds = tensor_model_parallel_all_gather(
+        image_embeds_local_padded, dim=0)
+
+    # Remove padding and reconstruct per-rank embeddings
+    rank_embeddings = list[torch.Tensor]()
+    for rank in range(tp_size):
+        start_idx = rank * max_len_per_rank
+        end_idx = start_idx + (grouped_pixel_values_len[rank] //
+                               embed_dim_reduction_factor)
+        rank_embeddings.append(gathered_embeds[start_idx:end_idx])
+
+    patches_per_output_image = [(patch_size // embed_dim_reduction_factor)
+                                for patch_size in patches_per_image]
+
+    # Reconstruct embeddings in the original order
+    original_order_embeddings = [None] * len(grid_thw_list)
+    current_idx = 0
+    for rank in range(tp_size):
+        count = gpu_sample_counts[rank]
+        if count > 0:
+            # Get images assigned to this rank in shuffled order
+            # GPU_0 = image_idxs_local  [0]
+            # GPU_1 = image_idxs_local  [2, 1, 3]
+            rank_images = image_to_tp_rank[current_idx:current_idx + count]
+
+            rank_embed = rank_embeddings[rank]
+            # Split rank embeddings back to individual images
+            embed_start = 0
+            for img_idx in rank_images:
+                img_patches = patches_per_output_image[img_idx]
+                original_order_embeddings[img_idx] = rank_embed[
+                    embed_start:embed_start + img_patches]
+                embed_start += img_patches
+            current_idx += count
+    out_embeddings = tuple(embed for embed in original_order_embeddings
+                           if embed is not None)
+    assert len(out_embeddings) == len(
+        original_order_embeddings), "Found unassigned embeddings"
+    return out_embeddings
 
 
 def fetch_audio(

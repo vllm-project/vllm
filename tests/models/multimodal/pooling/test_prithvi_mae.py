@@ -34,7 +34,7 @@ def _run_test(
             set_default_torch_num_threads(1),
             vllm_runner(
                 model,
-                task="embed",
+                runner="pooling",
                 dtype=torch.float16,
                 enforce_eager=True,
                 skip_tokenizer_init=True,

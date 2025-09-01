@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
+from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Any, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Literal, Optional, TypeVar, Union
 
 import numpy as np
 import torch
@@ -30,10 +31,10 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal import MULTIMODAL_REGISTRY, NestedTensors
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
                                     MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, VideoItem)
+                                    MultiModalKwargsItems, VideoItem)
 from vllm.multimodal.parse import (DictEmbeddingItems, ImageSize,
                                    ModalityDataItems, MultiModalDataItems,
                                    MultiModalDataParser)
@@ -44,8 +45,8 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import uses_mrope
-from vllm.transformers_utils.processor import (
-    cached_image_processor_from_config)
+from vllm.utils import is_list_of
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
                          SupportsMultiModal, SupportsPP)
@@ -57,16 +58,13 @@ from .vision import get_vit_attn_backend
 
 logger = init_logger(__name__)
 
-_MAX_FRAMES_PER_VIDEO = 16
-_MAX_IMAGE_SIZE = 9999999
-
 
 def smart_resize(
     height: int,
     width: int,
-    factor: int = 28,
-    min_pixels: int = 28 * 28 * 130,
-    max_pixels: int = 28 * 28 * 1280,
+    factor: int,
+    min_pixels: int,
+    max_pixels: int,
 ):
     if height < factor:
         logger.warning(
@@ -102,77 +100,69 @@ def smart_resize(
     return h_bar, w_bar
 
 
-class KeyeImagePixelInputs(TypedDict):
+class KeyeImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - b: Batch size
+        - np: Number of patches
+        - c: Number of channels
+        - ps: Patch size
+        - ni: Number of images
+        - g: Grid dimensions (3 for t, h, w)
+    """
     type: Literal["pixel_values"]
-    pixel_values: torch.Tensor
-    """Shape:
-    `(num_patches, num_channels * patch_size * patch_size)`
+    pixel_values: Annotated[
+        torch.Tensor,
+        TensorShape("b", "np", 3, "ps", "ps", dynamic_dims={"np"})]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
+
+
+class KeyeImageEmbeddingInputs(TensorSchema):
     """
-
-    image_grid_thw: torch.Tensor
-    """Shape: `(num_images, 3)`
-    This should be in `(grid_t, grid_h, grid_w)` format.
+    Dimensions:
+        - nf: Number of image features
+        - hs: Hidden size (must match the hidden size of language model 
+          backbone)
+        - ni: Number of images
+        - g: Grid dimensions (3 for t, h, w)
     """
-
-
-class KeyeImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
-    image_embeds: torch.Tensor
-    """Supported types:
-    - list[`torch.Tensor`]: A list of tensors holding all images' features.
-        Each tensor holds an image's features.
-    - `torch.Tensor`: A tensor holding all images' features
-        (concatenation of all images' feature tensors).
-    
-    Tensor shape: `(num_image_features, hidden_size)`
-    - `num_image_features` varies based on
-        the number and resolution of the images.
-    - `hidden_size` must match the hidden size of language model backbone.
-    """
-
-    image_grid_thw: torch.Tensor
-    """Shape: `(num_images, 3)`
-    This should be in `(grid_t, grid_h, grid_w)` format.
-    """
+    image_embeds: Annotated[torch.Tensor, TensorShape("nf", "hs")]
+    image_grid_thw: Annotated[torch.Tensor, TensorShape("ni", 3)]
 
 
 KeyeImageInputs = Union[KeyeImagePixelInputs, KeyeImageEmbeddingInputs]
 
 
-class KeyeVideoPixelInputs(TypedDict):
+class KeyeVideoPixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - b: Batch size
+        - np: Number of patches
+        - c: Number of channels
+        - ps: Patch size
+        - ni: Number of images
+        - g: Grid dimensions (3 for t, h, w)
+    """
     type: Literal["pixel_values_videos"]
-    pixel_values_videos: torch.Tensor
-    """Shape:
-    `(num_patches,
-      num_channels * temporal_patch_size * patch_size * patch_size)`
+    pixel_values_videos: Annotated[
+        torch.Tensor,
+        TensorShape("b", "np", 3, "ps", "ps", dynamic_dims={"np"})]
+    video_grid_thw: Annotated[torch.Tensor, TensorShape("nv", 3)]
+
+
+class KeyeVideoEmbeddingInputs(TensorSchema):
     """
-
-    video_grid_thw: torch.Tensor
-    """Shape: `(num_videos, 3)`
-
-    This should be in `(grid_t, grid_h, grid_w)` format.
+    Dimensions:
+        - nf: Number of video features
+        - hs: Hidden size (must match the hidden size of language model 
+          backbone)
+        - nv: Number of videos
+        - g: Grid dimensions (3 for t, h, w)
     """
-
-
-class KeyeVideoEmbeddingInputs(TypedDict):
     type: Literal["video_embeds"]
-    video_embeds: torch.Tensor
-    """Supported types:
-    - list[`torch.Tensor`]: A list of tensors holding all videos' features.
-        Each tensor holds an video's features.
-    - `torch.Tensor`: A tensor holding all videos' features
-        (concatenation of all videos' feature tensors).
-    
-    Tensor shape: `(num_image_features, hidden_size)`
-    - `num_image_features` varies based on 
-        the number and resolution of the videos.
-    - `hidden_size` must match the hidden size of language model backbone.
-    """
-
-    video_grid_thw: torch.Tensor
-    """Shape: `(num_videos, 3)`
-    This should be in `(grid_t, grid_h, grid_w)` format.
-    """
+    video_embeds: Annotated[torch.Tensor, TensorShape("nf", "hs")]
+    video_grid_thw: Annotated[torch.Tensor, TensorShape("nv", 3)]
 
 
 KeyeVideoInputs = Union[KeyeVideoPixelInputs, KeyeVideoEmbeddingInputs]
@@ -895,9 +885,9 @@ class Projector(nn.Module):
 
     def forward(
         self,
-        image_features: torch.Tensor,
+        image_features: Union[torch.Tensor, list[torch.Tensor]],
         image_grid_thw: list[tuple[int, int, int]],
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
         m1, m2 = self.merge_kernel_size
         if isinstance(image_features, (list, tuple)):
             processed_features = list()
@@ -994,75 +984,14 @@ class KeyeMultiModalDataParser(MultiModalDataParser):
 
 class KeyeProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_config(self):
-        return self.ctx.get_hf_config(PretrainedConfig)
+    def get_max_image_size(self) -> int:
+        return 9999999  #_MAX_IMAGE_SIZE
 
-    def get_hf_processor(
-        self,
-        *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        size: Optional[dict[str, int]] = None,
-        **kwargs: object,
-    ):
-        return self.ctx.get_hf_processor(
-            image_processor=self.get_image_processor(
-                min_pixels=min_pixels,
-                max_pixels=max_pixels,
-                size=size,
-            ),
-            **kwargs,
-        )
+    def get_max_frame_per_video(self) -> int:
+        return 16  #_MAX_FRAMES_PER_VIDEO
 
-    def _get_image_processor_kwargs(
-        self,
-        *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        size: Optional[dict[str, int]] = None,
-        **kwargs: object,
-    ):
-        if self.ctx.model_config.mm_processor_kwargs:
-            kwargs.update(self.ctx.model_config.mm_processor_kwargs)
-
-        if min_pixels is not None:
-            kwargs["min_pixels"] = min_pixels
-
-            if size is None:
-                size = {"shortest_edge": min_pixels}
-            else:
-                size["shortest_edge"] = min_pixels
-
-        if max_pixels is not None:
-            kwargs["max_pixels"] = max_pixels
-
-            if size is None:
-                size = {"longest_edge": max_pixels}
-            else:
-                size["longest_edge"] = max_pixels
-
-        if size is not None:
-            kwargs["size"] = size
-
-        return kwargs
-
-    def get_image_processor(
-        self,
-        *,
-        min_pixels: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        size: Optional[dict[str, int]] = None,
-        **kwargs: object,
-    ):
-        return cached_image_processor_from_config(
-            self.ctx.model_config,
-            **self._get_image_processor_kwargs(
-                min_pixels=min_pixels,
-                max_pixels=max_pixels,
-                size=size,
-                **kwargs,
-            ),
-        )
+    def get_image_processor(self, **kwargs: object):
+        return self.get_hf_processor(**kwargs).image_processor
 
     def get_supported_mm_limits(self, ) -> Mapping[str, Optional[int]]:
         return {"image": None, "video": None}
@@ -1152,8 +1081,8 @@ class KeyeProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self, ) -> ImageSize:
         max_image_size, _ = self._get_vision_info(
-            image_width=_MAX_IMAGE_SIZE,
-            image_height=_MAX_IMAGE_SIZE,
+            image_width=self.get_max_image_size(),
+            image_height=self.get_max_image_size(),
             image_processor=None,
         )
         return max_image_size
@@ -1198,7 +1127,7 @@ class KeyeProcessingInfo(BaseProcessingInfo):
                                                       max_image_tokens)
         max_frames_per_video = min(
             max_total_frames // max(max_videos, 1),
-            _MAX_FRAMES_PER_VIDEO,
+            self.get_max_frame_per_video(),
         )
 
         return max(max_frames_per_video, 1)
@@ -1214,7 +1143,10 @@ class KeyeProcessingInfo(BaseProcessingInfo):
         )
 
 
-class KeyeDummyInputsBuilder(BaseDummyInputsBuilder[KeyeProcessingInfo]):
+_I = TypeVar("_I", bound=KeyeProcessingInfo)
+
+
+class KeyeBaseDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
@@ -1258,30 +1190,20 @@ class KeyeDummyInputsBuilder(BaseDummyInputsBuilder[KeyeProcessingInfo]):
         return mm_data
 
 
+class KeyeDummyInputsBuilder(KeyeBaseDummyInputsBuilder[KeyeProcessingInfo]):
+    ...
+
+
 class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
 
     def _get_data_parser(self) -> MultiModalDataParser:
         return KeyeMultiModalDataParser()
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        mm_kwargs = self.info._get_image_processor_kwargs(**mm_kwargs)
-        return self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**mm_kwargs),
-            dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
-        )
-
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_processor = self.info.get_image_processor(
@@ -1297,7 +1219,8 @@ class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
         merge_length = image_processor.merge_size**2
 
         def get_replacement_keye(item_idx: int, modality: str):
-            grid_thw = out_mm_kwargs[f"{modality}_grid_thw"][item_idx]
+            out_item = out_mm_kwargs[modality][item_idx]
+            grid_thw = out_item[f"{modality}_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
 
             num_tokens = int(grid_thw.prod()) // merge_length
@@ -1319,13 +1242,7 @@ class KeyeMultiModalProcessor(BaseMultiModalProcessor[KeyeProcessingInfo]):
         return _keye_field_config(hf_inputs)
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    KeyeMultiModalProcessor,
-    info=KeyeProcessingInfo,
-    dummy_inputs=KeyeDummyInputsBuilder,
-)
-class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
-                                   SupportsPP):
+class BaseKeyeModule(nn.Module):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1352,6 +1269,11 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
 
         raise ValueError("Only image or video modality is supported")
 
+    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
+        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
+            return None
+        return quant_config
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config: PretrainedConfig = vllm_config.model_config.hf_config
@@ -1366,7 +1288,8 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
             quant_config=self._maybe_ignore_quant_config(quant_config),
             prefix=maybe_prefix(prefix, "visual"),
         )
-        self.mlp_AR = Projector(
+
+        self.mlp_AR = self._build_projector(
             config,
             config.vision_config,
             quant_config=self._maybe_ignore_quant_config(quant_config),
@@ -1382,109 +1305,16 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
-        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
-            return None
-        return quant_config
+    @abstractmethod
+    def _build_projector(self,
+                         text_config: PretrainedConfig,
+                         vision_config: PretrainedConfig,
+                         quant_config: Optional[QuantizationConfig] = None,
+                         prefix: str = "") -> nn.Module:
+        raise ValueError("Need projector")
 
-    def _validate_and_reshape_mm_tensor(self, mm_input: object,
-                                        name: str) -> torch.Tensor:
-        if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(f"Incorrect type of {name}. "
-                             f"Got type: {type(mm_input)}")
-        if isinstance(mm_input, torch.Tensor):
-            if mm_input.ndim == 2:
-                return mm_input
-            if mm_input.ndim == 5:
-                return mm_input
-            if mm_input.ndim != 3:
-                raise ValueError(f"{name} should be 2D or batched 3D tensor. "
-                                 f"Got ndim: {mm_input.ndim} "
-                                 f"(shape={mm_input.shape})")
-            return torch.concat(list(mm_input))
-        else:
-            return torch.concat(mm_input)
-
-    def _parse_and_validate_image_input(
-            self, **kwargs: object) -> Optional[KeyeImageInputs]:
-        pixel_values = kwargs.pop("pixel_values", None)
-        image_embeds = kwargs.pop("image_embeds", None)
-        image_grid_thw = kwargs.pop("image_grid_thw", None)
-
-        if pixel_values is None and image_embeds is None:
-            return None
-
-        if pixel_values is not None:
-            pixel_values = self._validate_and_reshape_mm_tensor(
-                pixel_values, "image pixel values")
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw")
-
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of image pixel values. "
-                                 f"Got type: {type(pixel_values)}")
-
-            return KeyeImagePixelInputs(
-                type="pixel_values",
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw,
-            )
-
-        if image_embeds is not None:
-            image_embeds = self._validate_and_reshape_mm_tensor(
-                image_embeds, "image embeds")
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw")
-
-            if not isinstance(image_embeds, torch.Tensor):
-                raise ValueError("Incorrect type of image embeddings. "
-                                 f"Got type: {type(image_embeds)}")
-            return KeyeImageEmbeddingInputs(
-                type="image_embeds",
-                image_embeds=image_embeds,
-                image_grid_thw=image_grid_thw,
-            )
-
-    def _parse_and_validate_video_input(
-            self, **kwargs: object) -> Optional[KeyeVideoInputs]:
-        pixel_values_videos = kwargs.pop("pixel_values_videos", None)
-        video_embeds = kwargs.pop("video_embeds", None)
-        video_grid_thw = kwargs.pop("video_grid_thw", None)
-
-        if pixel_values_videos is None and video_embeds is None:
-            return None
-
-        if pixel_values_videos is not None:
-            pixel_values_videos = self._validate_and_reshape_mm_tensor(
-                pixel_values_videos,
-                "video pixel values",
-            )
-            video_grid_thw = self._validate_and_reshape_mm_tensor(
-                video_grid_thw, "video grid_thw")
-
-            return KeyeVideoPixelInputs(
-                type="pixel_values_videos",
-                pixel_values_videos=pixel_values_videos,
-                video_grid_thw=video_grid_thw,
-            )
-
-        if video_embeds is not None:
-            video_embeds = self._validate_and_reshape_mm_tensor(
-                video_embeds, "video embeds")
-            video_grid_thw = self._validate_and_reshape_mm_tensor(
-                video_grid_thw, "video grid_thw")
-
-            if not isinstance(video_embeds, torch.Tensor):
-                raise ValueError("Incorrect type of video embeddings. "
-                                 f"Got type: {type(video_embeds)}")
-            return KeyeVideoEmbeddingInputs(
-                type="video_embeds",
-                video_embeds=video_embeds,
-                video_grid_thw=video_grid_thw,
-            )
-
-    def _process_image_input(
-            self, image_input: KeyeImageInputs) -> tuple[torch.Tensor, ...]:
+    def _process_image_input(self,
+                             image_input: Any) -> tuple[torch.Tensor, ...]:
         siglip_position_ids = list()
         image_grid_hws = list()
         sample_indices = list()
@@ -1529,18 +1359,20 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
             image_embeds = tuple(self.mlp_AR(image_embeds, image_grid_thw))
             return image_embeds
 
-    def _process_video_input(
-            self, video_input: KeyeVideoInputs) -> tuple[torch.Tensor, ...]:
+    def _process_video_embeds(
+        self,
+        video_type: Literal["video_embeds", "pixel_values_videos"],
+        video_grid_thw: list[torch.Tensor],
+        pixel_values_videos: Optional[torch.Tensor] = None
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
         siglip_position_ids = list()
         video_grid_hws = list()
         sample_indices = list()
         cu_seqlens = [0]
 
-        video_grid_thw = video_input["video_grid_thw"]
         assert video_grid_thw.ndim == 2
-
-        for idx, thaw in enumerate(video_grid_thw):
-            thw_tuple = tuple(thaw.detach().cpu().numpy().tolist())
+        for idx, sub_thw in enumerate(video_grid_thw):
+            thw_tuple = tuple(sub_thw.detach().cpu().numpy().tolist())
             numel = np.prod(thw_tuple)
 
             video_grid_hws.append(thw_tuple)
@@ -1550,12 +1382,11 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
                                              dtype=torch.int64))
             cu_seqlens.append(cu_seqlens[-1] + numel)
 
-        if video_input["type"] == "video_embeds":
+        if video_type == "video_embeds":
             raise ValueError(
                 "Video embeddings are not supported for this processing path.")
         else:
-            pixel_values_videos = video_input["pixel_values_videos"].type(
-                self.visual.dtype)
+            pixel_values_videos = pixel_values_videos.type(self.visual.dtype)
             siglip_position_ids = torch.concat(siglip_position_ids, dim=0).to(
                 pixel_values_videos.device)
             cu_seqlens = torch.tensor(cu_seqlens, dtype=torch.int32).to(
@@ -1574,7 +1405,7 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
                 use_rope=True,
                 window_size=-1,
             )
-            video_embeds = tuple(self.mlp_AR(video_embeds, video_grid_thw))
+            video_embeds = self.mlp_AR(video_embeds, video_grid_thw)
             return video_embeds
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
@@ -1636,8 +1467,8 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
     def get_input_embeddings_v0(
         self,
         input_ids: torch.Tensor,
-        image_input: Optional[KeyeImagePixelInputs] = None,
-        video_input: Optional[KeyeVideoPixelInputs] = None,
+        image_input: Optional[Any] = None,
+        video_input: Optional[Any] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.get_input_embeddings(input_ids)
         if image_input is not None:
@@ -1667,7 +1498,7 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
         inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        """Run forward pass for Qwen2-VL.
+        """Run forward pass for Keye-VL.
 
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
@@ -1686,14 +1517,12 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
             video_grid_thw: Tensor `(n_videos, 3)` of video 3D grid in LLM.
                 `None` if no videos are passed.
         """
-
         if intermediate_tensors is not None:
             inputs_embeds = None
 
         elif inputs_embeds is None:
             image_input = self._parse_and_validate_image_input(**kwargs)
             video_input = self._parse_and_validate_video_input(**kwargs)
-
             if image_input is None and video_input is None:
                 inputs_embeds = None
             else:
@@ -1714,6 +1543,7 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
+
         return hidden_states
 
     def compute_logits(
@@ -1726,7 +1556,6 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
@@ -1734,6 +1563,122 @@ class KeyeForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
         """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="visual.",
-            tower_model="mlp_AR.",
+            connector="mlp_AR.",
+            tower_model="visual.",
         )
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    KeyeMultiModalProcessor,
+    info=KeyeProcessingInfo,
+    dummy_inputs=KeyeDummyInputsBuilder,
+)
+class KeyeForConditionalGeneration(BaseKeyeModule, SupportsMultiModal,
+                                   SupportsLoRA, SupportsPP):
+
+    def _build_projector(self,
+                         text_config: PretrainedConfig,
+                         vision_config: PretrainedConfig,
+                         quant_config: Optional[QuantizationConfig] = None,
+                         prefix: str = "") -> nn.Module:
+        return Projector(text_config, vision_config, quant_config, prefix)
+
+    def _validate_and_reshape_mm_tensor(
+            self, mm_input: NestedTensors,
+            name: str) -> Union[torch.Tensor, list[torch.Tensor]]:
+        if not isinstance(mm_input, (torch.Tensor, list)):
+            raise ValueError(f"Incorrect type of {name}. "
+                             f"Got type: {type(mm_input)}")
+        if isinstance(mm_input, torch.Tensor):
+            if mm_input.ndim == 2:
+                return mm_input
+            if mm_input.ndim == 5:
+                return mm_input
+            if mm_input.ndim != 3:
+                raise ValueError(f"{name} should be 2D or batched 3D tensor. "
+                                 f"Got ndim: {mm_input.ndim} "
+                                 f"(shape={mm_input.shape})")
+            return torch.concat(list(mm_input))
+        elif is_list_of(mm_input, torch.Tensor):
+            if all(p.dim() == 4 for p in mm_input) or all(p.dim() == 2
+                                                          for p in mm_input):
+                return mm_input
+        return torch.concat(list(mm_input))
+
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[KeyeImageInputs]:
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
+        image_grid_thw = kwargs.pop("image_grid_thw", None)
+
+        if pixel_values is None and image_embeds is None:
+            return None
+
+        if pixel_values is not None:
+            pixel_values = self._validate_and_reshape_mm_tensor(
+                pixel_values, "image pixel values")
+            image_grid_thw = self._validate_and_reshape_mm_tensor(
+                image_grid_thw, "image grid_thw")
+
+            return KeyeImagePixelInputs(
+                type="pixel_values",
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+            )
+
+        if image_embeds is not None:
+            image_embeds = self._validate_and_reshape_mm_tensor(
+                image_embeds, "image embeds")
+            image_grid_thw = self._validate_and_reshape_mm_tensor(
+                image_grid_thw, "image grid_thw")
+
+            return KeyeImageEmbeddingInputs(
+                type="image_embeds",
+                image_embeds=image_embeds,
+                image_grid_thw=image_grid_thw,
+            )
+
+    def _parse_and_validate_video_input(
+            self, **kwargs: object) -> Optional[KeyeVideoInputs]:
+        pixel_values_videos = kwargs.pop("pixel_values_videos", None)
+        video_embeds = kwargs.pop("video_embeds", None)
+        video_grid_thw = kwargs.pop("video_grid_thw", None)
+
+        if pixel_values_videos is None and video_embeds is None:
+            return None
+
+        if pixel_values_videos is not None:
+            pixel_values_videos = self._validate_and_reshape_mm_tensor(
+                pixel_values_videos,
+                "video pixel values",
+            )
+            video_grid_thw = self._validate_and_reshape_mm_tensor(
+                video_grid_thw, "video grid_thw")
+
+            return KeyeVideoPixelInputs(
+                type="pixel_values_videos",
+                pixel_values_videos=pixel_values_videos,
+                video_grid_thw=video_grid_thw,
+            )
+
+        if video_embeds is not None:
+            video_embeds = self._validate_and_reshape_mm_tensor(
+                video_embeds, "video embeds")
+            video_grid_thw = self._validate_and_reshape_mm_tensor(
+                video_grid_thw, "video grid_thw")
+
+            return KeyeVideoEmbeddingInputs(
+                type="video_embeds",
+                video_embeds=video_embeds,
+                video_grid_thw=video_grid_thw,
+            )
+
+    def _process_video_input(
+            self, video_input: KeyeVideoInputs) -> tuple[torch.Tensor, ...]:
+        video_type = video_input["type"]
+        video_grid_thw = video_input["video_grid_thw"]
+        pixel_values_videos = video_input.get("pixel_values_videos", None)
+
+        return tuple(
+            self._process_video_embeds(video_type, video_grid_thw,
+                                       pixel_values_videos))

@@ -6,7 +6,7 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<80.0.0",
     "setuptools-scm>=8.0",
-    "torch == 2.7.1",
+    "torch == 2.8.0",
     "wheel",
     "jinja2",
 ]
@@ -24,13 +24,14 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-requires-python = ">=3.9,<3.13"
+requires-python = ">=3.9,<3.14"
 dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
@@ -73,8 +74,6 @@ line-length = 80
 "vllm/engine/**/*.py" = ["UP006", "UP035"]
 "vllm/executor/**/*.py" = ["UP006", "UP035"]
 "vllm/worker/**/*.py" = ["UP006", "UP035"]
-# Python 3.8 typing - skip utils for ROCm
-"vllm/utils/__init__.py" = ["UP006", "UP035"]
 
 [tool.ruff.lint]
 select = [
@@ -155,16 +154,6 @@ markers = [
     "skip_v1: do not run this test with v1",
     "optional: optional tests that are automatically skipped, include --optional to run them",
 ]
-
-[tool.pymarkdown]
-plugins.md004.style = "sublist" # ul-style
-plugins.md007.indent = 4 # ul-indent
-plugins.md007.start_indented = true # ul-indent
-plugins.md013.enabled = false # line-length
-plugins.md041.enabled = false # first-line-h1
-plugins.md033.enabled = false # inline-html
-plugins.md046.enabled = false # code-block-style
-plugins.md024.allow_different_nesting = true # no-duplicate-headers
 
 [tool.ty.src]
 root = "./vllm"

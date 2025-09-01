@@ -53,7 +53,7 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
-            "THUDM/chatglm3-6b",  # chatglm (text-only)
+            "zai-org/chatglm3-6b",  # chatglm (text-only)
         ),
         pytest.param(
             "meta-llama/Llama-3.2-1B-Instruct",  # llama
@@ -92,7 +92,8 @@ AITER_MODEL_LIST = [
         pytest.param(
             "allenai/OLMoE-1B-7B-0924-Instruct",
             marks=[pytest.mark.cpu_model],
-        )
+        ),
+        pytest.param("swiss-ai/Apertus-8B"),  # apertus
     ])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])

@@ -71,7 +71,7 @@ class EngineHandshakeMetadata:
     connect to.
     """
     addresses: EngineZmqAddresses
-    parallel_config: dict[str, Union[int, str]]
+    parallel_config: dict[str, Union[int, str, list[int]]]
 
 
 class CoreEngineProcManager:
@@ -164,19 +164,33 @@ def set_device_control_env_var(vllm_config: VllmConfig,
     """
     world_size = vllm_config.parallel_config.world_size
     evar = current_platform.device_control_env_var
+
+    value = get_device_indices(evar, local_dp_rank, world_size)
+    with patch.dict(os.environ, values=((evar, value), )):
+        yield
+
+
+def get_device_indices(device_control_env_var: str, local_dp_rank: int,
+                       world_size: int):
+    """
+    Returns a comma-separated string of device indices for the specified
+    data parallel rank.
+
+    For example, if world_size=2 and local_dp_rank=1, and there are 4 devices,
+    this will select devices 2 and 3 for local_dp_rank=1.
+    """
     try:
         value = ",".join(
             str(current_platform.device_id_to_physical_device_id(i))
             for i in range(local_dp_rank * world_size, (local_dp_rank + 1) *
                            world_size))
     except IndexError as e:
-        raise Exception(f"Error setting {evar}: "
+        raise Exception(f"Error setting {device_control_env_var}: "
                         f"local range: [{local_dp_rank * world_size}, "
                         f"{(local_dp_rank + 1) * world_size}) "
                         "base value: "
-                        f"\"{os.getenv(evar)}\"") from e
-    with patch.dict(os.environ, values=((evar, value), )):
-        yield
+                        f"\"{os.getenv(device_control_env_var)}\"") from e
+    return value
 
 
 class CoreEngineActorManager:
@@ -254,6 +268,19 @@ class CoreEngineActorManager:
             dp_vllm_config = copy.deepcopy(vllm_config)
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
+
+            # Ray XPU known issue: dpctl initializes the GPU runtime early, so
+            # setting device env vars in Ray actor's initialization method
+            # will not affect device selection. See:
+            # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56 # noqa: E501
+            if current_platform.is_xpu():
+                device_evar = current_platform.device_control_env_var
+                device_indices = get_device_indices(device_evar, local_index,
+                                                    world_size)
+                actor_env_vars = self.env_vars_dict.copy()
+                actor_env_vars[device_evar] = device_indices
+                runtime_env = RuntimeEnv(env_vars=actor_env_vars)
+
             actor = ray.remote(DPEngineCoreActor).options(
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
@@ -297,10 +324,10 @@ class CoreEngineActorManager:
         local_engine_count = \
             vllm_config.parallel_config.data_parallel_size_local
 
-        nodes = sorted(list_nodes(),
+        nodes = sorted(list_nodes(filters=[("state", "=", "ALIVE")]),
                        key=lambda node: node.node_ip != dp_master_ip)
         assert nodes[0].node_ip == dp_master_ip, (
-            "The first node must be the head node")
+            "The head node is missing or dead")
         assert len(nodes) == 1 or nodes[1].node_ip != dp_master_ip, (
             "There can only be one head node")
 
@@ -312,6 +339,8 @@ class CoreEngineActorManager:
         for node in nodes:
             node_ip = node.node_ip
             node_resources = available_resources[node.node_id]
+            if "GPU" not in node_resources:
+                continue
             # For now, each DP rank can only be assigned to one node
             # TODO(rui): support allocating a single DP rank
             # to multiple nodes
@@ -346,6 +375,13 @@ class CoreEngineActorManager:
                     )
                     placement_groups.append(pg)
                     local_dp_ranks.append(i)
+        if len(placement_groups) < num_pg_to_create:
+            raise ValueError(
+                f"Not enough resources to allocate {num_pg_to_create} "
+                "placement groups, only created "
+                f"{len(placement_groups)} placement groups. "
+                "Available resources: "
+                f"{available_resources}")
         return placement_groups, local_dp_ranks
 
     @staticmethod
@@ -789,6 +825,8 @@ def wait_for_engine_startup(
                         parallel_config.data_parallel_master_ip,
                         "data_parallel_master_port":
                         parallel_config.data_parallel_master_port,
+                        "_data_parallel_master_port_list":
+                        parallel_config._data_parallel_master_port_list,
                         "data_parallel_size":
                         parallel_config.data_parallel_size,
                     }))
