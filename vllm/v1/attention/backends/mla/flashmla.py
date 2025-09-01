@@ -176,8 +176,48 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        q = torch.cat([q_nope, q_pe], dim=-1)\
-            .unsqueeze(1) # Add seqlen dim of 1 (decode)
+        q = torch.cat([q_nope, q_pe],
+                      dim=-1)  # (total_tokens, num_heads, full_head_dim)
+        batch_size = attn_metadata.decode.seq_lens.shape[0]
+        total_tokens = q.shape[0]
+        num_heads = q.shape[1]
+        head_dim = q.shape[2]
+
+        if total_tokens % batch_size == 0:
+            seq_len = total_tokens // batch_size
+            q = q.view(batch_size, seq_len, num_heads, head_dim)
+        else:
+            # Variable length batch, use padding strategy
+            query_start_loc = attn_metadata.query_start_loc
+            if query_start_loc is None:
+                logger.error(
+                    "No query_start_loc available for variable length batch")
+                raise RuntimeError(
+                    "No query_start_loc available for variable length batch")
+            seq_lens = []
+            for i in range(batch_size):
+                if i == batch_size - 1:
+                    seq_len = total_tokens - query_start_loc[i].item()
+                else:
+                    seq_len = query_start_loc[
+                        i + 1].item() - query_start_loc[i].item()
+                seq_lens.append(seq_len)
+
+            max_seq_len = max(seq_lens)
+            q_padded = torch.zeros(batch_size,
+                                   max_seq_len,
+                                   num_heads,
+                                   head_dim,
+                                   dtype=q.dtype,
+                                   device=q.device)
+
+            for i, seq_len in enumerate(seq_lens):
+                start_idx = query_start_loc[i].item(
+                ) if i == 0 else query_start_loc[i].item()
+                end_idx = start_idx + seq_len
+                q_padded[i, :seq_len] = q[start_idx:end_idx]
+            q = q_padded
+            seq_len = max_seq_len
 
         o, _ = flash_mla_with_kvcache(
             q=q,
@@ -193,5 +233,15 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             descale_q=layer._q_scale.reshape(1),
             descale_k=layer._k_scale.reshape(1),
         )
+
+        # Remove padding from results
+        if total_tokens % batch_size != 0:
+            outputs = []
+            for i, seq_len in enumerate(seq_lens):
+                outputs.append(o[i, :seq_len])
+            o = torch.cat(outputs,
+                          dim=0)  # (total_tokens, num_heads, head_dim_v)
+        else:
+            o = o.view(total_tokens, num_heads, self.kv_lora_rank)
 
         return self._v_up_proj(o)

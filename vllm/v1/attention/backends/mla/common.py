@@ -190,7 +190,7 @@ return curr_o @ W_O
 import functools
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import ClassVar, Generic, Optional, TypeVar, Union
+from typing import Generic, Optional, TypeVar, Union
 
 import torch
 from tqdm import tqdm
@@ -424,7 +424,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
-    reorder_batch_threshold: ClassVar[int] = 1
 
     def __init__(self,
                  kv_cache_spec: AttentionSpec,
@@ -444,7 +443,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
         self.aot_schedule = current_platform.is_cuda()
-
+        self.speculative_config = vllm_config.speculative_config
+        # Set reorder_batch_threshold based on speculative config
+        if (self.speculative_config is not None and
+                self.speculative_config.num_speculative_tokens is not None):
+            MLACommonMetadataBuilder.reorder_batch_threshold = (
+                1 + self.speculative_config.num_speculative_tokens)
+        else:
+            MLACommonMetadataBuilder.reorder_batch_threshold = 1
         # Dont try to access the runner on AMD
         if self.aot_schedule:
             self.page_size = self.kv_cache_spec.block_size
@@ -623,9 +629,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         num_computed_tokens_cpu = (common_attn_metadata.seq_lens_cpu -
                                    query_seq_lens_cpu)
-
+        decode_threshold = self.reorder_batch_threshold
+        # 添加类型断言，确保不是None
+        assert decode_threshold is not None, \
+                "reorder_batch_threshold should not be None"
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
-            split_decodes_and_prefills(common_attn_metadata)
+            split_decodes_and_prefills(common_attn_metadata,decode_threshold)
 
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
