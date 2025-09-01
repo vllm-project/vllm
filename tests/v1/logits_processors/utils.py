@@ -142,13 +142,9 @@ def get_req_dummy_logits_processor(
     return req_dummy_logits_processor
 
 
-class DummyLogitsProcessorWrapped(AdapterLogitsProcessor):
+class DummyPerReqLogitsProcessor(AdapterLogitsProcessor):
     """Example of wrapping a fake request-level logit processor to create a
     batch-level logits processor"""
-
-    def __init__(self, vllm_config: VllmConfig, device: torch.device,
-                 is_pin_memory: bool):
-        super().__init__(vllm_config, device, is_pin_memory)
 
     def is_argmax_invariant(self) -> bool:
         return False
