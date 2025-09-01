@@ -704,17 +704,13 @@ class InputBatch:
             logitsprocs=self.logitsprocs,
         )
 
+    def get_pooling_params(self) -> list[PoolingParams]:
+        assert len(self.req_ids) == len(self.pooling_params)
+        return [self.pooling_params[req_id] for req_id in self.req_ids]
+
     @property
     def pooling_metadata(self) -> PoolingMetadata:
-        if len(self.pooling_params) == 0:
-            pooling_params = []
-        else:
-            # Note, for now this assumes that all request in the batch
-            # are either sampling or pooling requests
-            assert len(self.req_ids) == len(self.pooling_params)
-            pooling_params = [
-                self.pooling_params[req_id] for req_id in self.req_ids
-            ]
+        pooling_params = self.get_pooling_params()
 
         return PoolingMetadata(
             prompt_lens=torch.from_numpy(
