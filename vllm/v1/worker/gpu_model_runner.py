@@ -1536,7 +1536,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             is_mm_embed, mm_embeds = self._gather_mm_embeddings(
                 scheduler_output)
         else:
-            is_mm_embed, mm_embeds = torch.tensor(False), []
+            is_mm_embed, mm_embeds = torch.tensor(False,
+                                                  device=self.device), []
 
         if self.supports_mm_inputs and get_pp_group().is_first_rank:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
@@ -1892,7 +1893,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     shift_computed_tokens=1,
                 )
             else:
-                is_mm_embed, mm_embeds = torch.tensor(False), []
+                is_mm_embed, mm_embeds = torch.tensor(False,
+                                                      device=self.device), []
 
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,

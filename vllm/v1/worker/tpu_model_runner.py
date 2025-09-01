@@ -999,7 +999,8 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             is_mm_embed, mm_embeds = self._gather_mm_embeddings(
                 scheduler_output)
         else:
-            is_mm_embed, mm_embeds = torch.tensor(False), []
+            is_mm_embed, mm_embeds = torch.tensor(False,
+                                                  device=self.device), []
 
         xm.mark_step()
         # Prepare inputs, the requests might be split into multiple
@@ -1373,9 +1374,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                         placeholders_ids = placeholders_ids.to(self.device)
                         # Assign outputs or the graph will be cut short.
-                        a, b = self._get_model_inputs(placeholders_ids,
-                                                      torch.tensor(True),
-                                                      [mm_embeds])
+                        a, b = self._get_model_inputs(
+                            placeholders_ids,
+                            torch.tensor(True, device=self.device),
+                            [mm_embeds],
+                        )
                         assert a is None
                         xm.mark_step()
 
@@ -1386,8 +1389,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                dtype=torch.int32,
                                                device="cpu")
                 placeholders_ids = placeholders_ids.to(self.device)
-                a, b = self._get_model_inputs(placeholders_ids,
-                                              torch.tensor(False), [])
+                a, b = self._get_model_inputs(
+                    placeholders_ids,
+                    torch.tensor(False, device=self.device),
+                    [],
+                )
                 assert a is None
                 xm.mark_step()
 
