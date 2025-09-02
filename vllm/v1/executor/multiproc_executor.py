@@ -345,6 +345,7 @@ class MultiprocExecutor(Executor):
         # so world_size - tp_size = 32 - 8 = 24 should be PP rank = -1 (i.e. 3)
         return self.world_size - self.parallel_config.tensor_parallel_size
 
+
 @dataclass
 class UnreadyWorkerProcHandle:
     """WorkerProcess handle before READY."""
