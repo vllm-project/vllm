@@ -912,9 +912,6 @@ class OpenAIServingChat(OpenAIServing):
                         continue
                     if self.reasoning_parser and reasoning_end_arr[i]:
                         num_reasoning_tokens + len(output.token_ids)
-                    if self.reasoning_parser and reasoning_end_arr[i]:
-                        num_reasoning_tokens + len(output.token_ids)
-
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
                         delta_content = ""
