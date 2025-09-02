@@ -25,29 +25,8 @@
 #include "../attention/dtype_fp8.cuh"
 #include "../quantization/fp8/amd/quant_utils.cuh"
 
-#if defined(__HIPCC__) && (defined(__gfx908__) || defined(__gfx90a__) || \
-                           defined(__gfx942__) || defined(__gfx950__))
-  #define __HIP__GFX9__
-  #if defined(__gfx908__)
-    #define __HIP__GFX9__CNDA__ 1
-  #elif defined(__gfx90a__)
-    #define __HIP__GFX9__CNDA__ 2
-  #elif defined(__gfx942__)
-    #define __HIP__GFX9__CNDA__ 3
-    #define __HIP__GFX9__CDNA_FP8_EN__
-  #elif defined(__gfx950__)
-    #define __HIP__GFX9__CNDA__ 3
-    #define __HIP__GFX9__CDNA_FP4_EN__
-  #endif
-#endif
 
-#if defined(__HIPCC__) && (defined(__gfx1100__) || defined(__gfx1101__))
-  #define __HIP__GFX11__
-#endif
-
-#if defined(__HIPCC__) && (defined(__gfx1200__) || defined(__gfx1201__))
-  #define __HIP__GFX12__
-#endif
+#include "rocm_arch.h"
 
 #if defined(NDEBUG)
   #undef NDEBUG
@@ -3452,10 +3431,10 @@ void paged_attention_custom_launcher_navi(
                          false);                                             \
   }
 
-#if defined(__HIPCC__) && defined(__gfx90a__)
+#if defined(__HIPCC__) && !defined(__HIP__GFX9__CDNA_FP8_EN__)
   #define CALL_CUSTOM_LAUNCHER_OUT(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE)  \
     if (fp8_out_scale) {                                                   \
-      TORCH_CHECK(false, "fp8 out scale unsupported for gfx90a");          \
+      TORCH_CHECK(false, "fp8 out scale unsupported for GPU");             \
     } else {                                                               \
       CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, T, \
                                  256);                                     \
