@@ -63,7 +63,6 @@ class CommunicatorBenchmark:
         # Calculate max_size_override based on largest sequence length
         max_seq_len = max(sequence_lengths)
         max_tensor_elements = max_seq_len * HIDDEN_SIZE
-        # Add some buffer (20%) to ensure we can handle the largest tensor
         self.max_size_override = max_tensor_elements * BENCHMARK_DTYPE.itemsize + 1
 
         # Initialize communicators
@@ -406,7 +405,6 @@ def main():
     # Initialize distributed
     if not dist.is_initialized():
         dist.init_process_group(backend="gloo")
-
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
@@ -416,6 +414,10 @@ def main():
 
     # Get CPU process group
     cpu_group = dist.new_group(backend="gloo")
+
+    # Disable USE_SYMM_MEM to avoid affecting the max_sizes
+    # in symm_mem and custom_all_reduce for benchmark
+    os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
 
     # Initialize benchmark
     benchmark = CommunicatorBenchmark(
