@@ -268,7 +268,8 @@ def apply_penalties_and_sample(logits: torch.Tensor, prev_tokens: torch.Tensor,
     if "frequency_penalty" in penalty_params:
         penalty = penalty_params["frequency_penalty"]
         for i in range(logits.size(0)):
-            token_counts = torch.bincount(prev_tokens[i], minlength=logits.size(1))
+            token_counts = torch.bincount(prev_tokens[i],
+                                          minlength=logits.size(1))
             modified_logits[i] -= token_counts * penalty
 
     # Apply presence penalty
@@ -546,6 +547,8 @@ def benchmark_flashinfer(batch_sizes: list[int],
         print("Testing FlashInfer implementation...")
         results["flashinfer"] = benchmark_flashinfer_impl(
             batch_sizes, vocab_sizes, num_iterations, device)
+    else:
+        results["flashinfer"] = {}
 
     return results
 
@@ -749,6 +752,14 @@ def print_results(all_results: dict[str, Any]):
         if "eager_mode" in results and "torch_compile" in results:
             for batch_size in results["batch_sizes"]:
                 for vocab_size in results["vocab_sizes"]:
+
+                    if (batch_size not in results["eager_mode"] or vocab_size
+                            not in results["eager_mode"][batch_size]
+                            or batch_size not in results["torch_compile"]
+                            or vocab_size
+                            not in results["torch_compile"][batch_size]):
+                        continue
+
                     print(
                         f"\nBatch Size: {batch_size}, Vocab Size: {vocab_size}"
                     )
@@ -776,13 +787,14 @@ def print_results(all_results: dict[str, Any]):
                     print(f"Compilation Speedup: {speedup:.2f}x")
 
     # Print FlashInfer results
-    if "flashinfer" in all_results:
+    if "flashinfer" in all_results and all_results["flashinfer"]:
         print("\n" + "-" * 40)
         print("FLASHINFER VS PYTORCH NATIVE")
         print("-" * 40)
         results = all_results["flashinfer"]
 
-        if "pytorch_native" in results and "flashinfer" in results:
+        if ("pytorch_native" in all_results and "flashinfer" in results
+                and results["flashinfer"]):
             for batch_size in results["batch_sizes"]:
                 for vocab_size in results["vocab_sizes"]:
                     print(
