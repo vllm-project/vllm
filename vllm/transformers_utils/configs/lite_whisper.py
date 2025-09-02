@@ -3,7 +3,7 @@
 
 """Configuration for Lite-Whisper models."""
 
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 from transformers import WhisperConfig
 
@@ -15,7 +15,7 @@ class LiteWhisperConfig(WhisperConfig):
     to include low-rank adaptation settings for efficient inference.
 
     Args:
-        low_rank_config (List[Dict[str, int]], optional): 
+        low_rank_config (list[dict[str, int]], optional): 
             List of low-rank configurations for each encoder layer.
             Each dict can contain keys like
             'q_proj', 'k_proj', 'v_proj', 'out_proj',
@@ -28,7 +28,7 @@ class LiteWhisperConfig(WhisperConfig):
     
     def __init__(
         self,
-        low_rank_config: Optional[List[Dict[str, int]]] = None,
+        low_rank_config: Optional[list[dict[str, int]]] = None,
         **kwargs
     ):
         super().__init__(**kwargs)

@@ -382,7 +382,8 @@ class LiteWhisperEncoder(WhisperEncoder):
             self.embed_positions = nn.Embedding(self.max_source_positions, embed_dim)
             self.embed_positions.weight.copy_(sinusoids(*self.embed_positions.weight.shape))
 
-        # Get low_rank_config from config if it exists, else create default empty config for all layers
+        # Get low_rank_config from config if it exists,
+        # else create default empty config for all layers
         low_rank_config_list = getattr(config, "low_rank_config", [])
         
         # If no config provided,
@@ -481,11 +482,8 @@ class LiteWhisperModel(WhisperModel):
                 
                 if param_name in params_dict:
                     param = params_dict[param_name]
-                    if ".weight1" in name:
-                        shard_id = "weight1"
-                    else:  # .weight2
-                        shard_id = "weight2"
-                    
+                    shard_id = "weight1" if ".weight1" in name else "weight2"
+
                     # For LinearLowRank modules, call the custom weight_loader
                     weight_loader = getattr(param, 'weight_loader', None)
                     if weight_loader and callable(weight_loader):

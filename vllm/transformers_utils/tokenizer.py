@@ -204,7 +204,6 @@ def get_tokenizer(
     # Special handling for LiteWhisper models - use standard Whisper tokenizer
     is_lite_whisper = "lite-whisper" in str(tokenizer_name).lower()
     if is_lite_whisper:
-        logger.info(f"LiteWhisper model detected, using openai/whisper-large-v3 tokenizer instead of {tokenizer_name}")
         tokenizer_name = "openai/whisper-large-v3"
 
     tokenizer: AnyTokenizer
