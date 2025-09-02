@@ -19,7 +19,7 @@ from abc import abstractmethod
 from typing import Any
 
 
-class EplbAdaptor:
+class BaseAdaptor:
 
     def __init__(self, **args):
         pass
