@@ -51,8 +51,8 @@ from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader, make_empty_intermediate_tensors_factory, make_layers,
-    maybe_prefix)
+    AutoWeightsLoader, WeightsMapper, make_empty_intermediate_tensors_factory,
+    make_layers, maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import NemotronHConfig
@@ -471,6 +471,10 @@ class NemotronHModel(nn.Module):
 
 class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                            IsHybrid, SupportsQuant):
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
+        "backbone": "model",
+    })
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -622,10 +626,5 @@ class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        # update name in weights before passing to loader
-        updated_weights = []
-        for name, loaded_weight in weights:
-            name = name.replace("backbone", "model")
-            updated_weights.append((name, loaded_weight))
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(updated_weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
