@@ -6,6 +6,7 @@ from typing import Any, Callable, Optional, cast
 import torch
 from torch.nn import Parameter
 
+from vllm import envs
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
@@ -39,6 +40,10 @@ class QuarkW8A8Fp8(QuarkScheme):
             act_quant_static=self.is_static_input_scheme,
             act_quant_group_shape=self.act_quant_group_shape)
         self.out_dtype = torch.get_default_dtype()
+        self.use_aiter_and_is_supported = (current_platform.is_rocm()
+                                           and envs.VLLM_ROCM_USE_AITER
+                                           and envs.VLLM_ROCM_USE_AITER_LINEAR
+                                           and current_platform.is_fp8_fnuz())
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -90,7 +95,16 @@ class QuarkW8A8Fp8(QuarkScheme):
                 weight_scale = layer.weight_scale.data
             if self.act_quant_group_shape == GroupShape.PER_TOKEN:
                 weight_scale = weight_scale.view(-1, 1)
-            layer.weight = Parameter(weight.t(), requires_grad=False)
+            if self.use_aiter_and_is_supported:
+                from aiter.ops.shuffle import shuffle_weight
+
+                # keep the weight as (N, K)
+                layer.weight = Parameter(shuffle_weight(weight,
+                                                        layout=(16, 16)),
+                                         requires_grad=False)
+            else:
+                # keep the weight as (K, N)
+                layer.weight = Parameter(weight.t(), requires_grad=False)
             # required by torch.compile to be torch.nn.Parameter
             layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
