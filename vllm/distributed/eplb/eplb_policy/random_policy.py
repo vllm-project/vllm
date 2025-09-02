@@ -2,7 +2,7 @@
 import copy
 import random
 
-from vllm.distributed.eplb.eplb_policy.abstract_policy import DynamicConfig, EplbPolicy
+from vllm.distributed.eplb.eplb_policy.abstract_v2_policy import DynamicConfig, EplbPolicy
 
 random.seed(42)
 
