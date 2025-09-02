@@ -15,8 +15,6 @@ import torch
 from openai import BadRequestError, OpenAI
 
 from ...utils import RemoteOpenAIServer
-from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
-from .test_completion import zephyr_lora_files  # noqa: F401
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
