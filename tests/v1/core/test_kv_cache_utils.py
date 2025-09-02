@@ -7,7 +7,8 @@ import pytest
 import torch
 
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
-from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalFeatureSpec,
+                                    MultiModalKwargsItem, PlaceholderRange)
 from vllm.sampling_params import SamplingParams
 from vllm.utils import GiB_bytes, sha256, sha256_cbor_64bit
 from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -37,17 +38,20 @@ def make_request(
     mm_hashes: Optional[list[str]] = None,
     cache_salt: Optional[str] = None,
 ):
-    if mm_positions is None:
-        mm_kwargs = None
-    else:
-        mm_item = MultiModalKwargsItem.dummy("dummy_m")
-        mm_kwargs = [mm_item] * len(mm_positions)
+    mm_features = []
+    if mm_positions is not None:
+        for j, position in enumerate(mm_positions):
+            identifier = mm_hashes[j] if mm_hashes else f"hash_{j}"
+            mm_feature = MultiModalFeatureSpec(
+                data=MultiModalKwargsItem.dummy("dummy_m"),
+                mm_position=position,
+                identifier=identifier,
+                modality="image")
+            mm_features.append(mm_feature)
 
     return Request(request_id=request_id,
                    prompt_token_ids=prompt_token_ids,
-                   multi_modal_kwargs=mm_kwargs,
-                   multi_modal_hashes=mm_hashes,
-                   multi_modal_placeholders=mm_positions,
+                   mm_features=mm_features if mm_features else None,
                    sampling_params=SamplingParams(max_tokens=17),
                    pooling_params=None,
                    eos_token_id=100,
@@ -243,7 +247,7 @@ def test_free_kv_cache_block_queue_append_n():
 
 def test_free_kv_cache_block_queue_popleft_n():
     blocks = [KVCacheBlock(block_id=i) for i in range(6)]
-    # Create a empty FreeKVCacheBlockQueue with these blocks
+    # Create an empty FreeKVCacheBlockQueue with these blocks
     queue = FreeKVCacheBlockQueue(
         [blocks[1], blocks[3], blocks[5], blocks[4], blocks[0], blocks[2]])
     assert queue.num_free_blocks == 6
@@ -597,8 +601,14 @@ def test_unify_kv_cache_configs():
     ]
 
     unify_kv_cache_configs(need_sort_kv_cache_config)
-    assert need_sort_kv_cache_config[0].num_blocks == 10
-    assert need_sort_kv_cache_config[1].num_blocks == 10
+    sorted_kv_cache_groups = [
+        KVCacheGroupSpec(["layer1"], new_kv_cache_spec()),
+        KVCacheGroupSpec(["layer2"], new_kv_cache_spec(num_kv_heads=4)),
+    ]
+    assert (
+        need_sort_kv_cache_config[0].kv_cache_groups == sorted_kv_cache_groups)
+    assert (
+        need_sort_kv_cache_config[1].kv_cache_groups == sorted_kv_cache_groups)
 
     diff_kv_cache_config = [
         KVCacheConfig(
