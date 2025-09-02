@@ -336,7 +336,7 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
         self.seq_start_loc_np = self.seq_start_loc_cpu.numpy()
 
     def reorder_batch(self, input_batch: InputBatch,
-                      scheduler_output: SchedulerOutput) -> tuple[bool, int]:
+                      scheduler_output: SchedulerOutput) -> bool:
         prompt_list_idx = 0
         decode_list_idx = 0
         for req_index in range(input_batch.num_reqs):
@@ -362,7 +362,7 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
                 break
 
         if reorder_req_num == 0:
-            return False, 0
+            return False
 
         reorder_prompt_list = (
             self.reorder_prompt_req_index_list[:prompt_list_idx]
@@ -377,7 +377,7 @@ class TorchSDPAMetadataBuilderV1(AttentionMetadataBuilder[TorchSDPAMetadata]):
             decode_req_index = reorder_decode_list[idx].item()
             input_batch.swap_states(prompt_req_index, decode_req_index)
 
-        return True, decode_list_idx
+        return True
 
     def build(self,
               common_prefix_len: int,
