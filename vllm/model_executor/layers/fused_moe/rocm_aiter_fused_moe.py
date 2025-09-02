@@ -402,7 +402,10 @@ def rocm_aiter_fused_experts(
     topk_weights = topk_weights.to(torch.float32)
     topk_ids = topk_ids.to(torch.int32)
 
-    expert_mask = expert_map if expert_map is not None else None
+    if expert_map is not None:
+        expert_mask = (expert_map > -1).to(torch.int32)
+    else:
+        expert_mask = None
 
     # w8a8 per-channel quantization
     if per_channel_quant and apply_router_weight_on_input and use_fp8_w8a8:
