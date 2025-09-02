@@ -33,7 +33,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
     DeltaToolCall, ErrorResponse, FunctionCall, FunctionDefinition,
-    PromptTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo)
+    PromptTokenUsageInfo, CompletionTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -481,6 +481,8 @@ class OpenAIServingChat(OpenAIServing):
         # Send response for each token for each request.n (index)
         num_choices = 1 if request.n is None else request.n
         previous_num_tokens = [0] * num_choices
+
+        num_reasoning_tokens_per_choice = [0] * num_choices
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
@@ -766,9 +768,10 @@ class OpenAIServingChat(OpenAIServing):
                         fn_name_returned = function_name_returned[i]
 
                         if self.reasoning_parser:
-                            _, content = \
+                            _, _, content = \
                                 reasoning_parser.extract_reasoning_content(
                                     current_text,
+                                    [],
                                     request
                                 )
                         else:
@@ -887,6 +890,14 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         delta_message = DeltaMessage(content=delta_text)
 
+                    if delta_message is not None:
+                        if delta_message.reasoning_content:
+                            num_reasoning_tokens_per_choice[i] += len(output.token_ids)
+                        # Harmony 模式下，如果当前 channel 不是 "final"，也算作 reasoning_tokens
+                        elif self.use_harmony and not harmony_parsers[i].current_channel == "final":
+                            num_reasoning_tokens_per_choice[i] += len(output.token_ids)
+                            
+                    
                     # update the previous values for the next iteration
                     if ((tool_choice_auto or self.reasoning_parser)
                             and not self.use_harmony):
@@ -1020,6 +1031,9 @@ class OpenAIServingChat(OpenAIServing):
                             completion_tokens=completion_tokens,
                             total_tokens=num_prompt_tokens + completion_tokens,
                         )
+                        if num_reasoning_tokens_per_choice[i] > 0:
+                            chunk.usage.completion_tokens_details = CompletionTokenUsageInfo(
+                                reasoning_tokens=num_reasoning_tokens_per_choice[i])
 
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
@@ -1035,6 +1049,9 @@ class OpenAIServingChat(OpenAIServing):
                 if self.enable_prompt_tokens_details and num_cached_tokens:
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens)
+                if any(num_reasoning_tokens_per_choice):
+                    final_usage.completion_tokens_details = CompletionTokenUsageInfo(
+                        reasoning_tokens=sum([tokens for tokens in num_reasoning_tokens_per_choice if tokens is not None]))
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -1114,7 +1131,9 @@ class OpenAIServingChat(OpenAIServing):
             history_tool_call_cnt = 0
 
         role = self.get_chat_request_role(request)
-        for output in final_res.outputs:
+        num_reasoning_tokens_per_choice = [0] * len(final_res.outputs)
+
+        for i, output in enumerate(final_res.outputs):
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
@@ -1135,7 +1154,8 @@ class OpenAIServingChat(OpenAIServing):
                     parse_chat_output(token_ids))
                 if not request.include_reasoning:
                     reasoning_content = None
-
+                num_reasoning_tokens_per_choice[i] = None
+                
                 if is_tool_call:
                     # TODO(woosuk): Implement tool call for gpt-oss.
                     # For now, only Responses API supports tool call for
@@ -1170,13 +1190,17 @@ class OpenAIServingChat(OpenAIServing):
                     return self.create_error_response(str(e))
                 # If the reasoning parser is enabled,
                 # tool calls are extracted exclusively from the content.
-                reasoning_content, content = (
+                reasoning_content, reasoning_content_tokens, content = (
                     reasoning_parser.extract_reasoning_content(
-                        output.text, request=request))
+                        output.text, output.token_ids, request=request))
+                num_reasoning_tokens_per_choice[i] = len(reasoning_content_tokens)
+
                 if not request.include_reasoning:
                     reasoning_content = None
+                    num_reasoning_tokens_per_choice[i] = None
             else:
                 reasoning_content = None
+                num_reasoning_tokens_per_choice[i] = None
                 content = output.text
 
             auto_tools_called = False
@@ -1334,6 +1358,10 @@ class OpenAIServingChat(OpenAIServing):
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens)
+        # if num_reasoning_tokens_per_choice中存在非None和大于0的值
+        if any(num_reasoning_tokens_per_choice):
+            usage.completion_tokens_details = CompletionTokenUsageInfo(
+                reasoning_tokens=sum([tokens for tokens in num_reasoning_tokens_per_choice if tokens is not None]))
 
         request_metadata.final_usage_info = usage
 

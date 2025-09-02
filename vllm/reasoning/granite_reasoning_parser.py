@@ -53,7 +53,9 @@ class GraniteReasoningParser(ReasoningParser):
             len(think_start) for think_start in self.valid_think_starts)
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+            self, model_output: str, 
+            model_output_tokens: Sequence[int],
+            request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
@@ -69,11 +71,14 @@ class GraniteReasoningParser(ReasoningParser):
         """
         re_match = self.reasoning_regex.findall(model_output)
         if not re_match:
-            return None, model_output
+            return None, None, model_output
         reasoning_content, response_content = re_match[0]
+        
+        reasoning_content_tokens = None
         if not response_content:
-            return reasoning_content, None
-        return reasoning_content, response_content
+            return reasoning_content, reasoning_content_tokens, None
+        
+        return reasoning_content, reasoning_content_tokens, response_content
 
     def extract_reasoning_content_streaming(
         self,
