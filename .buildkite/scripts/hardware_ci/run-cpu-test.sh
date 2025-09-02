@@ -25,8 +25,8 @@ numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --tag cpu-test-"$NUMA_NODE
 numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" --tag cpu-test-"$NUMA_NODE"-avx2 --target vllm-test -f docker/Dockerfile.cpu .
 
 # Run the image, setting --shm-size=4g for tensor parallel.
-docker run -itd --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" --shm-size=4g --name cpu-test-"$NUMA_NODE" cpu-test-"$NUMA_NODE"
-docker run -itd --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" --shm-size=4g --name cpu-test-"$NUMA_NODE"-avx2 cpu-test-"$NUMA_NODE"-avx2
+docker run -itd --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" --shm-size=4g --name cpu-test-"$NUMA_NODE" cpu-test-"$NUMA_NODE"
+docker run -itd --cpuset-cpus="$CORE_RANGE" --cpuset-mems="$NUMA_NODE" --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=16 --env VLLM_CPU_CI_ENV=1 -e E2E_OMP_THREADS="$OMP_CORE_RANGE" --shm-size=4g --name cpu-test-"$NUMA_NODE"-avx2 cpu-test-"$NUMA_NODE"-avx2
 
 function cpu_tests() {
   set -e
@@ -89,17 +89,33 @@ function cpu_tests() {
     pytest -x -s -v \
     tests/lora/test_qwen2vl.py"
 
-  # online serving
+  # online serving: tp+pp
   docker exec cpu-test-"$NUMA_NODE" bash -c '
     set -e
     VLLM_CPU_OMP_THREADS_BIND=$E2E_OMP_THREADS VLLM_CPU_SGL_KERNEL=1 vllm serve meta-llama/Llama-3.2-3B-Instruct -tp=2 -pp=2 &
+    server_pid=$!
     timeout 600 bash -c "until curl localhost:8000/v1/models; do sleep 1; done" || exit 1
     vllm bench serve \
       --backend vllm \
       --dataset-name random \
       --model meta-llama/Llama-3.2-3B-Instruct \
       --num-prompts 20 \
-      --endpoint /v1/completions'
+      --endpoint /v1/completions
+    kill -s SIGTERM $server_pid &'
+
+  # online serving: tp+dp
+  docker exec cpu-test-"$NUMA_NODE" bash -c '
+    set -e
+    VLLM_CPU_OMP_THREADS_BIND=$E2E_OMP_THREADS VLLM_CPU_SGL_KERNEL=1 vllm serve meta-llama/Llama-3.2-3B-Instruct -tp=2 -dp=2 &
+    server_pid=$!
+    timeout 600 bash -c "until curl localhost:8000/v1/models; do sleep 1; done" || exit 1
+    vllm bench serve \
+      --backend vllm \
+      --dataset-name random \
+      --model meta-llama/Llama-3.2-3B-Instruct \
+      --num-prompts 20 \
+      --endpoint /v1/completions
+    kill -s SIGTERM $server_pid &'
 }
 
 # All of CPU tests are expected to be finished less than 40 mins.

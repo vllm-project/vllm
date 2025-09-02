@@ -49,8 +49,7 @@ async def transcribe_audio(client, tokenizer, y, sr):
     return latency, num_output_tokens, transcription.text
 
 
-async def bound_transcribe(model_name, sem, client, audio, reference):
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+async def bound_transcribe(sem, client, tokenizer, audio, reference):
     # Use semaphore to limit concurrent requests.
     async with sem:
         result = await transcribe_audio(client, tokenizer, *audio)
@@ -63,15 +62,19 @@ async def bound_transcribe(model_name, sem, client, audio, reference):
 async def process_dataset(model, client, data, concurrent_request):
     sem = asyncio.Semaphore(concurrent_request)
 
+    # Load tokenizer once outside the loop
+    tokenizer = AutoTokenizer.from_pretrained(model)
+
     # Warmup call as the first `librosa.load` server-side is quite slow.
     audio, sr = data[0]["audio"]["array"], data[0]["audio"]["sampling_rate"]
-    _ = await bound_transcribe(model, sem, client, (audio, sr), "")
+    _ = await bound_transcribe(sem, client, tokenizer, (audio, sr), "")
 
     tasks: list[asyncio.Task] = []
     for sample in data:
         audio, sr = sample["audio"]["array"], sample["audio"]["sampling_rate"]
         task = asyncio.create_task(
-            bound_transcribe(model, sem, client, (audio, sr), sample["text"]))
+            bound_transcribe(sem, client, tokenizer, (audio, sr),
+                             sample["text"]))
         tasks.append(task)
     return await asyncio.gather(*tasks)
 

@@ -38,7 +38,7 @@ class NemotronHConfig(PretrainedConfig):
             passed when calling [`NemotronHModel`]
         tie_word_embeddings (`bool`, *optional*, defaults to `False`):
             Whether the model's input and output word embeddings should be
-            tied. Note that this is only relevant if the model has a output
+            tied. Note that this is only relevant if the model has an output
             word embedding layer.
         hidden_size (`int`, *optional*, defaults to 4096):
             Dimension of the hidden representations.

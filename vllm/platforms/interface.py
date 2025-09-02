@@ -537,7 +537,7 @@ class Platform:
 
     def get_global_graph_pool(self) -> Any:
         """
-        Return the global graph pool for the this platform.
+        Return the global graph pool for this platform.
         """
         cls = self.__class__
         if cls._global_graph_pool is None:

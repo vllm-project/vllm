@@ -47,6 +47,7 @@ class MockModelConfig:
     allowed_local_media_path: str = ""
     encoder_config = None
     generation_config: str = "auto"
+    skip_tokenizer_init: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}

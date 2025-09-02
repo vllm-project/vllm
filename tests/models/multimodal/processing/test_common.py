@@ -293,6 +293,7 @@ def _test_processing_correctness_one(
     "OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview",
     "OpenGVLab/InternVL3_5-30B-A3B",
     "Kwai-Keye/Keye-VL-8B-Preview",
+    "Kwai-Keye/Keye-VL-1_5-8B",
     "moonshotai/Kimi-VL-A3B-Instruct",
     "meta-llama/Llama-4-Scout-17B-16E-Instruct",
     "llava-hf/llava-1.5-7b-hf",

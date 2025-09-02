@@ -6,7 +6,8 @@ import torch
 
 from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
-from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
+from vllm.multimodal.inputs import (MultiModalFeatureSpec,
+                                    MultiModalKwargsItem, PlaceholderRange)
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
                                          init_none_hash)
@@ -139,19 +140,20 @@ def create_requests(
                                      prompt_logprobs=prompt_logprobs)
     requests = []
     for i in range(num_requests):
+        mm_features = []
         if mm_positions is not None:
             mm_position = mm_positions[i]
-            mm_item = MultiModalKwargsItem.dummy("dummy_m")
-            mm_kwargs = [mm_item] * len(mm_position)
-            # Dummy hash for each mm item should be unique
-            # since encoder cache tracks entries by hash
-            mm_hashes = [
-                "hash" + str(i) + "_" + str(j) for j in range(len(mm_position))
-            ]
-        else:
-            mm_position = None
-            mm_kwargs = None
-            mm_hashes = None
+            for j, position in enumerate(mm_position):
+                # Dummy hash for each mm item should be unique
+                # since encoder cache tracks entries by hash
+                identifier = f"hash{i}_{j}"
+                mm_feature = MultiModalFeatureSpec(
+                    data=MultiModalKwargsItem.dummy("dummy_m"),
+                    mm_position=position,
+                    identifier=identifier,
+                    modality="image")
+                mm_features.append(mm_feature)
+
         prompt_token_ids = ([0] * num_tokens if same_prompt else [i] *
                             num_tokens)
         request = Request(
@@ -159,9 +161,7 @@ def create_requests(
             prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
             pooling_params=None,
-            multi_modal_kwargs=mm_kwargs,
-            multi_modal_placeholders=mm_position,
-            multi_modal_hashes=mm_hashes,
+            mm_features=mm_features if mm_features else None,
             eos_token_id=EOS_TOKEN_ID,
             block_hasher=block_hasher,
         )

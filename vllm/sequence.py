@@ -16,6 +16,7 @@ import msgspec
 import torch
 
 from vllm.inputs import SingletonInputs
+from vllm.logprobs import Logprob, PromptLogprobs, SampleLogprobs
 from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -36,30 +37,6 @@ VLLM_INVALID_TOKEN_ID = -1
 def array_full(token_id: int, count: int):
     """[`array`][] equivalent of [numpy.full][]."""
     return array(VLLM_TOKEN_ID_ARRAY_TYPE, [token_id]) * count
-
-
-# We use dataclass for now because it is used for
-# openai server output, and msgspec is not serializable.
-# TODO(sang): Fix it.
-@dataclass
-class Logprob:
-    """Infos for supporting OpenAI compatible logprobs and token ranks.
-
-    Attributes:
-        logprob: The logprob of chosen token
-        rank: The vocab rank of chosen token (>=1)
-        decoded_token: The decoded chosen token index
-    """
-    logprob: float
-    rank: Optional[int] = None
-    decoded_token: Optional[str] = None
-
-
-# {token_id -> logprob} per each sequence group. None if the corresponding
-# sequence group doesn't require prompt logprob.
-PromptLogprobs = list[Optional[dict[int, Logprob]]]
-# {token_id -> logprob} for each sequence group.
-SampleLogprobs = list[dict[int, Logprob]]
 
 
 class SequenceStatus(enum.IntEnum):
@@ -509,12 +486,6 @@ class Sequence:
         return self.inputs["prompt_token_ids"]
 
     @property
-    def token_type_ids(self) -> list[int]:
-        if self.inputs["type"] == "embeds":
-            return []
-        return self.inputs.get("token_type_ids", [])
-
-    @property
     def multi_modal_data(self) -> MultiModalKwargs:
         if self.inputs["type"] == "multimodal":
             return self.inputs["mm_kwargs"].get_data()
@@ -766,10 +737,6 @@ class SequenceGroup:
                 if self.encoder_seq is not None else None)
 
     @property
-    def token_type_ids(self) -> Optional[list[int]]:
-        return self.first_seq.token_type_ids
-
-    @property
     def multi_modal_data(self) -> MultiModalKwargs:
         if self.first_seq.multi_modal_data:
             return self.first_seq.multi_modal_data
@@ -972,7 +939,6 @@ class SequenceGroupMetadata(
     computed_block_nums: Optional[list[int]] = None
     state: Optional[SequenceGroupState] = msgspec.field(
         default_factory=lambda: SequenceGroupState())
-    token_type_ids: Optional[list[int]] = None
     multi_modal_data: Optional[MultiModalKwargs] = None
     multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     encoder_seq_data: Optional[SequenceData] = None
@@ -1227,7 +1193,7 @@ class HiddenStates(msgspec.Struct, array_like=True,
     seq_ids are the sequence ids of each entry of the batch
     dimension of the hidden_states tensor"""
     # Scorer hidden states. For prefill step, it is used for hidden states of
-    # all tokens, whereas for decode step, it use used for last accepted tokens.
+    # all tokens, whereas for decode step, it is used for last accepted tokens.
     hidden_states: torch.Tensor
     # The sequence group metadata list. Only needed for decode step.
     seq_group_metadata_list: Optional[list[SequenceGroupMetadata]] = None

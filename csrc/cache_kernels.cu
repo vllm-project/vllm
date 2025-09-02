@@ -913,7 +913,6 @@ __global__ void cp_gather_cache(
   const int32_t split_end = min((split + 1) * split_slots, tot_slots);
 
   const bool is_active_split = (split_start < tot_slots);
-  const bool is_last_split = (split_end == tot_slots);
 
   if (!is_active_split) return;
 

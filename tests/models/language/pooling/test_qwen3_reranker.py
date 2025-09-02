@@ -96,8 +96,5 @@ def test_rerank_models_mteb_tp(vllm_runner,
         "tensor_parallel_size": 2,
     }
 
-    mteb_test_rerank_models(Qwen3RerankerHfRunner,
-                            vllm_runner,
-                            model_info,
-                            vllm_extra_kwargs,
-                            atol=1.2e-2)
+    mteb_test_rerank_models(Qwen3RerankerHfRunner, vllm_runner, model_info,
+                            vllm_extra_kwargs)

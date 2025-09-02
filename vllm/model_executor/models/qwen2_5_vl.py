@@ -1021,8 +1021,10 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values = image_input["pixel_values"]
 
             if self.use_data_parallel:
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw_list)
+                return run_dp_sharded_mrope_vision_model(self.visual,
+                                                         pixel_values,
+                                                         grid_thw_list,
+                                                         rope_type="rope_3d")
             else:
                 image_embeds = self.visual(pixel_values,
                                            grid_thw=grid_thw_list)
@@ -1048,8 +1050,10 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
             if self.use_data_parallel:
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values_videos, grid_thw_list)
+                return run_dp_sharded_mrope_vision_model(self.visual,
+                                                         pixel_values_videos,
+                                                         grid_thw_list,
+                                                         rope_type="rope_3d")
             else:
                 video_embeds = self.visual(pixel_values_videos,
                                            grid_thw=grid_thw_list)
