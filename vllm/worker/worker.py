@@ -3,6 +3,7 @@
 """A GPU worker class."""
 import gc
 import os
+from contextlib import nullcontext
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
@@ -29,7 +30,6 @@ from vllm.utils import (GiB_bytes, MemorySnapshot, bind_kv_cache,
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
-from vllm.worker.pooling_model_runner import PoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
@@ -77,13 +77,12 @@ class Worker(LocalOrDistributedWorkerBase):
                         "eagle",
                         "deepseek_mtp",
                         "glm4_moe_mtp",
-                        "mimo_mtp")) \
+                        "mimo_mtp",
+                        "ernie_mtp")) \
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
-        if model_config.runner_type == "pooling":
-            ModelRunnerClass = PoolingModelRunner
-        elif self.model_config.is_encoder_decoder:
+        if self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
         self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
             vllm_config=self.vllm_config,
@@ -97,7 +96,6 @@ class Worker(LocalOrDistributedWorkerBase):
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CacheEngine]
-        # Initialize gpu_cache as pooling models don't initialize kv_caches
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
         self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
 
@@ -205,7 +203,6 @@ class Worker(LocalOrDistributedWorkerBase):
                 "used for one instance per process.")
             context = allocator.use_memory_pool(tag="weights")
         else:
-            from contextlib import nullcontext
             context = nullcontext()
         with context:
             self.model_runner.load_model()
@@ -329,7 +326,6 @@ class Worker(LocalOrDistributedWorkerBase):
             allocator = CuMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
         else:
-            from contextlib import nullcontext
             context = nullcontext()
         with context:
             self._init_cache_engine()

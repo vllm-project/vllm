@@ -4,11 +4,11 @@
 import asyncio
 import json
 import time
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
 from http import HTTPStatus
-from typing import Any, Callable, Final, Optional, Union
+from typing import Callable, Final, Optional, Union
 
 import jinja2
 import openai.types.responses as openai_responses_types
@@ -25,6 +25,8 @@ from openai.types.responses import (ResponseCreatedEvent,
                                     ResponseReasoningItem,
                                     ResponseReasoningTextDeltaEvent,
                                     ResponseReasoningTextDoneEvent)
+from openai.types.responses.response_output_text import (Logprob,
+                                                         LogprobTopLogprob)
 # yapf: enable
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent)
@@ -56,6 +58,8 @@ from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.tool_server import MCPToolServer, ToolServer
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob as SampleLogprob
+from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import SamplingParams
@@ -84,6 +88,7 @@ class OpenAIServingResponses(OpenAIServing):
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
         enable_log_outputs: bool = False,
+        log_error_stack: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -92,6 +97,7 @@ class OpenAIServingResponses(OpenAIServing):
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             enable_force_include_usage=enable_force_include_usage,
+            log_error_stack=log_error_stack,
         )
 
         self.chat_template = chat_template
@@ -201,6 +207,12 @@ class OpenAIServingResponses(OpenAIServing):
             # (i.e., their request's `store=True` just because it's the default
             # value).
             request.store = False
+        if self.use_harmony and request.is_include_output_logprobs():
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="logprobs are not supported with gpt-oss models",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
 
         # Handle the previous response ID.
         prev_response_id = request.previous_response_id
@@ -238,10 +250,10 @@ class OpenAIServingResponses(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         if self.tool_server is not None and isinstance(
-                self.tool_server, MCPToolServer
-        ) and (request.background or request.stream) and request.tools and any(
-                tool.type in ["web_search_preview", "code_interpreter"]
-                for tool in request.tools):
+                self.tool_server,
+                MCPToolServer) and request.stream and request.tools and any(
+                    tool.type in ["web_search_preview", "code_interpreter"]
+                    for tool in request.tools):
             return self.create_error_response(
                 "MCP tool server is not supported in background mode and "
                 "streaming mode")
@@ -255,103 +267,70 @@ class OpenAIServingResponses(OpenAIServing):
                 builtin_tool_list.append("browser")
             if self.tool_server.has_tool("python"):
                 builtin_tool_list.append("python")
-        async with AsyncExitStack() as exit_stack:
-            try:
-                if self.tool_server is not None:
-                    # TODO: initialize tool sessions lazily when the session
-                    # is actually used.
-                    tool_session_ctxs: dict[str, Any] = {
-                        tool_name:
-                        exit_stack.enter_async_context(
-                            self.tool_server.new_session(tool_name))
-                        for tool_name in builtin_tool_list
-                    }
-                    tool_sessions = {}
-                    for tool_name in builtin_tool_list:
-                        tool_sessions[tool_name] = (
-                            await tool_session_ctxs[tool_name])
-                else:
-                    assert len(builtin_tool_list) == 0
-                    tool_sessions = {}
-                for i, engine_prompt in enumerate(engine_prompts):
-                    default_max_tokens = self.max_model_len - len(
-                        engine_prompt["prompt_token_ids"])
-                    sampling_params = request.to_sampling_params(
-                        default_max_tokens, self.default_sampling_params)
 
-                    trace_headers = (None if raw_request is None else await
-                                     self._get_trace_headers(
-                                         raw_request.headers))
+        if self.tool_server is not None:
+            available_tools = builtin_tool_list
+        else:
+            assert len(builtin_tool_list) == 0
+            available_tools = []
+        try:
+            for i, engine_prompt in enumerate(engine_prompts):
+                default_max_tokens = self.max_model_len - len(
+                    engine_prompt["prompt_token_ids"])
+                sampling_params = request.to_sampling_params(
+                    default_max_tokens, self.default_sampling_params)
 
-                    context: ConversationContext
-                    if self.use_harmony:
-                        if request.stream:
-                            context = StreamingHarmonyContext(
-                                messages, tool_sessions)
-                        else:
-                            context = HarmonyContext(messages, tool_sessions)
+                trace_headers = (None if raw_request is None else await
+                                 self._get_trace_headers(raw_request.headers))
+
+                context: ConversationContext
+                if self.use_harmony:
+                    if request.stream:
+                        context = StreamingHarmonyContext(
+                            messages, available_tools)
                     else:
-                        context = SimpleContext()
-                    generator = self._generate_with_builtin_tools(
-                        request_id=request.request_id,
-                        request_prompt=request_prompts[i],
-                        engine_prompt=engine_prompt,
-                        sampling_params=sampling_params,
-                        context=context,
-                        lora_request=lora_request,
-                        priority=request.priority,
-                        trace_headers=trace_headers,
-                    )
-                    generators.append(generator)
-            except ValueError as e:
-                # TODO: Use a vllm-specific Validation Error
-                return self.create_error_response(str(e))
-
-            assert len(generators) == 1
-            result_generator, = generators
-
-            # Store the input messages.
-            if request.store:
-                self.msg_store[request.request_id] = messages
-
-            if request.background:
-                created_time = int(time.time())
-                response = ResponsesResponse.from_request(
-                    request,
-                    sampling_params,
-                    model_name=model_name,
-                    created_time=created_time,
-                    output=[],
-                    status="queued",
-                    usage=None,
+                        context = HarmonyContext(messages, available_tools)
+                else:
+                    context = SimpleContext()
+                generator = self._generate_with_builtin_tools(
+                    request_id=request.request_id,
+                    request_prompt=request_prompts[i],
+                    engine_prompt=engine_prompt,
+                    sampling_params=sampling_params,
+                    context=context,
+                    lora_request=lora_request,
+                    priority=request.priority,
+                    trace_headers=trace_headers,
                 )
-                async with self.response_store_lock:
-                    self.response_store[response.id] = response
+                generators.append(generator)
+        except ValueError as e:
+            # TODO: Use a vllm-specific Validation Error
+            return self.create_error_response(str(e))
 
-                # Run the request in the background.
-                task = asyncio.create_task(
-                    self._run_background_request(
-                        request,
-                        sampling_params,
-                        result_generator,
-                        context,
-                        model_name,
-                        tokenizer,
-                        request_metadata,
-                        created_time,
-                    ),
-                    name=f"create_{response.id}",
-                )
+        assert len(generators) == 1
+        result_generator, = generators
 
-                # For cleanup.
-                response_id = response.id
-                self.background_tasks[response_id] = task
-                task.add_done_callback(
-                    lambda _: self.background_tasks.pop(response_id, None))
-                return response
+        # Store the input messages.
+        if request.store:
+            self.msg_store[request.request_id] = messages
 
-            if request.stream:
-                return self.responses_stream_generator(
+        if request.background:
+            created_time = int(time.time())
+            response = ResponsesResponse.from_request(
+                request,
+                sampling_params,
+                model_name=model_name,
+                created_time=created_time,
+                output=[],
+                status="queued",
+                usage=None,
+            )
+            async with self.response_store_lock:
+                self.response_store[response.id] = response
+
+            # Run the request in the background.
+            task = asyncio.create_task(
+                self._run_background_request(
                     request,
                     sampling_params,
                     result_generator,
@@ -359,21 +338,41 @@ class OpenAIServingResponses(OpenAIServing):
                     model_name,
                     tokenizer,
                     request_metadata,
-                )
+                    created_time,
+                ),
+                name=f"create_{response.id}",
+            )
 
-            try:
-                return await self.responses_full_generator(
-                    request,
-                    sampling_params,
-                    result_generator,
-                    context,
-                    model_name,
-                    tokenizer,
-                    request_metadata,
-                )
-            except Exception as e:
-                return self.create_error_response(str(e))
-        return self.create_error_response("Should not reach here")
+            # For cleanup.
+            response_id = response.id
+            self.background_tasks[response_id] = task
+            task.add_done_callback(
+                lambda _: self.background_tasks.pop(response_id, None))
+            return response
+
+        if request.stream:
+            return self.responses_stream_generator(
+                request,
+                sampling_params,
+                result_generator,
+                context,
+                model_name,
+                tokenizer,
+                request_metadata,
+            )
+
+        try:
+            return await self.responses_full_generator(
+                request,
+                sampling_params,
+                result_generator,
+                context,
+                model_name,
+                tokenizer,
+                request_metadata,
+            )
+        except Exception as e:
+            return self.create_error_response(str(e))
 
     async def _make_request(
         self,
@@ -408,6 +407,11 @@ class OpenAIServingResponses(OpenAIServing):
             request, prev_response)
         prompt_token_ids = render_for_completion(messages)
         engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
+
+        # Add cache_salt if provided in the request
+        if request.cache_salt is not None:
+            engine_prompt["cache_salt"] = request.cache_salt
+
         return messages, [prompt_token_ids], [engine_prompt]
 
     async def responses_full_generator(
@@ -424,14 +428,16 @@ class OpenAIServingResponses(OpenAIServing):
         if created_time is None:
             created_time = int(time.time())
 
-        try:
-            async for _ in result_generator:
-                pass
-        except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+        async with AsyncExitStack() as exit_stack:
+            try:
+                await context.init_tool_sessions(self.tool_server, exit_stack)
+                async for _ in result_generator:
+                    pass
+            except asyncio.CancelledError:
+                return self.create_error_response("Client disconnected")
+            except ValueError as e:
+                # TODO: Use a vllm-specific Validation Error
+                return self.create_error_response(str(e))
 
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
@@ -485,6 +491,51 @@ class OpenAIServingResponses(OpenAIServing):
                         or stored_response.status != "cancelled"):
                     self.response_store[response.id] = response
         return response
+
+    def _topk_logprobs(self, logprobs: dict[int,
+                                            SampleLogprob], top_logprobs: int,
+                       tokenizer: AnyTokenizer) -> list[LogprobTopLogprob]:
+        """Returns the top-k logprobs from the logprobs dictionary."""
+        out = []
+        for i, (token_id, _logprob) in enumerate(logprobs.items()):
+            if i >= top_logprobs:
+                break
+            text = _logprob.decoded_token if _logprob.decoded_token \
+                is not None else tokenizer.decode([token_id])
+            out.append(
+                LogprobTopLogprob(
+                    token=text,
+                    logprob=max(_logprob.logprob, -9999.0),
+                    bytes=list(text.encode("utf-8", errors="replace")),
+                ))
+        return out
+
+    def _create_response_logprobs(
+            self,
+            token_ids: Sequence[int],
+            logprobs: Optional[SampleLogprobs],
+            tokenizer: AnyTokenizer,
+            top_logprobs: Optional[int] = None) -> list[Logprob]:
+        assert logprobs is not None, "logprobs must be provided"
+        assert len(token_ids) == len(logprobs), (
+            "token_ids and logprobs.token_ids must have the same length")
+        out = []
+        for i, token_id in enumerate(token_ids):
+            logprob = logprobs[i]
+            token_logprob = logprob[token_id]
+            text = token_logprob.decoded_token if token_logprob.decoded_token \
+                is not None else tokenizer.decode([token_id])
+            out.append(
+                Logprob(
+                    token=text,
+                    logprob=max(token_logprob.logprob, -9999.0),
+                    bytes=list(text.encode("utf-8", errors="replace")),
+                    top_logprobs=self._topk_logprobs(logprob,
+                                                     top_logprobs=top_logprobs,
+                                                     tokenizer=tokenizer)
+                    if top_logprobs else [],
+                ))
+        return out
 
     def _make_response_output_items(
         self,
@@ -542,7 +593,12 @@ class OpenAIServingResponses(OpenAIServing):
                 text=content,
                 annotations=[],  # TODO
                 type="output_text",
-                logprobs=None,  # TODO
+                logprobs=self._create_response_logprobs(
+                    token_ids=final_output.token_ids,
+                    logprobs=final_output.logprobs,
+                    tokenizer=tokenizer,
+                    top_logprobs=request.top_logprobs,
+                ) if request.is_include_output_logprobs() else None,
             )
             message = ResponseOutputMessage(
                 id=f"msg_{random_uuid()}",
@@ -773,7 +829,7 @@ class OpenAIServingResponses(OpenAIServing):
             status_code=HTTPStatus.BAD_REQUEST,
         )
 
-    async def responses_stream_generator(
+    async def _process_streaming_events(
         self,
         request: ResponsesRequest,
         sampling_params: SamplingParams,
@@ -782,18 +838,8 @@ class OpenAIServingResponses(OpenAIServing):
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-        created_time: Optional[int] = None,
+        created_time: int,
     ) -> AsyncGenerator[str, None]:
-        # TODO:
-        # 1. Handle disconnect
-
-        if not isinstance(context, StreamingHarmonyContext):
-            raise NotImplementedError(
-                "Streaming is not supported for responses API without Harmony."
-            )
-
-        created_time = created_time or int(time.time())
-
         sequence_number = 0
 
         def _send_event(event: BaseModel):
@@ -1004,7 +1050,48 @@ class OpenAIServingResponses(OpenAIServing):
                             delta=ctx.parser.last_content_delta,
                             sequence_number=-1,
                         ))
-
+                # built-in tools will be triggered on the analysis channel
+                # However, occasionally built-in tools will
+                # still be output to commentary.
+                elif (ctx.parser.current_channel == "commentary"
+                      or ctx.parser.current_channel == "analysis"
+                      ) and ctx.parser.current_recipient == "python":
+                    if not sent_output_item_added:
+                        sent_output_item_added = True
+                        yield _send_event(
+                            openai_responses_types.
+                            ResponseOutputItemAddedEvent(
+                                type="response.output_item.added",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item=openai_responses_types.
+                                ResponseCodeInterpreterToolCallParam(
+                                    type="code_interpreter_call",
+                                    id=current_item_id,
+                                    code=None,
+                                    container_id="auto",
+                                    outputs=None,
+                                    status="in_progress",
+                                ),
+                            ))
+                        yield _send_event(
+                            openai_responses_types.
+                            ResponseCodeInterpreterCallInProgressEvent(
+                                type=
+                                "response.code_interpreter_call.in_progress",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                            ))
+                    yield _send_event(
+                        openai_responses_types.
+                        ResponseCodeInterpreterCallCodeDeltaEvent(
+                            type="response.code_interpreter_call_code.delta",
+                            sequence_number=-1,
+                            output_index=current_output_index,
+                            item_id=current_item_id,
+                            delta=ctx.parser.last_content_delta,
+                        ))
             if ctx.is_assistant_action_turn() and len(ctx.parser.messages) > 0:
                 previous_item = ctx.parser.messages[-1]
                 if (self.tool_server is not None
@@ -1101,37 +1188,14 @@ class OpenAIServingResponses(OpenAIServing):
                         and previous_item.recipient is not None
                         and previous_item.recipient.startswith("python")):
                     yield _send_event(
-                        openai_responses_types.ResponseOutputItemAddedEvent(
-                            type="response.output_item.added",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item=openai_responses_types.
-                            ResponseCodeInterpreterToolCallParam(
-                                type="code_interpreter_call",
-                                id=current_item_id,
-                                code="",
-                                container_id="auto",
-                                outputs=[],
-                                status="in_progress",
-                            ),
-                        ))
-                    yield _send_event(
-                        openai_responses_types.
-                        ResponseCodeInterpreterCallInProgressEvent(
-                            type="response.code_interpreter_call.in_progress",
-                            sequence_number=-1,
-                            output_index=current_output_index,
-                            item_id=current_item_id,
-                        ))
-                    # TODO: do we need to add delta event here?
-                    yield _send_event(
                         openai_responses_types.
                         ResponseCodeInterpreterCallCodeDoneEvent(
                             type="response.code_interpreter_call_code.done",
                             sequence_number=-1,
                             output_index=current_output_index,
                             item_id=current_item_id,
-                            code=previous_item.content[0].text))
+                            code=previous_item.content[0].text,
+                        ))
                     yield _send_event(
                         openai_responses_types.
                         ResponseCodeInterpreterCallInterpretingEvent(
@@ -1187,3 +1251,31 @@ class OpenAIServingResponses(OpenAIServing):
                 sequence_number=-1,
                 response=final_response.model_dump(),
             ))
+
+    async def responses_stream_generator(
+        self,
+        request: ResponsesRequest,
+        sampling_params: SamplingParams,
+        result_generator: AsyncIterator[Optional[ConversationContext]],
+        context: ConversationContext,
+        model_name: str,
+        tokenizer: AnyTokenizer,
+        request_metadata: RequestResponseMetadata,
+        created_time: Optional[int] = None,
+    ) -> AsyncGenerator[str, None]:
+        # TODO:
+        # 1. Handle disconnect
+
+        if not isinstance(context, StreamingHarmonyContext):
+            raise NotImplementedError(
+                "Streaming is not supported for responses API without Harmony."
+            )
+
+        created_time = created_time or int(time.time())
+
+        async with AsyncExitStack() as exit_stack:
+            await context.init_tool_sessions(self.tool_server, exit_stack)
+            async for event_data in self._process_streaming_events(
+                    request, sampling_params, result_generator, context,
+                    model_name, tokenizer, request_metadata, created_time):
+                yield event_data

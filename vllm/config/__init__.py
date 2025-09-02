@@ -33,7 +33,8 @@ from vllm.config.cache import (BlockSize, CacheConfig, CacheDType, MambaDType,
                                PrefixCachingHashAlgo)
 from vllm.config.compilation import (CompilationConfig, CompilationLevel,
                                      CUDAGraphMode, PassConfig)
-from vllm.config.parallel import DistributedExecutorBackend, ParallelConfig
+from vllm.config.parallel import (DistributedExecutorBackend, EPLBConfig,
+                                  ParallelConfig)
 from vllm.config.scheduler import SchedulerConfig, SchedulerPolicy
 from vllm.config.utils import ConfigType, config
 from vllm.logger import init_logger
@@ -191,7 +192,17 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
             yield a, b
             a = b
 
-    cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+    try:
+        cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
+    except (OSError, KeyError, TypeError):
+        # HACK: Python 3.13+ workaround - set missing __firstlineno__
+        # Workaround can be removed after we upgrade to pydantic==2.12.0
+        with open(inspect.getfile(cls)) as f:
+            for i, line in enumerate(f):
+                if f"class {cls.__name__}" in line and ":" in line:
+                    cls.__firstlineno__ = i + 1
+                    break
+        cls_node = ast.parse(textwrap.dedent(inspect.getsource(cls))).body[0]
 
     if not isinstance(cls_node, ast.ClassDef):
         raise TypeError("Given object was not a class.")
@@ -246,8 +257,14 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
 
 TokenizerMode = Literal["auto", "slow", "mistral", "custom"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
-LogprobsMode = Literal["raw_logprobs", "raw_logits", "processed_logprobs",
-                       "processed_logits"]
+MMEncoderTPMode = Literal["weights", "data"]
+
+
+class LogprobsMode(enum.Enum):
+    RAW_LOGITS = "raw_logits"
+    RAW_LOGPROBS = "raw_logprobs"
+    PROCESSED_LOGITS = "processed_logits"
+    PROCESSED_LOGPROBS = "processed_logprobs"
 
 
 @config
@@ -351,12 +368,13 @@ class ModelConfig:
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
     vocab_size) logprobs are allowed to be returned and it may cause OOM."""
-    logprobs_mode: LogprobsMode = "raw_logprobs"
+    logprobs_mode: LogprobsMode = LogprobsMode.RAW_LOGPROBS
     """Indicates the content returned in the logprobs and prompt_logprobs.
     Supported mode:
     1) raw_logprobs, 2) processed_logprobs, 3) raw_logits, 4) processed_logits.
-    Raw means the values before applying logit processors, like bad words.
-    Processed means the values after applying such processors.
+    Raw means the values before applying any logit processors, like bad words.
+    Processed means the values after applying all processors, including
+    temperature and top_k/top_p.
     """
     disable_sliding_window: bool = False
     """Whether to disable sliding window. If True, we will disable the sliding
@@ -419,7 +437,7 @@ class ModelConfig:
     from `AutoProcessor.from_pretrained`. The available overrides depend on the
     model that is being run. For example, for Phi-3-Vision: `{"num_crops": 4}`.
     """
-    mm_processor_cache_gb: int = 4
+    mm_processor_cache_gb: float = 4
     """The size (in GiB) of the multi-modal processor cache, which is used to
     avoid re-processing past multi-modal inputs.
 
@@ -428,6 +446,19 @@ class ModelConfig:
     `mm_processor_cache_gb * (api_server_count + data_parallel_size)`.
 
     Set to `0` to disable this cache completely (not recommended)."""
+    mm_encoder_tp_mode: MMEncoderTPMode = "weights"
+    """Indicates how to optimize multi-modal encoder inference using
+    tensor parallelism (TP).
+
+    - `"weights"`: Within the same vLLM engine, split the weights of
+        each layer across TP ranks. (default TP behavior)
+    - `"data"`: Within the same vLLM engine, split the batched input data
+        across TP ranks to process the data in parallel, while hosting
+        the full weights on each TP rank.
+        This batch-level DP is not to be confused with API request-level
+        DP (which is controlled by `--data-parallel-size`).
+        This is only supported on a per-model basis and falls back to
+        `"weights"` if the encoder does not support DP."""
     override_neuron_config: dict[str, Any] = field(default_factory=dict)
     """Initialize non-default neuron config or override default neuron config
     that are specific to Neuron devices, this argument will be used to
@@ -470,6 +501,8 @@ class ModelConfig:
     logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
     """One or more logits processors' fully-qualified class names or class
     definitions"""
+    io_processor_plugin: Optional[str] = None
+    """IOProcessor plugin name to load at model startup"""
 
     def compute_hash(self) -> str:
         """
@@ -841,21 +874,24 @@ class ModelConfig:
 
     def _init_multimodal_config(self) -> Optional["MultiModalConfig"]:
         if self._model_info.supports_multimodal:
+            if (self.mm_encoder_tp_mode == "data" and
+                    not self._model_info.supports_multimodal_encoder_tp_data):
+                logger.warning_once(
+                    "This model does not support `--mm-encoder-tp-mode data`. "
+                    "Falling back to `--mm-encoder-tp-mode weights`.")
+                self.mm_encoder_tp_mode = "weights"
+
             return MultiModalConfig(
                 limit_per_prompt=self.limit_mm_per_prompt,
                 media_io_kwargs=self.media_io_kwargs,
                 mm_processor_kwargs=self.mm_processor_kwargs,
                 mm_processor_cache_gb=self.mm_processor_cache_gb,
+                mm_encoder_tp_mode=self.mm_encoder_tp_mode,
                 interleave_mm_strings=self.interleave_mm_strings,
-                skip_mm_profiling=self.skip_mm_profiling)
+                skip_mm_profiling=self.skip_mm_profiling,
+            )
 
         return None
-
-    def set_mm_processor_cache_gb(self, value: int) -> None:
-        mm_config = self.get_multimodal_config()
-
-        self.mm_processor_cache_gb = value
-        mm_config.mm_processor_cache_gb = value
 
     def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
@@ -1086,9 +1122,20 @@ class ModelConfig:
     def _verify_quantization(self) -> None:
         supported_quantization = me_quant.QUANTIZATION_METHODS
         optimized_quantization_methods = [
-            "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
-            "awq_marlin", "fbgemm_fp8", "compressed-tensors", "experts_int8",
-            "quark", "modelopt_fp4", "bitblas", "gptq_bitblas", "inc"
+            "fp8",
+            "modelopt",
+            "gptq_marlin_24",
+            "gptq_marlin",
+            "awq_marlin",
+            "fbgemm_fp8",
+            "compressed-tensors",
+            "experts_int8",
+            "quark",
+            "modelopt_fp4",
+            "bitblas",
+            "gptq_bitblas",
+            "inc",
+            "petit_nvfp4",
         ]
         if self.quantization is not None:
             self.quantization = cast(me_quant.QuantizationMethods,
@@ -1111,7 +1158,6 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
-                "marlin",
                 "bitblas",
                 "gptq_marlin_24",
                 "gptq_marlin",
@@ -1121,6 +1167,7 @@ class ModelConfig:
                 "moe_wna16",
                 "modelopt",
                 "modelopt_fp4",
+                "petit_nvfp4",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides
@@ -1453,7 +1500,8 @@ class ModelConfig:
         from vllm.distributed.utils import get_pp_indices
         if (self.hf_text_config.model_type == "deepseek_mtp"
                 or self.hf_config.model_type == "mimo_mtp"
-                or self.hf_config.model_type == "glm4_moe_mtp"):
+                or self.hf_config.model_type == "glm4_moe_mtp"
+                or self.hf_config.model_type == "ernie_mtp"):
             total_num_hidden_layers = getattr(self.hf_text_config,
                                               "num_nextn_predict_layers", 0)
         else:
@@ -1653,29 +1701,8 @@ class ModelConfig:
         return self.multimodal_config is not None
 
     @property
-    def processor_return_mm_hashes(self) -> bool:
-        """Whether the multi-modal processor should output hashes."""
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return False
-
-        return mm_config.mm_processor_cache_gb > 0
-
-    @property
-    def enable_mm_processor_cache(self) -> bool:
-        """Whether the multi-modal processor cache should be enabled."""
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return False
-
-        return mm_config.mm_processor_cache_gb > 0
-
-    def get_mm_input_cache_gb(self) -> int:
-        mm_config = self.multimodal_config
-        if mm_config is None:
-            return 0
-
-        return envs.VLLM_MM_INPUT_CACHE_GIB
+    def is_multimodal_raw_input_only_model(self) -> bool:
+        return self._model_info.supports_multimodal_raw_input_only
 
     @property
     def is_cross_encoder(self) -> bool:
@@ -1685,10 +1712,6 @@ class ModelConfig:
     @property
     def is_pp_supported(self) -> bool:
         return self._model_info.supports_pp
-
-    @property
-    def is_multimodal_raw_input_supported(self) -> bool:
-        return self._model_info.supports_multimodal_raw_input
 
     @property
     def is_attention_free(self) -> bool:
@@ -1901,7 +1924,8 @@ class DeviceConfig:
 
 
 SpeculativeMethod = Literal["ngram", "eagle", "eagle3", "medusa",
-                            "mlp_speculator", "draft_model", "deepseek_mtp"]
+                            "mlp_speculator", "draft_model", "deepseek_mtp",
+                            "ernie_mtp"]
 
 
 @config
@@ -2034,6 +2058,16 @@ class SpeculativeConfig:
                 "architectures": ["Glm4MoeMTPModel"]
             })
 
+        if hf_config.model_type == "ernie4_5_moe":
+            hf_config.model_type = "ernie_mtp"
+        if hf_config.model_type == "ernie_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update({
+                "n_predict": n_predict,
+                "architectures": ["ErnieMTPModel"]
+            })
+            return hf_config
+
         return hf_config
 
     def __post_init__(self):
@@ -2052,8 +2086,8 @@ class SpeculativeConfig:
             if self.target_model_config and \
                 (self.target_model_config.hf_text_config.model_type \
                         == "deepseek_v3" or
-                    self.target_model_config.hf_text_config.model_type \
-                        == "mimo"):
+                    self.target_model_config.hf_text_config.model_type in
+                        ("mimo","ernie4_5_moe")):
                 # use the draft model from the same model:
                 self.model = self.target_model_config.model
             elif self.method in ("ngram", "[ngram]"):
@@ -2148,6 +2182,15 @@ class SpeculativeConfig:
                     if self.num_speculative_tokens > 1:
                         logger.warning(
                                 "All Deepseek MTP models only have " \
+                                "one layer. Might need some code changes " \
+                                "to support multiple layers."
+                            )
+                elif (self.draft_model_config.hf_config.model_type ==
+                      "ernie_mtp"):
+                    self.method = "ernie_mtp"
+                    if self.num_speculative_tokens > 1:
+                        logger.warning(
+                                "All Ernie MTP models only have " \
                                 "one layer. Might need some code changes " \
                                 "to support multiple layers."
                             )
@@ -2366,7 +2409,7 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "deepseek_mtp")
+        return self.method in ("eagle", "eagle3", "deepseek_mtp", "ernie_mtp")
 
     def __repr__(self) -> str:
         method = self.method
@@ -2398,8 +2441,8 @@ class LoRAConfig:
     lora_dtype: Union[torch.dtype, LoRADType] = "auto"
     """Data type for LoRA. If auto, will default to base model dtype."""
     lora_extra_vocab_size: int = 256
-    """Maximum size of extra vocabulary that can be present in a LoRA adapter
-    (added to the base model vocabulary)."""
+    """(Deprecated) Maximum size of extra vocabulary that can be present in a 
+    LoRA adapter. Will be removed in v0.12.0."""
     lora_vocab_padding_size: ClassVar[int] = current_platform\
         .get_lora_vocab_padding_size()
 
@@ -2441,6 +2484,12 @@ class LoRAConfig:
         return hash_str
 
     def __post_init__(self):
+        # Deprecation warning for lora_extra_vocab_size
+        logger.warning(
+            "`lora_extra_vocab_size` is deprecated and will be removed "
+            "in v0.12.0. Additional vocabulary support for "
+            "LoRA adapters is being phased out.")
+
         # Setting the maximum rank to 512 should be able to satisfy the vast
         # majority of applications.
         possible_max_ranks = (8, 16, 32, 64, 128, 256, 320, 512)
@@ -2505,7 +2554,7 @@ class MultiModalConfig:
     `{"num_crops": 4}`.
     """
 
-    mm_processor_cache_gb: int = 4
+    mm_processor_cache_gb: float = 4
     """
     The size (in GiB) of the multi-modal processor cache, which is used to
 
@@ -2516,6 +2565,22 @@ class MultiModalConfig:
     Set to `0` to disable this cache completely (not recommended).
     """
 
+    mm_encoder_tp_mode: MMEncoderTPMode = "weights"
+    """
+    Indicates how to optimize multi-modal encoder inference using
+    tensor parallelism (TP).
+
+    - `"weights"`: Within the same vLLM engine, split the weights of
+        each layer across TP ranks. (default TP behavior)
+    - `"data"`: Within the same vLLM engine, split the batched input data
+        across TP ranks to process the data in parallel, while hosting
+        the full weights on each TP rank.
+        This batch-level DP is not to be confused with API request-level
+        DP (which is controlled by `--data-parallel-size`).
+        This is only supported on a per-model basis and falls back to
+        `"weights"` if the encoder does not support DP.
+    """
+
     interleave_mm_strings: bool = False
     """
     Enable fully interleaved support for multimodal prompts.
@@ -2523,7 +2588,7 @@ class MultiModalConfig:
 
     skip_mm_profiling: bool = False
     """
-    When enabled, skips multimodal memory profiling and only profiles with 
+    When enabled, skips multimodal memory profiling and only profiles with
     language backbone model during engine initialization.
 
     This reduces engine startup time but shifts the responsibility to users for
@@ -2586,24 +2651,24 @@ class PoolerConfig:
     ## for embeddings models
     normalize: Optional[bool] = None
     """
-    Whether to normalize the embeddings outputs. 
+    Whether to normalize the embeddings outputs.
     """
     dimensions: Optional[int] = None
     """
-    Reduce the dimensions of embeddings if model 
+    Reduce the dimensions of embeddings if model
     support matryoshka representation.
     """
 
     ## for classification models
     activation: Optional[bool] = None
     """
-    Whether to apply activation function to the classification outputs. 
+    Whether to apply activation function to the classification outputs.
     """
 
     ## for reward models
     softmax: Optional[bool] = None
     """
-    Whether to apply softmax to the reward outputs. 
+    Whether to apply softmax to the reward outputs.
     """
     step_tag_id: Optional[int] = None
     """
@@ -2629,9 +2694,9 @@ class PoolerConfig:
 
     max_embed_len: Optional[int] = None
     """
-    Maximum input length allowed for embedding generation. When set, allows 
+    Maximum input length allowed for embedding generation. When set, allows
     inputs longer than max_embed_len to be accepted for embedding models.
-    This parameter enables accepting long inputs without requiring 
+    This parameter enables accepting long inputs without requiring
     VLLM_ALLOW_LONG_MAX_MODEL_LEN environment variable. When an input exceeds
     max_embed_len, it will be handled according to the original max_model_len
     validation logic. Defaults to None (i.e. set to max_model_len).
@@ -2956,16 +3021,20 @@ def _get_and_verify_max_len(
                 f"User-specified max_model_len ({max_model_len}) is greater "
                 f"than the derived max_model_len ({max_len_key}="
                 f"{derived_max_model_len} or model_max_length="
-                f"{model_max_length} in model's config.json). This may lead "
-                "to incorrect model outputs or CUDA errors.")
+                f"{model_max_length} in model's config.json).")
+            warning = (
+                "VLLM_ALLOW_LONG_MAX_MODEL_LEN must be used with extreme "
+                "caution. If the model uses relative position encoding (RoPE), "
+                "positions exceeding derived_max_model_len lead to nan. If the "
+                "model uses absolute position encoding, positions exceeding "
+                "derived_max_model_len will cause a CUDA array out-of-bounds "
+                "error.")
             if envs.VLLM_ALLOW_LONG_MAX_MODEL_LEN:
-                logger.warning(
-                    "%s Make sure the value is correct and within the "
-                    "model context size.", msg)
+                logger.warning_once("%s %s", msg, warning)
             else:
                 raise ValueError(
                     f"{msg} To allow overriding this maximum, set "
-                    "the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN=1")
+                    f"the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN=1. {warning}")
     return int(max_model_len)
 
 
@@ -2985,7 +3054,8 @@ def get_served_model_name(model: str,
     return served_model_name
 
 
-GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines"]
+GuidedDecodingBackend = Literal["auto", "xgrammar", "guidance", "outlines",
+                                "lm-format-enforcer"]
 
 
 @config
