@@ -439,10 +439,10 @@ def test_auto_prefix_caching_with_preemption(baseline_llm_generator,
 @pytest.mark.parametrize("seed", [1])
 def test_auto_prefix_caching_after_eviction_start(baseline_llm_generator,
                                                   test_llm_generator):
-    """Verify block manager v2 with auto prefix caching could works normal
+    """Verify block manager v2 with auto prefix caching could work normally
     even when eviction started.
     With APC enabled, all blocks are held by native block at the beginning.
-    Then blocks are managed by evictor instead. If cache hit at the evitor's
+    Then blocks are managed by evictor instead. If cache hit at the evictor's
     block, then it could be reused, or we need to recompute its kv cache.
     """
     output_len = 10

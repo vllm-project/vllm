@@ -183,7 +183,7 @@ def test_load_model(mock_get_model, mock_get_layers, mock_get_pp_group, method,
     mock_pp_group.world_size = pp_size
     mock_get_pp_group.return_value = mock_pp_group
 
-    # Setup the target model mock with a custom class so that
+    # Set up the target model mock with a custom class so that
     # isinstance() checks match the expected type.
     class _TargetModelStub(LlamaForCausalLM):
         model: mock.MagicMock
