@@ -82,6 +82,54 @@ class SingleTypeKVCacheManager(ABC):
             for blk in new_computed_blocks)
         return num_new_blocks + num_evictable_computed_blocks
 
+    def get_num_blocks_to_allocate_for_connector(
+        self,
+        request_id: str,
+        num_connector_prefix_tokens: int,
+        num_new_tokens: int,
+        new_computed_blocks: list[KVCacheBlock],
+    ) -> int:
+        """
+        Get the # of blocks to allocate for the request when using connector.
+        
+        NOTE(Kuntai):
+            The tricky part is the external prefix from the connector. For 
+            long external prefix, as existing `get_num_blocks_to_allocate` 
+            assumes we allocate for all tokens and for all layers, it will
+            make vLLM unable to allocate for long external prefix cache,
+            even if the prefix cache can fit into the GPU memory after 
+            evicting tokens outside the sliding window.
+
+            So we need a new `get_num_blocks_to_allocate_for_connector`
+            and a new `allocate_new_blocks_for_connector` to handle this case.
+
+        NOTE(Kuntai): this function returns an *upper bound* of the # of
+        blocks needed to be allocated.
+
+        Args:
+            request_id: The request ID.
+            num_connector_prefix_tokens: The number of tokens from the external
+                prefix.
+            num_new_tokens: The number of new tokens.
+            new_computed_blocks: The new computed blocks just hitting the
+                prefix caching.
+
+        Returns:
+            The upper bound of # of blocks to allocate.
+        """
+        total_tokens = num_connector_prefix_tokens + num_new_tokens
+        num_required_blocks = cdiv(total_tokens, self.block_size)
+        num_new_blocks = (num_required_blocks - len(new_computed_blocks) -
+                          len(self.req_to_blocks[request_id]))
+        # If a computed block of a request is an eviction candidate (in the
+        # free queue and ref_cnt == 0), it will be changed from a free block
+        # to a computed block when the request is allocated, so we also count
+        # it as needed to be allocated.
+        num_evictable_computed_blocks = sum(
+            blk.ref_cnt == 0 and not blk.is_null
+            for blk in new_computed_blocks)
+        return num_new_blocks + num_evictable_computed_blocks
+
     def save_new_computed_blocks(
             self, request_id: str,
             new_computed_blocks: list[KVCacheBlock]) -> None:
@@ -126,6 +174,31 @@ class SingleTypeKVCacheManager(ABC):
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
             return new_blocks
+
+    def allocate_new_blocks_for_connector(
+        self,
+        request_id: str,
+        num_connector_prefix_tokens: int,
+        num_new_tokens: int,
+    ) -> list[KVCacheBlock]:
+        """
+        Allocate new blocks for the request when using connector.
+
+        NOTE(Kuntai): we need to distinguish between the prefix
+                tokens and the new tokens. Check the sliding window
+                layer implementation for more explanation on this.
+
+        Args:
+            request_id: The request ID.
+            num_connector_prefix_tokens: The number of tokens from the external
+                prefix. 
+            num_new_tokens: The number of new tokens.
+
+        Returns:
+            The new allocated blocks.
+        """
+        return self.allocate_new_blocks(
+            request_id, num_connector_prefix_tokens + num_new_tokens)
 
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
         """
@@ -389,6 +462,59 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         window in the future.
         """
         return 0
+
+    def get_num_blocks_to_allocate_for_connector(
+        self,
+        request_id: str,
+        num_connector_prefix_tokens: int,
+        num_new_tokens: int,
+        new_computed_blocks: list[KVCacheBlock],
+    ) -> int:
+        """
+        Get the # of blocks to allocate for the request with prefix cache
+        from connector.
+
+        The maximum # of blocks we need is the last sliding window in the
+        prefix cache, plus the blocks for new tokens.
+        """
+
+        # The maximum # of blocks we need for sliding window layer is
+        # one sliding window of blocks for entire prefix, plus the new tokens.
+        max_blocks = cdiv(self.sliding_window + num_new_tokens,
+                          self.block_size)
+        return min(
+            super().get_num_blocks_to_allocate_for_connector(
+                request_id, num_connector_prefix_tokens, num_new_tokens,
+                new_computed_blocks), max_blocks)
+
+    def allocate_new_blocks_for_connector(
+        self,
+        request_id: str,
+        num_connector_prefix_tokens: int,
+        num_new_tokens: int,
+    ) -> list[KVCacheBlock]:
+        # Remove the blocks that are no longer be in the sliding window and
+        # skipped during the attention computation.
+        last_useful_token = num_connector_prefix_tokens - \
+            self.sliding_window + 1
+        last_useful_block = last_useful_token // self.block_size
+        blocks = self.req_to_blocks[request_id]
+        removed_blocks: list[KVCacheBlock] = []
+
+        # Free blocks outside sliding window.
+        for i in range(len(blocks)):
+            if i < last_useful_block and not blocks[i].is_null:
+                removed_blocks.append(blocks[i])
+                blocks[i] = self._null_block
+        self.block_pool.free_blocks(removed_blocks)
+
+        # pad blocks with null blocks to the length of last_useful_block
+        self.req_to_blocks[request_id].extend(
+            [self._null_block] * (last_useful_block - len(blocks)))
+
+        # then fall back to normal allocation.
+        return super().allocate_new_blocks_for_connector(
+            request_id, num_connector_prefix_tokens, num_new_tokens)
 
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
