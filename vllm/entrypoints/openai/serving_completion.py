@@ -38,9 +38,9 @@ from vllm.entrypoints.utils import get_max_tokens
 from vllm.inputs.data import (EmbedsPrompt, TokensPrompt, is_embeds_prompt,
                               is_tokens_prompt)
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import as_list, merge_async_iterators
 
@@ -127,13 +127,16 @@ class OpenAIServingCompletion(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            if self.model_config.skip_tokenizer_init:
+                tokenizer = None
+            else:
+                tokenizer = await self.engine_client.get_tokenizer(lora_request
+                                                                   )
 
             request_prompts, engine_prompts = await self._preprocess_completion(
                 request,
                 tokenizer,
                 request.prompt,
-                truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
         except ValueError as e:
