@@ -948,6 +948,18 @@ def get_kv_cache_config_from_groups(vllm_config: VllmConfig,
                                     kv_cache_groups: list[KVCacheGroupSpec],
                                     kv_cache_specs: dict[str, KVCacheSpec],
                                     available_memory: int) -> KVCacheConfig:
+    """
+    Generate the KV cache configuration from the KV cache groups and spec
+    of each layer.
+
+    Args:
+        vllm_config: The global VllmConfig
+        kv_cache_groups: The KV cache groups
+        kv_cache_specs: The KV cache spec of each attention layer in the model
+        available_memory: Memory available for KV cache in bytes
+    Returns:
+        The generated KVCacheConfig
+    """
     if len(kv_cache_groups) == 0:
         # Attention free models do not have KV cache.
         # Return num_blocks=1 as BlockPool always needs a null_block.
@@ -1059,15 +1071,14 @@ def get_kv_cache_groups(
         vllm_config: VllmConfig,
         kv_cache_spec: dict[str, KVCacheSpec]) -> list[KVCacheGroupSpec]:
     """
-    Generates the KV cache configuration for a model.
+    Split the layers in the model into groups with the same KV cache spec.
 
     Args:
         vllm_config: The global VllmConfig
         kv_cache_spec: The kv cache spec of each attention layer in the model
-        available_memory: Memory available for KV cache in bytes.
 
     Returns:
-        The generated KVCacheConfigs
+        The generated KVCacheGroups
     """
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
