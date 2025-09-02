@@ -164,6 +164,9 @@ if TYPE_CHECKING:
     VLLM_P2PXFER_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_P2PXFER_SIDE_CHANNEL_PORT: int = 5557
     VLLM_P2PXFER_ABORT_REQUEST_TIMEOUT: int = 120
+    VLLM_MOONCAKE_METADATA_SERVER : str = "etcd://localhost:2379"
+    VLLM_MOONCAKE_TRANSPORT_PROTOCOL : str = "rdma"
+    VLLM_MOONCAKE_DEVICE_NAME : str = ""
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_ALL2ALL_BACKEND: Literal[
@@ -1194,10 +1197,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLOW_INSECURE_SERIALIZATION": lambda: bool(
         int(os.getenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0"))
     ),
-    # IP address used for P2P XFER handshake between remote agents.
+    # Mooncake metadata server to use
+    "VLLM_MOONCAKE_METADATA_SERVER":
+    lambda: os.getenv("VLLM_MOONCAKE_METADATA_SERVER", "etcd://localhost:2379"),
+    # Mooncake transfer protocol to use (dependent on a how mooncake is built)
+    "VLLM_MOONCAKE_TRANSPORT_PROTOCOL":
+    lambda: os.getenv("VLLM_MOONCAKE_TRANSPORT_PROTOCOL", "rdma"),
+    # Device name used for P2P XFER else auto discovery with GPU/NIC affinity
+    "VLLM_MOONCAKE_DEVICE_NAME":
+    lambda: os.getenv("VLLM_MOONCAKE_DEVICE_NAME", ""),
+    # IP address used for P2PXFER handshake between remote agents.
     "VLLM_P2PXFER_SIDE_CHANNEL_HOST":
     lambda: os.getenv("VLLM_P2PXFER_SIDE_CHANNEL_HOST", "localhost"),
-    # Port used for P2P XFER handshake between remote agents.
+    # Port used for P2PXFER handshake between remote agents.
     "VLLM_P2PXFER_SIDE_CHANNEL_PORT": lambda: int(
         os.getenv("VLLM_P2PXFER_SIDE_CHANNEL_PORT", "5557")),
     # Time (in seconds) after which the KV cache on the producer side is

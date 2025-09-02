@@ -162,6 +162,12 @@ KVConnectorFactory.register_connector(
 )
 
 KVConnectorFactory.register_connector(
+    "MooncakeConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_connector",
+    "MooncakeConnector",
+)
+
+KVConnectorFactory.register_connector(
     "NixlConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector",
     "NixlConnector",

@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
+
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
 EngineId = str
 ReqId = str
