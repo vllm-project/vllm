@@ -231,7 +231,7 @@ class InputPreprocessor:
             return cast(AnyTokenizer, object())  # Dummy
 
         tokenizer = self.get_tokenizer()
-        return await tokenizer
+        return tokenizer
 
     def _process_multimodal(
         self,
