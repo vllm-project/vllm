@@ -1989,6 +1989,12 @@ class SpeculativeConfig:
     speculative_token_tree: Optional[str] = None
     """Specifies the tree structure for speculative token generation.
     """
+    enable_draft_probs: bool = True
+    """Whether to use draft probs for speculative decoding. Using draft probs
+    always increases the acceptance rate but increases sampling overhead.
+    For small models and/or low temperatures payloads, it may be beneficial to
+    disable this. Disabling falls back to greedy sampling for the draft tokens.
+    """
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""

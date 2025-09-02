@@ -533,13 +533,15 @@ def test_propose_tree(spec_token_tree):
     sampling_metadata = mock.MagicMock()
 
     # Propose draft tokens.
-    result = proposer.propose(target_token_ids=target_token_ids,
-                              target_positions=target_positions,
-                              target_hidden_states=target_hidden_states,
-                              next_token_ids=next_token_ids,
-                              common_attn_metadata=common_attn_metadata,
-                              sampling_metadata=sampling_metadata)
+    result, draft_probs = proposer.propose(
+        target_token_ids=target_token_ids,
+        target_positions=target_positions,
+        target_hidden_states=target_hidden_states,
+        next_token_ids=next_token_ids,
+        common_attn_metadata=common_attn_metadata,
+        sampling_metadata=sampling_metadata)
     assert result.shape == (batch_size, num_speculative_tokens)
+    assert draft_probs is None
 
     # The tokens are expected to be consecutive integers starting
     # from the base token IDs.

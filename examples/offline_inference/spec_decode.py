@@ -69,6 +69,7 @@ def parse_args():
     parser.add_argument("--model-dir", type=str, default=None)
     parser.add_argument("--eagle-dir", type=str, default=None)
     parser.add_argument("--custom-mm-prompts", action="store_true")
+    parser.add_argument("--request-id-prefix", type=str, default="")
     return parser.parse_args()
 
 

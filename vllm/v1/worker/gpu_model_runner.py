@@ -1653,26 +1653,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # it is safe to update `target_logits` in place.
             target_logits = logits[spec_decode_metadata.target_logits_indices]
 
-            draft_probs_list: list[torch.Tensor] = []
-            has_draft_probs: list[bool] = []
-            for i, req_id in enumerate(self.input_batch.req_ids):
-                draft_length = spec_decode_metadata.num_draft_tokens[i]
-                if draft_length > 0:
-                    draft_probs = self.requests[req_id].draft_probs
-                    if draft_probs is not None:
-                        # <= since not every draft token is necessarily
-                        # scheduled
-                        assert draft_length <= draft_probs.shape[0]
-                        has_draft_probs.append(True)
-                        # Not every draft token is necessarily scheduled
-                        draft_probs_list.append(draft_probs[:draft_length])
-                    else:
-                        has_draft_probs.append(False)
-            assert all(has_draft_probs) or not any(has_draft_probs), (
-                "Some requests have draft logits while others do not.")
-
-            draft_probs = (torch.cat(draft_probs_list, dim=0)
-                           if len(draft_probs_list) > 0 else None)
+            draft_probs = self._collect_draft_probs(spec_decode_metadata)
             output_token_ids = self.rejection_sampler(
                 spec_decode_metadata,
                 draft_probs,
@@ -1769,11 +1750,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 spec_decode_metadata,
                 spec_decode_common_attn_metadata,
             )
-            # Save the draft probs for future use, usually the next step.
-            if draft_probs is not None:
-                for i, spec_prob in enumerate(draft_probs):
-                    req_id = self.input_batch.req_ids[i]
-                    self.requests[req_id].draft_probs = spec_prob
+            self._store_draft_probs(draft_probs)
 
         self.eplb_step()
 
@@ -1787,6 +1764,52 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
         )
+
+    def _store_draft_probs(self, draft_probs: Optional[torch.Tensor]) -> None:
+        """Store the draft probs for future use, usually the next step.
+        
+        Args:
+            draft_probs: [num_reqs, num_draft_tokens, vocab_size].  
+                It is assumed that draft_probs are in the same order as the
+                requests in the input batch.
+        """
+        if draft_probs is None:
+            return
+        for i, spec_prob in enumerate(draft_probs):
+            req_id = self.input_batch.req_ids[i]
+            self.requests[req_id].draft_probs = spec_prob
+
+    def _collect_draft_probs(
+            self, spec_decode_metadata: SpecDecodeMetadata
+    ) -> Optional[torch.Tensor]:
+        """Collect the draft probs for the requests in the current input batch.
+
+        Args:
+            spec_decode_metadata: The metadata for speculative decoding for
+                the current step.
+
+        Returns:
+            draft_probs: None if no draft probs are available.
+                Otherwise, a packed sequence of draft probs with shape
+                [total_num_draft_tokens, vocab_size].
+        """
+        draft_probs_list: list[torch.Tensor] = []
+        has_draft_probs: list[bool] = []
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            draft_length = spec_decode_metadata.num_draft_tokens[i]
+            if draft_length > 0:
+                draft_probs = self.requests[req_id].draft_probs
+                has_draft_probs.append(draft_probs is not None)
+                if draft_probs is not None:
+                    # <= since not every draft token is necessarily scheduled
+                    assert draft_length <= draft_probs.shape[0]
+                    draft_probs_list.append(draft_probs[:draft_length])
+        assert all(has_draft_probs) or not any(has_draft_probs), (
+            "Some requests have draft logits while others do not.")
+
+        draft_probs = (torch.cat(draft_probs_list, dim=0)
+                       if len(draft_probs_list) > 0 else None)
+        return draft_probs
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         if self._draft_token_ids is None:
@@ -1809,13 +1832,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         aux_hidden_states: Optional[torch.Tensor],
         spec_decode_metadata: Optional[SpecDecodeMetadata],
         common_attn_metadata: CommonAttentionMetadata,
-    ) -> tuple[Union[list[list[int]], torch.Tensor],
-               Optional[list[torch.Tensor]]]:
+    ) -> tuple[Union[list[list[int]], torch.Tensor], Optional[torch.Tensor]]:
         """Generate the draft for the next step.
         
         Returns:
-            - The draft token ids.
-            - The draft probs (optional).
+            draft_token_ids: [num_requests, num_draft_tokens]
+            draft_probs (optional): [num_requests, num_draft_tokens, vocab_size]
         """
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
@@ -2506,7 +2528,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE(woosuk): Here, we should use int32 because the sampler uses
             # int32 for bonus_token_ids. If the dtype mismatches, re-compilation
             # will occur at runtime.
-            bonus_token_ids = torch.zeros(num_reqs,
+            bonus_token_ids = torch.zeros((num_reqs, 1),
                                           device=self.device,
                                           dtype=torch.int32)
             self.rejection_sampler(
