@@ -807,9 +807,7 @@ class Glm4vVisionTransformer(nn.Module):
         grid_thw: list[list[int]],
     ) -> torch.Tensor:
         # Convert grid_thw to tensor (always expecting list format now)
-        grid_thw = torch.tensor(grid_thw,
-                                device=x.device,
-                                dtype=torch.long)
+        grid_thw = torch.tensor(grid_thw, device=x.device, dtype=torch.long)
 
         # patchify
         x = x.to(device=self.device, dtype=self.dtype)
