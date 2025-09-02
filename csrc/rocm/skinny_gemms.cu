@@ -13,17 +13,17 @@
 #include "dispatch_utils.h"
 #include "quantization/fp8/common.cuh"
 
-#if defined(__HIPCC__) && \
-    (defined(__gfx908__) || defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
+#if defined(__HIPCC__) && (defined(__gfx908__) || defined(__gfx90a__) || \
+                           defined(__gfx942__) || defined(__gfx950__))
   #define __HIP__GFX9__
   #if defined(__gfx908__)
     #define __HIP__GFX9__CNDA__ 1
-  #elif defined (__gfx90a__)
+  #elif defined(__gfx90a__)
     #define __HIP__GFX9__CNDA__ 2
-  #elif defined (__gfx942__)
+  #elif defined(__gfx942__)
     #define __HIP__GFX9__CNDA__ 3
     #define __HIP__GFX9__CDNA_FP8_EN__
-  #elif defined (__gfx950__)
+  #elif defined(__gfx950__)
     #define __HIP__GFX9__CNDA__ 3
     #define __HIP__GFX9__CDNA_FP4_EN__
   #endif
@@ -142,7 +142,6 @@ __device__ __forceinline__ float4 load_ntmprl(const float4* addr) {
   return make_float4(dat0, dat1, dat2, dat3);
 }
 
-
 using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
 
 using bit16_t = uint16_t;
@@ -155,20 +154,17 @@ typedef struct _B16x8 {
 
 template <int absz, int cbid, int blgp>
 __device__ __forceinline__ floatx4 gcn_mfma4x4x4bf16_instr(
-  const _B16x4& inpA,
-  const _B16x4& inpB,
-  const floatx4& inpC) {
+    const _B16x4& inpA, const _B16x4& inpB, const floatx4& inpC) {
 #if __HIP__GFX9__CNDA__ < 2
-    return __builtin_amdgcn_mfma_f32_4x4x2bf16(
-      (bit16x2){inpA[0], inpA[1]},
-      (bit16x2){inpB[0], inpB[1]}, 
-      __builtin_amdgcn_mfma_f32_4x4x2bf16(
-        (bit16x2){inpA[2], inpA[3]},
-        (bit16x2){inpB[2], inpB[3]}, inpC, absz, cbid, blgp),
+  return __builtin_amdgcn_mfma_f32_4x4x2bf16(
+      (bit16x2){inpA[0], inpA[1]}, (bit16x2){inpB[0], inpB[1]},
+      __builtin_amdgcn_mfma_f32_4x4x2bf16((bit16x2){inpA[2], inpA[3]},
+                                          (bit16x2){inpB[2], inpB[3]}, inpC,
+                                          absz, cbid, blgp),
       absz, cbid, blgp);
 #else
-    return __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(inpA, inpB, inpC, absz, cbid,
-      blgp);
+  return __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(inpA, inpB, inpC, absz, cbid,
+                                                blgp);
 #endif
 }
 
@@ -474,8 +470,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         if (k_ >= K) break;
-        // Do the matrix multiplication of activation and weight matrix
-        // - Remember the accumulation is happening for K-split of 64!
+          // Do the matrix multiplication of activation and weight matrix
+          // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
         for (uint32_t n = 0; n < N; n++) {
   #pragma unroll
@@ -489,7 +485,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 4; b++) {
                 sum4[n][y] = gcn_mfma4x4x4bf16_instr<0, 0, 0>(
-                  bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y]);
+                    bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y]);
               }
             }
           }
@@ -766,8 +762,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           uint32_t k = k1 + k2 * THRDS * A_CHUNK;
           uint32_t k_ = k + threadIdx.x * A_CHUNK;
           if (k_ >= K) break;
-          // Do the matrix multiplication of activation and weight matrix
-          // - Remember the accumulation is happening for K-split of 64!
+            // Do the matrix multiplication of activation and weight matrix
+            // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
           for (int y = 0; y < YTILE; y++) {
             if constexpr (!use_mfma)
@@ -778,7 +774,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             else
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 4; b++)
-                sum4[n][y] = gcn_mfma4x4x4bf16_instr<0,0,0>(
+                sum4[n][y] = gcn_mfma4x4x4bf16_instr<0, 0, 0>(
                     bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y]);
           }
         }
@@ -1069,7 +1065,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       if (m >= M) continue;
   #endif
 
-      // Fetch the weight matrix from memory!
+        // Fetch the weight matrix from memory!
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
