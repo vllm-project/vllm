@@ -14,8 +14,11 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
-  # x86 + CUDA builds
+  - block: "Build CUDA 12.8 wheel"
+    key: block-build-cu128-wheel
+
   - label: "Build wheel - CUDA 12.8"
+    depends_on: block-build-cu128-wheel
     id: build-wheel-cuda-12-8
     agents:
       queue: cpu_queue_postmerge
@@ -44,11 +47,8 @@ steps:
     env:
       DOCKER_BUILDKIT: "1"
 
-  - block: "Build CUDA 12.9 wheel"
-    key: block-build-cu129-wheel
-
+  # x86 + CUDA builds
   - label: "Build wheel - CUDA 12.9"
-    depends_on: block-build-cu129-wheel
     id: build-wheel-cuda-12-9
     agents:
       queue: cpu_queue_postmerge
