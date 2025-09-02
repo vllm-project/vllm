@@ -1469,7 +1469,6 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                          grid_thw.tolist(),
                                                          rope_type="rope_3d")
             else:
-                # Non-data parallel mode: pass list format for consistency
                 image_embeds = self.visual(pixel_values,
                                            grid_thw=grid_thw.tolist())
         merge_size = self.visual.spatial_merge_size
@@ -1494,6 +1493,7 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             else:
                 video_embeds = self.visual(pixel_values_videos,
                                            grid_thw=grid_thw.tolist())
+        # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
         sizes = grid_thw.prod(-1) // merge_size // merge_size
         return video_embeds.split(sizes.tolist())
