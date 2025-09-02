@@ -27,9 +27,6 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import (
-    IsAttentionFree, MultiModalEmbeddings, SupportsMultiModalWithRawInput,
-    default_pooling_type)
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (ImageItem, ModalityData,
@@ -42,6 +39,10 @@ from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
+
+from .interfaces import (IsAttentionFree, MultiModalEmbeddings,
+                         SupportsMultiModal)
+from .interfaces_base import default_pooling_type
 
 
 def _prithvi_field_config(hf_inputs: Mapping[str, torch.Tensor]):
@@ -137,6 +138,7 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
+        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
     ) -> MultiModalInputs:
         if "image" in mm_data:
             image_data = mm_data["image"]
@@ -145,8 +147,10 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
             mm_data = {"image": mm_data}
 
         mm_items = self._to_mm_items(mm_data)
-        mm_hashes = self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
-                                        tokenization_kwargs or {})
+        tokenization_kwargs = tokenization_kwargs or {}
+        mm_hashes = (mm_hash_overrides if mm_hash_overrides is not None else
+                     self._hash_mm_items(mm_items, hf_processor_mm_kwargs,
+                                         tokenization_kwargs))
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
 
         mm_processed_data = BatchFeature(image_data)
@@ -173,10 +177,10 @@ class PrithviGeoSpatialMAEMultiModalProcessor(BaseMultiModalProcessor):
     info=PrithviGeoSpatialMAEProcessingInfo,
     dummy_inputs=PrithviGeoSpatialMAEInputBuilder,
 )
-class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree,
-                           SupportsMultiModalWithRawInput):
+class PrithviGeoSpatialMAE(nn.Module, IsAttentionFree, SupportsMultiModal):
     """Prithvi Masked Autoencoder"""
 
+    supports_multimodal_raw_input_only = True
     is_pooling_model = True
 
     @classmethod
