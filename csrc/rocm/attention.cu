@@ -609,10 +609,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
                 Klocaltmp.xy[i], Qlocal[qkhe_depth][qkratio].xy[i],
                 d_out[token_depth]);
           }
-         }
-         else
-        {
-          {
+         } else {
+#if defined(__gfx942__) || defined(__gfx950__)
             _T8x8 Ktmp8x8, Qtmp8x8;
             Ktmp8x8.b8x8 = Ktmp8x16.xy[qkratio];
 
@@ -627,8 +625,10 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
             d_out[token_depth] = gcn_mfma16x16x32_instr<__hip_fp8_e4m3, 0, 0, 0>(
                   Ktmp8x8.i64, Qtmp8x8.i64,
                   d_out[token_depth]);
+#else
+            UNREACHABLE_CODE
+#endif
          }
-        }
         }
       }
     }
@@ -717,8 +717,10 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   // disable rtz conversion due to its impact on accuracy.
   constexpr bool LOGITS_RTZ_CONVERSION = false;
 
+#if defined(__gfx942__) || defined(__gfx950__)
   int rowid_8x8 = rowid/2;
   int offset    = rowid%2;
+#endif
 
   // write logits to shared mem
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
@@ -737,10 +739,14 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     }
     else
     {
+#if defined(__gfx942__) || defined(__gfx950__)
       // cast _B16x4* to _B8x8*
       _T8x8& logits_8x8 = *reinterpret_cast<_T8x8*>(&shared_logits[warpid][token_depth][lane16id][rowid_8x8]);
       logits_8x8.b16x4[offset * 2    ] = __builtin_amdgcn_cvt_pk_fp8_f32(d_out[token_depth][0], d_out[token_depth][1],0,false);
       logits_8x8.b16x4[offset * 2 + 1] = __builtin_amdgcn_cvt_pk_fp8_f32(d_out[token_depth][2], d_out[token_depth][3],0,false);
+#else
+      UNREACHABLE_CODE
+#endif
     }
   }
 
@@ -809,9 +815,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
                   shared_logits[vtoken_depth][offset2][lane16id][offset1],
                   tmp_out);
             }
-           }
-           else
-           {
+           } else {
+#if defined(__gfx942__) || defined(__gfx950__)
             for (int i = 0; i < ELEMS8_ELEMS4_RATIO/2; i++) {
                const int offset =
                    rowid * ELEMS16_ELEMS8_RATIO * ELEMS8_ELEMS4_RATIO +
@@ -825,7 +830,10 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
                    reinterpret_cast<_T8x8*>(&shared_logits[vtoken_depth][offset2][lane16id][offset1])->i64,
                    tmp_out);
              }
-          }
+#else
+             UNREACHABLE_CODE
+#endif
+           }
           }
         }
       }
