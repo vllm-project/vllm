@@ -31,6 +31,11 @@ MODELS = [
                              architecture="BertModel",
                              enable_test=False),
     ########### NewModel
+    # These three architectures are almost the same, but not exactly the same.
+    # For example,
+    # - whether to use token_type_embeddings
+    # - whether to use context expansion
+    # So only test one (the most widely used) model
     CLSPoolingEmbedModelInfo("Alibaba-NLP/gte-multilingual-base",
                              architecture="GteNewModel",
                              mteb_score=0.775074696,
