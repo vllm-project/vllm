@@ -527,6 +527,7 @@ def hash_block_tokens(
     hash values for the same block contents.
 
     Args:
+        hash_function: The hash function used to compute block hash.
         parent_block_hash: The hash of the parent block. None
             if this is the first block.
         curr_block_token_ids: A list of token ids in the current
