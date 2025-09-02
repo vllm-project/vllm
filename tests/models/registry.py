@@ -137,6 +137,9 @@ class _HfExamplesInfo:
 # yapf: disable
 _TEXT_GENERATION_EXAMPLE_MODELS = {
     # [Decoder-only]
+    "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B",
+                                          min_transformers_version="4.56.0",
+                                          trust_remote_code=True),
     "AquilaModel": _HfExamplesInfo("BAAI/AquilaChat-7B",
                                    trust_remote_code=True),
     "AquilaForCausalLM": _HfExamplesInfo("BAAI/AquilaChat2-7B",
@@ -435,6 +438,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "InternVLForConditionalGeneration": _HfExamplesInfo("OpenGVLab/InternVL3-1B-hf"),    # noqa: E501
     "KeyeForConditionalGeneration": _HfExamplesInfo("Kwai-Keye/Keye-VL-8B-Preview", # noqa: E501
                                                     trust_remote_code=True),
+    "KeyeVL1_5ForConditionalGeneration": _HfExamplesInfo("Kwai-Keye/Keye-VL-1_5-8B", # noqa: E501
+                                                         trust_remote_code=True),
     "KimiVLForConditionalGeneration": _HfExamplesInfo("moonshotai/Kimi-VL-A3B-Instruct",  # noqa: E501
                                                       extras={"thinking": "moonshotai/Kimi-VL-A3B-Thinking"},  # noqa: E501
                                                       trust_remote_code=True),
