@@ -581,7 +581,7 @@ def test_structured_output_with_reasoning_matrices(
         max_num_seqs=16,
         backend=backend,
         structured_outputs_config=dict(disable_any_whitespace=True,
-                                       reasoning_backend=reasoning_parser),
+                                       reasoning_parser=reasoning_parser),
         tokenizer_mode=tokenizer_mode,
         speculative_config=speculative_config,
     )

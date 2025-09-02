@@ -64,11 +64,11 @@ class StructuredOutputManager:
                 scheduler_config=self.vllm_config.scheduler_config,
                 lora_config=self.vllm_config.lora_config,
             ).get_lora_tokenizer(None)
-            reasoning_backend = \
-                    self.vllm_config.structured_outputs_config.reasoning_backend
-            if reasoning_backend:
+            reasoning_parser = \
+                    self.vllm_config.structured_outputs_config.reasoning_parser
+            if reasoning_parser:
                 reasoner_cls = ReasoningParserManager.get_reasoning_parser(
-                    reasoning_backend)
+                    reasoning_parser)
                 self.reasoner = reasoner_cls(tokenizer=self.tokenizer)
 
     def grammar_init(self, request: Request) -> None:

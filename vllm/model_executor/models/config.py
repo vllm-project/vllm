@@ -253,8 +253,8 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         structured_outputs_config = vllm_config.structured_outputs_config
-        if structured_outputs_config.reasoning_backend == "":
-            structured_outputs_config.reasoning_backend = "GptOss"
+        if structured_outputs_config.reasoning_parser == "":
+            structured_outputs_config.reasoning_parser = "GptOss"
 
         # Increase the max capture size from 512 to 1024 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
