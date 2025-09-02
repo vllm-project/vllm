@@ -202,7 +202,7 @@ class BitBLASLinearMethod(LinearMethodBase):
         output_size: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
-    ) -> dict[str, torch.Tensor]:
+    ) -> None:
         """Creates quantized weights for use in linear operations.
 
         The function initializes and returns a dictionary containing quantized 
