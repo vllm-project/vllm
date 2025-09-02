@@ -808,8 +808,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             return trtllm_gen_output
         elif (self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
               or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16):
-            assert not self.moe.use_ep, (
-                "EP is not supported for flashinfer mxfp4 moe backend yet.")
             from vllm.utils.flashinfer import flashinfer_cutlass_fused_moe
 
             topk_weights, topk_ids = FusedMoE.select_experts(
