@@ -79,8 +79,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
+        curr_M: int,
         M: int,
         N: int,
         K: int,
@@ -88,7 +87,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
         """
@@ -107,15 +106,12 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
         """
-        aq_m, aq_n = aq.shape
+        workspace1 = (curr_M, K)
         workspace2 = ()
-        output_shape = (aq_m, aq_n * 2) if self.quant_dtype != \
-            torch.float8_e4m3fn else (aq_m, aq_n)
-        workspace_dtype = a.dtype
-        workspace1 = output_shape
+        output_shape = (M, K)
         # The workspace is determined by `aq`, since it comes after any
         # potential communication op and is involved in the expert computation.
-        return (workspace1, workspace2, output_shape, workspace_dtype)
+        return (workspace1, workspace2, output_shape)
 
     def apply(
         self,

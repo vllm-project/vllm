@@ -154,18 +154,23 @@ class BatchedOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return TopKWeightAndReduceDelegate()
 
     def workspace_shapes(
-        self, a: torch.Tensor, aq: torch.Tensor, M: int, N: int, K: int,
-        topk: int, global_num_experts: int, local_num_experts: int,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata]
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+        self,
+        curr_M: int,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
-        assert a.dim() == 2
         num_dp = self.num_dispatchers
         num_experts = local_num_experts
         max_num_tokens = self.max_num_tokens
-        workspace2 = (0, 0, 0)
+        workspace2 = ()
         output = (num_experts, max_num_tokens * num_dp, N)
-        return (output, workspace2, output, a.dtype)
+        return (output, workspace2, output)
 
     def apply(
         self,
