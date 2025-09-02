@@ -6,6 +6,8 @@ import numpy as np
 import pytest
 import torch
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.config import ModelConfig, ParallelConfig, VllmConfig
 from vllm.multimodal.cache import (MultiModalCache,
                                    MultiModalProcessorCacheItem,

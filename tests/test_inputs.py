@@ -3,6 +3,8 @@
 
 import pytest
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.inputs import zip_enc_dec_prompts
 from vllm.inputs.parse import parse_and_batch_prompt
 

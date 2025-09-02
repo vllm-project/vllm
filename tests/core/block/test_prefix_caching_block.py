@@ -8,6 +8,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+pytestmark = pytest.mark.cpu_test
+
 from tests.core.utils import create_dummy_lora_sequence, create_dummy_sequence
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
 from vllm.core.block.interfaces import Block, BlockAllocator

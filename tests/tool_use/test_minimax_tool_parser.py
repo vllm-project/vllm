@@ -7,6 +7,8 @@ from typing import Any
 
 import pytest
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.entrypoints.openai.protocol import (ChatCompletionToolsParam,
                                               FunctionCall, ToolCall)
 from vllm.entrypoints.openai.tool_parsers import MinimaxToolParser

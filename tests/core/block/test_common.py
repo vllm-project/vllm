@@ -5,6 +5,8 @@ import random
 
 import pytest
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.core.block.common import RefCounter
 
 

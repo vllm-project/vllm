@@ -5,6 +5,8 @@ from typing import Optional
 
 import pytest
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 

@@ -3,6 +3,8 @@
 
 import pytest  # noqa
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.scheduler import Scheduler
 from vllm.sequence import SequenceGroup

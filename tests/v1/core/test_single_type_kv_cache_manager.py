@@ -13,6 +13,7 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (ChunkedLocalAttentionSpec,
                                         SlidingWindowSpec)
 
+pytestmark = pytest.mark.cpu_test
 
 def get_sliding_window_manager(sliding_window_spec, block_pool):
     return SlidingWindowManager(sliding_window_spec,

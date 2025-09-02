@@ -8,6 +8,8 @@ import pytest
 import regex as re
 from pydantic import TypeAdapter
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionToolsParam)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat

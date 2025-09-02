@@ -4,6 +4,8 @@
 import prometheus_client
 import pytest
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.v1.metrics.reader import (Counter, Gauge, Histogram, Vector,
                                     get_metrics_snapshot)
 

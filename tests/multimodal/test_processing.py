@@ -7,6 +7,8 @@ from typing import Optional, cast
 import numpy as np
 import pytest
 
+pytestmark = pytest.mark.cpu_test
+
 from vllm.config import ModelConfig
 from vllm.inputs import InputProcessingContext
 from vllm.multimodal import MULTIMODAL_REGISTRY

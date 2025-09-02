@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
+
+pytestmark = pytest.mark.cpu_test
 
 from vllm.multimodal.inputs import MultiModalKwargs, NestedTensors
 
