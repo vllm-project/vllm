@@ -7,7 +7,8 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
+from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
+                                                  FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     OCP_MX_BLOCK_SIZE)
@@ -24,6 +25,9 @@ __all__ = [
 
 
 class QuarkMoEMethod(FusedMoEMethodBase):
+
+    def __init__(self, moe: FusedMoEConfig):
+        super().__init__(moe)
 
     @staticmethod
     def get_moe_method(
@@ -42,17 +46,24 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         input_config = layer_quant_config.get("input_tensors")
 
         if quant_config._is_fp8_w8a8(weight_config, input_config):
-            return QuarkW8A8Fp8MoEMethod(weight_config, input_config)
+            return QuarkW8A8Fp8MoEMethod(weight_config, input_config,
+                                         module.moe_config)
         elif quant_config._is_mx_fp4(weight_config, input_config):
-            return QuarkW4A4MXFp4MoEMethod(weight_config, input_config)
+            return QuarkW4A4MXFp4MoEMethod(weight_config, input_config,
+                                           module.moe_config)
         else:
             raise RuntimeError("Unsupported FusedMoe scheme")
 
 
 class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
-    def __init__(self, weight_config: dict[str, Any], input_config: dict[str,
-                                                                         Any]):
+    def __init__(
+        self,
+        weight_config: dict[str, Any],
+        input_config: dict[str, Any],
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         self.weight_quant = weight_config
         self.input_quant = input_config
 
@@ -207,6 +218,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -215,6 +227,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `QuarkW8A8Fp8MoEMethod` yet.")
@@ -231,7 +245,9 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
         return fused_experts(
             x,
@@ -253,8 +269,13 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
 
 class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
 
-    def __init__(self, weight_config: dict[str, Any], input_config: dict[str,
-                                                                         Any]):
+    def __init__(
+        self,
+        weight_config: dict[str, Any],
+        input_config: dict[str, Any],
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         self.weight_quant = weight_config
         self.input_quant = input_config
 
@@ -361,6 +382,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -369,6 +391,7 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
 
         if enable_eplb:
             raise NotImplementedError(
@@ -386,7 +409,9 @@ class QuarkW4A4MXFp4MoEMethod(QuarkMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
         out = fused_experts(
             x,

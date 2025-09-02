@@ -9,7 +9,6 @@ def test_mistral():
               tensor_parallel_size=2,
               max_num_seqs=4,
               max_model_len=128,
-              use_v2_block_manager=True,
               override_neuron_config={
                   "sequence_parallel_enabled": False,
                   "skip_warmup": True

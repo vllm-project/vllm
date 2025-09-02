@@ -34,7 +34,7 @@ Prompt embeddings are passed in as base64 encoded torch tensors.
 First, launch the OpenAI-compatible server:
 
 ```bash
-vllm serve meta-llama/Llama-3.2-1B-Instruct --task generate \
+vllm serve meta-llama/Llama-3.2-1B-Instruct --runner generate \
   --max-model-len 4096 --enable-prompt-embeds
 ```
 

@@ -5,7 +5,7 @@ import json
 from argparse import ArgumentError
 from contextlib import nullcontext
 from dataclasses import dataclass, field
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal, Optional, Union
 
 import pytest
 
@@ -72,6 +72,10 @@ def test_get_type(type_hints, type, expected):
         "type": int,
         "choices": [1, 2]
     }),
+    ({str, Literal["x", "y"]}, {
+        "type": str,
+        "metavar": ["x", "y"]
+    }),
     ({Literal[1, "a"]}, Exception),
 ])
 def test_literal_to_kwargs(type_hints, expected):
@@ -91,32 +95,6 @@ class NestedConfig:
 
 @config
 @dataclass
-class FromCliConfig1:
-    field: int = 1
-    """field"""
-
-    @classmethod
-    def from_cli(cls, cli_value: str):
-        inst = cls(**json.loads(cli_value))
-        inst.field += 1
-        return inst
-
-
-@config
-@dataclass
-class FromCliConfig2:
-    field: int = 1
-    """field"""
-
-    @classmethod
-    def from_cli(cls, cli_value: str):
-        inst = cls(**json.loads(cli_value))
-        inst.field += 2
-        return inst
-
-
-@config
-@dataclass
 class DummyConfig:
     regular_bool: bool = True
     """Regular bool with default True"""
@@ -132,16 +110,14 @@ class DummyConfig:
     """List with variable length"""
     list_literal: list[Literal[1, 2]] = field(default_factory=list)
     """List with literal choices"""
+    list_union: list[Union[str, type[object]]] = field(default_factory=list)
+    """List with union type"""
     literal_literal: Literal[Literal[1], Literal[2]] = 1
     """Literal of literals with default 1"""
     json_tip: dict = field(default_factory=dict)
     """Dict which will be JSON in CLI"""
     nested_config: NestedConfig = field(default_factory=NestedConfig)
     """Nested config"""
-    from_cli_config1: FromCliConfig1 = field(default_factory=FromCliConfig1)
-    """Config with from_cli method"""
-    from_cli_config2: FromCliConfig2 = field(default_factory=FromCliConfig2)
-    """Different config with from_cli method"""
 
 
 @pytest.mark.parametrize(("type_hint", "expected"), [
@@ -183,6 +159,9 @@ def test_get_kwargs():
     assert kwargs["list_literal"]["type"] is int
     assert kwargs["list_literal"]["nargs"] == "+"
     assert kwargs["list_literal"]["choices"] == [1, 2]
+    # lists with unions should become str type.
+    # If not, we cannot know which type to use for parsing
+    assert kwargs["list_union"]["type"] is str
     # literals of literals should have merged choices
     assert kwargs["literal_literal"]["choices"] == [1, 2]
     # dict should have json tip in help
@@ -190,9 +169,6 @@ def test_get_kwargs():
     assert json_tip in kwargs["json_tip"]["help"]
     # nested config should should construct the nested config
     assert kwargs["nested_config"]["type"]('{"field": 2}') == NestedConfig(2)
-    # from_cli configs should be constructed with the correct method
-    assert kwargs["from_cli_config1"]["type"]('{"field": 2}').field == 3
-    assert kwargs["from_cli_config2"]["type"]('{"field": 2}').field == 4
 
 
 @pytest.mark.parametrize(

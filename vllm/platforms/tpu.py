@@ -24,6 +24,8 @@ else:
 
 logger = init_logger(__name__)
 
+USE_TPU_COMMONS = False
+
 
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
@@ -35,7 +37,9 @@ class TpuPlatform(Platform):
     device_control_env_var: str = "TPU_VISIBLE_CHIPS"
     simple_compile_backend: str = "openxla"
 
-    supported_quantization: list[str] = ["tpu_int8", "compressed-tensors"]
+    supported_quantization: list[str] = [
+        "fp8", "tpu_int8", "compressed-tensors"
+    ]
 
     additional_env_vars: list[str] = [
         "TPU_CHIPS_PER_HOST_BOUNDS", "TPU_HOST_BOUNDS"
@@ -44,8 +48,8 @@ class TpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend: _Backend, head_size: int,
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
-                             block_size: int, use_v1: bool,
-                             use_mla: bool) -> str:
+                             block_size: int, use_v1: bool, use_mla: bool,
+                             has_sink) -> str:
         if (selected_backend != _Backend.PALLAS
                 and selected_backend != _Backend.PALLAS_VLLM_V1):
             logger.info("Cannot use %s backend on TPU.", selected_backend)
@@ -97,7 +101,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        from vllm.config import CompilationLevel
+        from vllm.config import CompilationLevel, CUDAGraphMode
 
         cache_config = vllm_config.cache_config
         # For v0, the default block size is 16.
@@ -107,8 +111,16 @@ class TpuPlatform(Platform):
 
         # TPU only supports DYNAMO_ONCE compilation level
         if compilation_config.level != CompilationLevel.DYNAMO_ONCE:
-            logger.info("[TPU] Forcing DYNAMO_ONCE compilation level")
+            logger.info("[TPU] Forcing DYNAMO_ONCE compilation level, and "
+                        "disabling cudagraph.")
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
+
+        if compilation_config.cudagraph_mode is None or \
+                compilation_config.cudagraph_mode.max_cudagraph_mode() \
+                    != CUDAGraphMode.NONE:
+            logger.info("[TPU] CUDA graph is not supported on TPU, "
+                        "disabling cudagraphs.")
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
@@ -131,18 +143,13 @@ class TpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
-            if scheduler_config.is_multi_step:
-                raise NotImplementedError(
-                    "Multi-step scheduling is not supported (and not "
-                    "needed) on vLLM V1. Please launch without "
-                    "--num-scheduler-steps.")
             parallel_config.worker_cls = "vllm.v1.worker.tpu_worker.TPUWorker"
 
         assert not vllm_config.speculative_config, (
             "Speculative decoding is not yet supported for TPU backend")
 
         if scheduler_config.is_multimodal_model and not \
-            scheduler_config.disable_chunked_mm_input:
+                scheduler_config.disable_chunked_mm_input:
             logger.warning("TPU does not support running Multimodal models"\
             " without setting `--disable_chunked_mm_input`. " \
             "Forcing --disable_chunked_mm_input.")
@@ -188,10 +195,16 @@ class TpuPlatform(Platform):
                 and params.sampling_type == SamplingType.RANDOM_SEED):
             raise ValueError("Torch XLA does not support per-request seed.")
 
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
+        return True
+
 
 try:
     from tpu_commons.platforms import TpuPlatform as TpuCommonsPlatform
     TpuPlatform = TpuCommonsPlatform  # type: ignore
+    USE_TPU_COMMONS = True
 except ImportError:
     logger.info("tpu_commons not found, using vLLM's TpuPlatform")
     pass

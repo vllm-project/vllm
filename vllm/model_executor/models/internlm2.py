@@ -3,6 +3,7 @@
 
 from collections.abc import Iterable
 from functools import partial
+from itertools import islice
 from typing import Any, Optional, Union
 
 import torch
@@ -22,7 +23,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
+from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -32,6 +33,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces_base import default_pooling_type
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -296,7 +298,7 @@ class InternLM2Model(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in self.layers[self.start_layer:self.end_layer]:
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -401,6 +403,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         return loaded_params
 
 
+@default_pooling_type("ALL")
 class InternLM2ForRewardModel(InternLM2ForCausalLM):
 
     is_pooling_model = True
@@ -429,12 +432,10 @@ class InternLM2ForRewardModel(InternLM2ForCausalLM):
         )
 
         pooler_config = vllm_config.model_config.pooler_config
-        self.pooler = Pooler.from_config_with_defaults(
-            pooler_config,
-            pooling_type=PoolingType.ALL,
-            normalize=False,
-            softmax=False,
-        )
+        assert pooler_config is not None
+
+        self.pooler = DispatchPooler(
+            {"encode": Pooler.for_encode(pooler_config)}, )
 
     def forward(
         self,

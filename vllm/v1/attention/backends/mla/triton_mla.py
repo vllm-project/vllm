@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, Optional
+from typing import Optional
 
 import torch
 
 from vllm import envs
-from vllm.attention.backends.abstract import (AttentionType,
+from vllm.attention.backends.abstract import (AttentionLayer, AttentionType,
                                               is_quantized_kv_cache)
 from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.attention.ops.triton_flash_attention import triton_attention
@@ -42,7 +42,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             alibi_slopes: Optional[list[float]],
             sliding_window: Optional[int],
             kv_cache_dtype: str,
-            blocksparse_params: Optional[dict[str, Any]],
             logits_soft_cap: Optional[float],
             attn_type: str,
             kv_sharing_target_layer_name: Optional[str],
@@ -50,17 +49,14 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             **mla_args) -> None:
         super().__init__(num_heads, head_size, scale, num_kv_heads,
                          alibi_slopes, sliding_window, kv_cache_dtype,
-                         blocksparse_params, logits_soft_cap, attn_type,
+                         logits_soft_cap, attn_type,
                          kv_sharing_target_layer_name, **mla_args)
 
-        unsupported_features = [
-            alibi_slopes, sliding_window, blocksparse_params, logits_soft_cap
-        ]
+        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
         if any(unsupported_features):
             raise NotImplementedError(
                 "TritonMLAImpl does not support one of the following: "
-                "alibi_slopes, sliding_window, blocksparse_params, "
-                "logits_soft_cap")
+                "alibi_slopes, sliding_window, logits_soft_cap")
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
@@ -131,6 +127,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
+        layer: AttentionLayer,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None

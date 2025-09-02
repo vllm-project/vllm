@@ -14,6 +14,7 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+from .inductor_pass import enable_fake_mode
 from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
@@ -436,6 +437,7 @@ class SequenceParallelismPass(VllmInductorPass):
     performance.
     """
 
+    @enable_fake_mode
     def __init__(self, config: VllmConfig):
         super().__init__(config)
 
@@ -477,6 +479,6 @@ class SequenceParallelismPass(VllmInductorPass):
         self.begin()
         self.dump_graph(graph, "before_sequence_parallelism_pass")
         count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns", count)
+        logger.debug("Replaced %s patterns with sequence parallelism", count)
         self.dump_graph(graph, "after_sequence_parallelism_pass")
         self.end_and_log()

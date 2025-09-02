@@ -4,13 +4,11 @@ import multiprocessing
 import os
 import pickle
 import signal
-import sys
 import threading
 import time
 import traceback
 import weakref
-from collections import defaultdict
-from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import partial
@@ -27,19 +25,23 @@ from vllm.distributed import (destroy_distributed_environment,
                               destroy_model_parallel)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.executor.multiproc_worker_utils import (
-    _add_prefix, set_multiprocessing_worker_envs)
+    set_multiprocessing_worker_envs)
 from vllm.logger import init_logger
-from vllm.utils import (get_distributed_init_method, get_loopback_ip,
-                        get_mp_context, get_open_port)
+from vllm.utils import (decorate_logs, get_distributed_init_method,
+                        get_loopback_ip, get_mp_context, get_open_port,
+                        set_process_title)
 from vllm.v1.executor.abstract import Executor, FailureCallback
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
 
 class MultiprocExecutor(Executor):
+
+    supports_pp: bool = True
 
     def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
@@ -104,8 +106,12 @@ class MultiprocExecutor(Executor):
         finally:
             if not success:
                 # Clean up the worker procs if there was a failure.
+                # Close death_writers first to signal workers to exit
+                for uw in unready_workers:
+                    if uw.death_writer is not None:
+                        uw.death_writer.close()
                 self._ensure_worker_termination(
-                    [w.proc for w in unready_workers])
+                    [uw.proc for uw in unready_workers])
 
         # For pipeline parallel, we use a thread pool for asynchronous
         # execute_model.
@@ -118,13 +124,8 @@ class MultiprocExecutor(Executor):
 
         self.output_rank = self._get_output_rank()
         self.has_connector = self.vllm_config.kv_transfer_config is not None
-
-        # Complete transfer tracker. Used by to track finished requests
-        # [req_id -> n_finished_workers]
-        self._recv_remaining_count = defaultdict[str,
-                                                 int](lambda: self.world_size)
-        self._send_remaining_count = defaultdict[str,
-                                                 int](lambda: self.world_size)
+        self.kv_output_aggregator = KVOutputAggregator(
+            self.parallel_config.world_size)
 
     def start_worker_monitor(self):
         workers = self.workers
@@ -186,8 +187,19 @@ class MultiprocExecutor(Executor):
 
         # aggregate all workers output to a single output
         if non_block:
-            return self._async_aggregate_workers_output(outputs)
-        return self._aggregate_workers_output(outputs)
+            return self.kv_output_aggregator.async_aggregate(
+                outputs, self.output_rank)
+        return self.kv_output_aggregator.aggregate(outputs, self.output_rank)
+
+    def execute_dummy_batch(self) -> None:
+        self.collective_rpc("execute_dummy_batch",
+                            unique_reply_rank=self.output_rank)
+
+    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+        # OPTIMIZATION: Get output only from a single worker (output_rank)
+        outputs = self.collective_rpc("take_draft_token_ids",
+                                      unique_reply_rank=self.output_rank)
+        return outputs[0]
 
     def collective_rpc(self,
                        method: Union[str, Callable],
@@ -234,85 +246,22 @@ class MultiprocExecutor(Executor):
                 dequeue_timeout = None if deadline is None else (
                     deadline - time.monotonic())
 
-                if non_block:
+                if self.io_thread_pool is not None:
+                    # We must consume worker_response_mq from a single thread.
                     result = self.io_thread_pool.submit(  # type: ignore
                         get_response, w, dequeue_timeout, self.shutdown_event)
-                else:
+                    if not non_block:
+                        result = result.result()
+                elif not non_block:
                     result = get_response(w, dequeue_timeout)
-
+                else:
+                    raise RuntimeError("non_block can only be used when"
+                                       " max_concurrent_batches > 1")
                 responses.append(result)
 
             return responses
         except TimeoutError as e:
             raise TimeoutError(f"RPC call to {method} timed out.") from e
-
-    def _aggregate_workers_output(
-            self, outputs: list[ModelRunnerOutput]) -> ModelRunnerOutput:
-        # aggregate finished_sending, finished_recving from all workers
-
-        def update_finished_set(req_ids: Optional[set[str]],
-                                remaining_count_dict: dict[str, int],
-                                finished_set: set[str]) -> None:
-            for req_id in req_ids or ():
-                new_count = remaining_count_dict[req_id] - 1
-                if new_count == 0:
-                    finished_set.add(req_id)
-                    del remaining_count_dict[req_id]
-                else:
-                    remaining_count_dict[req_id] = new_count
-
-        finished_sending = set[str]()
-        finished_recving = set[str]()
-        for output in outputs:
-            update_finished_set(output.finished_sending,
-                                self._send_remaining_count, finished_sending)
-            update_finished_set(output.finished_recving,
-                                self._recv_remaining_count, finished_recving)
-
-        # select output of the worker specified by output_rank
-        output = outputs[self.output_rank]
-
-        # set the aggregated finished_sending / finished_recving
-        output.finished_sending = finished_sending if finished_sending else None
-        output.finished_recving = finished_recving if finished_recving else None
-
-        return output
-
-    def _async_aggregate_workers_output(
-        self, output_futures: list[Future[ModelRunnerOutput]]
-    ) -> (Future[ModelRunnerOutput]):
-        """Takes a list of futures and returns a single future which resolves
-        to the respective list of outputs."""
-        result_future: Future[ModelRunnerOutput] = Future()
-
-        outputs: list[Optional[ModelRunnerOutput]] = [None
-                                                      ] * len(output_futures)
-
-        def make_callback(idx):
-
-            def callback(fut):
-                if result_future.done():
-                    return
-
-                try:
-                    outputs[idx] = fut.result()
-                except CancelledError:
-                    result_future.cancel()
-                except Exception as e:
-                    result_future.set_exception(e)
-
-                # this check assumes io_thread_pool uses a single thread
-                if all(outputs):
-                    result_future.set_result(
-                        self._aggregate_workers_output(
-                            cast(list[ModelRunnerOutput], outputs)))
-
-            return callback
-
-        for i, output_future in enumerate(output_futures):
-            output_future.add_done_callback(make_callback(i))
-
-        return result_future
 
     @staticmethod
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):
@@ -354,6 +303,10 @@ class MultiprocExecutor(Executor):
 
             if workers := getattr(self, 'workers', None):
                 for w in workers:
+                    # Close death_writer to signal child processes to exit
+                    if w.death_writer is not None:
+                        w.death_writer.close()
+                        w.death_writer = None
                     w.worker_response_mq = None
                 self._ensure_worker_termination([w.proc for w in workers])
 
@@ -388,6 +341,7 @@ class UnreadyWorkerProcHandle:
     proc: BaseProcess
     rank: int
     ready_pipe: Connection
+    death_writer: Optional[Connection] = None
 
 
 @dataclass
@@ -395,6 +349,7 @@ class WorkerProcHandle:
     proc: BaseProcess
     rank: int
     worker_response_mq: MessageQueue  # The worker process writes to this MQ
+    death_writer: Optional[Connection] = None
 
     @classmethod
     def from_unready_handle(
@@ -404,6 +359,7 @@ class WorkerProcHandle:
             proc=unready_handle.proc,
             rank=unready_handle.rank,
             worker_response_mq=worker_response_mq,
+            death_writer=unready_handle.death_writer,
         )
 
 
@@ -438,9 +394,16 @@ class WorkerProc:
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
 
-        pid = os.getpid()
-        _add_prefix(sys.stdout, f"VllmWorker rank={rank}", pid)
-        _add_prefix(sys.stderr, f"VllmWorker rank={rank}", pid)
+        pp_size = vllm_config.parallel_config.pipeline_parallel_size
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+        pp_str = f"PP{rank // tp_size}" if pp_size > 1 else ""
+        tp_str = f"TP{rank % tp_size}" if tp_size > 1 else ""
+        suffix = f"{pp_str}{'_' if pp_str and tp_str else ''}{tp_str}"
+        process_name = "VllmWorker"
+        if suffix:
+            set_process_title(suffix, append=True)
+            process_name = f"{process_name} {suffix}"
+        decorate_logs(process_name)
 
         # Initialize MessageQueue for receiving SchedulerOutput
         self.rpc_broadcast_mq = MessageQueue.create_from_handle(
@@ -465,6 +428,9 @@ class WorkerProc:
         # (reader, writer)
         reader, writer = context.Pipe(duplex=False)
 
+        # Create death pipe to detect parent process exit
+        death_reader, death_writer = context.Pipe(duplex=False)
+
         process_kwargs = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
@@ -472,6 +438,7 @@ class WorkerProc:
             "distributed_init_method": distributed_init_method,
             "input_shm_handle": input_shm_handle,
             "ready_pipe": (reader, writer),
+            "death_pipe": death_reader,
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=WorkerProc.worker_main,
@@ -481,7 +448,9 @@ class WorkerProc:
 
         proc.start()
         writer.close()
-        return UnreadyWorkerProcHandle(proc, rank, reader)
+        # Keep death_writer open in parent - when parent exits,
+        # death_reader in child will get EOFError
+        return UnreadyWorkerProcHandle(proc, rank, reader, death_writer)
 
     @staticmethod
     def wait_for_ready(
@@ -552,6 +521,28 @@ class WorkerProc:
         worker = None
         # tuple[Connection, Connection]
         reader, ready_writer = kwargs.pop("ready_pipe")
+        death_pipe = kwargs.pop("death_pipe", None)
+
+        # Start death monitoring thread if death_pipe is provided
+        if death_pipe is not None:
+
+            def monitor_parent_death():
+                try:
+                    # This will block until parent process exits (pipe closes)
+                    death_pipe.recv()
+                except EOFError:
+                    # Parent process has exited, terminate this worker
+                    logger.info("Parent process exited, terminating worker")
+                    # Send signal to self to trigger clean shutdown
+                    os.kill(os.getpid(), signal.SIGTERM)
+                except Exception as e:
+                    logger.warning("Death monitoring error: %s", e)
+
+            death_monitor = Thread(target=monitor_parent_death,
+                                   daemon=True,
+                                   name="WorkerDeathMonitor")
+            death_monitor.start()
+
         try:
             reader.close()
             worker = WorkerProc(*args, **kwargs)
@@ -592,6 +583,8 @@ class WorkerProc:
         finally:
             if ready_writer is not None:
                 ready_writer.close()
+            if death_pipe is not None:
+                death_pipe.close()
             # Clean up once worker exits busy loop
             if worker is not None:
                 worker.shutdown()

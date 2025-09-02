@@ -3,6 +3,7 @@
 """A GPU worker class."""
 import gc
 import os
+from contextlib import nullcontext
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
@@ -22,7 +23,6 @@ from vllm.model_executor import set_random_seed
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.platforms import current_platform
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
 from vllm.utils import (GiB_bytes, MemorySnapshot, bind_kv_cache,
@@ -30,7 +30,6 @@ from vllm.utils import (GiB_bytes, MemorySnapshot, bind_kv_cache,
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
-from vllm.worker.pooling_model_runner import PoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
@@ -77,13 +76,13 @@ class Worker(LocalOrDistributedWorkerBase):
                         "mlp_speculator",
                         "eagle",
                         "deepseek_mtp",
-                         "mimo_mtp")) \
+                        "glm4_moe_mtp",
+                        "mimo_mtp",
+                        "ernie_mtp")) \
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
-        if model_config.runner_type == "pooling":
-            ModelRunnerClass = PoolingModelRunner
-        elif self.model_config.is_encoder_decoder:
+        if self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
         self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
             vllm_config=self.vllm_config,
@@ -97,7 +96,6 @@ class Worker(LocalOrDistributedWorkerBase):
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CacheEngine]
-        # Initialize gpu_cache as pooling models don't initialize kv_caches
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
         self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
 
@@ -205,7 +203,6 @@ class Worker(LocalOrDistributedWorkerBase):
                 "used for one instance per process.")
             context = allocator.use_memory_pool(tag="weights")
         else:
-            from contextlib import nullcontext
             context = nullcontext()
         with context:
             self.model_runner.load_model()
@@ -329,7 +326,6 @@ class Worker(LocalOrDistributedWorkerBase):
             allocator = CuMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
         else:
-            from contextlib import nullcontext
             context = nullcontext()
         with context:
             self._init_cache_engine()
@@ -511,19 +507,6 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
-
-    def add_prompt_adapter(
-            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        return self.model_runner.add_prompt_adapter(prompt_adapter_request)
-
-    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        return self.model_runner.remove_lora(prompt_adapter_id)
-
-    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        return self.model_runner.pin_prompt_adapter(prompt_adapter_id)
-
-    def list_prompt_adapters(self) -> Set[int]:
-        return self.model_runner.list_prompt_adapters()
 
     @property
     def max_model_len(self) -> int:

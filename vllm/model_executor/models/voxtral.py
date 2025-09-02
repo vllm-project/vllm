@@ -5,7 +5,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from math import ceil
-from typing import Optional, Union, cast
+from typing import Literal, Optional, Union, cast
 
 import numpy as np
 import regex as re
@@ -17,7 +17,7 @@ from mistral_common.protocol.instruct.messages import (AudioChunk, RawAudio,
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.protocol.transcription.request import TranscriptionRequest
 from mistral_common.tokens.tokenizers.audio import Audio, AudioEncoder
-from transformers import TensorType, WhisperConfig
+from transformers import BatchFeature, TensorType, WhisperConfig
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
@@ -26,17 +26,17 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import SupportsPP
 # yapf: disable
-from vllm.model_executor.models.whisper import (
-    WhisperEncoder, WhisperForConditionalGeneration)
+from vllm.model_executor.models.whisper import WhisperEncoder
 # yapf: enable
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
                                    MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, MultiModalHashes,
+                                        BaseProcessingInfo,
+                                        MultiModalProcessingInfo,
                                         PromptReplacement, PromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.sequence import IntermediateTensors
@@ -49,6 +49,18 @@ from .utils import (flatten_bn, init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
+
+ISO639_1_SUPPORTED_LANGS = {
+    "ar": "Arabic",
+    "nl": "Dutch",
+    "en": "English",
+    "fr": "French",
+    "de": "German",
+    "hi": "Hindi",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "es": "Spanish",
+}
 
 
 class VoxtralProcessorAdapter:
@@ -144,10 +156,12 @@ class VoxtralProcessorAdapter:
             audios_tokens.append(torch.tensor(audio_tokens))
             audios_processed.append(torch.tensor(audio))
 
-        return {
-            "input_ids": torch.cat(audios_tokens)[None].expand(len(text), -1),
-            "audio_arrays": audios_processed,
-        }
+        return BatchFeature({
+            "input_ids":
+            torch.cat(audios_tokens)[None].expand(len(text), -1),
+            "audio_arrays":
+            audios_processed,
+        })
 
 
 class VoxtralProcessingInfo(BaseProcessingInfo):
@@ -248,7 +262,7 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
@@ -276,20 +290,18 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]
         mm_data_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        *,
-        return_mm_hashes: bool,
-    ) -> tuple[list[int], MultiModalKwargs, Optional[MultiModalHashes], bool]:
-        prompt_ids, mm_kwargs, mm_hashes, _ = super(
-        )._cached_apply_hf_processor(
+        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
+    ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
+        prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            return_mm_hashes=return_mm_hashes,
+            mm_hash_overrides=mm_hash_overrides,
         )
 
         # NOTE: The tokens are already inserted by the chat template
-        return prompt_ids, mm_kwargs, mm_hashes, True
+        return prompt_ids, mm_info, True
 
     def _get_data_parser(self) -> MultiModalDataParser:
         sampling_rate = self.info.get_hf_processor().sampling_rate
@@ -301,6 +313,7 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]
                                         dummy_inputs=VoxtralDummyInputsBuilder)
 class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                                       SupportsPP, SupportsTranscription):
+    supported_languages = ISO639_1_SUPPORTED_LANGS
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -441,9 +454,11 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     # for speech-to-text transcription
     def get_generation_prompt(cls, audio: np.ndarray,
                               model_config: ModelConfig,
-                              stt_config: SpeechToTextConfig, language: str,
-                              task_type: str,
-                              request_prompt: str) -> PromptType:
+                              stt_config: SpeechToTextConfig,
+                              language: Optional[str],
+                              task_type: Literal["transcribe", "translate"],
+                              request_prompt: str,
+                              to_language: Optional[str]) -> PromptType:
         tokenizer = cached_tokenizer_from_config(model_config)
         audio = Audio(audio, int(stt_config.sample_rate),
                       format="wav")  # lossless
@@ -456,11 +471,6 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         prompts_dict = {"multi_modal_data": {"audio": audio}}
         prompts_dict["prompt_token_ids"] = tokenized.tokens
         return cast(PromptType, prompts_dict)
-
-    @classmethod
-    def validate_language(cls, language: str) -> bool:
-        # same as whisper
-        return WhisperForConditionalGeneration.validate_language(language)
 
     @classmethod
     def get_num_audio_tokens(cls, audio_duration_s: float,
