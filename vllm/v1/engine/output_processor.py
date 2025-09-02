@@ -506,9 +506,11 @@ class OutputProcessor:
                 inference_time)
 
             # meta
-            span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, req_state.request_id)
+            span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID,
+                               req_state.request_id)
             if req_state.top_p:
-                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TOP_P, req_state.top_p)
+                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TOP_P,
+                                   req_state.top_p)
             if req_state.max_tokens_param:
                 span.set_attribute(SpanAttributes.GEN_AI_REQUEST_MAX_TOKENS,
                                    req_state.max_tokens_param)
@@ -516,7 +518,8 @@ class OutputProcessor:
                 span.set_attribute(SpanAttributes.GEN_AI_REQUEST_TEMPERATURE,
                                    req_state.temperature)
             if req_state.n:
-                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N, req_state.n)
+                span.set_attribute(SpanAttributes.GEN_AI_REQUEST_N,
+                                   req_state.n)
 
     def _update_stats_from_output(self, req_state: RequestState,
                                   engine_core_output: EngineCoreOutput,
