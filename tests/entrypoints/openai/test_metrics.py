@@ -250,12 +250,15 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_params_max_tokens_sum",
     "vllm:request_params_max_tokens_bucket",
     "vllm:request_params_max_tokens_count",
-    "vllm:time_to_first_token_seconds_sum",
-    "vllm:time_to_first_token_seconds_bucket",
-    "vllm:time_to_first_token_seconds_count",
     "vllm:time_per_output_token_seconds_sum",
     "vllm:time_per_output_token_seconds_bucket",
     "vllm:time_per_output_token_seconds_count",
+    "vllm:time_to_first_token_seconds_sum",
+    "vllm:time_to_first_token_seconds_bucket",
+    "vllm:time_to_first_token_seconds_count",
+    "vllm:inter_token_latency_seconds_sum",
+    "vllm:inter_token_latency_seconds_bucket",
+    "vllm:inter_token_latency_seconds_count",
     "vllm:e2e_request_latency_seconds_sum",
     "vllm:e2e_request_latency_seconds_bucket",
     "vllm:e2e_request_latency_seconds_count",
@@ -273,7 +276,11 @@ EXPECTED_METRICS_V1 = [
     "vllm:request_decode_time_seconds_count",
 ]
 
-HIDDEN_DEPRECATED_METRICS: list[str] = []
+HIDDEN_DEPRECATED_METRICS: list[str] = [
+    "vllm:time_per_output_token_seconds_sum",
+    "vllm:time_per_output_token_seconds_bucket",
+    "vllm:time_per_output_token_seconds_count",
+]
 
 
 @pytest.mark.asyncio
@@ -289,9 +296,10 @@ async def test_metrics_exist(server: RemoteOpenAIServer,
     assert response.status_code == HTTPStatus.OK
 
     for metric in (EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS):
-        if (not server.show_hidden_metrics
-                and metric not in HIDDEN_DEPRECATED_METRICS):
-            assert metric in response.text
+        if (metric in HIDDEN_DEPRECATED_METRICS
+                and not server.show_hidden_metrics):
+            continue
+        assert metric in response.text
 
 
 @pytest.mark.asyncio

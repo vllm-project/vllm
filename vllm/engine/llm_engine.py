@@ -1414,7 +1414,7 @@ class LLMEngine:
         num_generation_tokens_iter = 0
         num_tokens_iter = 0
         time_to_first_tokens_iter: List[float] = []
-        time_per_output_tokens_iter: List[float] = []
+        inter_token_latencies_iter: List[float] = []
         num_preemption_iter = (0 if scheduler_outputs is None else
                                scheduler_outputs.preempted)
 
@@ -1498,9 +1498,9 @@ class LLMEngine:
                         num_generation_tokens_from_prefill_groups += (
                             seq_group.num_seqs())
                 else:
-                    # TPOTs.
+                    # ITLs
                     latency = seq_group.get_last_token_latency()
-                    time_per_output_tokens_iter.append(latency)
+                    inter_token_latencies_iter.append(latency)
                     if seq_group.state.current_step == 0:
                         # For async_output_proc, the do_log_stats()
                         # is called following init_multi_step(), which
@@ -1582,7 +1582,7 @@ class LLMEngine:
             num_generation_tokens_iter=num_generation_tokens_iter,
             num_tokens_iter=num_tokens_iter,
             time_to_first_tokens_iter=time_to_first_tokens_iter,
-            time_per_output_tokens_iter=time_per_output_tokens_iter,
+            inter_token_latencies_iter=inter_token_latencies_iter,
             num_preemption_iter=num_preemption_iter,
 
             # Request stats
