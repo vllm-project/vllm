@@ -205,8 +205,7 @@ void silu_and_mul_nvfp4_quant_sm1xxa(torch::Tensor& output,  // [..., d]
         using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
         auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
         vllm::silu_and_cvt_fp16_to_fp4<cuda_type><<<grid, block, 0, stream>>>(
-            m, n, input_ptr, input_sf_ptr,
-            static_cast<uint32_t*>(output_ptr),
+            m, n, input_ptr, input_sf_ptr, static_cast<uint32_t*>(output_ptr),
             static_cast<uint32_t*>(sf_out));
       });
 }
