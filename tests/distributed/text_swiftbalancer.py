@@ -35,6 +35,7 @@ def test_rebalance():
     num_rank = 4
 
     policy = SwiftBalancer()
+
     phy2log, log2phy, logcnt = policy.rebalance_experts(
         weight, num_replicas, num_groups, num_nodes,
         num_rank, old_global_expert_indices)
