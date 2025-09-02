@@ -201,17 +201,18 @@ In some container environments (like Docker), NUMA-related syscalls used by vLLM
 
 To enable these optimizations inside Docker with the least privilege, you can follow below tips:
 
-    ```bash
-    docker run ... --cap-add SYS_NICE --security-opt seccomp=unconfined  ...
+```bash
+docker run ... --cap-add SYS_NICE --security-opt seccomp=unconfined  ...
 
-    # 1) `--cap-add SYS_NICE` is to address `get_mempolicy` EPERM issue.
+# 1) `--cap-add SYS_NICE` is to address `get_mempolicy` EPERM issue.
 
-    # 2) `--security-opt seccomp=unconfined` is to enable `migrate_pages` for `numa_migrate_pages()`.
-    # Actually, `seccomp=unconfined` bypasses the seccomp for container,
-    # if it's unacceptable, you can customize your own seccomp profile,
-    # based on docker/runtime default.json and add `migrate_pages` to `SCMP_ACT_ALLOW` list.
+# 2) `--security-opt seccomp=unconfined` is to enable `migrate_pages` for `numa_migrate_pages()`.
+# Actually, `seccomp=unconfined` bypasses the seccomp for container,
+# if it's unacceptable, you can customize your own seccomp profile,
+# based on docker/runtime default.json and add `migrate_pages` to `SCMP_ACT_ALLOW` list.
 
-    # reference : https://docs.docker.com/engine/security/seccomp/
+# reference : https://docs.docker.com/engine/security/seccomp/
+```
 
 Alternatively, running with `--privileged=true` also works but is broader and not generally recommended.
 
