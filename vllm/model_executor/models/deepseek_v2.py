@@ -152,6 +152,7 @@ class DeepseekV2MoE(nn.Module):
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
 
+        # FIXME - only if we're using EP.
         self.is_sequence_parallel = True
 
         if config.hidden_act != "silu":
@@ -200,7 +201,9 @@ class DeepseekV2MoE(nn.Module):
             scoring_func=config.scoring_func,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.n_redundant_experts)
+            num_redundant_experts=self.n_redundant_experts,
+            is_sequence_parallel=self.is_sequence_parallel,
+        )
 
         if config.n_shared_experts is not None:
             intermediate_size = (config.moe_intermediate_size *
