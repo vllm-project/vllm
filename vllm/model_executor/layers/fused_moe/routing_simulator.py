@@ -50,7 +50,9 @@ class DistributionBasedRouting(RoutingStrategy):
     distributions for testing different routing patterns.
     """
 
-    def __init__(self, distribution: str = "uniform", **distribution_params):
+    def __init__(self,
+                 distribution: str = "uniform",
+                 **distribution_params: dict):
         """
         Initialize distribution-based routing.
 
@@ -244,7 +246,7 @@ class RoutingSimulator:
         cls._routing_strategies[name] = strategy
 
     @classmethod
-    def get_available_strategies(cls):
+    def get_available_strategies(cls) -> list[str]:
         """
         Get list of available routing strategy names.
 
