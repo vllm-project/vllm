@@ -1,7 +1,4 @@
----
-title: Dify
----
-[](){ #deployment-dify }
+# Dify
 
 [Dify](https://github.com/langgenius/dify) is an open-source LLM app development platform. Its intuitive interface combines agentic AI workflow, RAG pipeline, agent capabilities, model management, observability features, and more, allowing you to quickly move from prototype to production.
 
@@ -37,11 +34,11 @@ docker compose up -d
 - In the top-right user menu (under the profile icon), go to Settings, then click `Model Provider`, and locate the `vLLM` provider to install it.
 
 - Fill in the model provider details as follows:
-  - **Model Type**: `LLM`
-  - **Model Name**: `Qwen/Qwen1.5-7B-Chat`
-  - **API Endpoint URL**: `http://{vllm_server_host}:{vllm_server_port}/v1`
-  - **Model Name for API Endpoint**: `Qwen/Qwen1.5-7B-Chat`
-  - **Completion Mode**: `Completion`
+    - **Model Type**: `LLM`
+    - **Model Name**: `Qwen/Qwen1.5-7B-Chat`
+    - **API Endpoint URL**: `http://{vllm_server_host}:{vllm_server_port}/v1`
+    - **Model Name for API Endpoint**: `Qwen/Qwen1.5-7B-Chat`
+    - **Completion Mode**: `Completion`
 
 ![](../../assets/deployment/dify-settings.png)
 

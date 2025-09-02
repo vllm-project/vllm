@@ -1,7 +1,4 @@
----
-title: Benchmark Suites
----
-[](){ #benchmarks }
+# Benchmark Suites
 
 vLLM contains two sets of benchmarks:
 
@@ -14,7 +11,7 @@ vLLM contains two sets of benchmarks:
 
 The performance benchmarks are used for development to confirm whether new changes improve performance under various workloads. They are triggered on every commit with both the `perf-benchmarks` and `ready` labels, and when a PR is merged into vLLM.
 
-The latest performance results are hosted on the public [vLLM Performance Dashboard](https://perf.vllm.ai).
+The latest performance results are hosted on the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
 More information on the performance benchmarks and their parameters can be found [here](gh-file:.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
 

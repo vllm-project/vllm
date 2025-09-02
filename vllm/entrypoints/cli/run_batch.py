@@ -60,7 +60,7 @@ class RunBatchSubcommand(CLISubcommand):
         )
         run_batch_parser = make_arg_parser(run_batch_parser)
         show_filtered_argument_or_group_from_help(run_batch_parser,
-                                                  "run-batch")
+                                                  ["run-batch"])
         run_batch_parser.epilog = VLLM_SUBCMD_PARSER_EPILOG
         return run_batch_parser
 

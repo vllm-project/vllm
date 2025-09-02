@@ -3,16 +3,10 @@
 import filecmp
 import shutil
 import tempfile
-from collections import defaultdict
 from pathlib import Path
 
 from vllm import LLM, SamplingParams
-from vllm.config import KVTransferConfig, VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.factory import (
-    KVConnectorFactory)
-from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa
-    SharedStorageConnector)
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.config import KVTransferConfig
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
@@ -23,62 +17,6 @@ PROMPTS = [
 ]
 
 SAMPLING_PARAMS = SamplingParams(temperature=0, max_tokens=20)
-
-
-class TestSharedStorageConnector(SharedStorageConnector):
-
-    def __init__(self, config: VllmConfig, role):
-        self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
-        self._connector = SharedStorageConnector(config, role)
-        self.call_record: dict[str, int] = defaultdict(int)
-        # Use a unique temp file per connector
-        self._event_file = tempfile.gettempdir(
-        ) + f"/connector_{self.name}-{self.role.name}_events.log"
-        # Start with an empty file
-        with open(self._event_file, "w") as _:
-            pass
-
-    def __getattribute__(self, name):
-        if name in ("_connector", "call_record", "name", "_event_file",
-                    "__class__", "__dict__", "__getattribute__",
-                    "__init__"):  # avoid recursion
-            return object.__getattribute__(self, name)
-        if not hasattr(self._connector, name):
-            return object.__getattribute__(self, name)
-        attr = getattr(self._connector, name)
-
-        # Intercept calls to the connector interface and write an event
-        # for each one to a file, which can be read back in the main test proc.
-        if callable(attr):
-
-            def wrapper(*args, **kwargs):
-                self.call_record[name] += 1
-
-                # Include args that we're interested in
-                to_log = [name]
-                for arg in args:
-                    if isinstance(arg, int):
-                        to_log.append(str(arg))
-                    elif isinstance(arg, KVCacheBlocks):
-                        to_log.append(
-                            f"num_blocks={[len(b) for b in arg.blocks]}")
-
-                # Log the event as a line to the file
-                try:
-                    with open(self._event_file, "a") as f:
-                        f.write(' '.join(to_log) + "\n")
-                except Exception as e:
-                    print(f"[ERROR] Could not log event {name} "
-                          f"for {self.name}: {e}")
-                return attr(*args, **kwargs)
-
-            return wrapper
-        return attr
-
-
-KVConnectorFactory.register_connector("TestSharedStorageConnector",
-                                      TestSharedStorageConnector.__module__,
-                                      TestSharedStorageConnector.__name__)
 
 
 # Helper function to compare directories recursively
@@ -115,19 +53,27 @@ def test_multi_shared_storage_connector_consistency():
         kv_role="kv_both",
         kv_connector_extra_config={
             "connectors": [{
-                "kv_connector": "TestSharedStorageConnector",
-                "kv_role": "kv_both",
+                "kv_connector":
+                "TestSharedStorageConnector",
+                "kv_role":
+                "kv_both",
                 "kv_connector_extra_config": {
                     "shared_storage_path": str(storage_1_path),
                     "name": "storage1",
-                }
+                },
+                "kv_connector_module_path":
+                "tests.v1.kv_connector.unit.utils",
             }, {
-                "kv_connector": "TestSharedStorageConnector",
-                "kv_role": "kv_both",
+                "kv_connector":
+                "TestSharedStorageConnector",
+                "kv_role":
+                "kv_both",
                 "kv_connector_extra_config": {
                     "shared_storage_path": str(storage_2_path),
                     "name": "storage2",
-                }
+                },
+                "kv_connector_module_path":
+                "tests.v1.kv_connector.unit.utils",
             }]
         },
     )

@@ -14,7 +14,7 @@ PROMPT = "Hello my name is Robert and I"
 
 
 @pytest.fixture(scope="module")
-def model() -> LLM:
+def llm() -> LLM:
     return LLM(MODEL,
                enforce_eager=True,
                enable_prefix_caching=True,
@@ -24,16 +24,16 @@ def model() -> LLM:
                block_size=16)
 
 
-def test_concurrent_partial_prefill(model):
-    outputs = model.generate([PROMPT] * 3)
+def test_concurrent_partial_prefill(llm):
+    outputs = llm.generate([PROMPT] * 3)
     assert len(outputs) == 3
     for output in outputs:
         assert len(output.outputs) == 1
 
 
-def test_prefix_cache_stats_is_recorded(model):
+def test_prefix_cache_stats_is_recorded(llm):
     # 17 tokens will make sure first 16 tokens are cached in a block
     input_tokens = {"prompt_token_ids": [101] * 17}
-    _ = model.generate([input_tokens])
-    outputs = model.generate([input_tokens])
+    _ = llm.generate([input_tokens])
+    outputs = llm.generate([input_tokens])
     assert outputs[0].num_cached_tokens == 16

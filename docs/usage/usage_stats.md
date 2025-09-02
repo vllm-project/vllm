@@ -10,7 +10,7 @@ The list of data collected by the latest version of vLLM can be found here: <gh-
 
 Here is an example as of v0.4.0:
 
-??? Output
+??? console "Output"
 
     ```json
     {
@@ -51,7 +51,7 @@ tail ~/.config/vllm/usage_stats.json
 
 ## Opting out
 
-You can opt-out of usage stats collection by setting the `VLLM_NO_USAGE_STATS` or `DO_NOT_TRACK` environment variable, or by creating a `~/.config/vllm/do_not_track` file:
+You can opt out of usage stats collection by setting the `VLLM_NO_USAGE_STATS` or `DO_NOT_TRACK` environment variable, or by creating a `~/.config/vllm/do_not_track` file:
 
 ```bash
 # Any of the following methods can disable usage stats collection

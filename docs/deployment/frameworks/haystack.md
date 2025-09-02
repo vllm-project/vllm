@@ -1,8 +1,3 @@
----
-title: Haystack
----
-[](){ #deployment-haystack }
-
 # Haystack
 
 [Haystack](https://github.com/deepset-ai/haystack) is an end-to-end LLM framework that allows you to build applications powered by LLMs, Transformer models, vector search and more. Whether you want to perform retrieval-augmented generation (RAG), document search, question answering or answer generation, Haystack can orchestrate state-of-the-art embedding models and LLMs into pipelines to build end-to-end NLP applications and solve your use case.
@@ -27,7 +22,7 @@ vllm serve mistralai/Mistral-7B-Instruct-v0.1
 
 - Use the `OpenAIGenerator` and `OpenAIChatGenerator` components in Haystack to query the vLLM server.
 
-??? Code
+??? code
 
     ```python
     from haystack.components.generators.chat import OpenAIChatGenerator

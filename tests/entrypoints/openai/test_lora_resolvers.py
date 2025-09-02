@@ -47,6 +47,7 @@ class MockModelConfig:
     allowed_local_media_path: str = ""
     encoder_config = None
     generation_config: str = "auto"
+    skip_tokenizer_init: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -160,8 +161,8 @@ async def test_serving_completion_resolver_not_found(mock_serving_setup,
     mock_engine.generate.assert_not_called()
 
     assert isinstance(response, ErrorResponse)
-    assert response.code == HTTPStatus.NOT_FOUND.value
-    assert non_existent_model in response.message
+    assert response.error.code == HTTPStatus.NOT_FOUND.value
+    assert non_existent_model in response.error.message
 
 
 @pytest.mark.asyncio
@@ -190,8 +191,8 @@ async def test_serving_completion_resolver_add_lora_fails(
 
     # Assert the correct error response
     assert isinstance(response, ErrorResponse)
-    assert response.code == HTTPStatus.BAD_REQUEST.value
-    assert invalid_model in response.message
+    assert response.error.code == HTTPStatus.BAD_REQUEST.value
+    assert invalid_model in response.error.message
 
 
 @pytest.mark.asyncio

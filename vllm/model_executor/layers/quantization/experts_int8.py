@@ -6,7 +6,8 @@ from typing import Any, Callable, Optional
 import torch
 
 from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
-from vllm.model_executor.layers.fused_moe import FusedMoE, FusedMoEMethodBase
+from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEConfig,
+                                                  FusedMoEMethodBase)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -46,13 +47,18 @@ class ExpertsInt8Config(QuantizationConfig):
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
         elif isinstance(layer, FusedMoE):
-            return ExpertsInt8MoEMethod(self)
+            return ExpertsInt8MoEMethod(self, layer.moe_config)
         return None
 
 
 class ExpertsInt8MoEMethod(FusedMoEMethodBase):
 
-    def __init__(self, quant_config: ExpertsInt8Config):
+    def __init__(
+        self,
+        quant_config: ExpertsInt8Config,
+        moe: FusedMoEConfig,
+    ):
+        super().__init__(moe)
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
@@ -114,6 +120,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -122,6 +129,8 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        assert self.fused_experts is None
+
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ExpertsInt8MoEMethod` yet.")
@@ -138,7 +147,9 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias)
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            indices_type=self.topk_indices_dtype)
 
         return fused_experts(
             x,

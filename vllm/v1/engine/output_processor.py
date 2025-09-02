@@ -2,18 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
-import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Optional, Union, cast
 
 import torch
 
-from vllm.config import ObservabilityConfig
 from vllm.outputs import (CompletionOutput, PoolingOutput,
                           PoolingRequestOutput, RequestOutput)
 from vllm.sampling_params import RequestOutputKind
-from vllm.tracing import (Tracer, SpanAttributes, SpanKind, extract_trace_context)
+from vllm.tracing import (SpanAttributes, SpanKind, Tracer,
+                          extract_trace_context)
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
@@ -74,7 +73,6 @@ class RequestOutputCollector:
 
 @dataclass
 class OutputProcessorOutput:
-
     request_outputs: list[Union[RequestOutput, PoolingRequestOutput]]
     reqs_to_abort: list[str]
 
@@ -116,6 +114,7 @@ class RequestState:
         self.temperature = temperature
         self.is_prefilling = True
         self.queue = queue
+        self.num_cached_tokens = 0
 
         self.stats = RequestStateStats(
             arrival_time=arrival_time) if log_stats else None
@@ -185,7 +184,6 @@ class RequestState:
         finish_reason: Optional[FinishReason],
         stop_reason: Union[int, str, None],
         kv_transfer_params: Optional[dict[str, Any]] = None,
-        num_cached_tokens: int = 0,
     ) -> Optional[Union[RequestOutput, PoolingRequestOutput]]:
 
         finished = finish_reason is not None
@@ -213,7 +211,7 @@ class RequestState:
                 return None
 
         return self._new_request_output(request_id, outputs, finished,
-                                        kv_transfer_params, num_cached_tokens)
+                                        kv_transfer_params)
 
     def _new_request_output(
         self,
@@ -221,14 +219,14 @@ class RequestState:
         outputs: Union[list[CompletionOutput], list[PoolingOutput]],
         finished: bool,
         kv_transfer_params: Optional[dict[str, Any]] = None,
-        num_cached_tokens: int = 0,
     ) -> Union[RequestOutput, PoolingRequestOutput]:
 
-        if isinstance(outputs[0], PoolingOutput):
+        first_output = outputs[0]
+        if isinstance(first_output, PoolingOutput):
             assert len(outputs) == 1
             return PoolingRequestOutput(
                 request_id=request_id,
-                outputs=outputs[0],
+                outputs=first_output,
                 prompt_token_ids=self.prompt_token_ids,
                 finished=finished,
             )
@@ -247,7 +245,7 @@ class RequestState:
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
             kv_transfer_params=kv_transfer_params,
-            num_cached_tokens=num_cached_tokens,
+            num_cached_tokens=self.num_cached_tokens,
         )
 
     def _new_completion_output(
@@ -292,9 +290,7 @@ class RequestState:
 class OutputProcessor:
     """Process EngineCoreOutputs into RequestOutputs."""
 
-    def __init__(self,
-                 tokenizer: TokenizerGroup,
-                 log_stats: bool):
+    def __init__(self, tokenizer: TokenizerGroup, log_stats: bool):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
         self.request_states: dict[str, RequestState] = {}
@@ -325,11 +321,18 @@ class OutputProcessor:
             if req_state is not None:
                 self.lora_states.abort_request(req_state)
                 request_ids_to_abort.append(request_id)
-            else:
-                parent = self.parent_requests.pop(request_id, None)
-                if parent and parent.child_requests:
-                    self.abort_requests(parent.child_requests)
-                    request_ids_to_abort.extend(parent.child_requests)
+                # Produce final abort output.
+                if req_state.queue is not None and (
+                        request_output := req_state.make_request_output(
+                            [], None, FinishReason.ABORT, None, None)):
+                    req_state.queue.put(request_output)
+            elif parent := self.parent_requests.get(request_id):
+                # Abort children prior to removing the parent.
+                if parent.child_requests:
+                    child_reqs = list(parent.child_requests)
+                    child_reqs = self.abort_requests(child_reqs)
+                    request_ids_to_abort.extend(child_reqs)
+                self.parent_requests.pop(request_id, None)
         return request_ids_to_abort
 
     def add_request(
@@ -344,14 +347,16 @@ class OutputProcessor:
         if request_id in self.request_states:
             raise ValueError(f"Request id {request_id} already running.")
 
-        req_state = RequestState.from_new_request(
-            tokenizer=self.tokenizer.get_lora_tokenizer(request.lora_request),
-            request=request,
-            prompt=prompt,
-            parent_req=parent_req,
-            request_index=request_index,
-            queue=queue,
-            log_stats=self.log_stats)
+        tokenizer = None if not self.tokenizer else \
+            self.tokenizer.get_lora_tokenizer(request.lora_request)
+
+        req_state = RequestState.from_new_request(tokenizer=tokenizer,
+                                                  request=request,
+                                                  prompt=prompt,
+                                                  parent_req=parent_req,
+                                                  request_index=request_index,
+                                                  queue=queue,
+                                                  log_stats=self.log_stats)
         self.request_states[request_id] = req_state
         self.lora_states.add_request(req_state)
         if parent_req:
@@ -405,7 +410,7 @@ class OutputProcessor:
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
-            num_cached_tokens = engine_core_output.num_cached_tokens
+            req_state.num_cached_tokens = engine_core_output.num_cached_tokens
             req_state.is_prefilling = False
 
             if pooling_output is None:
@@ -426,7 +431,7 @@ class OutputProcessor:
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
                     new_token_ids, pooling_output, finish_reason, stop_reason,
-                    kv_transfer_params, num_cached_tokens):
+                    kv_transfer_params):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
                     req_state.queue.put(request_output)
@@ -449,8 +454,11 @@ class OutputProcessor:
                 # Track per-request stats
                 self._update_stats_from_finished(req_state, finish_reason,
                                                  iteration_stats)
+                print(f"self.tracer: {self.tracer}")
                 if self.tracer:
-                    self.do_tracing(engine_core_output, req_state, iteration_stats)
+                    print(f"engine_core_output: {engine_core_output}")
+                    self.do_tracing(engine_core_output, req_state,
+                                    iteration_stats)
         self.lora_states.update_iteration_stats(iteration_stats)
 
         return OutputProcessorOutput(
@@ -458,34 +466,46 @@ class OutputProcessor:
             reqs_to_abort=reqs_to_abort,
         )
 
-    def do_tracing(self,
-               engine_core_output: EngineCoreOutput,
-               req_state: RequestState,
-               iteration_stats: Optional[IterationStats]) -> None:
+    def do_tracing(self, engine_core_output: EngineCoreOutput,
+                   req_state: RequestState,
+                   iteration_stats: Optional[IterationStats]) -> None:
         assert req_state.stats is not None
         assert iteration_stats is not None
+        assert self.tracer is not None
 
         arrival_time_nano_seconds = int(req_state.stats.arrival_time * 1e9)
         trace_context = extract_trace_context(engine_core_output.trace_headers)
-        with self.tracer.start_as_current_span(
+        with (self.tracer.start_as_current_span(
                 "llm_request",
                 kind=SpanKind.SERVER,
                 context=trace_context,
-                start_time=arrival_time_nano_seconds) as span:
+                start_time=arrival_time_nano_seconds) as span):
             metrics = req_state.stats
-            e2e_time = iteration_stats.iteration_timestamp - metrics.arrival_time
+            e2e_time = iteration_stats.iteration_timestamp - \
+                       metrics.arrival_time
             queued_time = metrics.scheduled_ts - metrics.queued_ts
             prefill_time = metrics.first_token_ts - metrics.scheduled_ts
             decode_time = metrics.last_token_ts - metrics.first_token_ts
             inference_time = metrics.last_token_ts - metrics.scheduled_ts
-            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN, metrics.first_token_latency)
+            span.set_attribute(
+                SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN,
+                metrics.first_token_latency)
             span.set_attribute(SpanAttributes.GEN_AI_LATENCY_E2E, e2e_time)
-            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE, queued_time)
-            span.set_attribute(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS, len(req_state.prompt_token_ids))
-            span.set_attribute(SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS, metrics.num_generation_tokens)
-            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL, prefill_time)
-            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE, decode_time)
-            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE, inference_time)
+            span.set_attribute(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE,
+                               queued_time)
+            span.set_attribute(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS,
+                               len(req_state.prompt_token_ids))
+            span.set_attribute(SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS,
+                               metrics.num_generation_tokens)
+            span.set_attribute(
+                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL,
+                prefill_time)
+            span.set_attribute(
+                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE,
+                decode_time)
+            span.set_attribute(
+                SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE,
+                inference_time)
 
             # meta
             span.set_attribute(SpanAttributes.GEN_AI_REQUEST_ID, req_state.request_id)

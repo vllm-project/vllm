@@ -3,7 +3,7 @@
 """
 Example online usage of Pooling API.
 
-Run `vllm serve <model> --task <embed|classify|reward|score>`
+Run `vllm serve <model> --runner pooling`
 to start up the server in vLLM.
 """
 

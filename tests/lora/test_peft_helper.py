@@ -38,8 +38,8 @@ ERROR_CASES = [
 ]
 
 
-def test_peft_helper_pass(long_context_lora_files_16k_1, tmp_path):
-    peft_helper = PEFTHelper.from_local_dir(long_context_lora_files_16k_1,
+def test_peft_helper_pass(sql_lora_files, tmp_path):
+    peft_helper = PEFTHelper.from_local_dir(sql_lora_files,
                                             max_position_embeddings=4096)
     lora_config = LoRAConfig(max_lora_rank=16, max_cpu_loras=3, max_loras=2)
     peft_helper.validate_legal(lora_config)
@@ -56,15 +56,12 @@ def test_peft_helper_pass(long_context_lora_files_16k_1, tmp_path):
         "embed_tokens",
         "lm_head",
     ]
-    assert peft_helper.context_length == 16384
     assert peft_helper.vllm_max_position_embeddings == 4096
-    assert peft_helper.vllm_long_context_scaling_factor == float(
-        math.ceil(peft_helper.context_length /
-                  peft_helper.vllm_max_position_embeddings))
+
     # test RSLoRA
     rslora_config = dict(use_rslora=True)
     test_dir = tmp_path / "test_rslora"
-    shutil.copytree(long_context_lora_files_16k_1, test_dir)
+    shutil.copytree(sql_lora_files, test_dir)
 
     # Load and modify configuration
     config_path = test_dir / "adapter_config.json"

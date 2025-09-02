@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import torch
@@ -21,12 +23,31 @@ class XPUModelRunner(GPUModelRunner):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        super().__init__(vllm_config, device)
+        with _torch_cuda_wrapper():
+            super().__init__(vllm_config, device)
         # FIXME: To be verified.
         self.cascade_attn_enabled = False
 
     def _init_device_properties(self) -> None:
-        pass
+        self.num_sms = None
 
     def _sync_device(self) -> None:
         torch.xpu.synchronize()
+
+
+@contextmanager
+def _torch_cuda_wrapper():
+
+    class _EventPlaceholder:
+
+        def __init__(self, *args, **kwargs) -> None:
+            self.record = lambda: None
+            self.synchronize = lambda: None
+
+    try:
+        # replace cuda Event with xpu Event, this should work by default
+        torch.cuda.Event = torch.xpu.Event
+        yield
+    finally:
+        # if anything goes wrong, just patch it with a placeholder
+        torch.cuda.Event = _EventPlaceholder

@@ -5,13 +5,21 @@
 
 ## Profile with PyTorch Profiler
 
-We support tracing vLLM workers using the `torch.profiler` module. You can enable tracing by setting the `VLLM_TORCH_PROFILER_DIR` environment variable to the directory where you want to save the traces: `VLLM_TORCH_PROFILER_DIR=/mnt/traces/`
+We support tracing vLLM workers using the `torch.profiler` module. You can enable tracing by setting the `VLLM_TORCH_PROFILER_DIR` environment variable to the directory where you want to save the traces: `VLLM_TORCH_PROFILER_DIR=/mnt/traces/`. Additionally, you can control the profiling content by specifying the following environment variables:
+
+- `VLLM_TORCH_PROFILER_RECORD_SHAPES=1` to enable recording Tensor Shapes, off by default
+- `VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY=1` to record memory, off by default
+- `VLLM_TORCH_PROFILER_WITH_STACK=1` to enable recording stack information, on by default
+- `VLLM_TORCH_PROFILER_WITH_FLOPS=1` to enable recording FLOPs, off by default
 
 The OpenAI server also needs to be started with the `VLLM_TORCH_PROFILER_DIR` environment variable set.
 
-When using `benchmarks/benchmark_serving.py`, you can enable profiling by passing the `--profile` flag.
+When using `vllm bench serve`, you can enable profiling by passing the `--profile` flag.
 
 Traces can be visualized using <https://ui.perfetto.dev/>.
+
+!!! tip
+You can directly call bench module without installing vllm using `python -m vllm.entrypoints.cli.main bench`.
 
 !!! tip
     Only send a few requests through vLLM when profiling, as the traces can get quite large. Also, no need to untar the traces, they can be viewed directly.
@@ -35,10 +43,10 @@ VLLM_TORCH_PROFILER_DIR=./vllm_profile \
     --model meta-llama/Meta-Llama-3-70B
 ```
 
-benchmark_serving.py:
+vllm bench command:
 
 ```bash
-python benchmarks/benchmark_serving.py \
+vllm bench serve \
     --backend vllm \
     --model meta-llama/Meta-Llama-3-70B \
     --dataset-name sharegpt \
@@ -69,13 +77,13 @@ apt install nsight-systems-cli
 
 For basic usage, you can just append `nsys profile -o report.nsys-rep --trace-fork-before-exec=true --cuda-graph-trace=node` before any existing script you would run for offline inference.
 
-The following is an example using the `benchmarks/benchmark_latency.py` script:
+The following is an example using the `vllm bench latency` script:
 
 ```bash
 nsys profile -o report.nsys-rep \
     --trace-fork-before-exec=true \
     --cuda-graph-trace=node \
-    python benchmarks/benchmark_latency.py \
+vllm bench latency \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --num-iters-warmup 5 \
     --num-iters 1 \
@@ -98,7 +106,7 @@ nsys profile -o report.nsys-rep \
     vllm serve meta-llama/Llama-3.1-8B-Instruct
 
 # client
-python benchmarks/benchmark_serving.py \
+vllm bench serve \
     --backend vllm \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --num-prompts 1 \
@@ -109,13 +117,13 @@ python benchmarks/benchmark_serving.py \
 
 In practice, you should set the `--duration` argument to a large value. Whenever you want the server to stop profiling, run:
 
-```
+```bash
 nsys sessions list
 ```
 
 to get the session id in the form of `profile-XXXXX`, then run:
 
-```
+```bash
 nsys stop --session=profile-XXXXX
 ```
 
@@ -125,14 +133,14 @@ to manually kill the profiler and generate your `nsys-rep` report.
 
 You can view these profiles either as summaries in the CLI, using `nsys stats [profile-file]`, or in the GUI by installing Nsight [locally following the directions here](https://developer.nvidia.com/nsight-systems/get-started).
 
-??? CLI example
+??? console "CLI example"
 
     ```bash
     nsys stats report1.nsys-rep
     ...
     ** CUDA GPU Kernel Summary (cuda_gpu_kern_sum):
 
-    Time (%)  Total Time (ns)  Instances   Avg (ns)     Med (ns)    Min (ns)  Max (ns)   StdDev (ns)                                                  Name                                                
+    Time (%)  Total Time (ns)  Instances   Avg (ns)     Med (ns)    Min (ns)  Max (ns)   StdDev (ns)                                                  Name
     --------  ---------------  ---------  -----------  -----------  --------  ---------  -----------  ----------------------------------------------------------------------------------------------------
         46.3   10,327,352,338     17,505    589,965.9    144,383.0    27,040  3,126,460    944,263.8  sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize128x128x64_warpgroupsize1x1x1_execute_segment_k_of…
         14.8    3,305,114,764      5,152    641,520.7    293,408.0   287,296  2,822,716    867,124.9  sm90_xmma_gemm_bf16bf16_bf16f32_f32_tn_n_tilesize256x128x64_warpgroupsize2x1x1_execute_segment_k_of…
@@ -143,7 +151,7 @@ You can view these profiles either as summaries in the CLI, using `nsys stats [p
         2.6      587,283,113     37,824     15,526.7      3,008.0     2,719  2,517,756    139,091.1  std::enable_if<T2>(int)0&&vllm::_typeConvert<T1>::exists, void>::type vllm::fused_add_rms_norm_kern…
         1.9      418,362,605     18,912     22,121.5      3,871.0     3,328  2,523,870    175,248.2  void vllm::rotary_embedding_kernel<c10::BFloat16, (bool)1>(const long *, T1 *, T1 *, const T1 *, in…
         0.7      167,083,069     18,880      8,849.7      2,240.0     1,471  2,499,996    101,436.1  void vllm::reshape_and_cache_flash_kernel<__nv_bfloat16, __nv_bfloat16, (vllm::Fp8KVCacheDataType)0…
-    ... 
+    ...
     ```
 
 GUI example:

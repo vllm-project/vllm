@@ -22,18 +22,6 @@ from opentelemetry.sdk.environment_variables import (
 from vllm import LLM, SamplingParams
 from vllm.tracing import SpanAttributes
 
-
-@pytest.fixture(scope="function", autouse=True)
-def use_v0_only(monkeypatch: pytest.MonkeyPatch):
-    """
-    Since this module is V0 only, set VLLM_USE_V1=0 for
-    all tests in the module.
-    """
-    with monkeypatch.context() as m:
-        m.setenv('VLLM_USE_V1', '0')
-        yield
-
-
 FAKE_TRACE_SERVER_ADDRESS = "localhost:4317"
 
 FieldName = Literal['bool_value', 'string_value', 'int_value', 'double_value',
@@ -91,21 +79,21 @@ def test_traces(
 ):
     with monkeypatch.context() as m:
         m.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
-
+        m.setenv("VLLM_USE_V1", "1")
         sampling_params = SamplingParams(
             temperature=0.01,
             top_p=0.1,
             max_tokens=256,
         )
         model = "facebook/opt-125m"
-        llm = LLM(
-            model=model,
-            otlp_traces_endpoint=FAKE_TRACE_SERVER_ADDRESS,
-        )
+        llm = LLM(model=model,
+                  otlp_traces_endpoint=FAKE_TRACE_SERVER_ADDRESS,
+                  gpu_memory_utilization=0.3)
         prompts = ["This is a short prompt"]
         outputs = llm.generate(prompts, sampling_params=sampling_params)
+        print(f"test_traces outputs is : {outputs}")
 
-        timeout = 5
+        timeout = 10
         if not trace_service.evt.wait(timeout):
             raise TimeoutError(
                 f"The fake trace service didn't receive a trace within "
@@ -164,22 +152,21 @@ def test_traces_with_detailed_steps(
 ):
     with monkeypatch.context() as m:
         m.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
-
+        m.setenv("VLLM_USE_V1", "1")
         sampling_params = SamplingParams(
             temperature=0.01,
             top_p=0.1,
             max_tokens=256,
         )
         model = "facebook/opt-125m"
-        llm = LLM(
-            model=model,
-            otlp_traces_endpoint=FAKE_TRACE_SERVER_ADDRESS,
-            collect_detailed_traces=["all"],
-        )
+        llm = LLM(model=model,
+                  otlp_traces_endpoint=FAKE_TRACE_SERVER_ADDRESS,
+                  collect_detailed_traces=["all"],
+                  gpu_memory_utilization=0.3)
         prompts = ["This is a short prompt"]
         outputs = llm.generate(prompts, sampling_params=sampling_params)
 
-        timeout = 5
+        timeout = 10
         if not trace_service.evt.wait(timeout):
             raise TimeoutError(
                 f"The fake trace service didn't receive a trace within "

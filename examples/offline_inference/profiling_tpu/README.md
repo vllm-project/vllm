@@ -4,7 +4,7 @@ This script is used to profile the TPU performance of vLLM for specific prefill 
 
 Note: an actual running server is a mix of both prefill of many shapes and decode of many shapes.
 
-We assume you are on a TPU already (this was tested on TPU v6e) and have installed vLLM according to the [installation guide](https://docs.vllm.ai/en/latest/getting_started/installation/ai_accelerator/index.html).
+We assume you are on a TPU already (this was tested on TPU v6e) and have installed vLLM according to the [Google TPU installation guide](https://docs.vllm.ai/en/latest/getting_started/installation/google_tpu.html).
 
 > In all examples below, we run several warmups before (so `--enforce-eager` is okay)
 
@@ -57,7 +57,10 @@ Once you have collected your profiles with this script, you can visualize them u
 Here are most likely the dependencies you need to install:
 
 ```bash
-pip install tensorflow-cpu tensorboard-plugin-profile etils importlib_resources
+pip install tensorflow-cpu \
+    tensorboard-plugin-profile \
+    etils \
+    importlib_resources
 ```
 
 Then you just need to point TensorBoard to the directory where you saved the profiles and visit `http://localhost:6006/` in your browser:

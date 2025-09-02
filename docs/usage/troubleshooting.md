@@ -1,7 +1,4 @@
----
-title: Troubleshooting
----
-[](){ #troubleshooting }
+# Troubleshooting
 
 This document outlines some troubleshooting strategies you can consider. If you think you've discovered a bug, please [search existing issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue) first to see if it has already been reported. If not, please [file a new issue](https://github.com/vllm-project/vllm/issues/new/choose), providing as much relevant information as possible.
 
@@ -38,6 +35,7 @@ You can check if this is happening by trying the old defaults with `--generation
 If other strategies don't solve the problem, it's likely that the vLLM instance is stuck somewhere. You can use the following environment variables to help debug the issue:
 
 - `export VLLM_LOGGING_LEVEL=DEBUG` to turn on more logging.
+- `export VLLM_LOG_STATS_INTERVAL=1.` to get log statistics more frequently for tracking running queue, waiting queue and cache hit states.
 - `export CUDA_LAUNCH_BLOCKING=1` to identify which CUDA kernel is causing the problem.
 - `export NCCL_DEBUG=TRACE` to turn on more logging for NCCL.
 - `export VLLM_TRACE_FUNCTION=1` to record all function calls for inspection in the log files to tell which function crashes or hangs. Do not use this flag unless absolutely needed for debugging, it will cause significant delays in startup time.
@@ -60,7 +58,7 @@ To identify the particular CUDA operation that causes the error, you can add `--
 
 If GPU/CPU communication cannot be established, you can use the following Python script and follow the instructions below to confirm whether the GPU/CPU communication is working correctly.
 
-??? Code
+??? code
 
     ```python
     # Test PyTorch NCCL
@@ -170,7 +168,7 @@ WARNING 12-11 14:50:37 multiproc_worker_utils.py:281] CUDA was previously
 
 or an error from Python that looks like this:
 
-??? Logs
+??? console "Logs"
 
     ```console
     RuntimeError:
@@ -212,9 +210,9 @@ if __name__ == '__main__':
 
 ## `torch.compile` Error
 
-vLLM heavily depends on `torch.compile` to optimize the model for better performance, which introduces the dependency on the `torch.compile` functionality and the `triton` library. By default, we use `torch.compile` to [optimize some functions](https://github.com/vllm-project/vllm/pull/10406) in the model. Before running vLLM, you can check if `torch.compile` is working as expected by running the following script:
+vLLM heavily depends on `torch.compile` to optimize the model for better performance, which introduces the dependency on the `torch.compile` functionality and the `triton` library. By default, we use `torch.compile` to [optimize some functions](gh-pr:10406) in the model. Before running vLLM, you can check if `torch.compile` is working as expected by running the following script:
 
-??? Code
+??? code
 
     ```python
     import torch
@@ -231,7 +229,7 @@ vLLM heavily depends on `torch.compile` to optimize the model for better perform
     print(f(x))
     ```
 
-If it raises errors from `torch/_inductor` directory, usually it means you have a custom `triton` library that is not compatible with the version of PyTorch you are using. See [this issue](https://github.com/vllm-project/vllm/issues/12219) for example.
+If it raises errors from `torch/_inductor` directory, usually it means you have a custom `triton` library that is not compatible with the version of PyTorch you are using. See <gh-issue:12219> for example.
 
 ## Model failed to be inspected
 
@@ -267,7 +265,7 @@ or:
 ValueError: Model architectures ['<arch>'] are not supported for now. Supported architectures: [...]
 ```
 
-But you are sure that the model is in the [list of supported models][supported-models], there may be some issue with vLLM's model resolution. In that case, please follow [these steps](../configuration/model_resolution.md) to explicitly specify the vLLM implementation for the model.
+But you are sure that the model is in the [list of supported models](../models/supported_models.md), there may be some issue with vLLM's model resolution. In that case, please follow [these steps](../configuration/model_resolution.md) to explicitly specify the vLLM implementation for the model.
 
 ## Failed to infer device type
 
@@ -292,7 +290,7 @@ Traceback (most recent call last):
 ...
 ```
 
-This indicates vLLM failed to initialize the NCCL communicator, possibly due to a missing `IPC_LOCK` linux capability  or an unmounted `/dev/shm`. Refer to [Distributed Inference and Serving](../serving/distributed_serving.md#running-vllm-on-multiple-nodes) for guidance on properly configuring the environment for distributed serving.
+This indicates vLLM failed to initialize the NCCL communicator, possibly due to a missing `IPC_LOCK` linux capability  or an unmounted `/dev/shm`. Refer to [Enabling GPUDirect RDMA](../serving/parallelism_scaling.md#enabling-gpudirect-rdma) for guidance on properly configuring the environment for GPUDirect RDMA.
 
 ## Known Issues
 

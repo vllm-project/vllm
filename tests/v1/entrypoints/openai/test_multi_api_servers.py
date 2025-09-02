@@ -8,6 +8,7 @@ import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
+from tests.v1.test_utils import check_request_balancing
 
 MODEL_NAME = "ibm-research/PowerMoE-3b"
 
@@ -50,6 +51,7 @@ async def client(server):
     [MODEL_NAME],
 )
 async def test_single_completion(client: openai.AsyncOpenAI,
+                                 server: RemoteOpenAIServer,
                                  model_name: str) -> None:
 
     async def make_request():
@@ -97,6 +99,9 @@ async def test_single_completion(client: openai.AsyncOpenAI,
     assert len(results) == num_requests
     assert all(completion is not None for completion in results)
 
+    # Check request balancing via Prometheus metrics if DP_SIZE > 1
+    check_request_balancing(server, int(DP_SIZE))
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -104,6 +109,7 @@ async def test_single_completion(client: openai.AsyncOpenAI,
     [MODEL_NAME],
 )
 async def test_completion_streaming(client: openai.AsyncOpenAI,
+                                    server: RemoteOpenAIServer,
                                     model_name: str) -> None:
     prompt = "What is an LLM?"
 
@@ -170,3 +176,6 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
         results
     ) == num_requests, f"Expected {num_requests} results, got {len(results)}"
     assert all(results), "Not all streaming requests completed successfully."
+
+    # Check request balancing via Prometheus metrics if DP_SIZE > 1
+    check_request_balancing(server, int(DP_SIZE))

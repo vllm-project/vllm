@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Copyright 2024 HuggingFace Inc. team. All rights reserved.
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
@@ -150,7 +151,7 @@ class NemotronHConfig(PretrainedConfig):
         num_hidden_layers=52,
         hybrid_override_pattern="M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M-",
         num_attention_heads=32,
-        attention_head_dim=128,
+        head_dim=128,
         num_key_value_heads=8,  # nemo: num_query_groups
         mlp_hidden_act="relu2",
         attention_bias=False,
@@ -193,7 +194,7 @@ class NemotronHConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.hybrid_override_pattern = hybrid_override_pattern
         self.num_attention_heads = num_attention_heads
-        self.attention_head_dim = attention_head_dim
+        self.head_dim = head_dim
         self.sliding_window = sliding_window
         self.max_position_embeddings = max_position_embeddings
         self.attention_dropout = attention_dropout

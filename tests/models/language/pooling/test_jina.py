@@ -6,23 +6,22 @@ import pytest
 
 from vllm import PoolingParams
 
-from ...utils import EmbedModelInfo, RerankModelInfo
+from ...utils import (CLSPoolingEmbedModelInfo, CLSPoolingRerankModelInfo,
+                      EmbedModelInfo, RerankModelInfo)
 from .embed_utils import (check_embeddings_close,
                           correctness_test_embed_models, matryoshka_fy)
 from .mteb_utils import mteb_test_embed_models, mteb_test_rerank_models
 
 EMBEDDING_MODELS = [
-    EmbedModelInfo("jinaai/jina-embeddings-v3",
-                   architecture="XLMRobertaModel",
-                   is_matryoshka=True)
+    CLSPoolingEmbedModelInfo("jinaai/jina-embeddings-v3",
+                             architecture="XLMRobertaModel",
+                             is_matryoshka=True)
 ]
 
 RERANK_MODELS = [
-    RerankModelInfo(
+    CLSPoolingRerankModelInfo(
         "jinaai/jina-reranker-v2-base-multilingual",
-        architecture="XLMRobertaForSequenceClassification",
-        dtype="float32",
-    )
+        architecture="XLMRobertaForSequenceClassification")
 ]
 
 
@@ -87,13 +86,13 @@ def test_matryoshka(
         hf_outputs = matryoshka_fy(hf_outputs, dimensions)
 
     with vllm_runner(model_info.name,
-                     task="embed",
+                     runner="pooling",
                      dtype=dtype,
                      max_model_len=None) as vllm_model:
-        assert vllm_model.model.llm_engine.model_config.is_matryoshka
+        assert vllm_model.llm.llm_engine.model_config.is_matryoshka
 
         matryoshka_dimensions = (
-            vllm_model.model.llm_engine.model_config.matryoshka_dimensions)
+            vllm_model.llm.llm_engine.model_config.matryoshka_dimensions)
         assert matryoshka_dimensions is not None
 
         if dimensions not in matryoshka_dimensions:
