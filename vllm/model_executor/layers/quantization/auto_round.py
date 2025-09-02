@@ -138,9 +138,6 @@ class AutoRoundConfig(QuantizationConfig):
                     cfg.get("sym", self.sym if quantized else True),
                 )
             
-            # A heuristic to identify regex patterns and avoid misinterpreting literals.
-            # We only treat patterns with special regex characters as regexes.
-            # The '.' character is excluded as it's common in layer names.
             REGEX_SPECIAL_CHARS = set(r"*+?^$()[]{}|\\")
             for pattern, cfg in self.extra_config.items():
                 if not isinstance(pattern, str) or not any(
