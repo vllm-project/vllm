@@ -27,8 +27,7 @@ class KVTransferStats(
 
     def aggregate(self, other: "KVTransferStats") -> "KVTransferStats":
         """
-        Aggregate stats with another `KVTransferStats` object. Aggregation is
-        meant to be in-place to avoid extra copies.
+        Aggregate stats with another `KVTransferStats` object.
         """
         raise NotImplementedError
 
@@ -71,8 +70,6 @@ class NixlKVTransferStats(KVTransferStats,
         self.num_successful_transfers += 1
 
     def clone_and_reset(self) -> "NixlKVTransferStats":
-        # if self.is_empty():
-        # return EMPTY_KV_TRANSFER_STATS
         old = copy.deepcopy(self)
         self.reset()
         return old
@@ -81,6 +78,10 @@ class NixlKVTransferStats(KVTransferStats,
         return self.num_successful_transfers == 0
 
     def aggregate(self, other: "NixlKVTransferStats") -> "NixlKVTransferStats":
+        if self == EMPTY_NIXL_KV_TRANSFER_STATS:
+            # Make sure EMPTY_KV_TRANSFER_STATS is not mutated. This should also
+            # always be semantically correct, as EMPTY | other => other.
+            return other
         if not other.is_empty():
             self.transfer_durations.extend(other.transfer_durations)
             self.bytes_transferred.extend(other.bytes_transferred)
@@ -113,7 +114,8 @@ class KVTransferLogging:
         if self.transfer_stats_accumulator is None:
             self.transfer_stats_accumulator = transfer_stats
         elif not transfer_stats.is_empty():
-            self.transfer_stats_accumulator.aggregate(transfer_stats)
+            self.transfer_stats_accumulator = \
+                self.transfer_stats_accumulator.aggregate(transfer_stats)
 
     def log(self, log_fn=logger.info):
         """Log transfer metrics periodically, similar to throughput logging"""
@@ -130,4 +132,5 @@ class KVTransferLogging:
             self.reset()
 
 
-EMPTY_KV_TRANSFER_STATS = NixlKVTransferStats()
+EMPTY_KV_TRANSFER_STATS = KVTransferStats()
+EMPTY_NIXL_KV_TRANSFER_STATS = NixlKVTransferStats()

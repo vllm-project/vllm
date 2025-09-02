@@ -13,7 +13,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVTransferStats)
+    EMPTY_KV_TRANSFER_STATS, KVTransferStats)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput,
@@ -131,19 +131,20 @@ class KVConnectorModelRunnerMixin:
                 # Stats ready to send, aggregate and reset buffer.
                 assert isinstance(kv_transfer_stats,
                                   type(self._kv_transfer_stats_buffer))
-                kv_transfer_stats.aggregate(self._kv_transfer_stats_buffer)
+                kv_transfer_stats = \
+                    kv_transfer_stats.aggregate(self._kv_transfer_stats_buffer)
                 self._kv_transfer_stats_buffer = None
             return kv_transfer_stats
         elif self._kv_transfer_stats_buffer is None:
             # Accumulate but do not send yet.
             self._kv_transfer_stats_buffer = kv_transfer_stats
         else:
-            self._kv_transfer_stats_buffer.aggregate(kv_transfer_stats)
+            self._kv_transfer_stats_buffer = \
+                self._kv_transfer_stats_buffer.aggregate(kv_transfer_stats)
         return None
 
     @staticmethod
     def get_kv_transfer_stats() -> KVTransferStats:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_kv_transfer_stats()
-        # TODO Empty kvtransferstats
-        return KVTransferStats()
+        return EMPTY_KV_TRANSFER_STATS

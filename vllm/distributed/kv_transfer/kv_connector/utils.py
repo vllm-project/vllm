@@ -159,7 +159,8 @@ class KVOutputAggregator:
             elif kv_transfer_stats := output.kv_transfer_stats:
                 assert isinstance(aggregated_kv_transfer_stats,
                                   type(kv_transfer_stats))
-                aggregated_kv_transfer_stats.aggregate(kv_transfer_stats)
+                aggregated_kv_transfer_stats = \
+                    aggregated_kv_transfer_stats.aggregate(kv_transfer_stats)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
