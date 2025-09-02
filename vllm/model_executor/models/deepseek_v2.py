@@ -73,20 +73,34 @@ class DeepseekV2MLP(nn.Module):
         hidden_act: str,
         quant_config: Optional[QuantizationConfig] = None,
         reduce_results: bool = True,
+        is_sequence_parallel=False,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj")
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           quant_config=quant_config,
-                                           reduce_results=reduce_results,
-                                           prefix=f"{prefix}.down_proj")
+        if is_sequence_parallel:
+            self.gate_up_proj = MergedReplicatedLinear(
+                hidden_size, [intermediate_size] * 2,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.gate_up_proj")
+            self.down_proj = ReplicatedLinear(intermediate_size,
+                                              hidden_size,
+                                              bias=False,
+                                              quant_config=quant_config,
+                                              prefix=f"{prefix}.down_proj")
+
+        else:
+            self.gate_up_proj = MergedColumnParallelLinear(
+                hidden_size, [intermediate_size] * 2,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.gate_up_proj")
+            self.down_proj = RowParallelLinear(intermediate_size,
+                                               hidden_size,
+                                               bias=False,
+                                               quant_config=quant_config,
+                                               reduce_results=reduce_results,
+                                               prefix=f"{prefix}.down_proj")
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -137,6 +151,8 @@ class DeepseekV2MoE(nn.Module):
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
+
+        self.is_sequence_parallel = True
 
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
@@ -194,9 +210,9 @@ class DeepseekV2MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=True,
-                #reduce_results=self.experts.must_reduce_shared_expert_outputs(
-                #),
+                is_sequence_parallel=self.is_sequence_parallel,
+                reduce_results=self.experts.must_reduce_shared_expert_outputs(
+                ),
                 prefix=f"{prefix}.shared_experts",
             )
 
@@ -204,23 +220,25 @@ class DeepseekV2MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
+        # **************************************************
+        if self.is_sequence_parallel:
+            hidden_states = self.sp_chunk(hidden_states)
+
         shared_output = self.shared_experts(hidden_states)
 
-        # **************************************************
-        sp_hidden_states = self.sp_chunk(hidden_states)
-        sp_router_logits, _ = self.gate(sp_hidden_states)
+        router_logits, _ = self.gate(hidden_states)
 
-        final_sp_hidden_states = self.experts(
-            hidden_states=sp_hidden_states,
-            router_logits=sp_router_logits) * self.routed_scaling_factor
-
-        final_hidden_states = tensor_model_parallel_all_gather(
-            final_sp_hidden_states, 0).contiguous()
-
-        final_hidden_states = final_hidden_states[:num_tokens]
-        # **************************************************
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits) * self.routed_scaling_factor
 
         final_hidden_states = final_hidden_states + shared_output
+
+        if self.is_sequence_parallel:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0).contiguous()
+            final_hidden_states = final_hidden_states[:num_tokens]
+        # **************************************************
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
