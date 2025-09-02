@@ -58,7 +58,7 @@ class GptOssReasoningParser(ReasoningParser):
 
     def extract_reasoning_content(
             self, model_output: str, 
-            model_output_tokens: Sequence[int] = None,
+            model_output_tokens: Sequence[int],
             request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
         raise RuntimeError(

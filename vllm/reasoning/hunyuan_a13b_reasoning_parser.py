@@ -92,7 +92,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
 
     def extract_reasoning_content(
             self, model_output: str, 
-            model_output_tokens: Sequence[int] = None,
+            model_output_tokens: Sequence[int],
             request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
         """Extract the reasoning content & content sections, respectively.
@@ -109,13 +109,6 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         """
 
         reasoning_content_tokens = None
-        if model_output_tokens:
-            start_idx = model_output_tokens.find(self.start_token_id)
-            end_idx = model_output_tokens.find(self.end_token_id)
-            
-            # Check if both start and end tokens are found
-            if start_idx != -1 and end_idx != -1:
-                reasoning_content_tokens = model_output_tokens[start_idx:end_idx]
 
         re_match = self.full_match_reasoning_regex.findall(model_output)
         if re_match:

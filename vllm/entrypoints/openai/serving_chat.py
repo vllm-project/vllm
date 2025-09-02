@@ -1042,13 +1042,14 @@ class OpenAIServingChat(OpenAIServing):
 
             # once the final token is handled, if stream_options.include_usage
             # is sent, send the usage
+            valid_reasoning_tokens = [tokens for tokens in num_reasoning_tokens_per_choice if tokens is not None]
             if include_usage:
                 completion_tokens = sum(previous_num_tokens)
                 # [修改] 最终使用量，累加所有 choice 的 reasoning_tokens
-                final_reasoning_tokens = sum(num_reasoning_tokens_per_choice)
+                valid_reasoning_tokens = [tokens for tokens in num_reasoning_tokens_per_choice if tokens is not None]
                 final_usage = UsageInfo(prompt_tokens=num_prompt_tokens,
                                         completion_tokens=completion_tokens,
-                                        reasoning_tokens=final_reasoning_tokens, 
+                                        reasoning_tokens=sum(valid_reasoning_tokens), 
                                         total_tokens=num_prompt_tokens +
                                         completion_tokens)
                 if self.enable_prompt_tokens_details and num_cached_tokens:
@@ -1069,11 +1070,10 @@ class OpenAIServingChat(OpenAIServing):
             # report to FastAPI middleware aggregate usage across all choices
             num_completion_tokens = sum(previous_num_tokens)
             # [修改] 元数据使用量，累加所有 choice 的 reasoning_tokens
-            final_reasoning_tokens_for_metadata = sum(num_reasoning_tokens_per_choice)
             request_metadata.final_usage_info = UsageInfo(
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=num_completion_tokens,
-                reasoning_tokens=final_reasoning_tokens_for_metadata, 
+                reasoning_tokens=sum(valid_reasoning_tokens), 
                 total_tokens=num_prompt_tokens + num_completion_tokens,
             )
 
@@ -1138,7 +1138,7 @@ class OpenAIServingChat(OpenAIServing):
         role = self.get_chat_request_role(request)
         num_reasoning_tokens_per_choice = [0] * len(final_res.outputs)
 
-        for output in final_res.outputs:
+        for i, output in enumerate(final_res.outputs):
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
@@ -1160,7 +1160,7 @@ class OpenAIServingChat(OpenAIServing):
                 if not request.include_reasoning:
                     reasoning_content = None
                     reasoning_content_tokens = 0
-                num_reasoning_tokens_per_choice[i] = reasoning_content_tokens
+                num_reasoning_tokens_per_choice[i] = len(reasoning_content_tokens)
                 
                 if is_tool_call:
                     # TODO(woosuk): Implement tool call for gpt-oss.
@@ -1199,7 +1199,7 @@ class OpenAIServingChat(OpenAIServing):
                 reasoning_content, reasoning_content_tokens, content = (
                     reasoning_parser.extract_reasoning_content(
                         output.text, output.token_ids, request=request))
-                num_reasoning_tokens_per_choice[i] = reasoning_content_tokens
+                num_reasoning_tokens_per_choice[i] = len(reasoning_content_tokens)
 
                 if not request.include_reasoning:
                     reasoning_content = None
@@ -1358,8 +1358,10 @@ class OpenAIServingChat(OpenAIServing):
             num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs)
+
+        valid_reasoning_tokens = [tokens for tokens in num_reasoning_tokens_per_choice if tokens is not None]
         usage = UsageInfo(prompt_tokens=num_prompt_tokens,
-                          reasoning_tokens=sum(num_reasoning_tokens_per_choice),
+                          reasoning_tokens=sum(valid_reasoning_tokens),
                           completion_tokens=num_generated_tokens,
                           total_tokens=num_prompt_tokens +
                           num_generated_tokens)

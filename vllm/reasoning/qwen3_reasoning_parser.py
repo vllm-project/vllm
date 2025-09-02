@@ -117,7 +117,7 @@ class Qwen3ReasoningParser(ReasoningParser):
 
     def extract_reasoning_content(
             self, model_output: str, 
-            model_output_tokens: Sequence[int] = None,
+            model_output_tokens: Sequence[int],
             request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
         """
@@ -139,13 +139,17 @@ class Qwen3ReasoningParser(ReasoningParser):
         # if it is present.
         reasoning_content_tokens = None
         if model_output_tokens:
-            start_idx = model_output_tokens.find(self.start_token_id)
-            end_idx = model_output_tokens.find(self.end_token_id)
-            
-            # Check if both start and end tokens are found
-            if start_idx != -1 and end_idx != -1:
-                reasoning_content_tokens = model_output_tokens[start_idx:end_idx]
-
+            try:
+                start_idx = model_output_tokens.index(self.think_start_token_id)
+                end_idx = model_output_tokens.index(self.think_end_token_id)
+                
+                # Check if both start and end tokens are found
+                if start_idx != -1 and end_idx != -1:
+                    reasoning_content_tokens = model_output_tokens[start_idx+1:end_idx]
+            except ValueError:
+                # Handle the case where start_token_id or end_token_id is not found
+                pass
+        
         model_output_parts = model_output.partition(self.think_start_token)
         model_output = model_output_parts[2] if model_output_parts[
             1] else model_output_parts[0]
