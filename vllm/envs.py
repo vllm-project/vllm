@@ -172,6 +172,8 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
     VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT: bool = True
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_MUL_ADD: bool = True
     VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE: bool = False
 
 
@@ -1224,6 +1226,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER":
     lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+
+    # Use AITER Triton fused RMSNORM + Quantization
+    "VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT":
+    lambda: bool(int(os.getenv("VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT", "1"))),
+
+    # Use AITER Triton fused elementwise multiply + elementwise addtion
+    "VLLM_ROCM_USE_AITER_TRITON_FUSED_MUL_ADD":
+    lambda: bool(int(os.getenv("VLLM_ROCM_USE_AITER_TRITON_FUSED_MUL_ADD", "1"))),
 
     # Use AITER Triton fused rope + zeros + reshape_and_cache
     "VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE":

@@ -358,11 +358,16 @@ class ReplicatedLinear(LinearBase):
         param.data.copy_(loaded_weight)
 
     def forward(
-        self, x: torch.Tensor
+        self, x: torch.Tensor, x_quant_scales: torch.Tensor = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
         assert self.quant_method is not None
-        output = self.quant_method.apply(self, x, bias)
+        if isinstance(self.quant_method, UnquantizedLinearMethod):
+            assert x_quant_scales is None, "UnquantizedLinearMethod should not have quantized input"
+            output = self.quant_method.apply(self, x, bias)
+        else:
+            output = self.quant_method.apply(self, x, bias, x_quant_scales=x_quant_scales)
+
         output_bias = self.bias if self.skip_bias_add else None
         if not self.return_bias:
             return output
@@ -580,13 +585,17 @@ class ColumnParallelLinear(LinearBase):
         param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(
-        self, input_
+        self, input_, x_quant_scales: torch.Tensor = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
 
         # Matrix multiply.
         assert self.quant_method is not None
-        output_parallel = self.quant_method.apply(self, input_, bias)
+        if isinstance(self.quant_method, UnquantizedLinearMethod):
+            assert x_quant_scales is None, "UnquantizedLinearMethod should not have quantized input"
+            output_parallel = self.quant_method.apply(self, input_, bias)
+        else:
+            output_parallel = self.quant_method.apply(self, input_, bias, x_quant_scales=x_quant_scales)
         if self.gather_output:
             # All-gather across the partitions.
             output = tensor_model_parallel_all_gather(output_parallel)
@@ -1353,7 +1362,7 @@ class RowParallelLinear(LinearBase):
     def forward(
         self,
         input_,
-        input_scales=None
+        x_quant_scales = None
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         if self.input_is_parallel:
             input_parallel = input_
@@ -1368,15 +1377,22 @@ class RowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        if input_scales is not None:
-            output_parallel = self.quant_method.apply(self,
-                                                      input_parallel,
-                                                      bias=bias_,
-                                                      x_scales=input_scales)
+        # if input_scales is not None:
+        #     output_parallel = self.quant_method.apply(self,
+        #                                               input_parallel,
+        #                                               bias=bias_,
+        #                                               x_scales=input_scales)
+        # else:
+        #     output_parallel = self.quant_method.apply(self,
+        #                                               input_parallel,
+        #                                               bias=bias_)
+            
+        if isinstance(self.quant_method, UnquantizedLinearMethod):
+            assert x_quant_scales is None, "UnquantizedLinearMethod should not have quantized input"
+            output_parallel = self.quant_method.apply(self, input_parallel, bias_)
         else:
-            output_parallel = self.quant_method.apply(self,
-                                                      input_parallel,
-                                                      bias=bias_)
+            output_parallel = self.quant_method.apply(self, input_parallel, bias_, x_quant_scales=x_quant_scales)
+
 
         if self.reduce_results and self.tp_size > 1:
             output = tensor_model_parallel_all_reduce(output_parallel)
