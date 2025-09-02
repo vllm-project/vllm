@@ -217,11 +217,12 @@ docker run ... --cap-add SYS_NICE --security-opt seccomp=unconfined  ...
 Alternatively, running with `--privileged=true` also works but is broader and not generally recommended.
 
 In K8S, the following configuration can be added to workload yaml to achieve the same effect as above:
-    ```yaml
-    securityContext:
-      seccompProfile:
-        type: Unconfined
-      capabilities:
-        add:
-        - SYS_NICE
-    ```
+
+```yaml
+securityContext:
+  seccompProfile:
+    type: Unconfined
+  capabilities:
+    add:
+    - SYS_NICE
+```
