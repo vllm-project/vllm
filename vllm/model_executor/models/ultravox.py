@@ -426,7 +426,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         self.multi_modal_projector = UltravoxProjector(config)
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
-            hf_config=config.text_config,
+            hf_config=config.wrapped_model_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
         if config.text_model_id is not None:

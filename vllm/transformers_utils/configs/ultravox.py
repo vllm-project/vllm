@@ -81,14 +81,14 @@ class UltravoxConfig(transformers.PretrainedConfig):
             # Avoid circular import
             from vllm.transformers_utils.config import get_config
 
-            text_config_obj = get_config(text_model_id,
-                                         trust_remote_code=False)
+            wrapped_model_config = get_config(text_model_id,
+                                              trust_remote_code=False)
         else:
             text_config = text_config or {}
-            text_config_obj = transformers.CONFIG_MAPPING[text_config.get(
+            wrapped_model_config = transformers.CONFIG_MAPPING[text_config.get(
                 "model_type", "llama")](**text_config)
 
-        inner_text_config = text_config_obj.get_text_config()
+        text_config = wrapped_model_config.get_text_config()
 
         if audio_model_id is not None:
             # Avoid circular import
@@ -100,13 +100,17 @@ class UltravoxConfig(transformers.PretrainedConfig):
             audio_config = transformers.CONFIG_MAPPING[audio_config.get(
                 "model_type", "whisper")](**audio_config)
 
-        self.text_config = text_config_obj
+        # When Ultravox wraps a multi-modal model (e.g. Gemma), we instantiate
+        # the full model, but the text config is the text config of the inner
+        # model.
+        self.wrapped_model_config = wrapped_model_config
+        self.text_config = text_config
         self.audio_config = audio_config
         self.text_model_lora_config = text_model_lora_config or {}
         self.audio_model_lora_config = audio_model_lora_config or {}
 
-        self.vocab_size = inner_text_config.vocab_size
-        self.initializer_range = inner_text_config.initializer_range
-        self.text_hidden_size = inner_text_config.hidden_size
+        self.vocab_size = text_config.vocab_size
+        self.initializer_range = text_config.initializer_range
+        self.text_hidden_size = text_config.hidden_size
 
         super().__init__(**kwargs)
