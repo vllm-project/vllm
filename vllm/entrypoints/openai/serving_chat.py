@@ -1053,7 +1053,7 @@ class OpenAIServingChat(OpenAIServing):
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens)
                 if any(num_reasoning_tokens_per_choice):
-                    usage.completion_tokens_details = CompletionTokenUsageInfo(
+                    final_usage.completion_tokens_details = CompletionTokenUsageInfo(
                         reasoning_tokens=sum([tokens for tokens in num_reasoning_tokens_per_choice if tokens is not None]))
             
                 final_usage_chunk = ChatCompletionStreamResponse(
