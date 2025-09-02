@@ -168,7 +168,6 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             torch.ops.vllm.all_reduce.default,
-            torch.ops._C.scaled_fp4_quant.default
         ]
 
 
@@ -179,7 +178,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
         TestAllReduceRMSNormModel,
         TestAllReduceFusedAddRMSNormModel,
         TestAllReduceFusedAddRMSNormStaticQuantFP8Model,
-        # TODO: Enable with torch==2.8.0
+        # TODO: Enable with flashinfer v0.3.0
         # TestAllReduceFusedAddRMSNormStaticQuantFP4Model,
     ])
 @pytest.mark.parametrize(
