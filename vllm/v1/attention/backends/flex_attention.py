@@ -723,7 +723,7 @@ class FlexAttentionImpl(AttentionImpl):
 
         if self.sliding_window and attn_metadata.sliding_window is None:
             attn_metadata.sliding_window = self.sliding_window
-            attn_metadata.block_mask = self.build_block_mask()
+            attn_metadata.block_mask = attn_metadata.build_block_mask()
 
         if not attn_metadata.causal:
             assert self.attn_type == AttentionType.ENCODER_ONLY
