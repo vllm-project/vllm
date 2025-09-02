@@ -47,10 +47,13 @@ import torch
 
 from vllm import LLM, SamplingParams
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.v1.sample.logits_processor import (
     AdapterLogitsProcessor,
     RequestLogitsProcessor,
 )
+
+logger = init_logger(__name__)
 
 
 class DummyPerReqLogitsProcessor:
@@ -112,7 +115,13 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
             is None
         ):
             return None
-        assert isinstance(target_token, int)
+        if not isinstance(target_token, int):
+            logger.warning(
+                "target_token value %s is not int; not applying logits"
+                " processor to request.",
+                target_token,
+            )
+            return None
         return DummyPerReqLogitsProcessor(target_token)
 
 

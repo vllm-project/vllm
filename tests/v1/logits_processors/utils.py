@@ -8,12 +8,15 @@ from typing import Any, Optional
 import torch
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.logits_processor import (LOGITSPROCS_GROUP,
                                              AdapterLogitsProcessor,
                                              BatchUpdate, LogitsProcessor,
                                              RequestLogitsProcessor)
 from vllm.v1.sample.logits_processor.builtin import process_dict_updates
+
+logger = init_logger(__name__)
 
 MODEL_NAME = "facebook/opt-125m"
 POOLING_MODEL_NAME = "BAAI/bge-base-en-v1.5"
@@ -154,7 +157,11 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
             Any] = params.extra_args and params.extra_args.get("target_token")
         if target_token is None:
             return None
-        assert isinstance(target_token, int)
+        if not isinstance(target_token, int):
+            logger.warning(
+                "target_token value %s is not int; not applying logits"
+                " processor to request.", target_token)
+            return None
         return DummyPerReqLogitsProcessor(target_token)
 
 
