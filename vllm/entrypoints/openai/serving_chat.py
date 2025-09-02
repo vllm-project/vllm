@@ -24,7 +24,7 @@ from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
 from vllm.entrypoints.harmony_utils import (
     get_developer_message, get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant, get_system_message, parse_chat_input,
-    render_for_completion)
+    parse_chat_output, render_for_completion)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
@@ -1188,18 +1188,17 @@ class OpenAIServingChat(OpenAIServing):
             if self.use_harmony:
                 if TYPE_CHECKING:
                     assert self.tool_parser is not None
-                    assert self.reasoning_parser is not None
                 tool_parser = self.tool_parser(tokenizer)
-                reasoning_parser = self.reasoning_parser(tokenizer)
                 # NOTE: We use token_ids for openai tool parser
                 tool_call_info = tool_parser.extract_tool_calls(
-                    "", request=request, token_ids=token_ids)
+                    "",
+                    request=request,
+                    token_ids=token_ids,  # type: ignore
+                )
                 reasoning_content, content = None, tool_call_info.content
                 if request.include_reasoning:
-                    reasoning_content, content = reasoning_parser.extract_reasoning_content(  # noqa: E501
-                        "",
-                        request=request,
-                        token_ids=token_ids)
+                    reasoning_content, content, _ = parse_chat_output(
+                        token_ids)
                 message = ChatMessage(
                     role=role,
                     reasoning_content=reasoning_content,
