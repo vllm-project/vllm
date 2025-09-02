@@ -415,6 +415,12 @@ class ApertusModel(nn.Module):
             (".qkv_proj", ".v_proj", "v"),
         ]
         params_dict = dict(self.named_parameters())
+
+        # we need to load the buffers for beta and eps (XIELU)
+        for name, buffer in self.named_buffers():
+            if name.endswith(".beta") or name.endswith(".eps"):
+                params_dict[name] = buffer
+
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
