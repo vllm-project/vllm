@@ -76,7 +76,6 @@ def weight_loader_with_alias(alias: str):
     return wrapper
 
 
-
 class MiniMaxText01MLP(nn.Module):
 
     def __init__(
