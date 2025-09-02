@@ -487,8 +487,9 @@ async def test_chat_completion_stream_options(client: openai.AsyncOpenAI,
 
 
 @pytest.mark.asyncio
-async def test_guided_choice_chat(client: openai.AsyncOpenAI, sample_choices,
-                                  is_v1_server: bool):
+async def test_structured_outputs_choice_chat(client: openai.AsyncOpenAI,
+                                              sample_choices,
+                                              is_v1_server: bool):
     if not is_v1_server:
         pytest.skip("Guided decoding is only supported in v1 engine")
     messages = [{
@@ -526,8 +527,9 @@ async def test_guided_choice_chat(client: openai.AsyncOpenAI, sample_choices,
 
 
 @pytest.mark.asyncio
-async def test_guided_json_chat(client: openai.AsyncOpenAI, sample_json_schema,
-                                is_v1_server: bool):
+async def test_structured_outputs_json_chat(client: openai.AsyncOpenAI,
+                                            sample_json_schema,
+                                            is_v1_server: bool):
     if not is_v1_server:
         pytest.skip("Guided decoding is only supported in v1 engine")
 
@@ -572,8 +574,8 @@ async def test_guided_json_chat(client: openai.AsyncOpenAI, sample_json_schema,
 
 
 @pytest.mark.asyncio
-async def test_guided_regex_chat(client: openai.AsyncOpenAI, sample_regex,
-                                 is_v1_server: bool):
+async def test_structured_outputs_regex_chat(client: openai.AsyncOpenAI,
+                                             sample_regex, is_v1_server: bool):
     if not is_v1_server:
         pytest.skip("Guided decoding is only supported in v1 engine")
 
@@ -632,8 +634,8 @@ async def test_structured_outputs_type_error(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-async def test_guided_choice_chat_logprobs(client: openai.AsyncOpenAI,
-                                           sample_choices):
+async def test_structured_outputs_choice_chat_logprobs(
+        client: openai.AsyncOpenAI, sample_choices):
 
     messages = [{
         "role": "system",

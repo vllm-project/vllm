@@ -742,7 +742,7 @@ def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.parametrize("backend", ["guidance", "xgrammar", "outlines"])
-def test_structured_output_batched_with_non_guided_requests(
+def test_structured_output_batched_with_non_structured_outputs_requests(
     monkeypatch: pytest.MonkeyPatch,
     sample_json_schema: dict[str, Any],
     backend: str,
