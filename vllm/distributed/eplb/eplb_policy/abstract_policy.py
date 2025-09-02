@@ -4,7 +4,10 @@ from abc import abstractmethod
 class EplbPolicy:
 
     @abstractmethod
-    def rebalance_experts(self, weight, num_replicas, num_groups, num_nodes, num_ranks, old_global_expert_indices):
+    def rebalance_experts(
+            self, weight, num_replicas, num_groups, num_nodes,
+            num_ranks, old_global_expert_indices
+    ):
         """
         Entry point for expert-parallelism load balancer.
 
