@@ -299,7 +299,7 @@ class FlexAttentionMetadata:
     q_block_size: int = 16
     kv_block_size: int = 16
     transformed_score_mod: Optional[_score_mod_signature] = None
-    sliding_window: int = 1024
+    sliding_window: Optional[int] = None
 
     def _convert_physical_to_logical(
         self,
@@ -480,11 +480,11 @@ class FlexAttentionMetadata:
         return BlockMask.from_kv_blocks(**block_mask_kwargs)
 
     def build_block_mask(self) -> BlockMask:
-        if self.sliding_window:
-            self.logical_mask_mod = partial(sliding_window_mask_mod, sliding_window=1024)
-            mask_mod = self.get_causal_mask_mod()
-            kv_len = self.total_cache_tokens
-        elif self.causal:
+        if self.causal:
+            if self.sliding_window is not None:
+                self.logical_mask_mod = partial(
+                    sliding_window_mask_mod,
+                    sliding_window=self.sliding_window)
             mask_mod = self.get_causal_mask_mod()
             kv_len = self.total_cache_tokens
         else:
@@ -652,12 +652,9 @@ class FlexAttentionImpl(AttentionImpl):
                 "FlexAttention does not support alibi slopes yet.")
         else:
             self.alibi_slopes = None
-        if sliding_window is not None:
-            # raise NotImplementedError(
-            #     "FlexAttention does not support sliding window yet.")
-            self.sliding_window = sliding_window
-        else:
-            self.sliding_window = (-1, -1)
+
+        self.sliding_window = sliding_window
+
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
         if self.logits_soft_cap is not None:
@@ -723,6 +720,10 @@ class FlexAttentionImpl(AttentionImpl):
             # return torch.empty_like(query)
 
         num_actual_tokens = attn_metadata.num_actual_tokens
+
+        if self.sliding_window and attn_metadata.sliding_window is None:
+            attn_metadata.sliding_window = self.sliding_window
+            attn_metadata.block_mask = self.build_block_mask()
 
         if not attn_metadata.causal:
             assert self.attn_type == AttentionType.ENCODER_ONLY
