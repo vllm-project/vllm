@@ -6,9 +6,9 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from tests.v1.sample.utils import create_allowed_token_ids
 from vllm.platforms import current_platform
 from vllm.v1.sample.logits_processor import LogitsProcessors
-from tests.v1.sample.utils import create_allowed_token_ids
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (PLACEHOLDER_TOKEN_ID,
                                               RejectionSampler)
@@ -22,9 +22,10 @@ def rejection_sampler():
     return RejectionSampler()
 
 
-def create_logits_tensor(output_token_ids: list[list[int]],
-                         vocab_size: int = 100,
-                         token_idx_to_override: Optional[int] = None) -> torch.Tensor:
+def create_logits_tensor(
+        output_token_ids: list[list[int]],
+        vocab_size: int = 100,
+        token_idx_to_override: Optional[int] = None) -> torch.Tensor:
     """Helper function to create logits tensor that
        will produce desired token ids on argmax"""
     token_ids = [tokens[:-1] for tokens in output_token_ids]

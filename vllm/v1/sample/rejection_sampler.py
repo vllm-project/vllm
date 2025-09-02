@@ -193,8 +193,7 @@ class RejectionSampler(nn.Module):
 
         assert sampling_metadata.prompt_token_ids is not None
 
-        prompt_token_ids = sampling_metadata.prompt_token_ids[
-            repeat_indices]
+        prompt_token_ids = sampling_metadata.prompt_token_ids[repeat_indices]
         presence_penalties = sampling_metadata.presence_penalties[
             repeat_indices]
         frequency_penalties = sampling_metadata.frequency_penalties[

@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
-
 import numpy as np
 import pytest
 import torch
@@ -50,7 +48,6 @@ def _create_prompt_tokens_tensor(
         dtype=torch.int64,
         pin_memory=False,
     )
-
 
 
 def _create_bad_words_token_ids(

@@ -269,7 +269,7 @@ class InputBatch:
         # Store provided logitsprocs. If none are provided, initialize empty
         # data structure
         self.logitsprocs = logitsprocs or LogitsProcessors()
-        
+
         # Store last speculative tokens for sampler.
         self.last_spec_token_ids: list[Optional[list[int]]] = []
 
