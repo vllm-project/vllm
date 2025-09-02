@@ -309,11 +309,9 @@ class DashengAudioTransformer(nn.Module):
         )
 
         self.time_pos_embed = nn.Parameter(
-            torch.randn(1, config.embed_dim, 1, self.patch_embed.grid_size[1])
-            * 0.02)
+            torch.empty(1, config.embed_dim, 1, self.patch_embed.grid_size[1]))
         self.freq_pos_embed = nn.Parameter(
-            torch.randn(1, config.embed_dim, self.patch_embed.grid_size[0], 1)
-            * 0.02)
+            torch.empty(1, config.embed_dim, self.patch_embed.grid_size[0], 1))
         self.blocks = nn.ModuleList(
             DashengBlock(
                 dim=config.embed_dim,
