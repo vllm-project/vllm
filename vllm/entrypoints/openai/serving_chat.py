@@ -893,7 +893,6 @@ class OpenAIServingChat(OpenAIServing):
                     if delta_message is not None:
                         if delta_message.reasoning_content:
                             num_reasoning_tokens_per_choice[i] += len(output.token_ids)
-                        # Harmony 模式下，如果当前 channel 不是 "final"，也算作 reasoning_tokens
                         elif self.use_harmony and not harmony_parsers[i].current_channel == "final":
                             num_reasoning_tokens_per_choice[i] += len(output.token_ids)
                             
@@ -1154,7 +1153,7 @@ class OpenAIServingChat(OpenAIServing):
                     parse_chat_output(token_ids))
                 if not request.include_reasoning:
                     reasoning_content = None
-                num_reasoning_tokens_per_choice[i] = None
+                    num_reasoning_tokens_per_choice[i] = None
                 
                 if is_tool_call:
                     # TODO(woosuk): Implement tool call for gpt-oss.
@@ -1358,7 +1357,6 @@ class OpenAIServingChat(OpenAIServing):
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens)
-        # if num_reasoning_tokens_per_choice中存在非None和大于0的值
         if any(num_reasoning_tokens_per_choice):
             usage.completion_tokens_details = CompletionTokenUsageInfo(
                 reasoning_tokens=sum([tokens for tokens in num_reasoning_tokens_per_choice if tokens is not None]))
