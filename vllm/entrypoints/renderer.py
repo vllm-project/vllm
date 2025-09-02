@@ -8,7 +8,7 @@ from typing import Annotated, Optional, Union
 from pydantic import Field
 
 from vllm.config import ModelConfig
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import AsyncMicrobatchTokenizer
@@ -49,7 +49,7 @@ class BaseRenderer(ABC):
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: Optional[bool] = True,
         cache_salt: Optional[str] = None,
-    ) -> list[TokensPrompt]:
+    ) -> list[EngineTokensPrompt]:
         """
         Convert input prompts into tokenized format for engine processing.
         
@@ -72,7 +72,8 @@ class BaseRenderer(ABC):
             cache_salt: Optional string to disambiguate cached prompts
             
         Returns:
-            list[TokensPrompt]: Tokenized prompts ready for engine consumption
+            list[EngineTokensPrompt]: Tokenized prompts ready for engine 
+                consumption
             
         Raises:
             ValueError: If input format is invalid or length limits exceeded
@@ -100,7 +101,7 @@ class CompletionRenderer(BaseRenderer):
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: Optional[bool] = True,
         cache_salt: Optional[str] = None,
-    ) -> list[TokensPrompt]:
+    ) -> list[EngineTokensPrompt]:
         """Implementation of prompt rendering for completion-style requests.
         
         Uses async tokenizer pooling for improved performance. See base class
@@ -126,7 +127,7 @@ class CompletionRenderer(BaseRenderer):
         # Parse and batch the input prompts
         batch_inputs = parse_and_batch_prompt(prompt_or_prompts)
 
-        rendered_prompts: list[TokensPrompt] = []
+        rendered_prompts: list[EngineTokensPrompt] = []
         tokenize_tasks = []
         for prompt_input in batch_inputs:
             if prompt_input["is_tokens"] is True:
@@ -169,7 +170,7 @@ class CompletionRenderer(BaseRenderer):
         truncate_prompt_tokens: Optional[int],
         add_special_tokens: Optional[bool],
         cache_salt: Optional[str],
-    ) -> TokensPrompt:
+    ) -> EngineTokensPrompt:
         """Tokenize text input asynchronously."""
         async_tokenizer = self._get_async_tokenizer()
 
@@ -215,15 +216,15 @@ class CompletionRenderer(BaseRenderer):
         token_ids: list[int],
         max_length: Optional[int] = None,
         cache_salt: Optional[str] = None,
-    ) -> TokensPrompt:
-        """Create validated TokensPrompt."""
+    ) -> EngineTokensPrompt:
+        """Create validated EngineTokensPrompt."""
         if max_length is not None and len(token_ids) > max_length:
             raise ValueError(
                 f"This maximum context length is {max_length} tokens. "
                 f"However, your request has {len(token_ids)} input tokens. "
                 "Please reduce the length of the input messages.")
 
-        tokens_prompt = TokensPrompt(prompt_token_ids=token_ids)
+        tokens_prompt = EngineTokensPrompt(prompt_token_ids=token_ids)
         if cache_salt is not None:
             tokens_prompt["cache_salt"] = cache_salt
         return tokens_prompt
