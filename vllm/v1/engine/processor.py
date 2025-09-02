@@ -17,7 +17,7 @@ from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer_group import TokenizerGroup
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.structured_output.backend_guidance import (
     validate_guidance_grammar)
@@ -34,7 +34,7 @@ class Processor:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        tokenizer: TokenizerGroup,
+        tokenizer: AnyTokenizer,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
 
@@ -82,7 +82,6 @@ class Processor:
     def _validate_sampling_params(
         self,
         params: SamplingParams,
-        lora_request: Optional[LoRARequest],
     ) -> None:
         self._validate_structured_output(params)
         self._validate_logit_bias(params)
@@ -95,8 +94,7 @@ class Processor:
             # When skip_tokenizer_init=True, we can't validate token IDs
             # Skip validation and let the model handle invalid tokens
             return
-        tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
-        vocab_size = len(tokenizer)
+        vocab_size = len(self.tokenizer)
         if not all(0 <= tid < vocab_size for tid in params.allowed_token_ids):
             raise ValueError(
                 "allowed_token_ids contains out-of-vocab token id!")
@@ -136,7 +134,6 @@ class Processor:
     def _validate_params(
         self,
         params: Union[SamplingParams, PoolingParams],
-        lora_request: Optional[LoRARequest],
     ):
         """
         Validate supported SamplingParam.
@@ -147,14 +144,14 @@ class Processor:
             return
 
         self._validate_logprobs(params)
-        self._validate_sampling_params(params, lora_request)
+        self._validate_sampling_params(params)
         self._validate_supported_sampling_params(params)
 
     def _validate_multi_modal_uuids(self, prompt: PromptType) -> None:
         """
         Validate that user-provided multi_modal_uuids align with
         multi_modal_data in the incoming request prompt(s).
-        Only checks lengths; `None` entries are allowed and will be 
+        Only checks lengths; `None` entries are allowed and will be
         auto-hashed downstream.
         """
 
@@ -319,7 +316,7 @@ class Processor:
         # TODO(woosuk): Support pooling models.
         # TODO(woosuk): Support encoder-decoder models.
         self._validate_lora(lora_request)
-        self._validate_params(params, lora_request)
+        self._validate_params(params)
         if trace_headers is not None:
             raise ValueError("V1 does not support tracing yet.")
 
@@ -361,7 +358,6 @@ class Processor:
         processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
-            lora_request=lora_request,
             mm_hash_overrides=mm_hash_overrides,
         )
         from vllm.platforms import current_platform
@@ -371,9 +367,9 @@ class Processor:
             processed_inputs=processed_inputs,
         )
 
-        eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
+        eos_token_id = self.input_preprocessor.get_eos_token_id()
 
-        self._validate_model_inputs(processed_inputs, lora_request)
+        self._validate_model_inputs(processed_inputs)
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
 
@@ -394,8 +390,7 @@ class Processor:
             sampling_params.update_from_generation_config(
                 self.generation_config_fields, eos_token_id)
             if self.tokenizer is not None:
-                sampling_params.update_from_tokenizer(
-                    self.tokenizer.get_lora_tokenizer(lora_request))
+                sampling_params.update_from_tokenizer(self.tokenizer)
         else:
             pooling_params = params.clone()
 
@@ -435,24 +430,17 @@ class Processor:
             data_parallel_rank=data_parallel_rank,
         )
 
-    def _validate_model_inputs(self,
-                               inputs: ProcessorInputs,
-                               lora_request: Optional[LoRARequest] = None):
+    def _validate_model_inputs(self, inputs: ProcessorInputs):
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(inputs)
 
         if encoder_inputs is not None:
-            self._validate_model_input(encoder_inputs,
-                                       lora_request,
-                                       prompt_type="encoder")
+            self._validate_model_input(encoder_inputs, prompt_type="encoder")
 
-        self._validate_model_input(decoder_inputs,
-                                   lora_request,
-                                   prompt_type="decoder")
+        self._validate_model_input(decoder_inputs, prompt_type="decoder")
 
     def _validate_model_input(
         self,
         prompt_inputs: SingletonInputs,
-        lora_request: Optional[LoRARequest],
         *,
         prompt_type: Literal["encoder", "decoder"],
     ):
@@ -468,7 +456,7 @@ class Processor:
         if self.model_config.skip_tokenizer_init:
             tokenizer = None
         else:
-            tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
+            tokenizer = self.tokenizer
             max_input_id = max(prompt_ids, default=0)
 
             # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while

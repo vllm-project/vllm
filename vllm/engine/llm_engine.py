@@ -48,9 +48,8 @@ from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
 from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
                           init_tracer)
 from vllm.transformers_utils.detokenizer import Detokenizer
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizer_group import (
-    TokenizerGroup, init_tokenizer_from_configs)
+from vllm.transformers_utils.tokenizer import (AnyTokenizer,
+                                               init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter, Device, resolve_obj_by_qualname, weak_bind
@@ -185,7 +184,7 @@ class LLMEngine:
 
         return outputs_
 
-    tokenizer: Optional[TokenizerGroup]
+    tokenizer: Optional[AnyTokenizer]
 
     def __init__(
         self,
@@ -232,18 +231,9 @@ class LLMEngine:
         if self.model_config.skip_tokenizer_init:
             self.tokenizer = None
             self.detokenizer = None
-            tokenizer_group = None
         else:
             self.tokenizer = self._init_tokenizer()
             self.detokenizer = Detokenizer(self.tokenizer)
-            tokenizer_group = self.get_tokenizer_group()
-
-        # Ensure that the function doesn't contain a reference to self,
-        # to avoid engine GC issues
-        def get_tokenizer_for_seq(sequence: Sequence) -> AnyTokenizer:
-            assert tokenizer_group, ("tokenizer_group cannot be None, "
-                                     "make sure skip_tokenizer_init is False")
-            return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
         self.seq_counter = Counter()
         self.generation_config_fields = (
@@ -379,9 +369,7 @@ class LLMEngine:
                 self.detokenizer,
                 self.scheduler,
                 self.seq_counter,
-                get_tokenizer_for_seq,
-                stop_checker=StopChecker(self.scheduler_config.max_model_len,
-                                         get_tokenizer_for_seq),
+                stop_checker=StopChecker(self.scheduler_config.max_model_len),
             ))
 
         self.seq_id_to_seq_group: Dict[str, SequenceGroupBase] = {}
@@ -507,24 +495,15 @@ class LLMEngine:
         if model_executor := getattr(self, "model_executor", None):
             model_executor.shutdown()
 
-    def get_tokenizer_group(self) -> TokenizerGroup:
+    def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
             raise ValueError("Unable to get tokenizer because "
                              "skip_tokenizer_init is True")
 
         return self.tokenizer
 
-    def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        return self.get_tokenizer_group().get_lora_tokenizer(lora_request)
-
-    def _init_tokenizer(self) -> TokenizerGroup:
-        return init_tokenizer_from_configs(
-            model_config=self.model_config,
-            scheduler_config=self.scheduler_config,
-            lora_config=self.lora_config)
+    def _init_tokenizer(self) -> AnyTokenizer:
+        return init_tokenizer_from_configs(model_config=self.model_config)
 
     def _verify_args(self) -> None:
         self.model_config.verify_with_parallel_config(self.parallel_config)
@@ -686,7 +665,6 @@ class LLMEngine:
         processed_inputs = self.input_preprocessor.preprocess(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
-            lora_request=lora_request,
         )
 
         self._add_processed_request(
@@ -1741,13 +1719,11 @@ class LLMEngine:
     def _validate_model_input(
         self,
         prompt_inputs: SingletonInputs,
-        lora_request: Optional[LoRARequest],
         *,
         prompt_type: Literal["encoder", "decoder"],
     ):
         model_config = self.model_config
-        tokenizer = (None if self.tokenizer is None else
-                     self.tokenizer.get_lora_tokenizer(lora_request))
+        tokenizer = self.get_tokenizer()
 
         prompt_ids = prompt_inputs.get("prompt_token_ids", [])
         if not prompt_ids:
@@ -1808,7 +1784,7 @@ class LLMEngine:
         logits_processors = []
 
         if (sampling_params.logit_bias or sampling_params.allowed_token_ids):
-            tokenizer = self.get_tokenizer(lora_request=lora_request)
+            tokenizer = self.get_tokenizer()
 
             processors = get_openai_logits_processors(
                 logit_bias=sampling_params.logit_bias,
@@ -1821,7 +1797,7 @@ class LLMEngine:
             sampling_params.allowed_token_ids = None
 
         if len(sampling_params.bad_words) > 0:
-            tokenizer = self.get_tokenizer(lora_request)
+            tokenizer = self.get_tokenizer()
             processors = get_bad_words_logits_processors(
                 bad_words=sampling_params.bad_words, tokenizer=tokenizer)
             logits_processors.extend(processors)

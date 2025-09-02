@@ -291,23 +291,17 @@ class LLM:
         self.io_processor = get_io_processor(self.llm_engine.vllm_config,
                                              io_processor_plugin)
 
-    def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
-        return self.llm_engine.get_tokenizer_group().get_lora_tokenizer(
-            lora_request)
+    def get_tokenizer(self) -> AnyTokenizer:
+        return self.llm_engine.get_tokenizer()
 
     def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
-        tokenizer_group = self.llm_engine.get_tokenizer_group()
-
         # While CachedTokenizer is dynamic, have no choice but
         # compare class name. Misjudgment will arise from
         # user-defined tokenizer started with 'Cached'
         if tokenizer.__class__.__name__.startswith("Cached"):
-            tokenizer_group.tokenizer = tokenizer
+            self.llm_engine.tokenizer = tokenizer
         else:
-            tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
+            self.llm_engine.tokenizer = get_cached_tokenizer(tokenizer)
 
     def get_default_sampling_params(self) -> SamplingParams:
         if self.default_sampling_params is None:

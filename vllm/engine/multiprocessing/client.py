@@ -44,7 +44,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer import init_tokenizer_from_configs
 from vllm.utils import Device
 
 logger = init_logger(__name__)
@@ -97,13 +97,10 @@ class MQLLMEngineClient(EngineClient):
 
         if self.vllm_config.model_config.skip_tokenizer_init:
             self.tokenizer = None
-
         else:
-            # Create the tokenizer group.
+            # Create the tokenizer.
             self.tokenizer = init_tokenizer_from_configs(
-                model_config=self.model_config,
-                scheduler_config=engine_config.scheduler_config,
-                lora_config=engine_config.lora_config)
+                model_config=self.model_config)
 
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer)
@@ -378,10 +375,7 @@ class MQLLMEngineClient(EngineClient):
         return self.input_preprocessor
 
     async def get_tokenizer(self, lora_request: Optional[LoRARequest] = None):
-        if self.tokenizer is None:
-            return None
-        else:
-            return await self.tokenizer.get_lora_tokenizer_async(lora_request)
+        return self.tokenizer
 
     async def get_vllm_config(self) -> VllmConfig:
         return self.vllm_config
