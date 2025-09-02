@@ -933,27 +933,6 @@ class OpenAIServingChat(OpenAIServing):
                                 delta=True,
                             )
 
-                    # Log streaming delta if output logging is enabled
-                    if self.enable_log_outputs and self.request_logger:
-                        delta_content = ""
-                        if delta_message.content:
-                            delta_content = delta_message.content
-                        elif delta_message.tool_calls:
-                            delta_content = "".join(
-                                tc.function.arguments
-                                for tc in delta_message.tool_calls
-                                if tc.function and tc.function.arguments)
-
-                        if delta_content:
-                            self.request_logger.log_outputs(
-                                request_id=request_id,
-                                outputs=delta_content,
-                                output_token_ids=as_list(output.token_ids),
-                                finish_reason=output.finish_reason,
-                                is_streaming=True,
-                                delta=True,
-                            )
-
                     if output.finish_reason is None:
                         # Send token-by-token response for each request.n
                         choice_data = ChatCompletionResponseStreamChoice(
