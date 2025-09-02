@@ -213,7 +213,7 @@ def mteb_test_embed_models(hf_runner,
 
     # We are not concerned that the vllm mteb results are better
     # than SentenceTransformers, so we only perform one-sided testing.
-    assert vllm_main_score - st_main_score < atol
+    assert st_main_score - vllm_main_score < atol
 
 
 def run_mteb_rerank(cross_encoder, tasks, languages):
@@ -330,4 +330,4 @@ def mteb_test_rerank_models(hf_runner,
 
     # We are not concerned that the vllm mteb results are better
     # than SentenceTransformers, so we only perform one-sided testing.
-    assert vllm_main_score - st_main_score < atol
+    assert st_main_score - vllm_main_score < atol
