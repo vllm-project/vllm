@@ -249,7 +249,7 @@ class Sampler(nn.Module):
 
         any_penalties_or_bad_words = (sampling_metadata.bad_words_token_ids
                                       or not sampling_metadata.no_penalties)
-        
+
         output_token_ids = sampling_metadata.output_token_ids
         if predict_bonus_token and any_penalties_or_bad_words:
             # Speculative decoding is enabled
@@ -264,7 +264,7 @@ class Sampler(nn.Module):
         # Apply bad words exclusion.
         logits = self.apply_bad_words(logits, sampling_metadata,
                                       output_token_ids)
-        
+
         # Apply logits processors which can impact greedy sampling
         for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
             logits = processor.apply(logits)
