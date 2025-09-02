@@ -22,7 +22,7 @@ def get_all_expert_map(self, num_moe_layers):
 
 def get_all_moe_loads(self):
     all_moe_loads = torch.stack(
-        [self.model.layers[layer_id].mlp.experts.moe_load \
+        [self.model.layers[layer_id].mlp.experts.expert_load_view \
          for layer_id in range(self.num_moe_layers)],
         dim=0
     )
