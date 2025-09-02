@@ -212,7 +212,7 @@ class InputPreprocessor:
         tokenizer = self.get_tokenizer()
         tokenization_kwargs = self._get_tokenization_kw(tokenization_kwargs)
 
-        return tokenizer.encode(prompt=prompt, **tokenization_kwargs)
+        return tokenizer.encode(prompt, **tokenization_kwargs)
 
     def _get_mm_tokenizer(self) -> AnyTokenizer:
         # PrithviGeoSpatialMAE needs to be initialized without a tokenizer
