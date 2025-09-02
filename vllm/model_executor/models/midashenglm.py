@@ -437,7 +437,7 @@ class AudioProjectorSubsample(nn.Module):
                 input_size=out_dim,
                 output_size=out_dim,
                 quant_config=quant_config,
-                prefix=f"{prefix}.net.1",
+                prefix=f"{prefix}.net.2",
                 return_bias=False,
             ))
 
