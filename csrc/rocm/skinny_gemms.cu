@@ -337,7 +337,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                      const scalar_t* __restrict__ A, scalar_t* C,
                      const int _WvPrGrp, const int CuCount) {
   constexpr int max_lds_len = LDS_SIZE / 2;
-  #if defined(__HIP__MI3XX__)
+  #if defined(__HIP__GFX9__)
   constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
   #else
   constexpr bool use_mfma = false;
@@ -488,11 +488,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             else {
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 4; b++) {
-#if __HIP__GFX9__CNDA__ < 2
-#else
-                sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(
-                    bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
-#endif
+                sum4[n][y] = gcn_mfma4x4x4bf16_instr<0, 0, 0>(
+                  bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y]);
               }
             }
           }
