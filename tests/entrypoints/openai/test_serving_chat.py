@@ -29,10 +29,21 @@ GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 
 
 @pytest.fixture(scope="module")
-def gptoss_server():
-    args = ["--enforce-eager"]
-    with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, args) as remote_server:
-        yield remote_server
+def gptoss_server(monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
+        args = [
+            "--enforce-eager",
+            "--max-model-len",
+            "8192",
+            "--tool-call-parser",
+            "openai",
+            "--reasoning-parser",
+            "openai_gptoss",
+            "--enable-auto-tool-choice",
+        ]
+        with RemoteOpenAIServer(GPT_OSS_MODEL_NAME, args) as remote_server:
+            yield remote_server
 
 
 @pytest_asyncio.fixture
