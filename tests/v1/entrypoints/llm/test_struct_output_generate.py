@@ -579,8 +579,9 @@ def test_structured_output_with_reasoning_matrices(
         enforce_eager=bool(not current_platform.is_tpu()),
         max_model_len=1024,
         max_num_seqs=16,
-        backend=backend,
-        structured_outputs_config=dict(disable_any_whitespace=True,
+        structured_outputs_config=dict(backend=backend,
+                                       disable_any_whitespace=backend
+                                       not in {"xgrammar", "guidance"},
                                        reasoning_parser=reasoning_parser),
         tokenizer_mode=tokenizer_mode,
         speculative_config=speculative_config,
@@ -643,7 +644,7 @@ def test_structured_output_auto_mode(
 
     llm = LLM(model=model_name,
               max_model_len=1024,
-              backend="auto",
+              structured_outputs=dict(backend="auto"),
               tokenizer_mode=tokenizer_mode)
 
     sampling_params = SamplingParams(
@@ -686,6 +687,7 @@ def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
     llm = LLM(model="Qwen/Qwen2.5-1.5B-Instruct",
               max_model_len=1024,
               structured_outputs_config=dict(
+                  backend="guidance",
                   disable_any_whitespace=True,
                   disable_additional_properties=True))
 
