@@ -47,7 +47,9 @@ def is_v1_kv_transfer_group(
     return isinstance(connector, KVConnectorBase_V1)
 
 
-def ensure_kv_transfer_initialized(vllm_config: "VllmConfig", role: KVConnectorRole = KVConnectorRole.WORKER) -> None:
+def ensure_kv_transfer_initialized(
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole = KVConnectorRole.WORKER) -> None:
     """
     Initialize KV cache transfer parallel group.
     """
