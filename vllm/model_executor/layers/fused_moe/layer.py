@@ -840,18 +840,12 @@ class FusedMoE(CustomOp):
             # multiple expert groups and no redundant experts.
             enable_zigzag = num_expert_group is not None \
                 and num_expert_group > 1 and num_redundant_experts == 0
-            if enable_zigzag:
-                self.local_num_experts, self.expert_map = determine_expert_map(
-                    ep_size=self.ep_size,
-                    ep_rank=self.ep_rank,
-                    global_num_experts=self.global_num_experts,
-                    enable_zigzag_expert_placement=enable_zigzag,
-                )
-            else:
-                self.local_num_experts, self.expert_map = determine_expert_map(
-                    ep_size=self.ep_size,
-                    ep_rank=self.ep_rank,
-                    global_num_experts=self.global_num_experts)
+            self.local_num_experts, self.expert_map = determine_expert_map(
+                ep_size=self.ep_size,
+                ep_rank=self.ep_rank,
+                global_num_experts=self.global_num_experts,
+                enable_zigzag_expert_placement=enable_zigzag,
+            )
             logger.info_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
                 " number of experts: %s/%s. Experts local to global index map:"
