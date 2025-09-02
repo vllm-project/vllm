@@ -32,7 +32,8 @@ from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
 from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool)
-from openai.types.responses import ResponseInputImageParam
+from openai.types.responses import (ResponseFunctionToolCall,
+                                    ResponseInputImageParam)
 from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
@@ -676,7 +677,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return mm_uuids
 
     @abstractmethod
-    def create_parser(self) -> "BaseMultiModalContentParser":
+    def create_parser(self) -> BaseMultiModalContentParser:
         raise NotImplementedError
 
 
@@ -706,7 +707,7 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[object]):
             mm_inputs["video"] = items_by_modality["video"]  # A list of videos
         return mm_inputs
 
-    def create_parser(self) -> "BaseMultiModalContentParser":
+    def create_parser(self) -> BaseMultiModalContentParser:
         return MultiModalContentParser(self)
 
 
@@ -740,7 +741,7 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
             mm_inputs["video"] = items_by_modality["video"]  # A list of videos
         return mm_inputs
 
-    def create_parser(self) -> "BaseMultiModalContentParser":
+    def create_parser(self) -> BaseMultiModalContentParser:
         return AsyncMultiModalContentParser(self)
 
 
@@ -1542,27 +1543,27 @@ def make_tool_call_id(id_type: str = "random", func_name=None, idx=None):
         return f"chatcmpl-tool-{random_uuid()}"
 
 
-def parse_chat_tool_call(item: "ResponseInputOutputItem") -> ChatCompletionMessageParam:
-    if item.type == "function_call":
+def parse_chat_tool_call(item: ResponseInputOutputItem) -> ChatCompletionMessageParam:
+    if item.get("type") == "function_call":
         # Append the function call as a tool call.
         return ChatCompletionAssistantMessageParam(
                 role="assistant",
                 tool_calls=[
                     ChatCompletionMessageToolCallParam(
-                        id=item.call_id,
+                        id=item.get("call_id"),
                         function=FunctionCallTool(
-                            name=item.name,
-                            arguments=item.arguments,
+                            name=item.get("name"),
+                            arguments=item.get("arguments"),
                         ),
                         type="function",
                     )
                 ],
             )
-    elif item.type == "function_call_output":
+    elif item.get("type") == "function_call_output":
         # Append the function call output as a tool message.
         return ChatCompletionToolMessageParam(
                 role="tool",
-                content=item.output,
-                tool_call_id=item.call_id,
+                content=item.get("output"),
+                tool_call_id=item.get("call_id"),
             )
     return item  # type: ignore

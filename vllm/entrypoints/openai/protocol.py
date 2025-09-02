@@ -31,7 +31,7 @@ except ImportError:  # For newer openai versions (>= 1.100.0)
                                         ResponseTextConfig)
 
 from openai.types.responses.response import ToolChoice
-from openai.types.responses.tool import Tool
+from openai.types.responses.tool import FunctionTool, Tool
 from openai.types.shared import Metadata, Reasoning
 from pydantic import (BaseModel, ConfigDict, Field, TypeAdapter,
                       ValidationInfo, field_validator, model_validator)
@@ -253,8 +253,8 @@ def get_guided_json_from_tool(
 ) -> Optional[Union[str, dict, BaseModel]]:
     if tool_choice in ("none", None) or tools is None:
         return None
-
-    if isinstance(tool_choice, ToolChoice):
+    if (not isinstance(tool_choice, str)) and isinstance(
+            tool_choice, ToolChoice):
         tool_name = tool_choice.name
         tool_map = {
             tool.name: tool
@@ -265,7 +265,8 @@ def get_guided_json_from_tool(
                 f"Tool '{tool_name}' has not been passed in `tools`.")
         return tool_map[tool_name].parameters
 
-    if isinstance(tool_choice, ChatCompletionNamedToolChoiceParam):
+    if (not isinstance(tool_choice, str)) and isinstance(
+            tool_choice, ChatCompletionNamedToolChoiceParam):
         tool_name = tool_choice.function.name
         tool_map = {
             tool.function.name: tool
@@ -281,7 +282,7 @@ def get_guided_json_from_tool(
         def extract_tool_info(
                 tool: Union[Tool,
                             ChatCompletionToolsParam]) -> tuple[str, dict]:
-            if isinstance(tool, Tool):
+            if isinstance(tool, FunctionTool):
                 return tool.name, tool.parameters
             elif isinstance(tool, ChatCompletionToolsParam):
                 return tool.function.name, tool.function.parameters
@@ -833,7 +834,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
         )
-
 
     @model_validator(mode="before")
     @classmethod

@@ -54,7 +54,6 @@ def main():
     response = client.responses.create(
         model=model, input=input_messages, tools=tools, tool_choice="required"
     )
-    print(response.json())
     tool_call = response.output[0]
     args = json.loads(tool_call.arguments)
 
