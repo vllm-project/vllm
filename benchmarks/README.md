@@ -110,7 +110,11 @@ become available.
 
 🚧: to be supported
 
-**Note**: HuggingFace dataset's `dataset-name` should be set to `hf`
+**Note**: HuggingFace dataset's `dataset-name` should be set to `hf`. 
+For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
+```
+--dataset-path /datasets/VisionArena-Chat/ --hf-name lmarena-ai/VisionArena-Chat
+```
 
 ## 🚀 Example - Online Benchmark
 
