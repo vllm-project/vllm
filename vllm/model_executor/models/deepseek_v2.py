@@ -104,10 +104,19 @@ class DeepseekV2MoE(nn.Module):
     # Chunk x for sequence parallelism
     def sp_chunk(self, x):
         seq_len = x.size(0)
-        assert (seq_len % self.tp_size == 0)
+
+        # all_gather needs the sequence length to be divisible by tp_size
+        remainder = seq_len % self.tp_size
+        if remainder != 0:
+            pad_len = self.tp_size - remainder
+            pad_shape = list(x.shape)
+            pad_shape[0] = pad_len
+            pad = x.new_zeros(pad_shape)
+            x = torch.cat([x, pad], dim=0)
+            seq_len = x.size(0)
+
         chunk = seq_len // self.tp_size
-        #start = self.tp_rank * chunk
-        start = 0
+        start = self.tp_rank * chunk
         return x.narrow(0, start, chunk).contiguous()
 
     def __init__(
@@ -207,6 +216,8 @@ class DeepseekV2MoE(nn.Module):
 
         final_hidden_states = tensor_model_parallel_all_gather(
             final_sp_hidden_states, 0).contiguous()
+
+        final_hidden_states = final_hidden_states[:num_tokens]
         # **************************************************
 
         final_hidden_states = final_hidden_states + shared_output

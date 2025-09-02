@@ -401,8 +401,7 @@ class Worker(WorkerBase):
                 sort_by="self_cuda_time_total"))
 
     def execute_dummy_batch(self) -> None:
-        num_dummy_tokens = self.vllm_config.parallel_config.tensor_parallel_size
-        self.model_runner._dummy_run(num_dummy_tokens)
+        self.model_runner._dummy_run(1)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
