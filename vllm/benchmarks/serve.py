@@ -394,6 +394,7 @@ async def benchmark(
     ramp_up_start_rps: Optional[int] = None,
     ramp_up_end_rps: Optional[int] = None,
     ready_check_timeout_sec: int = 600,
+    skip_check: bool = False,
 ):
     task_type = (
         TaskType.EMBEDDING
@@ -426,47 +427,49 @@ async def benchmark(
         timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
     )
 
-    print("Starting initial single prompt test run...")
-    test_prompt, test_prompt_len, test_output_len, test_mm_content = (
-        input_requests[0].prompt,
-        input_requests[0].prompt_len,
-        input_requests[0].expected_output_len,
-        input_requests[0].multi_modal_data,
-    )
-
-    assert (
-        test_mm_content is None
-        or isinstance(test_mm_content, dict)
-        or (
-            isinstance(test_mm_content, list)
-            and all(isinstance(item, dict) for item in test_mm_content)
+    if not skip_check:
+        print("Starting initial single prompt test run...")
+        test_prompt, test_prompt_len, test_output_len, test_mm_content = (
+            input_requests[0].prompt,
+            input_requests[0].prompt_len,
+            input_requests[0].expected_output_len,
+            input_requests[0].multi_modal_data,
         )
-    ), "multi_modal_data must be a dict or list[dict]"
-    test_input = RequestFuncInput(
-        model=model_id,
-        model_name=model_name,
-        prompt=test_prompt,
-        api_url=api_url,
-        prompt_len=test_prompt_len,
-        output_len=test_output_len,
-        logprobs=logprobs,
-        multi_modal_content=test_mm_content,
-        ignore_eos=ignore_eos,
-        extra_body=extra_body,
-    )
 
-    test_output = await wait_for_endpoint(
-        request_func,
-        test_input,
-        session,
-        timeout_seconds=ready_check_timeout_sec,
-    )
-    if not test_output.success:
-        raise ValueError(
-            "Initial test run failed - Please make sure benchmark arguments "
-            f"are correctly specified. Error: {test_output.error}")
-    else:
-        print("Initial test run completed. Starting main benchmark run...")
+        assert (
+            test_mm_content is None
+            or isinstance(test_mm_content, dict)
+            or (
+                isinstance(test_mm_content, list)
+                and all(isinstance(item, dict) for item in test_mm_content)
+            )
+        ), "multi_modal_data must be a dict or list[dict]"
+        test_input = RequestFuncInput(
+            model=model_id,
+            model_name=model_name,
+            prompt=test_prompt,
+            api_url=api_url,
+            prompt_len=test_prompt_len,
+            output_len=test_output_len,
+            logprobs=logprobs,
+            multi_modal_content=test_mm_content,
+            ignore_eos=ignore_eos,
+            extra_body=extra_body,
+        )
+
+        test_output = await wait_for_endpoint(
+            request_func,
+            test_input,
+            session,
+            timeout_seconds=ready_check_timeout_sec,
+        )
+        if not test_output.success:
+            raise ValueError(
+                "Initial test run failed - Please make sure benchmark "
+                "arguments are correctly specified. "
+                f"Error: {test_output.error}")
+        else:
+            print("Initial test run completed. Starting main benchmark run...")
 
     if lora_modules:
         # For each input request, choose a LoRA module at random.
@@ -828,6 +831,11 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "actual request rate may be lower than specified with --request-rate, "
         "if the server is not processing requests fast enough to keep up.",
     )
+    parser.add_argument(
+        "--skip-check",
+        action="store_true",
+        help="Whether to skip the initial test run?",
+    )
 
     parser.add_argument(
         "--model",
@@ -1166,6 +1174,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
+        skip_check=args.skip_check,
     )
 
     # Save config and results to json
