@@ -655,20 +655,23 @@ class StatLoggerManager:
 
         # engine_idx: StatLogger
         self.per_engine_logger_dict: dict[int, list[StatLoggerBase]] = {}
+        prometheus_factory = PrometheusStatLogger
         for engine_idx in self.engine_idxs:
             loggers: list[StatLoggerBase] = []
             for logger_factory in factories:
-                # If we get a custom prometheus logger, add that to the shared
-                # DP logger list. This is typically used for the ray case.
+                # If we get a custom prometheus logger, use that
+                # instead. This is typically used for the ray case.
                 if (isinstance(logger_factory, type)
                         and issubclass(logger_factory, PrometheusStatLogger)):
-                    self.dp_shared_loggers.append(
-                        logger_factory(vllm_config,
-                                       engine_idxs))  # type: ignore
-                else:
-                    loggers.append(logger_factory(vllm_config,
-                                                  engine_idx))  # type: ignore
+                    prometheus_factory = logger_factory
+                    continue
+                loggers.append(logger_factory(vllm_config,
+                                              engine_idx))  # type: ignore
             self.per_engine_logger_dict[engine_idx] = loggers
+
+        # For Prometheus, need to share the metrics between EngineCores.
+        # Each EngineCore's metrics are expressed as a unique label.
+        self.prometheus_logger = prometheus_factory(vllm_config, engine_idxs)
 
     def record(
         self,
@@ -683,8 +686,8 @@ class StatLoggerManager:
         for logger in per_engine_loggers:
             logger.record(scheduler_stats, iteration_stats, engine_idx)
 
-        for logger in self.dp_shared_loggers:
-            logger.record(scheduler_stats, iteration_stats, engine_idx)
+        self.prometheus_logger.record(scheduler_stats, iteration_stats,
+                                      engine_idx)
 
     def log(self):
         for per_engine_loggers in self.per_engine_logger_dict.values():
@@ -692,9 +695,8 @@ class StatLoggerManager:
                 logger.log()
 
     def log_engine_initialized(self):
+        self.prometheus_logger.log_engine_initialized()
+
         for per_engine_loggers in self.per_engine_logger_dict.values():
             for logger in per_engine_loggers:
                 logger.log_engine_initialized()
-
-        for logger in self.dp_shared_loggers:
-            logger.log_engine_initialized()

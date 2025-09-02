@@ -95,7 +95,7 @@ class AsyncLLM(EngineClient):
         self.log_requests = log_requests
 
         self.log_stats = log_stats or (stat_loggers is not None)
-        if not log_stats and stats_loggers is not None:
+        if not log_stats and stat_loggers is not None:
             logger.info(
                 "AsyncLLM created with log_stats=False and non-empty custom "
                 "logger list; enabling logging without default stat loggers")
