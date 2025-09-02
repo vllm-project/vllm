@@ -30,7 +30,7 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
     def from_schemes(
         cls,
         quant_method: LinearMethodBase,
-        quant_scheme: CompressedTensorsScheme,
+        quant_scheme: Optional[CompressedTensorsScheme],
         input_tfms: dict[int, TransformTuple],
         output_tfms: dict[int, TransformTuple],
     ) -> "CompressedTensorsLinearTransformMethod":
