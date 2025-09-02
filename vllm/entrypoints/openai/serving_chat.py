@@ -1153,12 +1153,11 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs = None
 
             if self.use_harmony:
-                reasoning_content, reasoning_content_tokens, final_content, is_tool_call = (
+                reasoning_content, final_content, is_tool_call = (
                     parse_chat_output(token_ids))
                 if not request.include_reasoning:
                     reasoning_content = None
-                    reasoning_content_tokens = 0
-                num_reasoning_tokens_per_choice[i] = len(reasoning_content_tokens)
+                num_reasoning_tokens_per_choice[i] = None
                 
                 if is_tool_call:
                     # TODO(woosuk): Implement tool call for gpt-oss.
