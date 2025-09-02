@@ -170,7 +170,9 @@ class ModelOptFp8Config(QuantizationConfig):
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
         if isinstance(layer, LinearBase):
-            if self.is_layer_excluded(prefix):
+            if (is_layer_skipped(prefix, self.exclude_modules,
+                                 self.packed_modules_mapping)
+                    or self.is_layer_excluded(prefix)):
                 return UnquantizedLinearMethod()
             return ModelOptFp8LinearMethod(self)
         elif isinstance(layer, Attention):
@@ -763,7 +765,8 @@ class ModelOptNvFp4Config(QuantizationConfig):
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
         if isinstance(layer, LinearBase):
-            if (is_layer_skipped(prefix, self.exclude_modules)
+            if (is_layer_skipped(prefix, self.exclude_modules,
+                                 self.packed_modules_mapping)
                     or self.is_layer_excluded(prefix, self.exclude_modules)):
                 return UnquantizedLinearMethod()
             return ModelOptNvFp4LinearMethod(self)
@@ -1375,7 +1378,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if self.allow_flashinfer and \
             self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             import flashinfer
-
             from vllm.model_executor.models.llama4 import Llama4MoE
 
             a1_gscale = layer.w13_input_scale_quant
