@@ -214,6 +214,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # TODO: discard this for trtllm-gen backend
         self.global_hyperparameters = infer_global_hyperparameters(
             get_per_layer_parameters(vllm_config, layer_names, FlashInferImpl))
+        self.sm_scale = self.global_hyperparameters.sm_scale
+        self.window_left = self.global_hyperparameters.window_left
+        self.logits_soft_cap = self.global_hyperparameters.logits_soft_cap
+        self.has_sinks = self.global_hyperparameters.has_sinks
 
         # Preparing persistent buffers (device-side)
         self.paged_kv_indptr = torch.zeros(max_num_reqs + 1,
@@ -233,6 +237,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                device="cpu",
                                                pin_memory=pin_memory)
         self.paged_kv_indptr_np = self.paged_kv_indptr_cpu.numpy()
+        self.paged_kv_indptr_buffer = torch.zeros_like(
+            self.paged_kv_indptr_cpu, pin_memory=pin_memory)
         self.paged_kv_indices_cpu = torch.zeros(max_num_pages,
                                                 dtype=torch.int32,
                                                 device="cpu",
@@ -357,12 +363,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             dtype=np.int32,
             out=self.paged_kv_indptr_np[1:num_reqs + 1],
         )
+        # NOTE(woosuk): Because self.paged_kv_indptr_cpu can be modified
+        # after this line (e.g., for cuda graphs), we need to copy the data to
+        # self.paged_kv_indptr_buffer to avoid race condition.
+        self.paged_kv_indptr_buffer[:num_reqs +
+                                    1] = (self.paged_kv_indptr_cpu[:num_reqs +
+                                                                   1])
         paged_kv_indptr = self.paged_kv_indptr[:num_reqs + 1]
-        paged_kv_indptr.copy_(self.paged_kv_indptr_cpu[:num_reqs + 1],
+        paged_kv_indptr.copy_(self.paged_kv_indptr_buffer[:num_reqs + 1],
                               non_blocking=True)
 
         # write self.paged_kv_indices inplace
-        num_actual_pages = num_blocks_np.sum().item()
+        num_actual_pages = self.paged_kv_indptr_np[num_reqs]
         paged_kv_indices = self.paged_kv_indices[:num_actual_pages]
         _copy_page_indices_kernel[(num_reqs, )](
             paged_kv_indices,
@@ -381,8 +393,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
 
         # Check if any layer uses sinks (requires TRTLLM attention)
-        has_sinks = self.global_hyperparameters.has_sinks
-
         prefill_use_trtllm = use_trtllm_attention(self.num_qo_heads,
                                                   self.num_kv_heads,
                                                   num_prefill_tokens,
@@ -390,7 +400,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                   self.cache_dtype,
                                                   self.q_data_type,
                                                   is_prefill=True,
-                                                  has_sinks=has_sinks)
+                                                  has_sinks=self.has_sinks)
         decode_use_trtllm = use_trtllm_attention(self.num_qo_heads,
                                                  self.num_kv_heads,
                                                  num_decode_tokens,
@@ -398,7 +408,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                                                  self.cache_dtype,
                                                  self.q_data_type,
                                                  is_prefill=False,
-                                                 has_sinks=has_sinks)
+                                                 has_sinks=self.has_sinks)
 
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -433,9 +443,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.head_dim,
                 self.page_size,
                 causal=True,
-                sm_scale=self.global_hyperparameters.sm_scale,
-                window_left=self.global_hyperparameters.window_left,
-                logits_soft_cap=self.global_hyperparameters.logits_soft_cap,
+                sm_scale=self.sm_scale,
+                window_left=self.window_left,
+                logits_soft_cap=self.logits_soft_cap,
                 q_data_type=self.q_data_type,
                 kv_data_type=self.kv_cache_dtype,
             )
@@ -472,10 +482,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         self.head_dim,
                         self.page_size,
                         causal=True,
-                        sm_scale=self.global_hyperparameters.sm_scale,
-                        window_left=self.global_hyperparameters.window_left,
-                        logits_soft_cap=self.global_hyperparameters.
-                        logits_soft_cap,
+                        sm_scale=self.sm_scale,
+                        window_left=self.window_left,
+                        logits_soft_cap=self.logits_soft_cap,
                         q_data_type=self.q_data_type,
                         kv_data_type=self.kv_cache_dtype,
                     )
@@ -525,10 +534,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         self.page_size,
                         # Disable flashinfer's pos encoding and use vllm's rope.
                         pos_encoding_mode="NONE",
-                        sm_scale=self.global_hyperparameters.sm_scale,
-                        window_left=self.global_hyperparameters.window_left,
-                        logits_soft_cap=self.global_hyperparameters.
-                        logits_soft_cap,
+                        sm_scale=self.sm_scale,
+                        window_left=self.window_left,
+                        logits_soft_cap=self.logits_soft_cap,
                         q_data_type=self.q_data_type,
                         kv_data_type=self.kv_cache_dtype,
                     )
@@ -637,11 +645,9 @@ class FlashInferImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape -
-            # NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
-            # HND: [num_blocks, 2,  num_kv_heads, block_size, head_size]
-
-
+            kv_cache: KV cache tensor with different possible shapes:
+                - NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
+                - HND: [num_blocks, 2, num_kv_heads, block_size, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]

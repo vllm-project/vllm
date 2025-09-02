@@ -168,11 +168,15 @@ llm = LLM(
     Batch-level DP is not to be confused with API request-level DP
     (which is instead controlled by `data_parallel_size`).
 
-The availability of batch-level DP is based on model implementation.
-Currently, the following models support `mm_encoder_tp_mode="data"`:
+Batch-level DP needs to be implemented on a per-model basis,
+and enabled by setting `supports_encoder_tp_data = True` in the model class.
+Regardless, you need to set `mm_encoder_tp_mode="data"` in engine arguments to use this feature.
 
+Known supported models:
+
+- Kimi-VL (<gh-pr:23817>)
 - Llama4 (<gh-pr:18368>)
-- MiniCPM-V-4 (<gh-pr:23327>)
+- MiniCPM-V-2.5 or above (<gh-pr:23327>, <gh-pr:23948>)
 - Qwen2.5-VL (<gh-pr:22742>)
 - Step3 (<gh-pr:22697>)
 

@@ -15,12 +15,12 @@ from vllm.model_executor.layers.pooler import (DispatchPooler, Pooler,
                                                build_output, get_prompt_lens,
                                                get_prompt_token_ids)
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import PoolerOutput
 from vllm.tasks import PoolingTask
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
+from vllm.v1.pool.metadata import PoolingMetadata
 
-from .interfaces import default_pooling_type
+from .interfaces_base import default_pooling_type
 
 logger = init_logger(__name__)
 

@@ -1022,7 +1022,7 @@ def _extractNVMLErrorsAsClasses():
     Each NVML Error gets a new NVMLError subclass. This way try,except blocks can filter appropriate
     exceptions more easily.
 
-    NVMLError is a parent class. Each NVML_ERROR_* gets it's own subclass.
+    NVMLError is a parent class. Each NVML_ERROR_* gets its own subclass.
     e.g. NVML_ERROR_ALREADY_INITIALIZED will be turned into NVMLError_AlreadyInitialized
     '''
     this_module = sys.modules[__name__]
