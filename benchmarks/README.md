@@ -112,7 +112,8 @@ become available.
 
 **Note**: HuggingFace dataset's `dataset-name` should be set to `hf`.
 For local `dataset-path`, please set `hf-name` to its Hugging Face ID like
-```shell
+
+```bash
 --dataset-path /datasets/VisionArena-Chat/ --hf-name lmarena-ai/VisionArena-Chat
 ```
 
