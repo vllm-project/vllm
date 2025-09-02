@@ -274,7 +274,7 @@ class MistralTokenizer(TokenizerBase):
         return tokenizer_file
 
     # the following attributes are set to fit vLLM's design and are used
-    # by the guided structured output backends.
+    # by the structured output backends.
     @property
     def all_special_tokens_extended(self) -> list[str]:
         from mistral_common.tokens.tokenizers.base import SpecialTokens

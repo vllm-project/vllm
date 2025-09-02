@@ -762,14 +762,14 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
             disable_any_whitespace=(backend in {"xgrammar", "guidance"})),
     )
 
-    guided_prompt = (
+    structured_outputs_prompt = (
         "Give an example JSON for an employee profile that fits this "
         "schema. Make the response as short as possible. Schema: "
         f"{sample_json_schema}")
 
-    non_guided_prompt = "The diameter of the Earth in kilometers is "
+    non_structured_outputs_prompt = "The diameter of the Earth in kilometers is "
 
-    prompts = [guided_prompt, non_guided_prompt]
+    prompts = [structured_outputs_prompt, non_structured_outputs_prompt]
     sampling_params = [
         SamplingParams(temperature=1.0,
                        max_tokens=400,
@@ -805,16 +805,16 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
         print(f"Prompt:\n{prompt!r}\nGenerated text:\n{generated_text!r}")
 
         if index == 0:
-            # First prompt is guided, expect valid JSON
+            # First prompt is structured outputs, expect valid JSON
             assert "\n" not in generated_text
             output_json = json.loads(generated_text)
             jsonschema.validate(instance=output_json,
                                 schema=sample_json_schema)
         else:
-            # Second prompt is not guided, expect valid output
+            # Second prompt is not structured outputs, expect valid output
             # Cannot assert on exact output, but we can expect it to be factual
             assert "12,742" in generated_text
 
-            # non-guided requests should not return a valid JSON here
+            # non-structured outputs requests should not return a valid JSON here
             with pytest.raises(ValueError):
                 output_json = json.loads(generated_text)

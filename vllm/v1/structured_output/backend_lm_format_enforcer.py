@@ -157,11 +157,11 @@ def validate_structured_output_request_lm_format_enforcer(
                 json.dumps(so_params.json)
             except Exception as e:
                 raise ValueError(
-                    f"Error serializing guided decoding jsonschema: {e}"
+                    f"Error serializing structured outputs jsonschema: {e}"
                 ) from e
         return
     elif so_params.choice:
         return
     elif so_params.grammar:
-        raise ValueError("LM Format Enforcer guided decoding backend "
+        raise ValueError("LM Format Enforcer structured outputs backend "
                          "does not support grammar specifications")

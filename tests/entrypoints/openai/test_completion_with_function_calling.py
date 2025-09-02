@@ -225,7 +225,7 @@ def k2_server():  # noqa: F811
         "--dtype",
         "half",
         "--enable-auto-tool-choice",
-        "--guided-decoding-backend",
+        "--structured-outputs-config.backend",
         "xgrammar",
         "--tool-call-parser",
         "hermes",

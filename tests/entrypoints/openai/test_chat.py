@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-# imports for guided decoding tests
+# imports for structured outputs tests
 import json
 from typing import Optional
 
@@ -489,7 +489,7 @@ async def test_structured_outputs_choice_chat(client: openai.AsyncOpenAI,
                                               sample_choices,
                                               is_v1_server: bool):
     if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
+        pytest.skip("Structured outputs is only supported in v1 engine")
     messages = [{
         "role": "system",
         "content": "you are a helpful assistant"
@@ -529,7 +529,7 @@ async def test_structured_outputs_json_chat(client: openai.AsyncOpenAI,
                                             sample_json_schema,
                                             is_v1_server: bool):
     if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
+        pytest.skip("Structured outputs is only supported in v1 engine")
 
     messages = [{
         "role": "system",
@@ -575,7 +575,7 @@ async def test_structured_outputs_json_chat(client: openai.AsyncOpenAI,
 async def test_structured_outputs_regex_chat(client: openai.AsyncOpenAI,
                                              sample_regex, is_v1_server: bool):
     if not is_v1_server:
-        pytest.skip("Guided decoding is only supported in v1 engine")
+        pytest.skip("Structured outputs is only supported in v1 engine")
 
     messages = [{
         "role": "system",
