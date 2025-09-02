@@ -475,10 +475,12 @@ class rocm_aiter_ops:
     @staticmethod
     def topk_softmax(topk_weights: torch.Tensor, topk_indices: torch.Tensor,
                      token_expert_indices: torch.Tensor,
-                     gating_output: torch.Tensor, renormalize: bool) -> None:
+                     gating_output: torch.Tensor,
+                     renormalize: bool) -> tuple[torch.Tensor, ...]:
         torch.ops.vllm.rocm_aiter_topk_softmax(topk_weights, topk_indices,
                                                token_expert_indices,
                                                gating_output, renormalize)
+        return topk_weights, topk_indices
 
     @staticmethod
     def biased_grouped_topk(gating_output: torch.Tensor,
