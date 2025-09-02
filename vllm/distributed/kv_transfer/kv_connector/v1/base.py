@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING, Any, Callable, Literal, Optional
 
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    EMPTY_KV_TRANSFER_STATS)
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
@@ -373,4 +375,4 @@ class KVConnectorBase_V1(ABC):
         """
         Get the KV transfer stats for the connector.
         """
-        return KVTransferStats()
+        return EMPTY_KV_TRANSFER_STATS

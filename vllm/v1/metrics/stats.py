@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVTransferStats)
+    KVTransferStatsType)
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
@@ -45,6 +45,7 @@ class SchedulerStats:
         default_factory=PrefixCacheStats)
 
     spec_decoding_stats: Optional[SpecDecodingStats] = None
+    kv_transfer_stats: Optional[KVTransferStatsType] = None
 
     num_corrupted_reqs: int = 0
 
@@ -104,7 +105,6 @@ class IterationStats:
         self.inter_token_latencies_iter: list[float] = []
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
-        self.kv_transfer_stats: Optional[KVTransferStats] = None
 
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
@@ -113,8 +113,7 @@ class IterationStats:
     def update_from_output(self, output: "EngineCoreOutput",
                            engine_core_timestamp: float, is_prefilling: bool,
                            prompt_len: int, req_stats: RequestStateStats,
-                           lora_stats: Optional[LoRAStats],
-                           kv_transfer_stats: Optional[KVTransferStats]):
+                           lora_stats: Optional[LoRAStats]):
         num_new_generation_tokens = len(output.new_token_ids)
 
         self.num_generation_tokens += num_new_generation_tokens
@@ -140,9 +139,6 @@ class IterationStats:
             self.inter_token_latencies_iter.append(itl)
 
         req_stats.last_token_ts = engine_core_timestamp
-
-        if kv_transfer_stats is not None:
-            self.kv_transfer_stats = kv_transfer_stats
 
     def update_from_events(self, req_id: str, events: list["EngineCoreEvent"],
                            is_prefilling: bool, req_stats: RequestStateStats,

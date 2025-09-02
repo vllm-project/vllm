@@ -10,24 +10,38 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-# Sent to scheduler process to aggregate stats.
 class KVTransferStats(
         msgspec.Struct,
         array_like=True,  # type: ignore[call-arg]
         omit_defaults=True,  # type: ignore[call-arg]
         tag_field="type"):  # type: ignore[call-arg]
+    """
+    Base class for KV Transfer Stats, a container for transfer performance 
+    metrics. All sub-classes need to be serializable as stats are sent
+    from worker to logger process.
+    """
 
     def reset(self):
+        """Reset the stats, clear the state."""
         raise NotImplementedError
 
     def aggregate(self, other: "KVTransferStats") -> "KVTransferStats":
+        """
+        Aggregate stats with another `KVTransferStats` object.
+        """
         raise NotImplementedError
 
     def reduce(self) -> dict[str, Union[int, float]]:
-        # TODO docs
+        """
+        Reduce the observations collected during a time interval to one or 
+        more representative values (eg avg/median/sum of the series). 
+        This is meant to be called by the logger to produce a summary of the
+        stats for the last time interval.
+        """
         raise NotImplementedError
 
     def is_empty(self) -> bool:
+        """Return True if the stats are empty."""
         raise NotImplementedError
 
 
@@ -56,8 +70,6 @@ class NixlKVTransferStats(KVTransferStats,
         self.num_successful_transfers += 1
 
     def clone_and_reset(self) -> "NixlKVTransferStats":
-        # if self.is_empty():
-        # return EMPTY_KV_TRANSFER_STATS
         old = copy.deepcopy(self)
         self.reset()
         return old
@@ -66,6 +78,10 @@ class NixlKVTransferStats(KVTransferStats,
         return self.num_successful_transfers == 0
 
     def aggregate(self, other: "NixlKVTransferStats") -> "NixlKVTransferStats":
+        if self == EMPTY_NIXL_KV_TRANSFER_STATS:
+            # Make sure EMPTY_KV_TRANSFER_STATS is not mutated. This should also
+            # always be semantically correct, as EMPTY | other => other.
+            return other
         if not other.is_empty():
             self.transfer_durations.extend(other.transfer_durations)
             self.bytes_transferred.extend(other.bytes_transferred)
@@ -98,10 +114,8 @@ class KVTransferLogging:
         if self.transfer_stats_accumulator is None:
             self.transfer_stats_accumulator = transfer_stats
         elif not transfer_stats.is_empty():
-            print("OBSERVING TRANSFER STATS", transfer_stats, "\n\n")
-            self.transfer_stats_accumulator.aggregate(transfer_stats)
-            print("OBSERVING TRANSFER STATS", self.transfer_stats_accumulator,
-                  "\n\n")
+            self.transfer_stats_accumulator = \
+                self.transfer_stats_accumulator.aggregate(transfer_stats)
 
     def log(self, log_fn=logger.info):
         """Log transfer metrics periodically, similar to throughput logging"""
@@ -109,8 +123,6 @@ class KVTransferLogging:
                 and not self.transfer_stats_accumulator.is_empty()):
             # Produce a single cumulative stats object for the last time
             # interval from the recorded observations.
-            print("LOGGINGTRANSFER STATS", self.transfer_stats_accumulator,
-                  "\n\n")
             xfer_metrics = self.transfer_stats_accumulator.reduce()
             xfer_metrics_str = ", ".join(f"{k}={v}"
                                          for k, v in xfer_metrics.items())
@@ -120,4 +132,5 @@ class KVTransferLogging:
             self.reset()
 
 
-EMPTY_KV_TRANSFER_STATS = NixlKVTransferStats()
+EMPTY_KV_TRANSFER_STATS = KVTransferStats()
+EMPTY_NIXL_KV_TRANSFER_STATS = NixlKVTransferStats()

@@ -19,7 +19,6 @@ import torch
 from vllm import LLM
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorType
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     NixlKVTransferStats)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
@@ -495,9 +494,9 @@ def test_kv_transfer_stats(dist_init):
 
     # Verify that xfer_stats starts empty
     initial_stats = connector.get_kv_transfer_stats()
-    assert KVConnectorType.NIXL in initial_stats
-    assert initial_stats[KVConnectorType.NIXL].is_empty()
-    assert initial_stats[KVConnectorType.NIXL].num_successful_transfers == 0
+    assert isinstance(initial_stats, NixlKVTransferStats)
+    assert initial_stats.is_empty()
+    assert initial_stats.num_successful_transfers == 0
 
     # Create transfer metadata
     request_id = "test_req_for_stats"
@@ -539,19 +538,17 @@ def test_kv_transfer_stats(dist_init):
 
     # Now check that stats were recorded
     stats_after_transfer = connector.get_kv_transfer_stats()
-    assert KVConnectorType.NIXL in stats_after_transfer
-    stats = stats_after_transfer[KVConnectorType.NIXL]
+    assert isinstance(stats_after_transfer, NixlKVTransferStats)
 
     # Verify stats values are recorded
-    assert not stats.is_empty()
-    assert stats.num_successful_transfers == 1
+    assert not stats_after_transfer.is_empty()
+    assert stats_after_transfer.num_successful_transfers == 1
 
     # Verify stats are reset after retrieval
     stats_after_reset = connector.get_kv_transfer_stats()
-    assert KVConnectorType.NIXL in stats_after_reset
-    assert stats_after_reset[KVConnectorType.NIXL].is_empty()
-    assert stats_after_reset[
-        KVConnectorType.NIXL].num_successful_transfers == 0
+    assert isinstance(stats_after_reset, NixlKVTransferStats)
+    assert stats_after_reset.is_empty()
+    assert stats_after_reset.num_successful_transfers == 0
 
 
 def test_kv_transfer_stats_aggregation():
@@ -599,14 +596,14 @@ def test_kv_transfer_stats_aggregation():
                 if i < 2 else None,  # Workers 0,1 finished sending
                 finished_recving=set([f"req_{i}_recv"])
                 if i > 0 else None,  # Workers 1,2 finished receiving
-            ),
-            kv_transfer_stats={KVConnectorType.NIXL: worker_stats})
+                kv_transfer_stats=worker_stats,
+            ))
         worker_outputs.append(output)
 
     # Use the real aggregation mechanism (like MultiprocExecutor.execute_model)
     aggregated_output = aggregator.aggregate(worker_outputs, output_rank=0)
-    kv_transfer_stats = aggregated_output.kv_transfer_stats[
-        KVConnectorType.NIXL]
+    kv_transfer_stats = aggregated_output.kv_connector_output.kv_transfer_stats
+    assert isinstance(kv_transfer_stats, NixlKVTransferStats)
     # Number of total transfers across all workers.
     assert kv_transfer_stats.num_successful_transfers == 6
 

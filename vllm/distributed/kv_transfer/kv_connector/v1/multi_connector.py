@@ -43,10 +43,10 @@ class MultiKVTransferStats(KVTransferStats):
                   other: "MultiKVTransferStats") -> "MultiKVTransferStats":
         for connector_id, xfer_stats in other.stats.items():
             if connector_id not in self.stats:
-                self.stats[connector_id] = xfer_stats
+                self[connector_id] = xfer_stats
             else:
                 assert isinstance(xfer_stats, type(self.stats[connector_id]))
-                self.stats[connector_id].aggregate(xfer_stats)
+                self[connector_id] = self[connector_id].aggregate(xfer_stats)
         return self
 
     def reset(self):
@@ -54,7 +54,7 @@ class MultiKVTransferStats(KVTransferStats):
             xfer_stats.reset()
 
     def reduce(self) -> dict[str, Any]:
-        # TODO adjust for logging on separate lines
+        # TODO (NickLucche) Adjust for logging on separate lines
         return {
             connector_id: xfer_stats.reduce()
             for connector_id, xfer_stats in self.stats.items()

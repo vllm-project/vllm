@@ -24,7 +24,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVTransferStats, NixlKVTransferStats)
+    EMPTY_NIXL_KV_TRANSFER_STATS, KVTransferStats, NixlKVTransferStats)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -1312,7 +1312,7 @@ class NixlConnectorWorker:
         # Clear stats for next iteration
         if not self.xfer_stats.is_empty():
             return self.xfer_stats.clone_and_reset()
-        return NixlKVTransferStats()
+        return EMPTY_NIXL_KV_TRANSFER_STATS
 
 
 @contextlib.contextmanager

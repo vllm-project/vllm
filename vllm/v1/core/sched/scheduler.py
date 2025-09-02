@@ -15,6 +15,8 @@ from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
 from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1,
                                                           KVConnectorRole)
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVTransferStats)
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (EncoderCacheManager,
@@ -974,7 +976,6 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
-                        kv_transfer_stats=kv_transfer_stats,
                     ))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
@@ -1012,7 +1013,7 @@ class Scheduler(SchedulerInterface):
                         finished_requests=finished_set)
             finished_req_ids.clear()
 
-        if (stats := self.make_stats(spec_decoding_stats)) is not None:
+        if (stats := self.make_stats(spec_decoding_stats, kv_transfer_stats)) is not None:
             # Return stats to only one of the front-ends.
             if (eco := next(iter(engine_core_outputs.values()), None)) is None:
                 # We must return the stats even if there are no request
@@ -1177,20 +1178,20 @@ class Scheduler(SchedulerInterface):
     def make_stats(
         self,
         spec_decoding_stats: Optional[SpecDecodingStats] = None,
+        kv_transfer_stats: Optional[KVTransferStats] = None,
     ) -> Optional[SchedulerStats]:
         if not self.log_stats:
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
         assert prefix_cache_stats is not None
-        return SchedulerStats(
-            num_running_reqs=len(self.running),
-            num_waiting_reqs=len(self.waiting),
-            kv_cache_usage=self.kv_cache_manager.usage,
-            prefix_cache_stats=prefix_cache_stats,
-            spec_decoding_stats=spec_decoding_stats,
-            num_corrupted_reqs=sum(req.is_output_corrupted
-                                   for req in self.running),
-        )
+        return SchedulerStats(num_running_reqs=len(self.running),
+                              num_waiting_reqs=len(self.waiting),
+                              kv_cache_usage=self.kv_cache_manager.usage,
+                              prefix_cache_stats=prefix_cache_stats,
+                              spec_decoding_stats=spec_decoding_stats,
+                              num_corrupted_reqs=sum(req.is_output_corrupted
+                                                     for req in self.running),
+                              kv_transfer_stats=kv_transfer_stats)
 
     def make_spec_decoding_stats(
         self,
