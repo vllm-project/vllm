@@ -45,6 +45,8 @@ class QutlassFP4LinearMethod(CompressedTensorsLinearTransformMethod):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         assert bias is None
 
+        raise NotImplementedError()
+
         # x_e2m1, x_e8m0, clip_mask = fusedQuantizeNv(
         #     x, self.input_transform.weight[0], method='quest')
         # x_scale_block = to_blocked(x_e8m0)

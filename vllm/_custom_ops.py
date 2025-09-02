@@ -2014,15 +2014,6 @@ def onednn_scaled_mm(
 
 # hadamard transforms
 def hadacore_transform(value: torch.Tensor) -> torch.Tensor:
-    # note that weight is not required, since this is a deterministic hadamard
+    # note that weight is not required, as this is a deterministic hadamard
     torch.ops._C.hadacore_transform(value)
-
     return value
-
-
-if hasattr(torch.ops._C, "hadacore_transform"):
-
-    @register_fake("_C::hadacore_transform")
-    def _hadacore_transform_fake(x: torch.Tensor):
-        pass
-        #return torch.empty(x.shape, device=x.device, dtype=x.dtype)
