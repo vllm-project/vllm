@@ -708,8 +708,7 @@ class InputBatch:
         assert len(self.req_ids) == len(self.pooling_params)
         return [self.pooling_params[req_id] for req_id in self.req_ids]
 
-    @property
-    def pooling_metadata(self) -> PoolingMetadata:
+    def get_pooling_metadata(self) -> PoolingMetadata:
         pooling_params = self.get_pooling_params()
 
         return PoolingMetadata(
