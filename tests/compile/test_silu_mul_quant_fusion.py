@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     Fp8LinearOp, cutlass_fp8_supported)
 from vllm.platforms import current_platform
-from vllm.tests.utils import override_cutlass_fp8_supported
+from ..utils import override_cutlass_fp8_supported
 
 from .backend import TestBackend
 
