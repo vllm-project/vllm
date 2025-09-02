@@ -3,6 +3,7 @@
 """Attention layer with FlexAttention."""
 
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
@@ -253,6 +254,12 @@ def causal_mask_mod(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor,
     return q_idx >= kv_idx
 
 
+def sliding_window_mask_mod(b, h, q_idx, kv_idx, sliding_window: int):
+    causal_mask = q_idx >= kv_idx
+    window_mask = q_idx - kv_idx <= sliding_window
+    return causal_mask & window_mask
+
+
 @dataclass
 class FlexAttentionMetadata:
     causal: bool
@@ -292,6 +299,7 @@ class FlexAttentionMetadata:
     q_block_size: int = 16
     kv_block_size: int = 16
     transformed_score_mod: Optional[_score_mod_signature] = None
+    sliding_window: int = 1024
 
     def _convert_physical_to_logical(
         self,
@@ -472,7 +480,11 @@ class FlexAttentionMetadata:
         return BlockMask.from_kv_blocks(**block_mask_kwargs)
 
     def build_block_mask(self) -> BlockMask:
-        if self.causal:
+        if self.sliding_window:
+            self.logical_mask_mod = partial(sliding_window_mask_mod, sliding_window=1024)
+            mask_mod = self.get_causal_mask_mod()
+            kv_len = self.total_cache_tokens
+        elif self.causal:
             mask_mod = self.get_causal_mask_mod()
             kv_len = self.total_cache_tokens
         else:
@@ -641,8 +653,9 @@ class FlexAttentionImpl(AttentionImpl):
         else:
             self.alibi_slopes = None
         if sliding_window is not None:
-            raise NotImplementedError(
-                "FlexAttention does not support sliding window yet.")
+            # raise NotImplementedError(
+            #     "FlexAttention does not support sliding window yet.")
+            self.sliding_window = sliding_window
         else:
             self.sliding_window = (-1, -1)
         self.kv_cache_dtype = kv_cache_dtype
