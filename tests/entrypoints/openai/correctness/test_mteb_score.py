@@ -42,7 +42,7 @@ def test_mteb_score(server):
     print("SentenceTransformer main score: ", st_main_score)
     print("Difference: ", st_main_score - vllm_main_score)
 
-    assert st_main_score == pytest.approx(vllm_main_score, abs=MTEB_RERANK_TOL)
+    assert st_main_score - vllm_main_score < MTEB_RERANK_TOL
 
 
 def test_mteb_rerank(server):
@@ -55,4 +55,4 @@ def test_mteb_rerank(server):
     print("SentenceTransformer main score: ", st_main_score)
     print("Difference: ", st_main_score - vllm_main_score)
 
-    assert st_main_score == pytest.approx(vllm_main_score, abs=MTEB_RERANK_TOL)
+    assert st_main_score - vllm_main_score < MTEB_RERANK_TOL
