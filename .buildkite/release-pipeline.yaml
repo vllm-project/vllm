@@ -176,9 +176,9 @@ steps:
       - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
       - "docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT"
       - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT vllm/vllm-openai:nightly"
-      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT vllm/vllm-openai:$BUILDKITE_COMMIT"
+      - "docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT vllm/vllm-openai:nightly-$BUILDKITE_COMMIT"
       - "docker push vllm/vllm-openai:nightly"
-      - "docker push vllm/vllm-openai:$BUILDKITE_COMMIT"
+      - "docker push vllm/vllm-openai:nightly-$BUILDKITE_COMMIT"
       # Clean up old nightly builds (keep only last 14)
       - "bash .buildkite/scripts/cleanup-nightly-builds.sh"
     plugins:

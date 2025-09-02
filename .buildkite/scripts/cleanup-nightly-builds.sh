@@ -3,7 +3,7 @@
 set -ex
 
 # Clean up old nightly builds from DockerHub, keeping only the last 14 builds
-# This script uses DockerHub API to list and delete old tags
+# This script uses DockerHub API to list and delete old tags with "nightly-" prefix
 
 # DockerHub API endpoint for vllm/vllm-openai repository
 REPO_API_URL="https://hub.docker.com/v2/repositories/vllm/vllm-openai/tags"
@@ -23,7 +23,8 @@ get_all_tags() {
         local response=$(curl -s -H "Authorization: Bearer $DOCKERHUB_TOKEN" \
             "$REPO_API_URL?page=$page&page_size=100")
         
-        local tags=$(echo "$response" | jq -r '.results[] | select(.name | startswith("nightly-") or test("^[a-f0-9]{40}$")) | .name')
+        # Get both last_updated timestamp and tag name, separated by |
+        local tags=$(echo "$response" | jq -r '.results[] | select(.name | startswith("nightly-")) | "\(.last_updated)|\(.name)"')
         
         if [ -z "$tags" ]; then
             break
@@ -33,10 +34,10 @@ get_all_tags() {
         page=$((page + 1))
     done
     
-    echo "$all_tags" | sort -r
+    # Sort by timestamp (newest first) and extract just the tag names
+    echo "$all_tags" | sort -r | cut -d'|' -f2
 }
 
-# Function to delete a tag from DockerHub
 delete_tag() {
     local tag_name="$1"
     echo "Deleting tag: $tag_name"
@@ -51,7 +52,7 @@ delete_tag() {
     fi
 }
 
-# Get all nightly and commit-based tags, sorted by creation date (newest first)
+# Get all nightly- prefixed tags, sorted by last_updated timestamp (newest first)
 echo "Fetching all tags from DockerHub..."
 all_tags=$(get_all_tags)
 
