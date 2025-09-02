@@ -772,8 +772,8 @@ class GroupCoordinator:
                     continue
 
                 # send-allgather: send only a slice, then do allgather.
-                use_all_gather = (all_gather_group is not None and
-                                  tensor.numel() % all_gather_size == 0)
+                use_all_gather = (all_gather_group is not None
+                                  and tensor.numel() % all_gather_size == 0)
                 use_all_gather = all_gather_tensors.get(key, use_all_gather) \
                     if all_gather_tensors else use_all_gather
 

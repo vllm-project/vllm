@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, Optional
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.config import ModelConfig, SchedulerConfig
+from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.cache import processor_only_cache_from_config
@@ -15,7 +15,6 @@ from vllm.multimodal.registry import MultiModalRegistry
 from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec
-from vllm.config import VllmConfig
 
 if TYPE_CHECKING:
     from vllm.attention.layer import Attention
@@ -280,22 +279,25 @@ def bind_kv_cache(
         forward_context[layer_name].kv_cache = [kv_cache]
 
 
-def get_all_gather_tensors(vllm_config: VllmConfig,
-                           num_input_tokens: int) -> Optional[Dict[str, bool]]:
-    """Get the all_gather_tensors dictionary for send/recv_tensor_dict.
+def is_residual_scattered(vllm_config: VllmConfig,
+                          num_input_tokens: int) -> bool:
+    """Check if the residual tensor is scattered for sequence parallelism.
 
-    This is used to control whether to use all_gather for the residual tensor
-    in sequence parallelism.
+    The residual tensor is scattered across tensor parallel ranks when sequence
+    parallelism and tensor parallelism is enabled, and the number of
+    input tokens is one of the compilation sizes.
     """
-    if not vllm_config.compilation_config.pass_config.enable_sequence_parallelism:
-        return None
+    if not vllm_config.compilation_config.pass_config.\
+        enable_sequence_parallelism:
+        return False
 
     tp = vllm_config.parallel_config.tensor_parallel_size
-    is_residual_scattered = (
-        tp > 1 and num_input_tokens % tp == 0 and num_input_tokens in
-        vllm_config.compilation_config.compile_sizes)
+    # When sequence parallelism is enabled, we always pad num_input_tokens
+    # to be a multiple of tensor_parallel_size (tp) earlier.
+    if tp > 1:
+        assert num_input_tokens % tp == 0
 
-    if is_residual_scattered:
-        return {"residual": False}
+    is_residual_scattered = (tp > 1 and num_input_tokens
+                             in vllm_config.compilation_config.compile_sizes)
 
-    return None
+    return is_residual_scattered

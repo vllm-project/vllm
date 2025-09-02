@@ -17,9 +17,9 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
-from vllm.v1.worker.utils import get_all_gather_tensors
 from vllm.v1.worker.gpu_worker import (Worker,
                                        init_worker_distributed_environment)
+from vllm.v1.worker.utils import is_residual_scattered
 
 logger = init_logger(__name__)
 
@@ -111,9 +111,11 @@ class CPUWorker(Worker):
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         num_input_tokens = self.model_runner._get_num_input_tokens(
             num_scheduled_tokens)
-        all_gather_tensors = get_all_gather_tensors(
-            self.vllm_config, num_input_tokens)
-        if not get_pp_group().is_first_rank:          
+        all_gather_tensors = {
+            "residual":
+            not is_residual_scattered(self.vllm_config, num_input_tokens)
+        }
+        if not get_pp_group().is_first_rank:
             intermediate_tensors = IntermediateTensors(
                 get_pp_group().recv_tensor_dict(
                     all_gather_group=get_tp_group(),
