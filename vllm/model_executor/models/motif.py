@@ -23,7 +23,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaModel
+from vllm.model_executor.models.llama import LlamaForCausalLM
 
 from .adapters import as_seq_cls_model
 from .interfaces import SupportsV0Only
