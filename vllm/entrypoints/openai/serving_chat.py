@@ -1135,7 +1135,6 @@ class OpenAIServingChat(OpenAIServing):
         else:
             history_tool_call_cnt = 0
 
-        num_reasoning_tokens = 0
         role = self.get_chat_request_role(request)
         num_reasoning_tokens_per_choice = [0] * len(final_res.outputs)
 
