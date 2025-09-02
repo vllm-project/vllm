@@ -50,6 +50,7 @@ steps:
 
   # x86 + CUDA builds
   - label: "Build wheel - CUDA 12.9"
+    depends_on: ~
     id: build-wheel-cuda-12-9
     agents:
       queue: cpu_queue_postmerge
