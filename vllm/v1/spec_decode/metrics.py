@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from dataclasses import dataclass, field
 from typing import Optional
-import time
+
 import numpy as np
 import prometheus_client
 
@@ -82,11 +83,8 @@ class SpecDecodingLogging:
             draft_throughput = num_draft_tokens / elapsed_time
             accepted_throughput = num_accepted_tokens / elapsed_time
 
-        draft_acceptance_rate = (
-            num_accepted_tokens / num_draft_tokens * 100
-            if num_draft_tokens > 0
-            else float("nan")
-        )
+        draft_acceptance_rate = (num_accepted_tokens / num_draft_tokens *
+                                 100 if num_draft_tokens > 0 else float("nan"))
 
         # Conventionally, mean acceptance length includes the bonus token
         mean_acceptance_length = 1 + (num_accepted_tokens / num_drafts)
