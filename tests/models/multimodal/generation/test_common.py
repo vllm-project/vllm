@@ -312,7 +312,7 @@ VLM_TEST_SETTINGS = {
         models=[
             "nvidia/Eagle2.5-8B",
         ],
-        test_type=(VLMTestType.IMAGE,VLMTestType.MULTI_IMAGE),
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE, VLMTestType.VIDEO),
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
         single_image_prompts=IMAGE_ASSETS.prompts({
             "stop_sign": "Image-1: <image>\nWhat's the content in the center of the image?",  # noqa: E501
