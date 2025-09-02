@@ -418,9 +418,9 @@ class MultiHeadAttention(nn.Module):
             out = flash_attn_func(query, key, value, softmax_scale=self.scale)
             out = out.reshape(bsz, q_len, -1)
         elif self.attn_backend == _Backend.ROCM_AITER_FA:
-            from aiter import flash_attn_func
+            from aiter import flash_attn_varlen_func
             # ROCm Flash Attention expects (batch, seq, heads, head_dim)
-            out = flash_attn_func(query, key, value, softmax_scale=self.scale)
+            out = flash_attn_varlen_func(query, key, value, softmax_scale=self.scale)
             out = out.reshape(bsz, q_len, -1)
         elif self.attn_backend == _Backend.FLEX_ATTENTION:
             # FlexAttention requires specific tensor format
