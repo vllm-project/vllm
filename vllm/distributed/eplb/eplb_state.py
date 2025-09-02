@@ -42,8 +42,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .rebalance_execute import rearrange_expert_weights_inplace
-from .policy.policy_factory import PolicyFactory
-from .policy.policy_abstract import EplbPolicy
+from .eplb_policy.policy_factory import PolicyFactory
+from .eplb_policy.policy_abstract import EplbPolicy
 
 logger = init_logger(__name__)
 
@@ -264,7 +264,7 @@ class EplbState:
 
         # Construct the algorithm instance based
         # on the selected eplb algorithm type.
-        policy_type = parallel_config.eplb_policy_type
+        policy_type = parallel_config.eplb_config.eplb_policy_type
         policy = PolicyFactory.generate_policy(policy_type)
         assert policy is not None, "EplbPolicy must be initialized"
         if global_expert_load is not None:

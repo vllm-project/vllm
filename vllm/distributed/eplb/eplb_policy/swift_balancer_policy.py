@@ -438,7 +438,7 @@ class SwiftBalancer(EplbPolicy):
                 num_experts,
                 num_exist_expert,
                 device_assignments,
-                device_loads,
+                device_counts,
                 expert_from_device,
                 com_between_devices
             )

@@ -4,7 +4,7 @@
 import pytest
 import torch
 
-from vllm.distributed.eplb.policy.policy_default_eplb import DefaultEplb
+from vllm.distributed.eplb.eplb_policy.default_eplb_policy import DefaultEplb
 
 
 def test_basic_rebalance():

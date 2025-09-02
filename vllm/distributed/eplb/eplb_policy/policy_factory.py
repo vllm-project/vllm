@@ -1,6 +1,6 @@
-from .policy_abstract import EplbPolicy
-from .policy_swift_balancer import SwiftBalancer
-from .policy_default_eplb import DefaultEplb
+from .abstract_policy import EplbPolicy
+from .swift_balancer_policy import SwiftBalancer
+from .default_eplb_policy import DefaultEplb
 
 
 class PolicyFactory:
