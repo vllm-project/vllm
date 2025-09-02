@@ -123,7 +123,7 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
    MODEL="Qwen/Qwen2.5-14B-Instruct" \
    HF_TOKEN="<your huggingface token>" \
    DOCKER_IMAGE="<docker image url>" \
-   VTENSOR_PARALLEL_SIZE=1 \
+   TENSOR_PARALLEL_SIZE=1 \
    MAX_MODEL_LEN=2048 \
    INPUT_TOK=128 \
    OUTPUT_TOK=128 \
@@ -147,15 +147,16 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
 
    ```bash
    HF_TOKEN=<your huggingface token> \
-   VLLM_SERVER_CONFIG_FILE=server_configurations/server_text.yaml \
+   DOCKER_IMAGE="<docker image url>" \
+   VLLM_SERVER_CONFIG_FILE=server/server_scenarios_text.yaml \
    VLLM_SERVER_CONFIG_NAME=llama31_8b_instruct \
-   VLLM_BENCHMARK_CONFIG_FILE=benchmark_configurations/benchmark_text.yaml \
+   VLLM_BENCHMARK_CONFIG_FILE=benchmark/benchmark_scenarios_text.yaml \
    VLLM_BENCHMARK_CONFIG_NAME=llama31_8b_instruct \
    docker compose --profile benchmark up
    ```
 
    > [!NOTE]
-   > When using configuration files, you do not need to set the `MODEL` environment variable, as the model name is specified within the configuration file. However, you must still provide your `HF_TOKEN`.
+   > When using configuration files, you do not need to set the `MODEL` environment variable, as the model name is specified within the configuration file. However, you must still provide your `HF_TOKEN` and `DOCKER_IMAGE`.
 
 ### 7. Running the Server Directly with Docker
 
@@ -175,6 +176,7 @@ Supports a wide range of validated models including LLaMa, Mistral, and Qwen fam
      --runtime=habana \
      -e HABANA_VISIBLE_DEVICES=all \
      -p 8000:8000 \
+     -e HF_HOME='mnt/hf_cache'
      --name vllm-server \
      <docker image name>
    ```
