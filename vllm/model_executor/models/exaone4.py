@@ -164,7 +164,7 @@ class Exaone4Attention(nn.Module):
         is_sliding = config.layer_types[layer_idx] == "sliding_attention"
         self.sliding_window = config.sliding_window if is_sliding else None
 
-        # apply rotary embeddings to every layer
+        # apply rotary embeddings to every layer in full attention models
         self.apply_rope_all_layers = "sliding_attention" not in config.layer_types
 
         self.rotary_emb = get_rope(
