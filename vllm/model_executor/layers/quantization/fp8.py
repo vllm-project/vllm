@@ -137,10 +137,35 @@ class Fp8Config(QuantizationConfig):
                    ignored_layers=ignored_layers,
                    weight_block_size=weight_block_size)
 
+    def get_xpu_quant_method(self, layer: torch.nn.Module,
+                             prefix: str) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention
+        from vllm.model_executor.layers.quantization.ipex_quant import (
+            XPUFp8LinearMethod, XPUFp8MoEMethod)
+        fp8_config = Fp8Config(
+            is_checkpoint_fp8_serialized=self.is_checkpoint_fp8_serialized,
+            activation_scheme=self.activation_scheme,
+            ignored_layers=self.ignored_layers,
+            weight_block_size=self.weight_block_size)
+
+        if isinstance(layer, LinearBase):
+            if is_layer_skipped(prefix=prefix,
+                                ignored_layers=self.ignored_layers,
+                                fused_mapping=self.packed_modules_mapping):
+                return UnquantizedLinearMethod()
+            return XPUFp8LinearMethod(fp8_config)
+        elif isinstance(layer, FusedMoE):
+            return XPUFp8MoEMethod(fp8_config, layer)
+        elif isinstance(layer, Attention):
+            return Fp8KVCacheMethod(self)
+        return None
+
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         from vllm.attention.layer import Attention  # Avoid circular import
 
+        if current_platform.is_xpu():
+            return self.get_xpu_quant_method(layer, prefix)
         if isinstance(layer, LinearBase):
             if is_layer_skipped(prefix=prefix,
                                 ignored_layers=self.ignored_layers,
