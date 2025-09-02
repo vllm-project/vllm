@@ -69,6 +69,10 @@ class EPLBConfig:
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
 
+    eplb_policy_type: int = 0
+    """
+    Choose the EPLB algorithm.
+    """
 
 @config
 @dataclass

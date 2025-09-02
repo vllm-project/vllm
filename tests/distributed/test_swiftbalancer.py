@@ -1,7 +1,8 @@
-import pytest
 import torch
 
-from vllm.distributed.eplb.policy.policy_swift_balancer import SwiftBalancer
+from vllm.distributed.eplb.eplb_policy.swift_balancer_policy import (
+    SwiftBalancer
+)
 
 def test_rebalance():
     """Test rebalancing functionality"""
@@ -35,6 +36,7 @@ def test_rebalance():
     num_rank = 4
 
     policy = SwiftBalancer()
+
     phy2log, log2phy, logcnt = policy.rebalance_experts(
         weight, num_replicas, num_groups, num_nodes,
         num_rank, old_global_expert_indices)
