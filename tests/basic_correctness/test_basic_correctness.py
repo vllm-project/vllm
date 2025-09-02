@@ -279,7 +279,9 @@ def test_failed_model_execution(vllm_runner, monkeypatch) -> None:
     # Needed to mock an error in the same process
     monkeypatch.setenv('VLLM_ENABLE_V1_MULTIPROCESSING', '0')
 
-    with vllm_runner('hmellor/tiny-random-LlamaForCausalLM',
+    # Very tiny models (e.g. hmellor/tiny-random-LlamaForCausalLM) have
+    # such negligible memory footprint that it makes the test flaky
+    with vllm_runner('EleutherAI/pythia-14m',
                      enforce_eager=True) as vllm_model:
         if isinstance(vllm_model.llm.llm_engine, LLMEngineV1):
             v1_test_failed_model_execution(vllm_model)
