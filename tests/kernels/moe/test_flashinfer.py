@@ -164,9 +164,6 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
                                    rtol=1e-2)
 
 
-@pytest.mark.skip(
-    "Requires flashinfer version that contains https://github.com/flashinfer-ai/flashinfer/pull/1472"
-)
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
