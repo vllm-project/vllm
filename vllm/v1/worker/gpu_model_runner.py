@@ -783,28 +783,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         logits_indices_padded = None
         if self.cache_config.kv_sharing_fast_prefill:
-            assert self.kv_sharing_fast_prefill_logits_indices is not None
-            num_logits = logits_indices.shape[0]
-            assert num_logits > 0
-            self.kv_sharing_fast_prefill_logits_indices[:num_logits].copy_(
+            logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
                 logits_indices)
-            # There might have leftover indices in logits_indices[num_logits:]
-            # from previous iterations, whose values may be greater than the
-            # batch size in the current iteration. To ensure indices are always
-            # valid, we fill the padded indices with the last index.
-            self.kv_sharing_fast_prefill_logits_indices[num_logits:].fill_(
-                logits_indices[-1].item())
-            if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-                    and num_logits <= self.cudagraph_batch_sizes[-1]):
-                # Use piecewise CUDA graphs.
-                # Add padding to the batch size.
-                num_logits_padded = self.vllm_config.pad_for_cudagraph(
-                    num_logits)
-            else:
-                num_logits_padded = num_logits
-            logits_indices_padded = (
-                self.kv_sharing_fast_prefill_logits_indices[:num_logits_padded]
-            )
 
         attn_metadata: dict[str, Any] = {}
 
@@ -827,13 +807,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 blk_table_tensor = torch.zeros(
                     (num_reqs, 1),
                     dtype=torch.int32,
-                    pin_memory=self.pin_memory,
-                    device="cpu").to(self.device, non_blocking=True)
-                slot_mapping = torch.zeros((total_num_scheduled_tokens, ),
-                                           dtype=torch.int32,
-                                           pin_memory=self.pin_memory,
-                                           device="cpu").to(self.device,
-                                                            non_blocking=True)
+                    device=self.device,
+                )
+                slot_mapping = torch.zeros(
+                    (total_num_scheduled_tokens, ),
+                    dtype=torch.int64,
+                    device=self.device,
+                )
                 num_common_prefix_blocks = 0
             else:
                 blk_table = self.input_batch.block_table[kv_cache_group_id]
@@ -1108,6 +1088,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logits_indices=logits_indices,
         )
         return metadata
+
+    def _prepare_kv_sharing_fast_prefill(
+        self,
+        logits_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        assert self.kv_sharing_fast_prefill_logits_indices is not None
+        num_logits = logits_indices.shape[0]
+        assert num_logits > 0
+        self.kv_sharing_fast_prefill_logits_indices[:num_logits].copy_(
+            logits_indices)
+        # There might have leftover indices in logits_indices[num_logits:]
+        # from previous iterations, whose values may be greater than the
+        # batch size in the current iteration. To ensure indices are always
+        # valid, we fill the padded indices with the last index.
+        self.kv_sharing_fast_prefill_logits_indices[num_logits:].fill_(
+            logits_indices[-1].item())
+        if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                and num_logits <= self.cudagraph_batch_sizes[-1]):
+            # Use piecewise CUDA graphs.
+            # Add padding to the batch size.
+            num_logits_padded = self.vllm_config.pad_for_cudagraph(num_logits)
+        else:
+            num_logits_padded = num_logits
+        logits_indices_padded = (
+            self.kv_sharing_fast_prefill_logits_indices[:num_logits_padded])
+        return logits_indices_padded
 
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
@@ -2213,6 +2219,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         uniform_decode: bool = False,
         skip_eplb: bool = False,
         is_profile: bool = False,
+        remove_lora: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -2230,6 +2237,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             uniform_decode: If True, the batch is a uniform decode batch.
             skip_eplb: If True, skip EPLB state update.
             is_profile: If True, this is a profile run.
+            remove_lora: If False, dummy LoRAs are not destroyed after the run
         """
         assert cudagraph_runtime_mode in {
             CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL
@@ -2317,7 +2325,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         attn_metadata[layer_name] = attn_metadata_i
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
-                                            num_scheduled_tokens):
+                                            num_scheduled_tokens, remove_lora):
             if self.supports_mm_inputs:
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -2708,11 +2716,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                                 force_attention=force_attention,
                                 uniform_decode=uniform_decode,
-                                skip_eplb=True)
+                                skip_eplb=True,
+                                remove_lora=False)
             self._dummy_run(num_tokens,
                             cudagraph_runtime_mode=cudagraph_runtime_mode,
                             uniform_decode=uniform_decode,
-                            skip_eplb=True)
+                            skip_eplb=True,
+                            remove_lora=False)
+        self.maybe_remove_all_loras(self.lora_config)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -2729,7 +2740,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                                  layer_names)
             attn_backends = {}
             attn_backend_layers = defaultdict(list)
-            # Dedupe based on full class name; this is a bit safer than using
+            # Dedupe based on full class name; this is a bit safer than
             # using the class itself as the key because when we create dynamic
             # attention backend subclasses (e.g. ChunkedLocalAttention) unless
             # they are cached correctly, there will be different objects per
