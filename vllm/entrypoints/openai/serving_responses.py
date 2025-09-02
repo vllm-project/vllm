@@ -550,8 +550,8 @@ class OpenAIServingResponses(OpenAIServing):
                 logger.exception("Error in reasoning parser creation.")
                 raise e
 
-            reasoning_content, content = (
-                reasoning_parser.extract_reasoning_content(final_output.text,
+            reasoning_content, _, content = (
+                reasoning_parser.extract_reasoning_content(final_output.text, final_output.token_ids,
                                                            request=request))
         else:
             reasoning_content = None
