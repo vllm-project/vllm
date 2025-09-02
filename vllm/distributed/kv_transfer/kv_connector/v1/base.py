@@ -72,13 +72,6 @@ class KVConnectorRole(enum.Enum):
     WORKER = 1
 
 
-class KVConnectorType(enum.Enum):
-    NIXL = enum.auto()
-    LMCACHE = enum.auto()
-    NCCL = enum.auto()
-    SHARED_STORAGE = enum.auto()
-
-
 class KVConnectorMetadata(ABC):  # noqa: B024
     """
     Abstract Metadata used to communicate between the
@@ -376,10 +369,8 @@ class KVConnectorBase_V1(ABC):
 
         return None
 
-    def get_kv_transfer_stats(
-            self) -> dict[KVConnectorType, "KVTransferStats"]:
+    def get_kv_transfer_stats(self) -> "KVTransferStats":
         """
-        Get the KV transfer stats for the connector. Results are aggregated by
-        connector type, hence a dict is returned.
+        Get the KV transfer stats for the connector.
         """
-        return {}
+        return KVTransferStats()

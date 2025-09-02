@@ -395,6 +395,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ) if self.supports_mm_inputs else None
 
         self.reorder_batch_threshold: Optional[int] = None
+        # Initialize the KVConnector runner if kv transfer is enabled.
+        self._init_kv_connector_runner()
 
         # Attention layers that are only in the KVCacheConfig of the runner
         # (e.g., KV sharing, encoder-only attention), but not in the

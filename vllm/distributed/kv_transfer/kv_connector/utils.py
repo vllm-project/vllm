@@ -6,7 +6,7 @@ KV cache helper for store.
 from collections import defaultdict
 from collections.abc import Sequence
 from concurrent.futures import CancelledError, Future
-from typing import cast, Literal, Optional, TYPE_CHECKING, Union
+from typing import cast, Literal, Optional, Union
 
 import torch
 
@@ -15,14 +15,8 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.factory import (
     KVConnectorFactory)
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVTransferStats)
 from vllm.logger import init_logger
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
-
-if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-        KVConnectorType)
 
 logger = init_logger(__name__)
 
@@ -135,7 +129,7 @@ class KVOutputAggregator:
     def aggregate(self,
                   outputs: list[ModelRunnerOutput],
                   output_rank: int = 0) -> ModelRunnerOutput:
-        # aggregate kv_connector_output from all workers
+        # Aggregate kv_connector_output from all workers
 
         def update_finished_set(req_ids: Optional[set[str]],
                                 remaining_count_dict: dict[str, int],
@@ -148,8 +142,7 @@ class KVOutputAggregator:
 
         finished_sending = set[str]()
         finished_recving = set[str]()
-        aggregated_kv_transfer_stats = dict["KVConnectorType",
-                                            KVTransferStats]()
+        aggregated_kv_transfer_stats = None
         for model_runner_output in outputs:
             output = model_runner_output.kv_connector_output
             if not output:
@@ -159,14 +152,14 @@ class KVOutputAggregator:
             update_finished_set(output.finished_recving,
                                 self._recv_remaining_count, finished_recving)
 
-            # Aggregate kv_transfer_stats from all workers, by connector type.
-            if kv_transfer_stats := output.kv_transfer_stats:
-                for connector_id, xfer_stats in kv_transfer_stats.items():
-                    if connector_id not in aggregated_kv_transfer_stats:
-                        aggregated_kv_transfer_stats[connector_id] = xfer_stats
-                    else:
-                        aggregated_kv_transfer_stats[connector_id].aggregate(
-                            xfer_stats)
+            # Aggregate kv_transfer_stats from all workers.
+            if aggregated_kv_transfer_stats is None:
+                # Use the first worker's kv_transfer_stats as accumulator.
+                aggregated_kv_transfer_stats = output.kv_transfer_stats
+            elif kv_transfer_stats := output.kv_transfer_stats:
+                assert isinstance(aggregated_kv_transfer_stats,
+                                  type(kv_transfer_stats))
+                aggregated_kv_transfer_stats.aggregate(kv_transfer_stats)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]

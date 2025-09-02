@@ -22,8 +22,7 @@ from vllm import envs
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole,
-    KVConnectorType)
+    CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVTransferStats, NixlKVTransferStats)
 from vllm.distributed.parallel_state import (
@@ -209,7 +208,7 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
-    def get_kv_transfer_stats(self) -> dict[KVConnectorType, KVTransferStats]:
+    def get_kv_transfer_stats(self) -> KVTransferStats:
         assert self.connector_worker is not None
         return self.connector_worker.get_kv_transfer_stats()
 
@@ -1306,12 +1305,14 @@ class NixlConnectorWorker:
             block_len = self.block_len
         return block_len
 
-    def get_kv_transfer_stats(self) -> dict[KVConnectorType, KVTransferStats]:
+    def get_kv_transfer_stats(self) -> KVTransferStats:
         """
         Get the KV transfer stats for the connector.
         """
         # Clear stats for next iteration
-        return {KVConnectorType.NIXL: self.xfer_stats.clone_and_reset()}
+        if not self.xfer_stats.is_empty():
+            return self.xfer_stats.clone_and_reset()
+        return NixlKVTransferStats()
 
 
 @contextlib.contextmanager

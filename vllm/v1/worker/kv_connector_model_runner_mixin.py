@@ -13,7 +13,6 @@ from vllm.distributed.kv_transfer import (ensure_kv_transfer_shutdown,
                                           get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorType
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVTransferStats)
 from vllm.forward_context import get_forward_context, set_forward_context
@@ -29,6 +28,11 @@ logger = init_logger(__name__)
 
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
 class KVConnectorModelRunnerMixin:
+
+    def _init_kv_connector_runner(self):
+        # This buffer ...
+        # TODO could replace with create from registered method
+        self._kv_transfer_stats_buffer = None
 
     @staticmethod
     def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
@@ -66,14 +70,14 @@ class KVConnectorModelRunnerMixin:
                 scheduler_output.finished_req_ids)
         return None, None
 
-    @staticmethod
-    def kv_connector_no_forward(scheduler_output: "SchedulerOutput",
+    # @staticmethod
+    def kv_connector_no_forward(self, scheduler_output: "SchedulerOutput",
                                 vllm_config: VllmConfig) -> ModelRunnerOutput:
         # KV send/recv even if no work to do.
         with set_forward_context(
-                None, vllm_config
-        ), KVConnectorModelRunnerMixin._get_kv_connector_output(
-                scheduler_output, wait_for_save=False) as kv_connector_output:
+                None, vllm_config), self._get_kv_connector_output(
+                    scheduler_output,
+                    wait_for_save=False) as kv_connector_output:
             pass
 
         if (not kv_connector_output.finished_sending
@@ -84,21 +88,21 @@ class KVConnectorModelRunnerMixin:
         output.kv_connector_output = kv_connector_output
         return output
 
-    @staticmethod
+    # @staticmethod
     def maybe_get_kv_connector_output(
-        scheduler_output: "SchedulerOutput"
+        self, scheduler_output: "SchedulerOutput"
     ) -> AbstractContextManager[Optional[KVConnectorOutput]]:
-        return KVConnectorModelRunnerMixin._get_kv_connector_output(
+        return self._get_kv_connector_output(
             scheduler_output) if has_kv_transfer_group() else nullcontext()
 
     # This context manager must be used within an active forward context.
-    # It encapsulates the entire KV connector lifecycle within execute_model
-    @staticmethod
+    # It encapsulates the entire KV conector lifecycle within execute_model
+    # @staticmethod
     @contextmanager
-    def _get_kv_connector_output(
-        scheduler_output: "SchedulerOutput",
-        wait_for_save: bool = True
-    ) -> Generator[KVConnectorOutput, None, None]:
+    def _get_kv_connector_output(self,
+                                 scheduler_output: "SchedulerOutput",
+                                 wait_for_save: bool = True
+                                 ) -> Generator[KVConnectorOutput, None, None]:
         output = KVConnectorOutput()
 
         # Update KVConnector with the KVConnector metadata forward().
@@ -121,12 +125,31 @@ class KVConnectorModelRunnerMixin:
 
             output.finished_sending, output.finished_recving = (
                 kv_connector.get_finished(scheduler_output.finished_req_ids))
-            output.kv_transfer_stats = (
-                KVConnectorModelRunnerMixin.get_kv_transfer_stats())
-            kv_connector.clear_connector_metadata()
+
+            kv_transfer_stats = self.get_kv_transfer_stats()
+            output.kv_transfer_stats = self.accumulate_kv_transfer_stats(
+                scheduler_output, kv_transfer_stats)
+
+    def accumulate_kv_transfer_stats(self, scheduler_output: "SchedulerOutput",
+                                     kv_transfer_stats: KVTransferStats):
+        if scheduler_output.num_scheduled_tokens:
+            if self._kv_transfer_stats_buffer is not None:
+                assert isinstance(kv_transfer_stats,
+                                  type(self._kv_transfer_stats_buffer))
+                kv_transfer_stats.aggregate(self._kv_transfer_stats_buffer)
+                # Reset buffer
+                self._kv_transfer_stats_buffer = None
+            return kv_transfer_stats
+        elif self._kv_transfer_stats_buffer is None:
+            self._kv_transfer_stats_buffer = kv_transfer_stats
+        else:
+            # We need to buffer since..
+            self._kv_transfer_stats_buffer.aggregate(kv_transfer_stats)
+        return None
 
     @staticmethod
-    def get_kv_transfer_stats() -> dict[KVConnectorType, KVTransferStats]:
+    def get_kv_transfer_stats() -> KVTransferStats:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_kv_transfer_stats()
-        return {}
+        # TODO Empty kvtransferstats
+        return KVTransferStats()

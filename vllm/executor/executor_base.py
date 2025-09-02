@@ -148,6 +148,9 @@ class ExecutorBase(ABC):
     ) -> Optional[List[Union[SamplerOutput, PoolerOutput]]]:
         output = self.collective_rpc("execute_model",
                                      args=(execute_model_req, ))
+        if output[0].kv_connector_output:
+            print("EXECUTOR OUTPUT",
+                  output[0].kv_connector_output.kv_transfer_stats, "\n")
         return output[0]
 
     def stop_remote_worker_execution_loop(self) -> None:

@@ -10,8 +10,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-        KVConnectorType)
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
     from vllm.v1.engine.output_processor import RequestState
 
@@ -106,8 +104,7 @@ class IterationStats:
         self.inter_token_latencies_iter: list[float] = []
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
-        self.kv_transfer_stats: Optional[dict[KVConnectorType,
-                                              KVTransferStats]] = None
+        self.kv_transfer_stats: Optional[KVTransferStats] = None
 
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
@@ -117,8 +114,7 @@ class IterationStats:
                            engine_core_timestamp: float, is_prefilling: bool,
                            prompt_len: int, req_stats: RequestStateStats,
                            lora_stats: Optional[LoRAStats],
-                           kv_transfer_stats: Optional[dict["KVConnectorType",
-                                                            KVTransferStats]]):
+                           kv_transfer_stats: Optional[KVTransferStats]):
         num_new_generation_tokens = len(output.new_token_ids)
 
         self.num_generation_tokens += num_new_generation_tokens

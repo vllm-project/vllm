@@ -8,8 +8,6 @@ from typing import TYPE_CHECKING, NamedTuple, Optional
 import torch
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-        KVConnectorType)
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVTransferStats)
 
@@ -83,8 +81,7 @@ class KVConnectorOutput:
     # [req_ids]
     finished_sending: Optional[set[str]] = None
     finished_recving: Optional[set[str]] = None
-    kv_transfer_stats: Optional[dict["KVConnectorType",
-                                     "KVTransferStats"]] = None
+    kv_transfer_stats: Optional["KVTransferStats"] = None
 
     def is_empty(self):
         return (not self.finished_sending and not self.finished_recving

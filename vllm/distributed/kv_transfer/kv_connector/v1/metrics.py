@@ -1,18 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-from collections import defaultdict
-from typing import TYPE_CHECKING, Union
+from typing import Union
 
 import msgspec
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
-if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-        KVConnectorType)
 
 
 # Sent to scheduler process to aggregate stats.
@@ -29,6 +24,7 @@ class KVTransferStats(
         raise NotImplementedError
 
     def reduce(self) -> dict[str, Union[int, float]]:
+        # TODO docs
         raise NotImplementedError
 
     def is_empty(self) -> bool:
@@ -60,8 +56,8 @@ class NixlKVTransferStats(KVTransferStats,
         self.num_successful_transfers += 1
 
     def clone_and_reset(self) -> "NixlKVTransferStats":
-        if self.is_empty():
-            return EMPTY_KV_TRANSFER_STATS
+        # if self.is_empty():
+        # return EMPTY_KV_TRANSFER_STATS
         old = copy.deepcopy(self)
         self.reset()
         return old
@@ -92,55 +88,36 @@ class KVTransferLogging:
         self.reset()
 
     def reset(self):
-        self.transfer_stats = defaultdict["KVConnectorType",
-                                          list[KVTransferStats]](list)
+        self.transfer_stats_accumulator: KVTransferStats = None
 
-    def observe(self, transfer_stats: dict["KVConnectorType",
-                                           KVTransferStats]):
+    def observe(self, transfer_stats: KVTransferStats):
         # Called periodically when connector syncs with the scheduler.
         # Note that this is not the same as the logging interval.
-        # We expect transfer_stats to be aggregated across all workers.
-        if len(transfer_stats):
-            for connector_type, stats in transfer_stats.items():
-                if not stats.is_empty():
-                    self.transfer_stats[connector_type].append(stats)
+        # We expect transfer_stats to be aggregated across all workers and
+        # consist of observations from a single connector or a MultiConnector.
+        if self.transfer_stats_accumulator is None:
+            self.transfer_stats_accumulator = transfer_stats
+        elif not transfer_stats.is_empty():
+            print("OBSERVING TRANSFER STATS", transfer_stats, "\n\n")
+            self.transfer_stats_accumulator.aggregate(transfer_stats)
+            print("OBSERVING TRANSFER STATS", self.transfer_stats_accumulator,
+                  "\n\n")
 
     def log(self, log_fn=logger.info):
         """Log transfer metrics periodically, similar to throughput logging"""
-        if self.transfer_stats:
+        if (self.transfer_stats_accumulator
+                and not self.transfer_stats_accumulator.is_empty()):
             # Produce a single cumulative stats object for the last time
-            # interval from the recorded observations. This allows different
-            # connectors to log their own set of stats.
-            for connector_type, stats_list in self.transfer_stats.items():
-                if len(stats_list) > 0:
-                    cumulative_stats = stats_list[0]
-                    for stats in stats_list[1:]:
-                        cumulative_stats.aggregate(stats)
-                    xfer_metrics = cumulative_stats.reduce()
-                    xfer_metrics_str = ", ".join(
-                        f"{k}={v}" for k, v in xfer_metrics.items())
-                    log_fn("KVConnectorType: %s, KV Transfer metrics: %s",
-                           connector_type, xfer_metrics_str)
+            # interval from the recorded observations.
+            print("LOGGINGTRANSFER STATS", self.transfer_stats_accumulator,
+                  "\n\n")
+            xfer_metrics = self.transfer_stats_accumulator.reduce()
+            xfer_metrics_str = ", ".join(f"{k}={v}"
+                                         for k, v in xfer_metrics.items())
+            log_fn("KV Transfer metrics: %s", xfer_metrics_str)
 
-            # example
-            # logger.info(
-            #     "Engine %s: KV Transfer metrics: "
-            #     "Avg transfer throughput: %s, "
-            #     "Blocks/s: %.1f, Transfers/s: %.1f, "
-            #     "Avg latency: %.3fs, P50: %.3fs, P95: %.3fs, "
-            #     "Total transfers: %d",
-            #     self.engine_id,
-            #     bytes_throughput_str,
-            #     blocks_per_sec,
-            #     transfers_per_sec,
-            #     avg_latency,
-            #     p50_latency,
-            #     p95_latency,
-            #     len(self.transfer_metrics.transfer_durations)
-            # )
-
-        # Reset metrics for next interval
-        self.reset()
+            # Reset metrics for next interval
+            self.reset()
 
 
 EMPTY_KV_TRANSFER_STATS = NixlKVTransferStats()
