@@ -197,7 +197,7 @@ vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel
 
 ### Why do I see `get_mempolicy: Operation not permitted`when running in Docker?
 
-    In some container environments, NUMA-related syscalls used by vLLM (e.g., `get_mempolicy`, `migrate_pages`) can be denied by the runtime's default seccomp/capabilities settings. This may lead to warnings like `get_mempolicy: Operation not permitted`. Functionality is not affected, but NUMA memory binding/migration optimizations may not take effect and performance can be suboptimal.
+    In some container environments, NUMA-related syscalls used by vLLM (e.g., `get_mempolicy`, `migrate_pages`) are not denied in the runtime's default seccomp/capabilities settings. This may lead to warnings like `get_mempolicy: Operation not permitted`. Functionality is not affected, but NUMA memory binding/migration optimizations may not take effect and performance can be suboptimal.
 
     To enable these optimizations inside Docker with the least privilege, you can follow below tips:
 
