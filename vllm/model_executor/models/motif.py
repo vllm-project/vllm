@@ -255,7 +255,7 @@ class MotifDecoderLayer(nn.Module):
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         attention_bias = getattr(config, "attention_bias", False) or getattr(
-            config, "bias", False)
+            config, "use_bias", False)
         bias_o_proj = attention_bias
         if hasattr(config, 'qkv_bias'):
             attention_bias = config.qkv_bias
