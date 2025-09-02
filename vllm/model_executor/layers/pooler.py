@@ -427,13 +427,18 @@ class EmbeddingPoolerHead(PoolerHead):
     def __init__(self) -> None:
         super().__init__(activation=PoolerNormalize())
 
-        # Load ST projector if available
+        # Load ST projector if available (only for embedding models)
         from vllm.config import get_current_vllm_config
         from vllm.model_executor.models.adapters import _load_st_projector
 
         vllm_config = get_current_vllm_config()
-        self.projector = _load_st_projector(
-            vllm_config.model_config) if vllm_config else None
+        # Only attempt to load ST projector for embed pooling models
+        self.projector = None
+        if (vllm_config and hasattr(vllm_config.model_config, 'runner_type')
+                and hasattr(vllm_config.model_config, 'convert_type')
+                and vllm_config.model_config.runner_type == "pooling"
+                and vllm_config.model_config.convert_type == "embed"):
+            self.projector = _load_st_projector(vllm_config.model_config)
 
     def forward(self, pooled_data: Union[list[torch.Tensor], torch.Tensor],
                 pooling_metadata: PoolingMetadata):
