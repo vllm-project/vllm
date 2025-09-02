@@ -1400,12 +1400,12 @@ class FusedMoE(CustomOp):
         # with shape (num_logical_experts,), not an expert weight.
         NON_EXPERT_WEIGHTS = {
             "e_score_correction_bias",
-            "_shared_experts.",
         }
 
         return [
             weight.view(self.local_num_experts, -1) for name, weight in weights
             if name not in NON_EXPERT_WEIGHTS
+            and not name.startswith("_shared_experts.")
         ]
 
     def set_eplb_state(
