@@ -1708,13 +1708,9 @@ class LLMEngine:
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(inputs)
 
         if encoder_inputs is not None:
-            self._validate_model_input(encoder_inputs,
-                                       lora_request,
-                                       prompt_type="encoder")
+            self._validate_model_input(encoder_inputs, prompt_type="encoder")
 
-        self._validate_model_input(decoder_inputs,
-                                   lora_request,
-                                   prompt_type="decoder")
+        self._validate_model_input(decoder_inputs, prompt_type="decoder")
 
     def _validate_model_input(
         self,
