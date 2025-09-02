@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from typing import Any
-from .policy_abstract import EplbPolicy
+from .abstract_policy import EplbPolicy
 
 
 class DynamicTable:
@@ -397,7 +397,8 @@ class SwiftBalancer(EplbPolicy):
         """
 
         num_devices = len(device_assignments)
-        com_between_devices = [{} for _ in range(num_devices)]
+        com_between_devices: list[dict[int, int]] = [
+            {} for _ in range(num_devices)]
 
         for expert_id, weight in redundant_expert_list:
             candidate = -1
@@ -438,7 +439,7 @@ class SwiftBalancer(EplbPolicy):
                 num_experts,
                 num_exist_expert,
                 device_assignments,
-                device_loads,
+                device_counts,
                 expert_from_device,
                 com_between_devices
             )
@@ -1083,13 +1084,15 @@ class SwiftBalancer(EplbPolicy):
 
         # Processing and analyzing data
         info = DynamicTable()
-        if old_global_expert_indices is None:
-            raise ValueError(" old_global_expert_indices cannot be None.")
         info.workload_table = weight.numpy()
+        if info.workload_table is None:
+            raise ValueError(" workload_table cannot be None.")
         layer_num = info.workload_table.shape[0]
         info.placement_table = old_global_expert_indices.numpy().reshape(
             layer_num, num_ranks, -1
             )
+        if info.placement_table is None:
+            raise ValueError(" placement_table cannot be None.")
         expert_ids, counts = np.unique(info.placement_table[0],
                                        return_counts=True)
         num_redundancy_expert = self.get_redundant_num(counts)
@@ -1138,7 +1141,7 @@ class SwiftBalancer(EplbPolicy):
             # The position of the statistical logic expert
             # on the card and the location of the redundancy
             # expert on the card.
-            rendun_pos = [[] for _ in range(num_ranks)]
+            rendun_pos: list[list[int]] = [[] for _ in range(num_ranks)]
             existing_experts = set()
             for device_id, device in enumerate(info.placement_table[layer]):
                 for index, expert_id in enumerate(device):
