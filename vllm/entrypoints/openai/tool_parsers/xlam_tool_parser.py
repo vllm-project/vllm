@@ -186,11 +186,31 @@ class xLAMToolParser(ToolParser):
         """
         Extract tool calls for streaming mode.
         """
-        # Simplify detection: if it begins with "[" treat it as a function call
-        is_function_call = (current_text.strip().startswith("["))
+        # First, check for a definitive start of a tool call block.
+        # This prevents premature parsing of incomplete output.
+        stripped_text = current_text.strip()
+        preprocessed_content, preprocessed_tool_calls = (
+            self.preprocess_model_output(current_text))
 
-        # If not a function call, return normal content
-        if not is_function_call:
+        # For JSON code blocks, we need to detect them earlier, even if incomplete
+        has_potential_json_block = ("```json" in current_text
+                                    or "```\n[" in current_text
+                                    or "[TOOL_CALLS]" in current_text
+                                    or "<tool_call>" in current_text)
+
+        is_tool_call_block = (
+            stripped_text.startswith("[")
+            or stripped_text.startswith("<tool_call>")
+            or stripped_text.startswith("[TOOL_CALLS]") or
+            # Check if we have thinking tags with JSON-like content following
+            ("</think>[" in current_text) or
+            # Check if the text contains a JSON array after preprocessing
+            preprocessed_tool_calls is not None or
+            # For JSON code blocks, detect early if we see enough structure
+            (has_potential_json_block and '"name"' in current_text
+             and '"arguments"' in current_text))
+
+        if not is_tool_call_block:
             return DeltaMessage(content=delta_text)
 
         try:
@@ -204,7 +224,10 @@ class xLAMToolParser(ToolParser):
 
             # Try parsing as JSON to check for complete tool calls
             try:
-                parsed_tools = json.loads(current_text)
+                # Use preprocessed tool calls if available
+                tool_calls_text = (preprocessed_tool_calls if
+                                   preprocessed_tool_calls else current_text)
+                parsed_tools = json.loads(tool_calls_text)
                 if isinstance(parsed_tools, list):
                     # Update our tool array for next time
                     self.prev_tool_call_arr = parsed_tools
@@ -257,13 +280,40 @@ class xLAMToolParser(ToolParser):
                         return delta
 
             # Use regex to identify tool calls in the output
+            # Use preprocessed tool calls text for better parsing, but also try to extract from incomplete JSON blocks
+            search_text = (preprocessed_tool_calls
+                           if preprocessed_tool_calls else current_text)
+
+            # For JSON code blocks that aren't complete yet, try to extract the JSON content
+            if not preprocessed_tool_calls and has_potential_json_block:
+                # Try to extract the JSON array from within the code block
+                json_match = re.search(r"```(?:json)?\s*([\s\S]*?)(?:```|$)",
+                                       current_text)
+                if json_match:
+                    potential_json = json_match.group(1).strip()
+                    # Use this as search text even if it's incomplete
+                    if potential_json.startswith("[") and (
+                            '"name"' in potential_json
+                            and '"arguments"' in potential_json):
+                        search_text = potential_json
+
+            # Try to find complete tool names first
             name_pattern = r'"name"\s*:\s*"([^"]+)"'
-            name_matches = list(re.finditer(name_pattern, current_text))
+            name_matches = list(re.finditer(name_pattern, search_text))
             tool_count = len(name_matches)
 
-            # If no tools found yet, return
+            # If no complete tool names found, check for partial tool names
             if tool_count == 0:
-                return None
+                # Check if we're in the middle of parsing a tool name
+                partial_name_pattern = r'"name"\s*:\s*"([^"]*)'
+                partial_matches = list(
+                    re.finditer(partial_name_pattern, search_text))
+                if partial_matches:
+                    # We have a partial tool name - not ready to emit yet
+                    return None
+                else:
+                    # No tools found at all
+                    return None
 
             # Ensure our state arrays are large enough
             while len(self.streaming_state["sent_tools"]) < tool_count:
@@ -332,7 +382,7 @@ class xLAMToolParser(ToolParser):
                 # First, check for the empty arguments case: "arguments": {}
                 empty_args_pattern = (
                     r'"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{\s*\}')
-                empty_args_match = re.search(empty_args_pattern, current_text)
+                empty_args_match = re.search(empty_args_pattern, search_text)
 
                 # Check if this tool has empty arguments
                 if empty_args_match and empty_args_match.start() > 0:
@@ -376,7 +426,7 @@ class xLAMToolParser(ToolParser):
 
                 # Extract arguments for current tool using regex for non-empty arguments
                 args_pattern = r'"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*(\{(?:[^{}]|(?:\{[^{}]*\}))*\})'
-                args_matches = list(re.finditer(args_pattern, current_text))
+                args_matches = list(re.finditer(args_pattern, search_text))
 
                 if current_idx < len(args_matches):
                     args_text = args_matches[current_idx].group(1)
@@ -384,17 +434,25 @@ class xLAMToolParser(ToolParser):
                     # Handle transition between tools
                     is_last_tool = current_idx == tool_count - 1
 
-                    # Find where the arguments for our current tool end
-                    if not is_last_tool:
-                        # If we have more tools after this one, try to find the complete argument block
-                        next_tool_pos = current_text.find(
-                            "},{", args_matches[current_idx].start())
-                        if next_tool_pos != -1:
-                            args_end_pos = (next_tool_pos + 1
-                                            )  # +1 to include the '}'
-                            args_text = (current_text[args_matches[current_idx]
-                                                      .start():args_end_pos].
-                                         split('"arguments":')[1].strip())
+                    # For multiple tools, extract only the arguments for the current tool
+                    if tool_count > 1:
+                        # Parse the entire JSON structure to properly extract arguments for each tool
+                        try:
+                            parsed_tools = json.loads(search_text)
+                            if isinstance(
+                                    parsed_tools,
+                                    list) and current_idx < len(parsed_tools):
+                                current_tool = parsed_tools[current_idx]
+                                if isinstance(current_tool.get("arguments"),
+                                              dict):
+                                    args_text = json.dumps(
+                                        current_tool["arguments"])
+                                else:
+                                    args_text = str(
+                                        current_tool.get("arguments", "{}"))
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            # Fallback to regex-based extraction
+                            pass
 
                     # If arguments haven't been sent yet
                     sent_args = self.streaming_state["sent_tools"][
@@ -419,7 +477,7 @@ class xLAMToolParser(ToolParser):
                                 index=current_idx,
                                 function=DeltaFunctionCall(
                                     arguments="{").model_dump(
-                                        exclude_none=True),  # type: ignore  
+                                        exclude_none=True),  # type: ignore
                             )
                         ])
                         return delta
