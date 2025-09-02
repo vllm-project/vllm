@@ -1341,10 +1341,10 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     # --8<-- [start:chat-embedding-extra-params]
     add_generation_prompt: bool = Field(
         default=False,
-        description=(
-            "If true, the generation prompt will be added to the chat template. "
-            "This is a parameter used by chat template in tokenizer config of the "
-            "model."),
+        description=
+        ("If true, the generation prompt will be added to the chat template. "
+         "This is a parameter used by chat template in tokenizer config of the "
+         "model."),
     )
 
     add_special_tokens: bool = Field(
