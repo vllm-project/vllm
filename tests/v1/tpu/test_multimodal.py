@@ -15,7 +15,7 @@ from ...utils import RemoteOpenAIServer
 def base64_encoded_image(local_asset_server) -> dict[str, str]:
     return {
         image_url:
-        encode_image_base64(local_asset_server.get_image_data(image_url))
+        encode_image_base64(local_asset_server.get_image_asset(image_url))
         for image_url in TEST_IMAGE_URLS
     }
 
