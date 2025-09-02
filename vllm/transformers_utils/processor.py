@@ -90,7 +90,7 @@ def get_processor(
         revision = "main"
 
     # Global fallback for LiteWhisper models
-    if processor_name == "efficient-speech/lite-whisper-large-v3":
+    if "lite-whisper" in str(processor_name).lower():
         try:
             processor_name = "openai/whisper-large-v3"
         except Exception:
