@@ -4,8 +4,9 @@ from collections import defaultdict
 from collections.abc import Iterable
 from typing import Optional
 
-from vllm.distributed.kv_events import (AllBlocksCleared, BlockRemoved,
-                                        BlockStored, KVCacheEvent)
+from vllm.distributed.kv_events import (MEDIUM_GPU, AllBlocksCleared,
+                                        BlockRemoved, BlockStored,
+                                        KVCacheEvent)
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
                                          FreeKVCacheBlockQueue, KVCacheBlock)
@@ -156,6 +157,7 @@ class BlockPool:
                     block_size=block_size,
                     lora_id=request.lora_request.id
                     if request.lora_request else None,
+                    medium=MEDIUM_GPU,
                 ))
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
@@ -218,7 +220,8 @@ class BlockPool:
             # we disable hybrid kv cache manager when kv cache event is
             # enabled, so there is only one group.
             self.kv_event_queue.append(
-                BlockRemoved(block_hashes=[block_hash.get_hash_value()]))
+                BlockRemoved(block_hashes=[block_hash.get_hash_value()],
+                             medium=MEDIUM_GPU))
         return True
 
     def touch(self, blocks: tuple[list[KVCacheBlock], ...]) -> None:
@@ -298,7 +301,12 @@ class BlockPool:
         Returns:
             The KV cache usage (between 0.0 and 1.0).
         """
-        return 1.0 - (self.get_num_free_blocks() / self.num_gpu_blocks)
+
+        # Subtract 1 to account for null block.
+        total_gpu_blocks = self.num_gpu_blocks - 1
+        if not total_gpu_blocks:
+            return 0
+        return 1.0 - (self.get_num_free_blocks() / total_gpu_blocks)
 
     def take_events(self) -> list[KVCacheEvent]:
         """Atomically takes all events and clears the queue.
