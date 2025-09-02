@@ -3,7 +3,7 @@
 
 from dataclasses import dataclass, field
 from typing import Optional
-
+import time
 import numpy as np
 import prometheus_client
 
@@ -58,6 +58,7 @@ class SpecDecodingLogging:
         self.num_draft_tokens: list[int] = []
         self.num_accepted_tokens: list[int] = []
         self.accepted_tokens_per_pos_lists: list[list[int]] = []
+        self.last_log_time = time.monotonic()
 
     def observe(self, spec_decoding_stats: SpecDecodingStats):
         self.num_drafts.append(spec_decoding_stats.num_drafts)
@@ -73,9 +74,19 @@ class SpecDecodingLogging:
         num_drafts = np.sum(self.num_drafts)
         num_draft_tokens = np.sum(self.num_draft_tokens)
         num_accepted_tokens = np.sum(self.num_accepted_tokens)
+        draft_throughput = 0
+        accepted_throughput = 0
 
-        draft_acceptance_rate = (num_accepted_tokens / num_draft_tokens *
-                                 100 if num_draft_tokens > 0 else float("nan"))
+        elapsed_time = time.monotonic() - self.last_log_time
+        if elapsed_time > 0:
+            draft_throughput = num_draft_tokens / elapsed_time
+            accepted_throughput = num_accepted_tokens / elapsed_time
+
+        draft_acceptance_rate = (
+            num_accepted_tokens / num_draft_tokens * 100
+            if num_draft_tokens > 0
+            else float("nan")
+        )
 
         # Conventionally, mean acceptance length includes the bonus token
         mean_acceptance_length = 1 + (num_accepted_tokens / num_drafts)
@@ -88,13 +99,13 @@ class SpecDecodingLogging:
             "SpecDecoding metrics: "
             "Draft acceptance rate: %.1f%%, "
             "Mean acceptance length: %.2f, "
-            "Accepted: %d tokens, "
-            "Drafted: %d tokens, "
+            "Accepted throughput: %.2f tokens/s, "
+            "Drafted throughput: %.2f tokens/s, "
             "Per-position acceptance rate: %s",
             draft_acceptance_rate,
             mean_acceptance_length,
-            num_accepted_tokens,
-            num_draft_tokens,
+            accepted_throughput,
+            draft_throughput,
             rates_str,
         )
         self.reset()
