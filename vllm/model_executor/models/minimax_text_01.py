@@ -314,7 +314,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 layer_idx=self._ilayer,
                 linear_layer_idx=linear_layer_id,
-                prefix=f"{prefix}.self_attn")
+                prefix=prefix)
         elif config.attention_type == 1:
             self.self_attn = MiniMaxText01Attention(
                 hidden_size=self.hidden_size,
@@ -329,7 +329,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
                 quant_config=quant_config,
                 layer_idx=self._ilayer,
                 cache_config=cache_config,
-                prefix=f"{prefix}.self_attn")
+                prefix=prefix)
         else:
             raise ValueError(
                 f"Unsupported attention type: {self.config.attention_type}")
