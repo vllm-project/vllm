@@ -427,14 +427,15 @@ async def benchmark(
         timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
     )
 
+    test_prompt, test_prompt_len, test_output_len, test_mm_content = (
+        input_requests[0].prompt,
+        input_requests[0].prompt_len,
+        input_requests[0].expected_output_len,
+        input_requests[0].multi_modal_data,
+    )
     if not skip_check:
         print("Starting initial single prompt test run...")
-        test_prompt, test_prompt_len, test_output_len, test_mm_content = (
-            input_requests[0].prompt,
-            input_requests[0].prompt_len,
-            input_requests[0].expected_output_len,
-            input_requests[0].multi_modal_data,
-        )
+
 
         assert (
             test_mm_content is None
