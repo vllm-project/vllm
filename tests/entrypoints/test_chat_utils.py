@@ -6,31 +6,24 @@ from collections.abc import Mapping
 from typing import Literal, Optional
 
 import pytest
-from mistral_common.tokens.tokenizers.base import (
-    SpecialTokenPolicy,
-    SpecialTokens,
-)
-from mistral_common.tokens.tokenizers.tekken import SpecialTokenInfo, Tekkenizer
+from mistral_common.tokens.tokenizers.base import (SpecialTokenPolicy,
+                                                   SpecialTokens)
+from mistral_common.tokens.tokenizers.tekken import (SpecialTokenInfo,
+                                                     Tekkenizer)
 
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
-    _try_extract_ast,
-    load_chat_template,
-    parse_chat_messages,
-    parse_chat_messages_futures,
-    resolve_chat_template_content_format,
-    resolve_hf_chat_template,
-)
+from vllm.entrypoints.chat_utils import (_try_extract_ast, load_chat_template,
+                                         parse_chat_messages,
+                                         parse_chat_messages_futures,
+                                         resolve_chat_template_content_format,
+                                         resolve_hf_chat_template)
 from vllm.entrypoints.llm import apply_hf_chat_template
 from vllm.multimodal import MultiModalDataDict
-from vllm.multimodal.utils import (
-    encode_audio_base64,
-    encode_image_base64,
-    encode_video_base64,
-)
+from vllm.multimodal.utils import (encode_audio_base64, encode_image_base64,
+                                   encode_video_base64)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
@@ -209,23 +202,31 @@ def test_parse_chat_messages_single_image(
     image_url,
 ):
     conversation, mm_data = parse_chat_messages(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "What's in the image?"},
-                ],
-            }
-        ],
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "What's in the image?"
+                },
+            ],
+        }],
         phi3v_model_config,
         phi3v_tokenizer,
         content_format="string",
     )
 
-    assert conversation == [
-        {"role": "user", "content": "<|image_1|>\nWhat's in the image?"}
-    ]
+    assert conversation == [{
+        "role": "user",
+        "content": "<|image_1|>\nWhat's in the image?"
+    }]
     _assert_mm_data_is_image_input(mm_data, 1)
 
 
@@ -236,10 +237,16 @@ def test_parse_chat_messages_empty_system(
     # Test string format
     conversation, _ = parse_chat_messages(
         [
-            {"role": "system", "content": ""},
+            {
+                "role": "system",
+                "content": ""
+            },
             {
                 "role": "user",
-                "content": [{"type": "text", "text": "Who are you?"}],
+                "content": [{
+                    "type": "text",
+                    "text": "Who are you?"
+                }],
             },
         ],
         mistral_model_config,
@@ -247,17 +254,29 @@ def test_parse_chat_messages_empty_system(
         content_format="string",
     )
     assert conversation == [
-        {"role": "system", "content": ""},
-        {"role": "user", "content": "Who are you?"},
+        {
+            "role": "system",
+            "content": ""
+        },
+        {
+            "role": "user",
+            "content": "Who are you?"
+        },
     ]
 
     # Test openai format
     conversation, _ = parse_chat_messages(
         [
-            {"role": "system", "content": ""},
+            {
+                "role": "system",
+                "content": ""
+            },
             {
                 "role": "user",
-                "content": [{"type": "text", "text": "Who are you?"}],
+                "content": [{
+                    "type": "text",
+                    "text": "Who are you?"
+                }],
             },
         ],
         mistral_model_config,
@@ -265,8 +284,20 @@ def test_parse_chat_messages_empty_system(
         content_format="openai",
     )
     assert conversation == [
-        {"role": "system", "content": [{"type": "text", "text": ""}]},
-        {"role": "user", "content": [{"type": "text", "text": "Who are you?"}]},
+        {
+            "role": "system",
+            "content": [{
+                "type": "text",
+                "text": ""
+            }]
+        },
+        {
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "Who are you?"
+            }]
+        },
     ]
 
 
@@ -277,23 +308,31 @@ async def test_parse_chat_messages_single_image_async(
     image_url,
 ):
     conversation, mm_future = parse_chat_messages_futures(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "What's in the image?"},
-                ],
-            }
-        ],
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "What's in the image?"
+                },
+            ],
+        }],
         phi3v_model_config,
         phi3v_tokenizer,
         content_format="string",
     )
 
-    assert conversation == [
-        {"role": "user", "content": "<|image_1|>\nWhat's in the image?"}
-    ]
+    assert conversation == [{
+        "role": "user",
+        "content": "<|image_1|>\nWhat's in the image?"
+    }]
     _assert_mm_data_is_image_input(await mm_future, 1)
 
 
@@ -303,30 +342,37 @@ def test_parse_chat_messages_multiple_images(
     image_url,
 ):
     conversation, mm_data = parse_chat_messages(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {
-                        "type": "image_pil",
-                        "image_pil": ImageAsset("cherry_blossom").pil_image,
-                    },
-                    {"type": "text", "text": "What's in these images?"},
-                ],
-            }
-        ],
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type": "image_pil",
+                    "image_pil": ImageAsset("cherry_blossom").pil_image,
+                },
+                {
+                    "type": "text",
+                    "text": "What's in these images?"
+                },
+            ],
+        }],
         phi3v_model_config,
         phi3v_tokenizer,
         content_format="string",
     )
 
-    assert conversation == [
-        {
-            "role": "user",
-            "content": "<|image_1|>\n<|image_2|>\nWhat's in these images?",
-        }
-    ]
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "<|image_1|>\n<|image_2|>\nWhat's in these images?",
+    }]
     _assert_mm_data_is_image_input(mm_data, 2)
 
 
@@ -337,30 +383,37 @@ async def test_parse_chat_messages_multiple_images_async(
     image_url,
 ):
     conversation, mm_future = parse_chat_messages_futures(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {
-                        "type": "image_pil",
-                        "image_pil": ImageAsset("cherry_blossom").pil_image,
-                    },
-                    {"type": "text", "text": "What's in these images?"},
-                ],
-            }
-        ],
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type": "image_pil",
+                    "image_pil": ImageAsset("cherry_blossom").pil_image,
+                },
+                {
+                    "type": "text",
+                    "text": "What's in these images?"
+                },
+            ],
+        }],
         phi3v_model_config,
         phi3v_tokenizer,
         content_format="string",
     )
 
-    assert conversation == [
-        {
-            "role": "user",
-            "content": "<|image_1|>\n<|image_2|>\nWhat's in these images?",
-        }
-    ]
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "<|image_1|>\n<|image_2|>\nWhat's in these images?",
+    }]
     _assert_mm_data_is_image_input(await mm_future, 2)
 
 
@@ -370,29 +423,40 @@ def test_parse_chat_messages_placeholder_already_in_prompt(
     image_url,
 ):
     conversation, mm_data = parse_chat_messages(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {
-                        "type": "text",
-                        "text": "What's in <|image_1|> and how does it compare to <|image_2|>?",
-                    },
-                ],
-            }
-        ],
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type":
+                    "text",
+                    "text":
+                    "What's in <|image_1|> and how does it compare to <|image_2|>?",  # noqa: E501
+                },
+            ],
+        }],
         phi3v_model_config,
         phi3v_tokenizer,
         content_format="string",
     )
-    assert conversation == [
-        {
-            "role": "user",
-            "content": "What's in <|image_1|> and how does it compare to <|image_2|>?",
-        }
-    ]
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "What's in <|image_1|> and how does it compare to <|image_2|>?",
+    }]
     _assert_mm_data_is_image_input(mm_data, 2)
 
 
@@ -402,31 +466,42 @@ def test_parse_chat_messages_placeholder_one_already_in_prompt(
     image_url,
 ):
     conversation, mm_data = parse_chat_messages(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {
-                        "type": "text",
-                        "text": "What's in <|image_1|> and how does it compare to the other one?",  # noqa: E501
-                    },
-                ],
-            }
-        ],
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type":
+                    "text",
+                    "text":
+                    "What's in <|image_1|> and how does it compare to the other one?",  # noqa: E501
+                },
+            ],
+        }],
         phi3v_model_config,
         phi3v_tokenizer,
         content_format="string",
     )
 
-    assert conversation == [
-        {
-            "role": "user",
-            "content": "<|image_2|>\nWhat's in <|image_1|> and how does it compare to the "
-            "other one?",
-        }
-    ]
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "<|image_2|>\nWhat's in <|image_1|> and how does it compare to the "
+        "other one?",
+    }]
     _assert_mm_data_is_image_input(mm_data, 2)
 
 
@@ -438,18 +513,39 @@ def test_parse_chat_messages_multiple_images_across_messages(
     conversation, mm_data = parse_chat_messages(
         [
             {
-                "role": "user",
+                "role":
+                "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "What's in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": "What's in this image?"
+                    },
                 ],
             },
-            {"role": "assistant", "content": "Some stuff."},
             {
-                "role": "user",
+                "role": "assistant",
+                "content": "Some stuff."
+            },
+            {
+                "role":
+                "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "What about this one?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": "What about this one?"
+                    },
                 ],
             },
         ],
@@ -459,9 +555,18 @@ def test_parse_chat_messages_multiple_images_across_messages(
     )
 
     assert conversation == [
-        {"role": "user", "content": "<|image_1|>\nWhat's in this image?"},
-        {"role": "assistant", "content": "Some stuff."},
-        {"role": "user", "content": "<|image_2|>\nWhat about this one?"},
+        {
+            "role": "user",
+            "content": "<|image_1|>\nWhat's in this image?"
+        },
+        {
+            "role": "assistant",
+            "content": "Some stuff."
+        },
+        {
+            "role": "user",
+            "content": "<|image_2|>\nWhat about this one?"
+        },
     ]
     _assert_mm_data_is_image_input(mm_data, 2)
 
@@ -474,10 +579,19 @@ def test_parse_chat_messages_context_text_format(
         [
             {
                 "role": "user",
-                "content": [{"type": "text", "text": "What's in this text?"}],
+                "content": [{
+                    "type": "text",
+                    "text": "What's in this text?"
+                }],
             },
-            {"role": "assistant", "content": "Some stuff."},
-            {"role": "user", "content": "What about this one?"},
+            {
+                "role": "assistant",
+                "content": "Some stuff."
+            },
+            {
+                "role": "user",
+                "content": "What about this one?"
+            },
         ],
         phi3v_model_config,
         phi3v_tokenizer,
@@ -487,15 +601,24 @@ def test_parse_chat_messages_context_text_format(
     assert conversation == [
         {
             "role": "user",
-            "content": [{"type": "text", "text": "What's in this text?"}],
+            "content": [{
+                "type": "text",
+                "text": "What's in this text?"
+            }],
         },
         {
             "role": "assistant",
-            "content": [{"type": "text", "text": "Some stuff."}],
+            "content": [{
+                "type": "text",
+                "text": "Some stuff."
+            }],
         },
         {
             "role": "user",
-            "content": [{"type": "text", "text": "What about this one?"}],
+            "content": [{
+                "type": "text",
+                "text": "What about this one?"
+            }],
         },
     ]
 
@@ -512,26 +635,34 @@ def test_parse_chat_messages_rejects_too_many_images_in_one_message(
         )
         with pytest.raises(ValueError, match="At most"):
             parse_chat_messages(
-                [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": image_url},
+                [{
+                    "role":
+                    "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url
                             },
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": image_url},
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url
                             },
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": image_url},
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url
                             },
-                            {"type": "text", "text": "What's in these images?"},
-                        ],
-                    }
-                ],
+                        },
+                        {
+                            "type": "text",
+                            "text": "What's in these images?"
+                        },
+                    ],
+                }],
                 phi3v_model_config,
                 phi3v_tokenizer,
                 content_format="string",
@@ -552,28 +683,45 @@ def test_parse_chat_messages_rejects_too_many_images_across_messages(
             parse_chat_messages(
                 [
                     {
-                        "role": "user",
+                        "role":
+                        "user",
                         "content": [
                             {
                                 "type": "image_url",
-                                "image_url": {"url": image_url},
+                                "image_url": {
+                                    "url": image_url
+                                },
                             },
-                            {"type": "text", "text": "What's in this image?"},
+                            {
+                                "type": "text",
+                                "text": "What's in this image?"
+                            },
                         ],
                     },
-                    {"role": "assistant", "content": "Some stuff."},
                     {
-                        "role": "user",
+                        "role": "assistant",
+                        "content": "Some stuff."
+                    },
+                    {
+                        "role":
+                        "user",
                         "content": [
                             {
                                 "type": "image_url",
-                                "image_url": {"url": image_url},
+                                "image_url": {
+                                    "url": image_url
+                                },
                             },
                             {
                                 "type": "image_url",
-                                "image_url": {"url": image_url},
+                                "image_url": {
+                                    "url": image_url
+                                },
                             },
-                            {"type": "text", "text": "What about these two?"},
+                            {
+                                "type": "text",
+                                "text": "What about these two?"
+                            },
                         ],
                     },
                 ],
@@ -589,27 +737,30 @@ def test_parse_chat_messages_multiple_images_uncommon_input(
     image_url,
 ):
     conversation, mm_data = parse_chat_messages(
-        [
-            {
-                "role": "user",
-                "content": [
-                    "What's in these images?",
-                    {"image_url": image_url},
-                    {"image_url": image_url},
-                ],
-            }
-        ],
+        [{
+            "role":
+            "user",
+            "content": [
+                "What's in these images?",
+                {
+                    "image_url": image_url
+                },
+                {
+                    "image_url": image_url
+                },
+            ],
+        }],
         phi3v_model_config,
         phi3v_tokenizer,
         content_format="string",
     )
 
-    assert conversation == [
-        {
-            "role": "user",
-            "content": "<|image_1|>\n<|image_2|>\nWhat's in these images?",
-        }
-    ]
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "<|image_1|>\n<|image_2|>\nWhat's in these images?",
+    }]
     _assert_mm_data_is_image_input(mm_data, 2)
 
 
@@ -619,33 +770,48 @@ def test_parse_chat_messages_multiple_images_interleave(
     image_url,
 ):
     conversation, mm_data = parse_chat_messages(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "I need you to compare this image",
-                    },
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "and this one"},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "Do they have differences?"},
-                ],
-            }
-        ],
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "I need you to compare this image",
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "and this one"
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "Do they have differences?"
+                },
+            ],
+        }],
         phi3v_model_config_mm_interleaved,
         phi3v_tokenizer,
         content_format="string",
     )
 
-    assert conversation == [
-        {
-            "role": "user",
-            "content": "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
-            "Do they have differences?",
-        }
-    ]
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
+        "Do they have differences?",
+    }]
     _assert_mm_data_is_image_input(mm_data, 2)
 
 
@@ -656,33 +822,48 @@ async def test_parse_chat_messages_multiple_images_interleave_async(
     image_url,
 ):
     conversation, mm_data = parse_chat_messages_futures(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "I need you to compare this image",
-                    },
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "and this one"},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "Do they have differences?"},
-                ],
-            }
-        ],
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "I need you to compare this image",
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "and this one"
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "Do they have differences?"
+                },
+            ],
+        }],
         phi3v_model_config_mm_interleaved,
         phi3v_tokenizer,
         content_format="string",
     )
 
-    assert conversation == [
-        {
-            "role": "user",
-            "content": "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
-            "Do they have differences?",
-        }
-    ]
+    assert conversation == [{
+        "role":
+        "user",
+        "content":
+        "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
+        "Do they have differences?",
+    }]
     _assert_mm_data_is_image_input(await mm_data, 2)
 
 
@@ -694,19 +875,43 @@ def test_parse_chat_messages_multiple_images_multiple_messages_interleave(
     conversation, mm_data = parse_chat_messages(
         [
             {
-                "role": "user",
+                "role":
+                "user",
                 "content": [
-                    {"type": "text", "text": "What's on this image?"},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "Be accurate."},
+                    {
+                        "type": "text",
+                        "text": "What's on this image?"
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": "Be accurate."
+                    },
                 ],
             },
-            {"role": "assistant", "content": "Some stuff."},
             {
-                "role": "user",
+                "role": "assistant",
+                "content": "Some stuff."
+            },
+            {
+                "role":
+                "user",
                 "content": [
-                    {"type": "text", "text": "What's on this image?"},
-                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {
+                        "type": "text",
+                        "text": "What's on this image?"
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    },
                 ],
             },
         ],
@@ -720,8 +925,14 @@ def test_parse_chat_messages_multiple_images_multiple_messages_interleave(
             "role": "user",
             "content": "What's on this image?\n<|image_1|>\nBe accurate.",
         },
-        {"role": "assistant", "content": "Some stuff."},
-        {"role": "user", "content": "What's on this image?\n<|image_2|>"},
+        {
+            "role": "assistant",
+            "content": "Some stuff."
+        },
+        {
+            "role": "user",
+            "content": "What's on this image?\n<|image_2|>"
+        },
     ]
     _assert_mm_data_is_image_input(mm_data, 2)
 
@@ -736,22 +947,59 @@ def test_parse_chat_messages_multiple_modals_multiple_messages_interleave(
     conversation, mm_data = parse_chat_messages(
         [
             {
-                "role": "user",
+                "role":
+                "user",
                 "content": [
-                    {"type": "text", "text": "What's on this image?"},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "Now listen to this audio"},
-                    {"type": "audio_url", "audio_url": {"url": audio_url}},
+                    {
+                        "type": "text",
+                        "text": "What's on this image?"
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": "Now listen to this audio"
+                    },
+                    {
+                        "type": "audio_url",
+                        "audio_url": {
+                            "url": audio_url
+                        }
+                    },
                 ],
             },
-            {"role": "assistant", "content": "Some stuff."},
             {
-                "role": "user",
+                "role": "assistant",
+                "content": "Some stuff."
+            },
+            {
+                "role":
+                "user",
                 "content": [
-                    {"type": "text", "text": "What's on this image?"},
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "And what's in the video?"},
-                    {"type": "video_url", "video_url": {"url": video_url}},
+                    {
+                        "type": "text",
+                        "text": "What's on this image?"
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": "And what's in the video?"
+                    },
+                    {
+                        "type": "video_url",
+                        "video_url": {
+                            "url": video_url
+                        }
+                    },
                 ],
             },
         ],
@@ -762,14 +1010,21 @@ def test_parse_chat_messages_multiple_modals_multiple_messages_interleave(
 
     assert conversation == [
         {
-            "role": "user",
-            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
-            "Now listen to this audio\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>",
+            "role":
+            "user",
+            "content":
+            "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
+            "Now listen to this audio\nAudio 1: <|audio_bos|><|AUDIO|><|audio_eos|>",  # noqa: E501
         },
-        {"role": "assistant", "content": "Some stuff."},
         {
-            "role": "user",
-            "content": "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
+            "role": "assistant",
+            "content": "Some stuff."
+        },
+        {
+            "role":
+            "user",
+            "content":
+            "What's on this image?\n<|vision_start|><|IMAGE|><|vision_end|>\n"
             "And what's in the video?\n<|vision_start|><|VIDEO|><|vision_end|>",
         },
     ]
@@ -783,25 +1038,36 @@ def test_parse_chat_messages_multiple_images_interleave_with_placeholders(
     image_url,
 ):
     with pytest.raises(
-        ValueError,
-        match=r"Found more '<|image_1|>' placeholders in input prompt "
-        "than actual multimodal data items.",
+            ValueError,
+            match=r"Found more '<|image_1|>' placeholders in input prompt "
+            "than actual multimodal data items.",
     ):
         parse_chat_messages(
-            [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": image_url}},
-                        {"type": "image_url", "image_url": {"url": image_url}},
-                        {
-                            "type": "text",
-                            "text": "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
-                            "Do they have differences?",
-                        },
-                    ],
-                }
-            ],
+            [{
+                "role":
+                "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_url
+                        }
+                    },
+                    {
+                        "type":
+                        "text",
+                        "text":
+                        "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
+                        "Do they have differences?",
+                    },
+                ],
+            }],
             phi3v_model_config_mm_interleaved,
             phi3v_tokenizer,
             content_format="string",
@@ -816,29 +1082,37 @@ def test_mllama_single_image(
 ):
     """Ensures that a single image is parsed correctly mllama."""
     conversation, mm_data = parse_chat_messages(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "The content of this image is:"},
-                    {"image_url": image_url},
-                ],
-            }
-        ],
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "The content of this image is:"
+                },
+                {
+                    "image_url": image_url
+                },
+            ],
+        }],
         mllama_model_config,
         mllama_tokenizer,
         content_format="openai",
     )
     _assert_mm_data_is_image_input(mm_data, 1)
-    assert conversation == [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "The content of this image is:"},
-                {"type": "image"},
-            ],
-        }
-    ]
+    assert conversation == [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "The content of this image is:"
+            },
+            {
+                "type": "image"
+            },
+        ],
+    }]
 
 
 def test_mllama_interleaved_images(
@@ -848,39 +1122,51 @@ def test_mllama_interleaved_images(
 ):
     """Ensures that multiple image are parsed as interleaved dicts."""
     conversation, mm_data = parse_chat_messages(
-        [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "The content of the first image is:",
-                    },
-                    {"image_url": image_url},
-                    {
-                        "type": "text",
-                        "text": "The content of the second image is:",
-                    },
-                    {"image_url": image_url},
-                ],
-            }
-        ],
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "The content of the first image is:",
+                },
+                {
+                    "image_url": image_url
+                },
+                {
+                    "type": "text",
+                    "text": "The content of the second image is:",
+                },
+                {
+                    "image_url": image_url
+                },
+            ],
+        }],
         mllama_model_config,
         mllama_tokenizer,
         content_format="openai",
     )
     _assert_mm_data_is_image_input(mm_data, 2)
-    assert conversation == [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "The content of the first image is:"},
-                {"type": "image"},
-                {"type": "text", "text": "The content of the second image is:"},
-                {"type": "image"},
-            ],
-        }
-    ]
+    assert conversation == [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "The content of the first image is:"
+            },
+            {
+                "type": "image"
+            },
+            {
+                "type": "text",
+                "text": "The content of the second image is:"
+            },
+            {
+                "type": "image"
+            },
+        ],
+    }]
 
 
 @pytest.mark.parametrize("model", [MLLAMA_MODEL_ID])
@@ -891,27 +1177,26 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
         img_part = {"type": "image_url", "image_url": {"url": image_url}}
         if is_hf:
             img_part = {"type": "image"}
-        return [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "The content of the first image is:",
-                    },
-                    img_part,
-                    {
-                        "type": "text",
-                        "text": "The content of the second image is:",
-                    },
-                    img_part,
-                    {
-                        "type": "text",
-                        "text": "What animal is in the first image?",
-                    },
-                ],
-            }
-        ]
+        return [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "The content of the first image is:",
+                },
+                img_part,
+                {
+                    "type": "text",
+                    "text": "The content of the second image is:",
+                },
+                img_part,
+                {
+                    "type": "text",
+                    "text": "What animal is in the first image?",
+                },
+            ],
+        }]
 
     # Build a config for the model
     model_config = ModelConfig(
@@ -993,20 +1278,14 @@ def test_resolve_hf_chat_template(sample_json_schema, model, use_tools):
     )
     tokenizer = tokenizer_group.tokenizer
 
-    tools = (
-        [
-            {
-                "type": "function",
-                "function": {
-                    "name": "dummy_function_name",
-                    "description": "This is a dummy function",
-                    "parameters": sample_json_schema,
-                },
-            }
-        ]
-        if use_tools
-        else None
-    )
+    tools = ([{
+        "type": "function",
+        "function": {
+            "name": "dummy_function_name",
+            "description": "This is a dummy function",
+            "parameters": sample_json_schema,
+        },
+    }] if use_tools else None)
 
     # Test detecting the tokenizer's chat_template
     chat_template = resolve_hf_chat_template(

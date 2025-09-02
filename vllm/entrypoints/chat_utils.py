@@ -8,20 +8,11 @@ from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Iterable
 from functools import cached_property, lru_cache, partial
 from pathlib import Path
-from typing import (
-    Any,
-    Callable,
-    Generic,
-    Literal,
-    Optional,
-    TypeVar,
-    Union,
-    cast,
-)
+from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
+                    cast)
 
 import jinja2.nodes
 import transformers.utils.chat_template_utils as hf_chat_utils
-
 # yapf conflicts with isort for this block
 # yapf: disable
 from openai.types.chat import (ChatCompletionAssistantMessageParam,
@@ -42,12 +33,8 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 # yapf: enable
-from transformers import (
-    PreTrainedTokenizer,
-    PreTrainedTokenizerFast,
-    ProcessorMixin,
-)
-
+from transformers import (PreTrainedTokenizer, PreTrainedTokenizerFast,
+                          ProcessorMixin)
 # pydantic needs the TypedDict from typing_extensions
 from typing_extensions import Required, TypeAlias, TypedDict
 
@@ -56,7 +43,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
 from vllm.multimodal.utils import MediaConnector
-
 # yapf: disable
 from vllm.transformers_utils.chat_templates import (
     get_chat_template_fallback_path)
@@ -272,11 +258,9 @@ def _is_var_access(node: jinja2.nodes.Node, varname: str) -> bool:
 
 def _is_attr_access(node: jinja2.nodes.Node, varname: str, key: str) -> bool:
     if isinstance(node, jinja2.nodes.Getitem):
-        return (
-            _is_var_access(node.node, varname)
-            and isinstance(node.arg, jinja2.nodes.Const)
-            and node.arg.value == key
-        )
+        return (_is_var_access(node.node, varname)
+                and isinstance(node.arg, jinja2.nodes.Const)
+                and node.arg.value == key)
 
     if isinstance(node, jinja2.nodes.Getattr):
         return _is_var_access(node.node, varname) and node.attr == key
@@ -291,14 +275,12 @@ def _is_var_or_elems_access(
 ) -> bool:
     if isinstance(node, jinja2.nodes.Filter):
         return node.node is not None and _is_var_or_elems_access(
-            node.node, varname, key
-        )
+            node.node, varname, key)
     if isinstance(node, jinja2.nodes.Test):
         return _is_var_or_elems_access(node.node, varname, key)
 
     if isinstance(node, jinja2.nodes.Getitem) and isinstance(
-        node.arg, jinja2.nodes.Slice
-    ):
+            node.arg, jinja2.nodes.Slice):
         return _is_var_or_elems_access(node.node, varname, key)
 
     # yapf: disable
