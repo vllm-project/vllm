@@ -3,7 +3,7 @@
 # code modified from deepseekv3_tool_parser.py
 
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import Union
 
 import regex as re
 
@@ -71,7 +71,6 @@ class KimiK2ToolParser(ToolParser):
         self,
         model_output: str,
         request: ChatCompletionRequest,
-        token_ids: Optional[Sequence[int]] = None,
     ) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing

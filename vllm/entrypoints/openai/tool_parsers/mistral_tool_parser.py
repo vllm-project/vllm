@@ -5,7 +5,7 @@ import json
 from collections.abc import Sequence
 from random import choices
 from string import ascii_letters, digits
-from typing import Optional, Union
+from typing import Union
 
 import partial_json_parser
 import regex as re
@@ -104,7 +104,6 @@ class MistralToolParser(ToolParser):
         self,
         model_output: str,
         request: ChatCompletionRequest,
-        token_ids: Optional[Sequence[int]] = None,
     ) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response. Requires

@@ -3,7 +3,7 @@
 
 import json
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -45,11 +45,8 @@ class GraniteToolParser(ToolParser):
         self.bot_string = "<tool_call>"
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
-        token_ids: Optional[Sequence[int]] = None,
-    ) -> ExtractedToolCallInformation:
+            self, model_output: str,
+            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
         stripped = model_output.strip()\
                     .removeprefix(self.bot_token)\
                     .removeprefix(self.bot_string)\

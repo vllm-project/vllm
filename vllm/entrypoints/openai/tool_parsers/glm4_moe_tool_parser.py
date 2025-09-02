@@ -57,7 +57,6 @@ class Glm4MoeModelToolParser(ToolParser):
         self,
         model_output: str,
         request: ChatCompletionRequest,
-        token_ids: Optional[Sequence[int]] = None,
     ) -> ExtractedToolCallInformation:
 
         def _is_string_type(

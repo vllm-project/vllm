@@ -115,11 +115,8 @@ class xLAMToolParser(ToolParser):
         return model_output, None
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
-        token_ids: Optional[Sequence[int]] = None,
-    ) -> ExtractedToolCallInformation:
+            self, model_output: str,
+            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
         """
         Extract tool calls from a complete model output.
         """

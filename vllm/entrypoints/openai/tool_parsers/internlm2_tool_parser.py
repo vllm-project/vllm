@@ -3,7 +3,7 @@
 
 import json
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -184,7 +184,6 @@ class Internlm2ToolParser(ToolParser):
         self,
         model_output: str,
         request: ChatCompletionRequest,
-        token_ids: Optional[Sequence[int]] = None,
     ) -> ExtractedToolCallInformation:
         text = model_output
         tools = request.tools

@@ -246,7 +246,6 @@ class Step3ToolParser(ToolParser):
         self,
         model_output: str,
         request: ChatCompletionRequest,
-        token_ids: Optional[Sequence[int]] = None,
     ) -> ExtractedToolCallInformation:
         if self.TOOL_CALLS_BEGIN not in model_output:
             return ExtractedToolCallInformation(tools_called=False,

@@ -116,10 +116,7 @@ class Qwen3ReasoningParser(ReasoningParser):
             return DeltaMessage(content=delta_text)
 
     def extract_reasoning_content(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
-        token_ids: Sequence[int] | None = None,
+            self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from the model output.

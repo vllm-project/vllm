@@ -77,7 +77,6 @@ class ReasoningParser:
         self,
         model_output: str,
         request: Union[ChatCompletionRequest, ResponsesRequest],
-        token_ids: Sequence[int] | None = None,
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from a complete model-generated string.

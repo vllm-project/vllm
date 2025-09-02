@@ -3,7 +3,7 @@
 
 import json
 from collections.abc import Sequence
-from typing import Optional, Union
+from typing import Union
 
 import partial_json_parser
 import regex as re
@@ -73,11 +73,8 @@ class JambaToolParser(ToolParser):
         return request
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
-        token_ids: Optional[Sequence[int]] = None,
-    ) -> ExtractedToolCallInformation:
+            self, model_output: str,
+            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
 
         # sanity check; avoid unnecessary processing
         if self.tool_calls_start_token not in model_output:

@@ -4,7 +4,7 @@
 import json
 from collections.abc import Sequence
 from json import JSONDecoder
-from typing import Optional, Union
+from typing import Union
 
 import partial_json_parser
 import regex as re
@@ -47,11 +47,8 @@ class Granite20bFCToolParser(ToolParser):
         self.tool_call_regex = re.compile(r"<function_call>\s*")
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
-        token_ids: Optional[Sequence[int]] = None,
-    ) -> ExtractedToolCallInformation:
+            self, model_output: str,
+            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
         if self.tool_start_token not in model_output:
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],

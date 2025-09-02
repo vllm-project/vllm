@@ -4,7 +4,7 @@
 import ast
 import json
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any, Union
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
@@ -58,11 +58,8 @@ class PythonicToolParser(ToolParser):
         self.current_tool_id = value
 
     def extract_tool_calls(
-        self,
-        model_output: str,
-        request: ChatCompletionRequest,
-        token_ids: Optional[Sequence[int]] = None,
-    ) -> ExtractedToolCallInformation:
+            self, model_output: str,
+            request: ChatCompletionRequest) -> ExtractedToolCallInformation:
         """
         Extract the tool calls from a complete model response.
         """
