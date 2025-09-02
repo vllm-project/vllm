@@ -264,8 +264,8 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
             )
             output_items.append(reasoning_item)
     elif message.channel == "commentary":
-        if message.recipient.startswith("functions."):
-            function_name = message.recipient.split(".")[-1]
+        if recipient is not None and recipient.startswith("functions."):
+            function_name = recipient.split(".")[-1]
             for content in message.content:
                 random_id = random_uuid()
                 response_item = ResponseFunctionToolCall(
@@ -276,8 +276,8 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                     id=f"ft_{random_id}",
                 )
                 output_items.append(response_item)
-        elif message.recipient.startswith(
-                "python") or message.recipient.startswith("browser"):
+        elif recipient is not None and (recipient.startswith("python")
+                                        or recipient.startswith("browser")):
             for content in message.content:
                 reasoning_item = ResponseReasoningItem(
                     id=f"rs_{random_uuid()}",
@@ -291,7 +291,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                 )
                 output_items.append(reasoning_item)
         else:
-            raise ValueError(f"Unknown recipient: {message.recipient}")
+            raise ValueError(f"Unknown recipient: {recipient}")
     elif message.channel == "final":
         contents = []
         for content in message.content:
