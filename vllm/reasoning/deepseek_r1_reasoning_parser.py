@@ -138,7 +138,9 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 return DeltaMessage(reasoning_content=delta_text)
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
+            self, model_output: str,
+            model_output_tokens: Sequence[int] = None,
+            request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[str]]:
         """
         Extract reasoning content from the model output.
@@ -161,8 +163,17 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
         # Thus we assume the reasoning content is always at the start.
         # Ref https://huggingface.co/deepseek-ai/DeepSeek-R1/commit/8a58a132790c9935686eb97f042afa8013451c9f
         if self.end_token not in model_output:
-            return model_output, None
+            return model_output, None, None
         else:
+            reasoning_content_tokens = None
+            if model_output_tokens:
+                start_idx = model_output_tokens.find(self.start_token_id)
+                end_idx = model_output_tokens.find(self.end_token_id)
+                
+                # Check if both start and end tokens are found
+                if start_idx != -1 and end_idx != -1:
+                    reasoning_content_tokens = model_output_tokens[start_idx:end_idx]
+        
             reasoning_content, _, content = model_output.partition(
                 self.end_token)
             # If the end token is not found, return the model output as is.
@@ -170,4 +181,4 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
             # of the end token.
             # If generation stops right after end-of-think, return null content
             final_content = content or None
-            return reasoning_content, final_content
+            return reasoning_content, reasoning_content_tokens, final_content

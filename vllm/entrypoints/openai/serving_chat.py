@@ -770,9 +770,10 @@ class OpenAIServingChat(OpenAIServing):
                         fn_name_returned = function_name_returned[i]
 
                         if self.reasoning_parser:
-                            _, content = \
+                            _, _, content = \
                                 reasoning_parser.extract_reasoning_content(
                                     current_text,
+                                    None,
                                     request
                                 )
                         else:
@@ -1136,6 +1137,8 @@ class OpenAIServingChat(OpenAIServing):
 
         num_reasoning_tokens = 0
         role = self.get_chat_request_role(request)
+        num_reasoning_tokens_per_choice = [0] * len(final_res.outputs)
+
         for output in final_res.outputs:
             token_ids = output.token_ids
             out_logprobs = output.logprobs
@@ -1153,11 +1156,13 @@ class OpenAIServingChat(OpenAIServing):
                 logprobs = None
 
             if self.use_harmony:
-                reasoning_content, final_content, is_tool_call = (
+                reasoning_content, reasoning_content_tokens, final_content, is_tool_call = (
                     parse_chat_output(token_ids))
                 if not request.include_reasoning:
                     reasoning_content = None
-
+                    reasoning_content_tokens = 0
+                num_reasoning_tokens_per_choice[i] = reasoning_content_tokens
+                
                 if is_tool_call:
                     # TODO(woosuk): Implement tool call for gpt-oss.
                     # For now, only Responses API supports tool call for
@@ -1192,13 +1197,17 @@ class OpenAIServingChat(OpenAIServing):
                     return self.create_error_response(str(e))
                 # If the reasoning parser is enabled,
                 # tool calls are extracted exclusively from the content.
-                reasoning_content, content = (
+                reasoning_content, reasoning_content_tokens, content = (
                     reasoning_parser.extract_reasoning_content(
-                        output.text, request=request))
+                        output.text, output.token_ids, request=request))
+                num_reasoning_tokens_per_choice[i] = reasoning_content_tokens
+
                 if not request.include_reasoning:
                     reasoning_content = None
+                    num_reasoning_tokens_per_choice[i] = 0
             else:
                 reasoning_content = None
+                num_reasoning_tokens_per_choice[i] = 0
                 content = output.text
 
             auto_tools_called = False
@@ -1353,8 +1362,8 @@ class OpenAIServingChat(OpenAIServing):
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs)
         usage = UsageInfo(prompt_tokens=num_prompt_tokens,
+                          reasoning_tokens=sum(num_reasoning_tokens_per_choice),
                           completion_tokens=num_generated_tokens,
-                          reasoning_tokens=num_reasoning_tokens,
                           total_tokens=num_prompt_tokens +
                           num_generated_tokens)
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
