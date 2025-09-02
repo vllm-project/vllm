@@ -149,6 +149,10 @@ class XPUPlatform(Platform):
         return torch.xpu.max_memory_allocated(device)
 
     @classmethod
+    def fp8_dtype(cls) -> torch.dtype:
+        return torch.float8_e5m2
+
+    @classmethod
     def is_data_center_gpu(cls) -> bool:
         device_name = cls.get_device_name().lower()
         return device_name.count("data center gpu") > 0
