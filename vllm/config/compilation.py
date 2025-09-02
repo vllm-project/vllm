@@ -77,7 +77,7 @@ class PassConfig:
 
     enable_fusion: bool = field(default_factory=lambda: envs.VLLM_USE_V1)
     """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
-    enable_attn_fusion: bool = False
+    enable_attn_fusion: bool = field(default_factory=lambda: envs.VLLM_USE_V1)
     """Whether to enable the custom attention+quant fusion pass."""
     enable_noop: bool = field(default_factory=lambda: envs.VLLM_USE_V1)
     """Whether to enable the custom no-op elimination pass."""
