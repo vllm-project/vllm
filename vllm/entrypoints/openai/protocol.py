@@ -347,8 +347,9 @@ class ResponsesRequest(OpenAIBaseModel):
         structured_outputs = None
         if self.text is not None and self.text.format is not None:
             response_format = self.text.format
-            if response_format.type == "json_schema":
-                structured_outputs = StructuredOutputsParams.from_optional(
+            if (response_format.type == "json_schema"
+                    and response_format.schema_ is not None):
+                structured_outputs = StructuredOutputsParams(
                     json=response_format.schema_)
             elif response_format.type == "json_object":
                 raise NotImplementedError("json_object is not supported")
@@ -639,31 +640,28 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        structured_outputs = StructuredOutputsParams(
-            **(self.structured_outputs or {}))
-        if self.response_format is not None:
-            if self.response_format.type == "json_object":
-                structured_outputs.json_object = True
-            elif self.response_format.type == "json_schema":
-                json_schema = self.response_format.json_schema
-                assert json_schema is not None
-                structured_outputs.json = json_schema.json_schema
-            elif self.response_format.type == "structural_tag":
-                structural_tag = self.response_format
-                assert structural_tag is not None and isinstance(
-                    structural_tag, StructuralTagResponseFormat)
-                s_tag_obj = structural_tag.model_dump(by_alias=True)
-                structured_outputs.structural_tag = json.dumps(s_tag_obj)
+        structured_outputs = None
+        if (self.structured_outputs is not None
+                and any(v is not None
+                        for v in self.structured_outputs.values())):
+            structured_outputs = StructuredOutputsParams(
+                **self.structured_outputs)
 
-        structured_outputs = StructuredOutputsParams.from_optional(
-            json=self._get_json_schema_from_tool() or structured_outputs.json,
-            regex=structured_outputs.regex,
-            choice=structured_outputs.choice,
-            grammar=structured_outputs.grammar,
-            json_object=structured_outputs.json_object,
-            whitespace_pattern=structured_outputs.whitespace_pattern,
-            structural_tag=structured_outputs.structural_tag,
-        )
+            if self.response_format is not None:
+                if self.response_format.type == "json_object":
+                    structured_outputs.json_object = True
+                elif self.response_format.type == "json_schema":
+                    json_schema = self.response_format.json_schema
+                    assert json_schema is not None
+                    structured_outputs.json = json_schema.json_schema
+                elif self.response_format.type == "structural_tag":
+                    structural_tag = self.response_format
+                    assert structural_tag is not None and isinstance(
+                        structural_tag, StructuralTagResponseFormat)
+                    s_tag_obj = structural_tag.model_dump(by_alias=True)
+                    structured_outputs.structural_tag = json.dumps(s_tag_obj)
+            if json_schema := self._get_json_schema_from_tool():
+                structured_outputs.json = json_schema
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -1125,20 +1123,15 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
-        structured_outputs_kwargs = StructuredOutputsParams(
-            **(self.structured_outputs or {}))
-        if (self.response_format is not None
-                and self.response_format.type == "json_object"):
-            structured_outputs_kwargs.json_object = True
-
-        structured_outputs = StructuredOutputsParams.from_optional(
-            json=structured_outputs_kwargs.json,
-            regex=structured_outputs_kwargs.regex,
-            choice=structured_outputs_kwargs.choice,
-            grammar=structured_outputs_kwargs.grammar,
-            json_object=structured_outputs_kwargs.json_object,
-            whitespace_pattern=structured_outputs_kwargs.whitespace_pattern,
-        )
+        structured_outputs = None
+        if (self.structured_outputs is not None
+                and any(v is not None
+                        for v in self.structured_outputs.values())):
+            structured_outputs = StructuredOutputsParams(
+                **self.structured_outputs)
+            if (self.response_format is not None
+                    and self.response_format.type == "json_object"):
+                structured_outputs.json_object = True
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:

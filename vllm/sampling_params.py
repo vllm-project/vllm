@@ -8,7 +8,6 @@ from functools import cached_property
 from typing import Annotated, Any, Optional, Union
 
 import msgspec
-from pydantic import BaseModel
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
@@ -41,32 +40,6 @@ class StructuredOutputsParams:
     disable_additional_properties: bool = False
     whitespace_pattern: Optional[str] = None
     structural_tag: Optional[str] = None
-
-    @staticmethod
-    def from_optional(
-        json: Optional[Union[dict, BaseModel, str]] = None,
-        regex: Optional[str] = None,
-        choice: Optional[list[str]] = None,
-        grammar: Optional[str] = None,
-        json_object: Optional[bool] = None,
-        whitespace_pattern: Optional[str] = None,
-        structural_tag: Optional[str] = None,
-    ) -> Optional["StructuredOutputsParams"]:
-        if all(arg is None for arg in (json, regex, choice, grammar,
-                                       json_object, structural_tag)):
-            return None
-        # Extract json schemas from pydantic models
-        if isinstance(json, (BaseModel, type(BaseModel))):
-            json = json.model_json_schema()
-        return StructuredOutputsParams(
-            json=json,
-            regex=regex,
-            choice=choice,
-            grammar=grammar,
-            json_object=json_object,
-            whitespace_pattern=whitespace_pattern,
-            structural_tag=structural_tag,
-        )
 
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
