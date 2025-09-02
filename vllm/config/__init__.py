@@ -1304,10 +1304,10 @@ class ModelConfig:
                         self.hf_config.dual_chunk_attention_config:
                     self.hf_config.dual_chunk_attention_config[
                         "sparse_attention_enabled"] = True
-            assert (
-                envs.VLLM_ATTENTION_BACKEND == STR_DUAL_CHUNK_FLASH_ATTN_VAL
-            ), ("please set VLLM_ATTENTION_BACKEND to "
-                f"{STR_DUAL_CHUNK_FLASH_ATTN_VAL}")
+
+            if envs.VLLM_ATTENTION_BACKEND != STR_DUAL_CHUNK_FLASH_ATTN_VAL:
+                raise ValueError("please set VLLM_ATTENTION_BACKEND to "
+                                 f"{STR_DUAL_CHUNK_FLASH_ATTN_VAL}")
 
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
