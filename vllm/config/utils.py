@@ -3,11 +3,11 @@
 
 import enum
 import hashlib
+import json
 import pathlib
 from collections.abc import Mapping, Sequence, Set
 from contextlib import suppress
 from dataclasses import fields
-from json import dumps
 from typing import TYPE_CHECKING, TypeVar
 
 from vllm.logger import init_logger
@@ -71,9 +71,16 @@ def normalize_value(x):
     except Exception:
         pass
 
-    # Paths
+    # Bytes
+    if isinstance(x, (bytes, bytearray)):
+        return x.hex()
+
+    # Paths (canonicalize)
     if isinstance(x, pathlib.Path):
-        return str(x)
+        try:
+            return str(x.expanduser().resolve())
+        except Exception:
+            return str(x)
 
     # Containers (generic)
     if isinstance(x, Mapping):
@@ -115,15 +122,19 @@ def get_hash_factors(config: ConfigT,
         try:
             factors[factor] = normalize_value(value)
         except TypeError:
-            # Log once per key to surface potential under-hashing without
-            # spamming logs. The value will be skipped from the hash.
+            # Warn once per key to surface potential under-hashing. If this is
+            # expected, add the key to `ignored_factors` explicitly.
             with suppress(Exception):
-                logger.debug("Hash skip: unsupported type for key '%s'",
-                             factor)
+                logger.warning(
+                    "Hash skip: unsupported type for key '%s' — add to "
+                    "ignored_factors to silence",
+                    factor,
+                )
             continue
     return factors
 
 
 def hash_factors(items: dict[str, object]) -> str:
     """Return a SHA-256 hex digest of the canonical items structure."""
-    return hashlib.sha256(dumps(items, sort_keys=True).encode()).hexdigest()
+    return hashlib.sha256(json.dumps(items,
+                                     sort_keys=True).encode()).hexdigest()

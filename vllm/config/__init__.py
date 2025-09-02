@@ -3420,7 +3420,12 @@ class VllmConfig:
         # driven by env vars are reflected in the cache key.
         try:
             vllm_factors.append(envs.compute_hash())
-        except Exception:
+        except Exception as e:
+            logger.warning(
+                "Env hash unavailable (%s) — falling back to "
+                "'env_hash_unavailable'",
+                e,
+            )
             vllm_factors.append("env_hash_unavailable")
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())

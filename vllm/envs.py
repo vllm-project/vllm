@@ -1264,5 +1264,14 @@ def compute_hash() -> str:
         except Exception:
             # Skip envs that raise during retrieval.
             # Skip values we cannot canonicalize deterministically.
+            try:
+                from vllm.logger import init_logger as _init_logger
+                _init_logger(__name__).warning(
+                    "Env hash skip: unsupported value for '%s' — add to "
+                    "ignored_factors if expected",
+                    factor,
+                )
+            except Exception:
+                pass
             continue
     return hash_factors(factors)
