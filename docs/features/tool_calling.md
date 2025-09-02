@@ -308,7 +308,7 @@ Supported models:
 Flags:
 
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
-* For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b --enable_reasoning`
+* For reasoning: `--tool-call-parser hunyuan_a13b --structured-outputs-config.reasoning_parser hunyuan_a13b --enable_reasoning`
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 

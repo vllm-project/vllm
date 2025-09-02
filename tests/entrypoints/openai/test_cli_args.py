@@ -145,7 +145,7 @@ def test_enable_auto_choice_fails_with_enable_reasoning(serve_parser):
     """Ensure validation fails if reasoning is enabled with auto tool choice"""
     args = serve_parser.parse_args(args=[
         "--enable-auto-tool-choice",
-        "--reasoning-parser",
+        "--structured-outputs-config.reasoning_parser",
         "deepseek_r1",
     ])
     with pytest.raises(TypeError):
@@ -156,7 +156,7 @@ def test_passes_with_reasoning_parser(serve_parser):
     """Ensure validation passes if reasoning is enabled 
     with a reasoning parser"""
     args = serve_parser.parse_args(args=[
-        "--reasoning-parser",
+        "--structured-outputs-config.reasoning_parser",
         "deepseek_r1",
     ])
     validate_parsed_serve_args(args)

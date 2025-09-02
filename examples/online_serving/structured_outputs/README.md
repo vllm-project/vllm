@@ -14,7 +14,7 @@ To serve a reasoning model, you can use the following command:
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B \
-    --reasoning-parser deepseek_r1
+    --structured-outputs-config.reasoning_parser deepseek_r1
 ```
 
 If you want to run this script standalone with `uv`, you can use the following:

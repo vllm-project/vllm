@@ -161,7 +161,7 @@ See also: [full example](../examples/online_serving/structured_outputs.md)
 You can also use structured outputs with <project:#reasoning-outputs> for reasoning models.
 
 ```bash
-vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --reasoning-parser deepseek_r1
+vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-7B --structured-outputs-config.reasoning_parser deepseek_r1
 ```
 
 Note that you can use reasoning with any provided structured outputs feature. The following uses one with JSON schema:

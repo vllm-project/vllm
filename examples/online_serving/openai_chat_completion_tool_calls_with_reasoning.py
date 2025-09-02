@@ -10,7 +10,7 @@ the reasoning parser and tool calling enabled.
 
 ```bash
 vllm serve Qwen/QwQ-32B \
-     --reasoning-parser deepseek_r1 \
+     --structured-outputs-config.reasoning_parser deepseek_r1 \
      --enable-auto-tool-choice --tool-call-parser hermes
      
 ```
