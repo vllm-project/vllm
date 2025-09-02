@@ -589,7 +589,19 @@ class Scheduler(SchedulerInterface):
             meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
+        # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
+
+        # collect KV cache events from connector
+        if self.connector is not None:
+            connector_events = self.connector.take_events()
+            if connector_events:
+                if events is None:
+                    events = list(connector_events)
+                else:
+                    events.extend(connector_events)
+
+        # publish collected KV cache events
         if events:
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
@@ -861,19 +873,19 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
+                num_draft_tokens = len(scheduled_spec_token_ids)
+                num_accepted = len(generated_token_ids) - 1
+                num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
                 # num_computed_tokens is decreased by the number of rejected
-                # tokens, where is given by:
-                # len(scheduled_spec_token_ids) + 1 - len(generated_token_ids).
-                num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
-                                       len(generated_token_ids))
-                request.num_computed_tokens -= num_tokens_rejected
+                # tokens.
+                request.num_computed_tokens -= num_rejected
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
-                    num_draft_tokens=len(scheduled_spec_token_ids),
-                    num_accepted_tokens=len(generated_token_ids) - 1)
+                    num_draft_tokens=num_draft_tokens,
+                    num_accepted_tokens=num_accepted)
 
             stopped = False
             new_logprobs = None
@@ -1207,7 +1219,7 @@ class Scheduler(SchedulerInterface):
         # Now that the blocks are ready, actually cache them.
         (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
         num_computed_tokens = len(block_ids) * self.block_size
-        # Handle the case where num request tokens less then one block.
+        # Handle the case where num request tokens less than one block.
         num_computed_tokens = min(num_computed_tokens, request.num_tokens)
         if num_computed_tokens == request.num_tokens:
             num_computed_tokens -= 1

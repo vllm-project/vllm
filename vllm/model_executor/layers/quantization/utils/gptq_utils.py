@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from copy import deepcopy
+from fractions import Fraction
 from typing import Optional, Union
 
 import regex as re
@@ -29,7 +30,7 @@ def override_config(config: QuantizationConfig, prefix: str):
     if isinstance(desc_act, bool):
         config.desc_act = desc_act
 
-    config.pack_factor = 32 // config.weight_bits  # packed into int32
+    config.pack_factor = Fraction(32, config.weight_bits)  # packed into int32
     if config.get_name() == "gptq_marlin":
         is_sym = get_dynamic_override(config, prefix, "sym", config.is_sym)
         if isinstance(is_sym, bool):

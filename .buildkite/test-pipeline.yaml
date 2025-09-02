@@ -566,8 +566,7 @@ steps:
   - tests/models/multimodal
   commands:
     - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-    - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
-    - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+    - pytest -v -s models/multimodal/processing
 
 - label: Multi-Modal Models Test (Standard)
   mirror_hardwares: [amdexperimental]
@@ -770,6 +769,11 @@ steps:
   - pytest -v -s plugins_tests/test_platform_plugins.py
   - pip uninstall vllm_add_dummy_platform -y
   # end platform plugin tests
+  # begin io_processor plugins test, all the code in between uses the prithvi_io_processor plugin
+  - pip install -e ./plugins/prithvi_io_processor_plugin
+  - pytest -v -s plugins_tests/test_io_processor_plugins.py
+  - pip uninstall prithvi_io_processor_plugin -y 
+  # end io_processor plugins test
   # other tests continue here:
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model
