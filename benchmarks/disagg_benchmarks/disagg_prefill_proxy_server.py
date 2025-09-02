@@ -54,13 +54,13 @@ def parse_args():
     parser.add_argument(
         "--prefill-url",
         type=str,
-        default="http://localhost:8100/v1/completions",
+        default="http://localhost:8100",
         help="Prefill service endpoint URL",
     )
     parser.add_argument(
         "--decode-url",
         type=str,
-        default="http://localhost:8200/v1/completions",
+        default="http://localhost:8200",
         help="Decode service endpoint URL",
     )
 
@@ -138,7 +138,7 @@ def main():
                 logger.error("Timeout connecting to %s", url)
                 yield b'{"error": "Service timeout"}'
 
-    async def process_request():
+    async def process_request(prefill_url, decode_url):
         """Process a single request through prefill and decode stages"""
         try:
             original_request_data = await request.get_json()
@@ -148,11 +148,11 @@ def main():
             prefill_request["max_tokens"] = 1
 
             # Execute prefill stage
-            async for _ in forward_request(PREFILL_SERVICE_URL, prefill_request):
+            async for _ in forward_request(prefill_url, prefill_request):
                 continue
 
             # Execute decode stage and stream response
-            generator = forward_request(DECODE_SERVICE_URL, original_request_data)
+            generator = forward_request(decode_url, original_request_data)
             response = await make_response(generator)
             response.timeout = None  # Disable timeout for streaming response
             return response
@@ -164,12 +164,10 @@ def main():
                 status=500,
                 content_type="application/json",
             )
-
-    @app.route("/v1/completions", methods=["POST"])
-    async def handle_request():
+    async def handle_api_request(process_func):
         """Handle incoming API requests with concurrency and rate limiting"""
         # Create task for request processing
-        task = asyncio.create_task(process_request())
+        task = asyncio.create_task(process_func())
 
         # Enqueue request or reject if queue is full
         if not await request_queue.enqueue(task):
@@ -190,6 +188,16 @@ def main():
                 status=503,
                 content_type="application/json",
             )
+
+    @app.route(["/v1/completions"], methods=["POST"])
+    async def handle_completion_request():
+        """Handle completion requests"""
+        return await handle_api_request(lambda: process_request(f"{PREFILL_SERVICE_URL}/v1/completions", f"{DECODE_SERVICE_URL}/v1/completions"))
+
+    @app.route(["/v1/chat/completions"], methods=["POST"])
+    async def handle_completion_request():
+        """Handle chat completion requests"""
+        return await handle_api_request(lambda: process_request(f"{PREFILL_SERVICE_URL}/v1/chat/completions", f"{DECODE_SERVICE_URL}/v1/chat/completions"))
 
     # Start the Quart server with host can be set to 0.0.0.0
     app.run(port=PORT)
