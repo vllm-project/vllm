@@ -757,10 +757,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         index=input_ids_index_tensor,
                         src=self.input_batch.prev_sampled_token_ids[
                             prev_common_req_indices_tensor].squeeze(1))
-            else:
-                self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
-        else:
-            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
+                return
+        self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
 
     def _prepare_inputs(
         self,
