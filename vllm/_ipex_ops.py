@@ -363,11 +363,12 @@ class ipex_ops:
         """
         Quantize input tensor to FP8 and return quantized tensor and scale.
         
-        This function supports both static and dynamic quantization: If you
-        provide the scale, it will use static scaling and if you omit it,
-        the scale will be determined dynamically. The function also allows
-        optional padding of the output tensors for downstream kernels that
-        will benefit from padding.
+        This function is designed for both static and dynamic quantization:
+        If you provide the scale, it will use static scaling and if you omit
+        it, the scale will be determined dynamically. Currently, XPU platform
+        only supports dynamic quantization. The function also allows optional
+        padding of the output tensors for downstream kernels that will benefit
+        from padding.
 
         Args:
             input: The input tensor to be quantized to FP8
