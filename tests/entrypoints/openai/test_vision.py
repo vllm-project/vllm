@@ -224,7 +224,7 @@ async def test_single_chat_session_image_beamsearch(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS, indirect=True)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image_base64encoded(
         client: openai.AsyncOpenAI, model_name: str, image_url: str,
         base64_encoded_image: dict[str, str]):
@@ -288,13 +288,13 @@ async def test_single_chat_session_image_base64encoded(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize(("image_url", "expected_res"),
-                         zip(TEST_IMAGE_URLS, EXPECTED_MM_BEAM_SEARCH_RES),
-                         indirect=True)
+@pytest.mark.parametrize("image_idx", list(range(len(TEST_IMAGE_URLS))))
 async def test_single_chat_session_image_base64encoded_beamsearch(
-        client: openai.AsyncOpenAI, model_name: str, image_url: str,
-        expected_res: list[str], base64_encoded_image: dict[str, str]):
+        client: openai.AsyncOpenAI, model_name: str, image_idx: int,
+        base64_encoded_image: dict[str, str]):
     # NOTE: This test also validates that we pass MM data through beam search
+    image_url = TEST_IMAGE_URLS[image_idx]
+    expected_res = EXPECTED_MM_BEAM_SEARCH_RES[image_idx]
 
     messages = [{
         "role":

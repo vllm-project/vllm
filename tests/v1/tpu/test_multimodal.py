@@ -25,8 +25,7 @@ def base64_encoded_image(local_asset_server) -> dict[str, str]:
                     reason="This test needs a TPU")
 @pytest.mark.parametrize("model_name", ["llava-hf/llava-1.5-7b-hf"])
 async def test_basic_vision(model_name: str, base64_encoded_image: dict[str,
-                                                                        str],
-                            local_asset_server):
+                                                                        str]):
 
     pytest.skip("Skip this test until it's fixed.")
 
@@ -69,8 +68,7 @@ async def test_basic_vision(model_name: str, base64_encoded_image: dict[str,
 
         # Other requests now should be much faster
         for image_url in TEST_IMAGE_URLS:
-            image_base64 = base64_encoded_image[local_asset_server.url_for(
-                image_url)]
+            image_base64 = base64_encoded_image[image_url]
             chat_completion_from_base64 = await client.chat.completions\
                 .create(
                 model=model_name,
