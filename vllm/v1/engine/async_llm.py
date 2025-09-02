@@ -583,15 +583,12 @@ class AsyncLLM(EngineClient):
     async def get_input_preprocessor(self) -> InputPreprocessor:
         return self.processor.input_preprocessor
 
-    async def get_tokenizer(
-        self,
-        lora_request: Optional[LoRARequest] = None,
-    ) -> AnyTokenizer:
+    async def get_tokenizer(self) -> AnyTokenizer:
         if self.tokenizer is None:
             raise ValueError("Unable to get tokenizer because "
                              "skip_tokenizer_init is True")
 
-        return self.tokenizer.get_lora_tokenizer(lora_request)
+        return self.tokenizer
 
     async def is_tracing_enabled(self) -> bool:
         return False
