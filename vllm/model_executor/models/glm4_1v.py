@@ -1461,14 +1461,9 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
-            merge_size = self.visual.spatial_merge_size
-            sizes = grid_thw.prod(-1) // merge_size // merge_size
-            return image_embeds.split(sizes.tolist())
         else:
             pixel_values = image_input["pixel_values"].type(self.visual.dtype)
             if self.use_data_parallel:
-                # run_dp_sharded_mrope_vision_model already
-                # returns split embeddings
                 return run_dp_sharded_mrope_vision_model(self.visual,
                                                          pixel_values,
                                                          grid_thw.tolist(),
@@ -1477,9 +1472,9 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
                 # Non-data parallel mode: pass list format for consistency
                 image_embeds = self.visual(pixel_values,
                                            grid_thw=grid_thw.tolist())
-                merge_size = self.visual.spatial_merge_size
-                sizes = grid_thw.prod(-1) // merge_size // merge_size
-                return image_embeds.split(sizes.tolist())
+        merge_size = self.visual.spatial_merge_size
+        sizes = grid_thw.prod(-1) // merge_size // merge_size
+        return image_embeds.split(sizes.tolist())
 
     def _process_video_input(
             self, video_input: Glm4vVideoInputs) -> tuple[torch.Tensor, ...]:
@@ -1488,28 +1483,20 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
-            # Split concatenated embeddings for each video item.
-            merge_size = self.visual.spatial_merge_size
-            sizes = grid_thw.prod(-1) // merge_size // merge_size
-            return video_embeds.split(sizes.tolist())
         else:
             pixel_values_videos = video_input["pixel_values_videos"].type(
                 self.visual.dtype)
             if self.use_data_parallel:
-                # run_dp_sharded_mrope_vision_model already
-                # returns split embeddings
                 return run_dp_sharded_mrope_vision_model(self.visual,
                                                          pixel_values_videos,
                                                          grid_thw.tolist(),
                                                          rope_type="rope_3d")
             else:
-                # Non-data parallel mode: pass list format for consistency
                 video_embeds = self.visual(pixel_values_videos,
                                            grid_thw=grid_thw.tolist())
-                # Split concatenated embeddings for each video item.
-                merge_size = self.visual.spatial_merge_size
-                sizes = grid_thw.prod(-1) // merge_size // merge_size
-                return video_embeds.split(sizes.tolist())
+        merge_size = self.visual.spatial_merge_size
+        sizes = grid_thw.prod(-1) // merge_size // merge_size
+        return video_embeds.split(sizes.tolist())
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
