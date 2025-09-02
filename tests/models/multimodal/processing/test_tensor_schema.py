@@ -198,7 +198,7 @@ def test_model_tensor_schema(model_arch: str, model_id: str):
         tokenizer_mode=model_info.tokenizer_mode,
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
-        hf_overrides=model_info.hf_overrides,
+        hf_overrides=hf_overrides_fn,
         skip_tokenizer_init=model_info.skip_tokenizer_init,
         enforce_eager=model_info.enforce_eager,
         dtype=model_info.dtype)

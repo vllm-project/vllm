@@ -12,7 +12,7 @@ from vllm.entrypoints.openai.protocol import IOProcessorResponse
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 
-MODEL_NAME = "christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM"
+MODEL_NAME = "mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11"
 
 image_url = "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/valencia_example_2024-10-26.tiff"  # noqa: E501
 
@@ -59,6 +59,7 @@ def test_prithvi_mae_plugin_offline(vllm_runner, model_name: str):
             # Limit the maximum number of parallel requests
             # to avoid the model going OOM in CI.
             max_num_seqs=1,
+            model_impl="terratorch",
             io_processor_plugin="prithvi_to_tiff_valencia",
     ) as llm_runner:
         pooler_output = llm_runner.get_llm().encode(
@@ -90,7 +91,9 @@ def server():
         "--max-num-seqs",
         "32",
         "--io-processor-plugin",
-        "prithvi_to_tiff_valencia"
+        "prithvi_to_tiff_valencia",
+        "--model-impl",
+        "terratorch",
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:

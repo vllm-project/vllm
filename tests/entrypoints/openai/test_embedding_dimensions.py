@@ -58,6 +58,11 @@ def server(model_info, dtype: str):
             "--trust_remote_code", "--hf_overrides",
             '{"matryoshka_dimensions":[256]}'
         ])
+    if model_info.max_num_seqs:
+        args.extend([
+            "--max-num-seqs",
+            f"{model_info.max_num_seqs}",
+        ])
 
     with RemoteOpenAIServer(model_info.name, args) as remote_server:
         yield remote_server

@@ -94,6 +94,9 @@ class _HfExamplesInfo:
     If not specified, the default revision will be used.
     """
 
+    max_num_seqs: Optional[int] = None
+    """Maximum number of sequences to be processed in a single iteration."""
+
     def check_transformers_version(
         self,
         *,
@@ -383,7 +386,10 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "Terratorch": _HfExamplesInfo("mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
                                   dtype=torch.float16,
                                   enforce_eager=True,
-                                  skip_tokenizer_init=True),  # noqa: E501
+                                  skip_tokenizer_init=True,
+                                  # This is to avoid the model going OOM in CI
+                                  max_num_seqs=32,
+                                  ),
 }
 
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
