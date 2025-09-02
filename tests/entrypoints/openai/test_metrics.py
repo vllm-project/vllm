@@ -289,9 +289,10 @@ async def test_metrics_exist(server: RemoteOpenAIServer,
     assert response.status_code == HTTPStatus.OK
 
     for metric in (EXPECTED_METRICS_V1 if use_v1 else EXPECTED_METRICS):
-        if (not server.show_hidden_metrics
-                and metric not in HIDDEN_DEPRECATED_METRICS):
-            assert metric in response.text
+        if (metric in HIDDEN_DEPRECATED_METRICS
+                and not server.show_hidden_metrics):
+            continue
+        assert metric in response.text
 
 
 @pytest.mark.asyncio
