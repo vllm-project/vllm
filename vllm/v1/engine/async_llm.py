@@ -44,7 +44,7 @@ from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.prometheus import shutdown_prometheus
-from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.metrics.stats import EngineStateStats, IterationStats
 
 logger = init_logger(__name__)
 
@@ -636,8 +636,24 @@ class AsyncLLM(EngineClient):
         await self.reset_prefix_cache()
         await self.engine_core.sleep_async(level)
 
+        # Log sleep status
+        if self.log_stats and self.logger_manager:
+            model_name = self.vllm_config.model_config.served_model_name
+            for engine_idx in self.logger_manager.engine_idxs:
+                engine_stats = EngineStateStats(sleep=1, level=level)
+                self.logger_manager.record_sleep_state(engine_stats,
+                                                       engine_idx, model_name)
+
     async def wake_up(self, tags: Optional[list[str]] = None) -> None:
         await self.engine_core.wake_up_async(tags)
+
+        # logs awake status
+        if self.log_stats and self.logger_manager:
+            model_name = self.vllm_config.model_config.served_model_name
+            for engine_idx in self.logger_manager.engine_idxs:
+                engine_stats = EngineStateStats(sleep=0)
+                self.logger_manager.record_sleep_state(engine_stats,
+                                                       engine_idx, model_name)
 
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()

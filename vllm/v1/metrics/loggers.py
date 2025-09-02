@@ -8,6 +8,7 @@ from typing import Callable, Optional, Union
 
 import prometheus_client
 
+import vllm.envs as envs
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorLogging)
@@ -15,7 +16,8 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import (EngineStateStats, IterationStats,
+                                   SchedulerStats)
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
@@ -203,8 +205,28 @@ class PrometheusStatLogger(StatLoggerBase):
         self.gauge_scheduler_waiting = make_per_engine(gauge_scheduler_waiting,
                                                        engine_indexes,
                                                        model_name)
+        if envs.VLLM_SERVER_DEV_MODE:
+            # Engine sleep state
+            self.gauge_engine_sleep_state = self._gauge_cls(
+                name="vllm:engine_sleep_state",
+                documentation=("Engine sleep state."),
+                labelnames=labelnames + ["sleep_state"],
+                multiprocess_mode="mostrecent")
 
-        #
+            # Setting default values
+            for idx in engine_indexes:
+                self.gauge_engine_sleep_state.labels(
+                    engine=idx, model_name=model_name,
+                    sleep_state="awake").set(1)
+                self.gauge_engine_sleep_state.labels(
+                    engine=idx,
+                    model_name=model_name,
+                    sleep_state="weights_offloaded").set(0)
+                self.gauge_engine_sleep_state.labels(
+                    engine=idx,
+                    model_name=model_name,
+                    sleep_state="discard_all").set(0)
+
         # GPU cache
         #
         # Deprecated in 0.9.2 - Renamed as vllm:kv_cache_usage_perc
@@ -614,6 +636,35 @@ class PrometheusStatLogger(StatLoggerBase):
             self.gauge_lora_info.labels(**lora_info_labels)\
                                 .set_to_current_time()
 
+    def record_sleep_state(self,
+                           engine_stats: Optional[EngineStateStats],
+                           engine_idx: int = 0,
+                           model_name: str = ""):
+
+        if engine_stats is not None:
+            awake = 1
+            discard_all = 0
+            weights_offloaded = 0
+
+            if engine_stats.sleep == 1:
+                awake = 0
+                if engine_stats.level == 1:
+                    weights_offloaded = 1
+                elif engine_stats.level == 2:
+                    discard_all = 1
+
+            self.gauge_engine_sleep_state.labels(
+                engine=engine_idx, model_name=model_name,
+                sleep_state="awake").set(awake)
+            self.gauge_engine_sleep_state.labels(
+                engine=engine_idx,
+                model_name=model_name,
+                sleep_state="weights_offloaded").set(weights_offloaded)
+            self.gauge_engine_sleep_state.labels(
+                engine=engine_idx,
+                model_name=model_name,
+                sleep_state="discard_all").set(discard_all)
+
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
 
@@ -727,6 +778,16 @@ class StatLoggerManager:
 
         self.prometheus_logger.record(scheduler_stats, iteration_stats,
                                       engine_idx)
+
+    def record_sleep_state(self,
+                           engine_stats: Optional[EngineStateStats],
+                           engine_idx: Optional[int] = None,
+                           model_name: str = ""):
+        if engine_idx is None:
+            engine_idx = 0
+
+        self.prometheus_logger.record_sleep_state(engine_stats, engine_idx,
+                                                  model_name)
 
     def log(self):
         for per_engine_loggers in self.per_engine_logger_dict.values():
