@@ -188,7 +188,7 @@ class OpenAIServingChat(OpenAIServing):
 
             model_name = self._get_model_name(request.model, lora_request)
 
-            tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            tokenizer = await self.engine_client.get_tokenizer()
 
             tool_parser = self.tool_parser
 

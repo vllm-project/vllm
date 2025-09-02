@@ -269,7 +269,7 @@ class ServingScores(OpenAIServing):
     ) -> Union[list[PoolingRequestOutput], ErrorResponse]:
         lora_request = self._maybe_get_adapters(request)
 
-        tokenizer = await self.engine_client.get_tokenizer(lora_request)
+        tokenizer = await self.engine_client.get_tokenizer()
 
         truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens",
                                          None)

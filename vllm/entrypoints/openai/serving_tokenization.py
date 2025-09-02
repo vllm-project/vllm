@@ -64,7 +64,7 @@ class OpenAIServingTokenization(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            tokenizer = await self.engine_client.get_tokenizer()
 
             if isinstance(request, TokenizeChatRequest):
                 tool_dicts = (None if request.tools is None else
@@ -131,7 +131,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
         lora_request = self._maybe_get_adapters(request)
 
-        tokenizer = await self.engine_client.get_tokenizer(lora_request)
+        tokenizer = await self.engine_client.get_tokenizer()
 
         self._log_inputs(request_id,
                          request.tokens,

@@ -374,7 +374,7 @@ class MQLLMEngineClient(EngineClient):
     async def get_input_preprocessor(self) -> InputPreprocessor:
         return self.input_preprocessor
 
-    async def get_tokenizer(self, lora_request: Optional[LoRARequest] = None):
+    async def get_tokenizer(self):
         return self.tokenizer
 
     async def get_vllm_config(self) -> VllmConfig:

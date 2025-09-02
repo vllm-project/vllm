@@ -102,8 +102,7 @@ class OpenAIServingPooling(OpenAIServing):
             if self.model_config.skip_tokenizer_init:
                 tokenizer = None
             else:
-                tokenizer = await self.engine_client.get_tokenizer(lora_request
-                                                                   )
+                tokenizer = await self.engine_client.get_tokenizer()
 
             if getattr(request, "dimensions", None) is not None:
                 return self.create_error_response(
