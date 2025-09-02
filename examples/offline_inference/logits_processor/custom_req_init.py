@@ -105,11 +105,15 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
         """
         if (
             not self.is_cuda
-            or not params.extra_args
-            or "target_token" not in params.extra_args
+            or (
+                target_token := params.extra_args
+                and params.extra_args.get("target_token")
+            )
+            is None
         ):
             return None
-        return DummyPerReqLogitsProcessor(params.extra_args["target_token"])
+        assert isinstance(target_token, int)
+        return DummyPerReqLogitsProcessor(target_token)
 
 
 # Sample prompts.

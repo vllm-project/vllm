@@ -39,7 +39,7 @@ Output:    ' in the hands of the people.\n\nThe future of AI is in the'
 ------------------------------------------------------------
 """
 
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -93,9 +93,13 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
         Returns:
           `Callable` request logits processor, or None
         """
-        if not params.extra_args or "target_token" not in params.extra_args:
+        target_token: Optional[Any] = params.extra_args and params.extra_args.get(
+            "target_token"
+        )
+        if target_token is None:
             return None
-        return DummyPerReqLogitsProcessor(params.extra_args["target_token"])
+        assert isinstance(target_token, int)
+        return DummyPerReqLogitsProcessor(target_token)
 
 
 # Sample prompts.

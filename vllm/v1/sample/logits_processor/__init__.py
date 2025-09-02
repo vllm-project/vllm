@@ -189,17 +189,20 @@ class AdapterLogitsProcessor(LogitsProcessor):
     To wrap a specific per-request logits processor,
     * Subclass `AdapterLogitsProcessor`
     * Implement `self.is_argmax_invariant()` base-class method
-    * Implement `self.req_logits_processor()`
+    * Implement `self.new_req_logits_processor(params)`
     
-    `__init__()` does not need to be overridden in general. However, to
-    implement custom constructor behavior, and/or to access the engine config/
-    device identifier/flag which indicates the availability of pin
-    memory, `__init__()` must be overriden and must call `super().__init__()`
+    `self.__init__(vllm_config, device, is_pin_memory)` does not need to be
+    overridden in general. However, to implement custom constructor behavior -
+    especially any logic which operates on or stores `vllm_config`, `device`,
+    or `is_pin_memory` - `self.__init__(vllm_config, device, is_pin_memory)`
+    must be overriden and the override must call
+    `super().__init__(vllm_config, device, is_pin_memory)`
     """
 
     def __init__(self, vllm_config: "VllmConfig", device: torch.device,
                  is_pin_memory: bool):
-        """Subclass must invoke `super().__init__()`.
+        """Subclass must invoke
+        `super().__init__(vllm_config, device, is_pin_memory)`.
 
         Subclass constructor may find it useful to utilize the `vllm_config`,
         `device` and `is_pin_memory` argument. However regardless of whether
