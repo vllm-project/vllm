@@ -147,7 +147,7 @@ class EplbState:
             dtype=torch.int32,
             device=device,
         )
-        expert_load_window_size = parallel_config.eplb_config.window_size
+        expert_load_window_size = parallel_config.window_size
         expert_load_window = torch.zeros(
             (expert_load_window_size, model.num_moe_layers,
              model.num_physical_experts),
@@ -156,7 +156,7 @@ class EplbState:
         )
 
         # Set the initial progress of rearrangement to 3/4
-        eplb_step_interval = parallel_config.eplb_config.step_interval
+        eplb_step_interval = parallel_config.step_interval
         expert_rearrangement_step = max(
             0, eplb_step_interval - eplb_step_interval // 4)
 
@@ -256,13 +256,6 @@ class EplbState:
             - `max_tokens`: The maximum load across ranks.
             - `balancedness`: The ratio of average load to maximum load.
         """
-
-        if is_profile:
-            self.eplb_updator.profile(model, is_profile)
-
-        if is_dummy:
-            # Do not record load metrics for dummy steps
-            self.eplb_updator.dummy(model)
 
         self.eplb_updator.step(model, is_dummy, is_profile, log_stats)
 

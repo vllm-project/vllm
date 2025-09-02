@@ -18,6 +18,7 @@ import numpy
 import torch.distrubuted as dist
 
 from overrides import override
+from vllm.eplb.eplb_process.eplb_process import EPLBProcess
 
 
 class EplbUpdator(BaseUpdator):
@@ -53,6 +54,36 @@ class EplbUpdator(BaseUpdator):
             self.eplb_data.expert_rearrangement_step = 0
             self.rearrange(model)
 
+    def log_stats(self):
+        # total_expert_load_pass: (num_moe_layers, num_physical_experts)
+        total_expert_load_pass = self.eplb_data.expert_load_pass.clone()
+
+        # Collect load metrics from all ranks
+        ep_group = get_ep_group().device_group
+        all_reduce(total_expert_load_pass, group=ep_group)
+
+        # num_tokens_per_rank: (num_moe_layers, num_ranks)
+        num_tokens_per_rank = total_expert_load_pass.reshape(
+            total_expert_load_pass.shape[0], ep_group.size(),
+            -1).sum(dim=-1).float()
+
+        # Compute balancedness ratio:
+        # for each layer:
+        #   (mean load across ranks) / (max load across ranks)
+        avg_tokens_tensor = num_tokens_per_rank.mean(dim=0).sum(dim=0)
+        max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(
+            dim=0)
+
+        # Just to make type checker happy
+        tokens_tensors: list[float] = torch.stack(
+            [avg_tokens_tensor, max_tokens_tensor]).tolist()
+        avg_tokens, max_tokens = tokens_tensors
+        balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
+
+        if ep_group.rank() == 0:
+            logger.info(
+                "EPLB step: avg_tokens=%.2f, max_tokens=%d, "
+                "balancedness=%.4f", avg_tokens, max_tokens, balancedness)
     @override
     def step(self,
              model: MixtureOfExperts,
@@ -79,36 +110,13 @@ class EplbUpdator(BaseUpdator):
             - `balancedness`: The ratio of average load to maximum load.
         """
 
+        if is_profile:
+            self.profile(model)
+        if is_dummy:
+            # Do not record load metrics for dummy steps
+            self.dummy(model)
         if log_stats:
-            # total_expert_load_pass: (num_moe_layers, num_physical_experts)
-            total_expert_load_pass = self.eplb_data.expert_load_pass.clone()
-
-            # Collect load metrics from all ranks
-            ep_group = get_ep_group().device_group
-            all_reduce(total_expert_load_pass, group=ep_group)
-
-            # num_tokens_per_rank: (num_moe_layers, num_ranks)
-            num_tokens_per_rank = total_expert_load_pass.reshape(
-                total_expert_load_pass.shape[0], ep_group.size(),
-                -1).sum(dim=-1).float()
-
-            # Compute balancedness ratio:
-            # for each layer:
-            #   (mean load across ranks) / (max load across ranks)
-            avg_tokens_tensor = num_tokens_per_rank.mean(dim=0).sum(dim=0)
-            max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(
-                dim=0)
-
-            # Just to make type checker happy
-            tokens_tensors: list[float] = torch.stack(
-                [avg_tokens_tensor, max_tokens_tensor]).tolist()
-            avg_tokens, max_tokens = tokens_tensors
-            balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
-
-            if ep_group.rank() == 0:
-                logger.info(
-                    "EPLB step: avg_tokens=%.2f, max_tokens=%d, "
-                    "balancedness=%.4f", avg_tokens, max_tokens, balancedness)
+            self.log_stats()
 
         # Update the expert load sliding window
         # if not is_dummy:
@@ -326,10 +334,10 @@ class EplbUpdator(BaseUpdator):
         if not is_profile:
             if self.eplb_data.physical_to_logical_map.shape[
                 1] != new_physical_to_logical_map.shape[1]:
-                self.physical_to_logical_map = new_physical_to_logical_map.to(
+                self.eplb_data.physical_to_logical_map = new_physical_to_logical_map.to(
                     self.eplb_data.physical_to_logical_map.device)
             else:
-                self.physical_to_logical_map.copy_(new_physical_to_logical_map)
+                self.eplb_data.physical_to_logical_map.copy_(new_physical_to_logical_map)
             max_physical_slots = new_logical_to_physical_map.shape[-1]
             assert max_physical_slots <= self.eplb_data.logical_to_physical_map.shape[-1]
             new_logical_to_physical_map = torch.nn.functional.pad(
