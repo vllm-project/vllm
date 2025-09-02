@@ -399,7 +399,8 @@ def resolve_hf_chat_template(
     # 2nd priority: AutoProcessor chat template, unless tool calling is enabled
     if tools is None:
         try:
-            # Special handling for LiteWhisper models - use standard Whisper processor
+            # Special handling for LiteWhisper models:
+            # use standard Whisper processor
             processor_name = tokenizer.name_or_path
             if "lite-whisper" in str(processor_name).lower():
                 processor_name = "openai/whisper-large-v3"

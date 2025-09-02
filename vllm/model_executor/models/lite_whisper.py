@@ -512,34 +512,39 @@ class LiteWhisperModel(WhisperModel):
                 for param_name, weight_name, shard_id \
                     in stacked_params_mapping:
                     if weight_name in name:
-                        # Transform name from HF format to vLLM format
-                        vllm_name = name.replace(weight_name, param_name)
-                        
-                        # Try both with and without model. prefix
-                        if vllm_name not in params_dict and f"model.{vllm_name}" in params_dict:
+                        vllm_name = name.replace(
+                            weight_name, param_name)
+                                                                
+                        if (vllm_name not in params_dict and
+                            f"model.{vllm_name}" in params_dict):
                             vllm_name = f"model.{vllm_name}"
-                        
-                        # Skip loading extra bias for GPTQ models
+
                         if (vllm_name.endswith(".bias") and
                             vllm_name not in params_dict):
-                            print(f"  Skipping extra bias: {vllm_name}")
+                            print(f"  Skipping extra bias: \
+                                   {vllm_name}")
                             processed = True
                             break
-                            
+
                         if vllm_name in params_dict:
                             param = params_dict[vllm_name]
-                            weight_loader = getattr(param,
-                                                    'weight_loader', None)
-                            if weight_loader and callable(weight_loader):
-                                weight_loader(param, loaded_weight, shard_id)
+                            weight_loader = getattr(
+                                param,
+                                'weight_loader', None)
+                            if (weight_loader and
+                                callable(weight_loader)):
+                                weight_loader(
+                                    param, loaded_weight, shard_id)
                                 loaded_params.add(name)
                                 loaded_params.add(vllm_name)
                             else:
-                                print(f"  Warning:No weight_loader for stacked param: {vllm_name}")
+                                print(f"  Warning:No weight_loader \
+                                      for stacked param: {vllm_name}")
                             processed = True
                             break
                         else:
-                            print(f"  Warning: Stacked param not found: {vllm_name}")
+                            print(f"  Warning: Stacked param not found: \
+                                  {vllm_name}")
                             processed = True
                             break
             
@@ -554,14 +559,17 @@ class LiteWhisperModel(WhisperModel):
                 param_name = f"model.{param_name}"
             
             # Skip loading extra bias for GPTQ models
-            if param_name.endswith(".bias") and param_name not in params_dict:
-                print(f"  Skipping extra bias: {param_name}")
+            if (param_name.endswith(".bias") and
+                param_name not in params_dict):
+                print(f"  Skipping extra bias: \
+                       {param_name}")
                 continue
             
             if param_name in params_dict:
                 param = params_dict[param_name]
-                weight_loader = getattr(param,
-                                        "weight_loader", default_weight_loader)
+                weight_loader = getattr(
+                    param,
+                    "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
                 loaded_params.add(param_name)
@@ -576,7 +584,9 @@ class LiteWhisperModel(WhisperModel):
     info=WhisperProcessingInfo,
     dummy_inputs=WhisperDummyInputsBuilder
 )
-class LiteWhisperForConditionalGeneration(WhisperForConditionalGeneration):
+class LiteWhisperForConditionalGeneration(
+    WhisperForConditionalGeneration
+    ):
     config_class = LiteWhisperConfig
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

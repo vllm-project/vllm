@@ -11,14 +11,16 @@ from transformers import WhisperConfig
 class LiteWhisperConfig(WhisperConfig):
     """Configuration class for Lite-Whisper models.
     
-    This configuration extends the standard Whisper configuration to include
-    low-rank adaptation settings for efficient inference.
-    
+    This configuration extends the standard Whisper configuration
+    to include low-rank adaptation settings for efficient inference.
+
     Args:
         low_rank_config (List[Dict[str, int]], optional): 
-            List of low-rank configurations for each encoder layer. Each dict
-            can contain keys like 'q_proj', 'k_proj', 'v_proj', 'out_proj',
-            'fc1', 'fc2' with integer values representing the low-rank dimensions.
+            List of low-rank configurations for each encoder layer.
+            Each dict can contain keys like
+            'q_proj', 'k_proj', 'v_proj', 'out_proj',
+            'fc1', 'fc2'
+            with integer values representing the low-rank dimensions.
             If None, no low-rank adaptations are applied.
     """
     
