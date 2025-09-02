@@ -1,4 +1,6 @@
 import time
+from multiprocessing import Manager
+
 from typing import Optional, Sequence, Iterable
 
 import torch
@@ -6,20 +8,36 @@ from torch._C._distributed_c10d import ProcessGroup
 from torch.distributed import all_reduce, all_gather
 
 from vllm.distributed import get_ep_group, get_node_count
-from vllm.distributed.eplb import rebalance_experts
+from vllm.distributed.eplb import rebalance_experts, EplbWeightLoader
 from vllm.distributed.eplb.eplb_data.eplb_data import EplbData
 from vllm.distributed.eplb.eplb_updator.abstract_updator import BaseUpdator
-
+from vllm.distributed.eplb.eplb_process.eplb_process import EplbProcess
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.utils import logger
+import numpy
+import torch.distrubuted as dist
 
 from overrides import override
 
 
 class EplbUpdator(BaseUpdator):
-    def __init__(self, eplb_data: EplbData, eplb_loader):
+    def __init__(self, eplb_data: EplbData, eplb_loader: EplbWeightLoader,adaptor, eplb_process: EplbProcess):
+        self.reqs = None
+        self.eplb_process = eplb_process
         self.eplb_data = eplb_data
         self.eplb_loader = eplb_loader
+        #新加init看是否需要
+        self.eplb_adaptor = adaptor
+        self.manager = Manager()
+        self.shared_dict = self.manager.dict({
+            # 当前rank_id的专家表[num_layers,num_experts]
+            "expert_map": None,
+            # 热度负载信息 [num_layers, world_size, num_experts]
+            "moe_load": None,
+            # 所有的专家表[num_layers, world_size, num_experts]
+            "expert_maps": None,
+        })
+
 
     @override
     def profile(self, model: MixtureOfExperts, is_profile):
@@ -60,14 +78,6 @@ class EplbUpdator(BaseUpdator):
             - `max_tokens`: The maximum load across ranks.
             - `balancedness`: The ratio of average load to maximum load.
         """
-
-        # if is_profile:
-        #     self.rearrange(model, is_profile=True)
-        #     return
-        #
-        # if is_dummy:
-        #     # Do not record load metrics for dummy steps
-        #     self.eplb_data.expert_load_pass.zero_()
 
         if log_stats:
             # total_expert_load_pass: (num_moe_layers, num_physical_experts)
@@ -120,13 +130,85 @@ class EplbUpdator(BaseUpdator):
             self.rearrange(model)
 
     @override
-    def step_after_forward(self):
-        # 1 根据热度异步调用算法计算专家热度
-        # 2 根据计算结果异步编排任务，返回任务参数
-        # 3 根据编排好的参数调用generate_task(封装了prepare_send 以及 prepare_recv)
-        # 4 调用传输方法
+    def step_before_forward(self):
+        # process与updator解耦，方法挪到process里
+        if self.eplb_process._should_process():
+            # adaptor与updator解耦，数据相关的类型放到数据侧
+            for layer_id in range(self.eplb_adaptor.num_moe_layers):
+                self.shuffer_layer_async(layer_id)
+                
+    @override           
+    def shuffer_layer_async(self,layer):
+        if self.eplb_process._should_process():
+            (expert_send_info, expert_recv_info, updated_expert_map, 
+            log2phy_map, layer_id) = self.eplb_process.get_at_index(layer)
 
-        pass
+            log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
+            self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
+            updated_expert_map_this_rank = torch.from_numpy(
+                numpy.array(updated_expert_map))
+
+            self.eplb_loader.generate_expert_d2d_transfer_task(  
+                    expert_send_info, expert_recv_info, 
+                    updated_expert_map_this_rank, 
+                    layer_id + self.eplb_adaptor.num_dense_layers)
+            self.reqs = []
+            self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
+            
+    @override
+    def step_after_forward(self):
+        if self.wakeup_eplb_worker_flag():
+            self.compute_and_set_moe_load(is_clear=True) 
+            # self.wakeup_eplb_worker()
+ 
+        if self.update_expert_weight_flag():
+            self.eplb_loader.update_expert_map_and_weight(self.reqs) 
+ 
+        self.update_iteration()
+
+    @override
+    def update_expert_weight_flag(self):
+        weight_update_counter = self.cur_iterations - (
+            self.eplb_data.num_iterations_eplb_update + self.eplb_data.num_wait_worker_iterations)
+        return (weight_update_counter >= 0
+                and weight_update_counter < self.eplb_data.num_moe_layers)
+
+    @override
+    def wakeup_eplb_worker_flag(self):
+        return self.cur_iterations == (self.eplb_data.num_iterations_eplb_update - 1)
+
+    @override 
+    def compute_and_set_moe_load(self, is_clear=False):
+        local_load = self.eplb_adaptor.get_rank_expert_workload() #取local load逻辑
+
+        self._gather_buffer = None
+        if dist.is_initialized():
+            self.world_size = dist.get_world_size()
+            self.device = local_load.device #local load换成self.expert_load_view
+            if self._gather_buffer is None:
+                shape = (self.world_size, *local_load.shape)
+                self._gather_buffer = torch.empty(shape,
+                                                  dtype=local_load.dtype,
+                                                  device=self.device)
+
+            dist.all_gather_into_tensor(self._gather_buffer, local_load)
+
+            moe_load = self._gather_buffer.permute(1, 0, 2)
+            self.shared_dict["moe_load"] = moe_load.cpu()
+            logger.debug(
+                f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
+            )
+        else:
+            moe_load = local_load.unsqueeze(1)
+            self.shared_dict["moe_load"] = moe_load.cpu()
+            logger.debug(
+                f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
+            )
+        return moe_load
+    
+    # @override
+    # def wakeup_eplb_worker(self):
+    #     self.eplb.block_update_q.put(1)
 
     @override
     def rearrange(self,
@@ -480,3 +562,11 @@ class EplbUpdator(BaseUpdator):
                     new_global_expert_indices[:, new_start_idx:new_end_idx]
 
         return mapped_expert_indices
+
+    def update_iteration(self):
+        self.cur_iterations += 1
+        if self.cur_iterations == (self.eplb_data.num_iterations_eplb_update + \
+                                   self.eplb_data.num_wait_worker_iterations + self.eplb_data.num_moe_layers):
+            self.eplb_adaptor.model.clear_all_moe_loads()
+            if not self.eplb_data.gate_eplb:
+                self.cur_iterations = 0

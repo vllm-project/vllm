@@ -19,12 +19,11 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from vllm.logger import logger
 
-from vllm.distributed.eplb.eplb_adaptor.abstract_adaptor import EplbAdaptor
+from vllm.distributed.eplb.eplb_adaptor.abstract_adaptor import BaseAdaptor
 
 
-class VllmEplbAdaptor(EplbAdaptor):
+class VllmEplbAdaptor(BaseAdaptor):
 
     def __init__(self, model, **args):
         super().__init__(**args)
@@ -80,7 +79,7 @@ class VllmEplbAdaptor(EplbAdaptor):
             complete_name = "model.layers." + str(
                 self.num_dense_layers) + ".mlp.experts." + name
             expert_tensor = self.param_dict[complete_name].data[
-                0:num_buffer_tensor]
+                            0:num_buffer_tensor]
             buffer_tensors = torch.empty_like(expert_tensor)
             for buffer_id in range(num_buffer_tensor):
                 self.buffer_tensor_list[buffer_id].append(
@@ -156,7 +155,6 @@ class VllmEplbAdaptor(EplbAdaptor):
                 tensor_data.append(device_data)
             expert_map_tensor = torch.tensor(tensor_data, dtype=torch.int32)
             return expert_map_tensor, layers_num, gpus_num
-        logger.error(f"failed to read expert_map_path: {expert_map_path}")
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
         self.expert_map_per_layer[layer_id].copy_(updated_expert_map)

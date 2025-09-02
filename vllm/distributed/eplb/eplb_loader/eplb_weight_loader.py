@@ -2,6 +2,7 @@ from functools import partial
 from typing import Sequence, Iterable
 
 import torch
+import torch.distributed as dist
 from overrides import override
 from torch._C._distributed_c10d import ProcessGroup
 from torch.distributed import P2POp, batch_isend_irecv, get_global_rank
@@ -11,6 +12,14 @@ from vllm.distributed.eplb.eplb_utils.eplb_utils import idx_local_to_global, get
 
 
 class EplbWeightLoader(BaseLoader):
+
+    def __init__(self):
+        self.recv_expert_list = None
+        self.eplb_adaptor = None
+        self.comm_op_list = None
+        self.layer_id = None
+        self.updated_expert_map = None
+        self.updated_log2phy_map = None
 
     def shuffle_layer(self,
                       num_local_experts: int,
@@ -179,3 +188,84 @@ class EplbWeightLoader(BaseLoader):
                     ) for weight in expert_weights
                 ]
         return p2p_ops
+
+    @override
+    def prepare_send(self, expert_send_info, layer_id):
+        """准备发送任务 (isend)"""
+        for dst_rank, global_expert_id_to_send in expert_send_info:
+            local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[
+                layer_id][global_expert_id_to_send].item()
+            for src_tensor in self.eplb_adaptor.expert_param_per_layer[
+                    layer_id][local_expert_id]:
+                self.comm_op_list.append(
+                    dist.P2POp(dist.isend, src_tensor, dst_rank))
+                
+    @override
+    def prepare_recv(self, expert_recv_info, updated_expert_map):
+        """准备接收任务 (irecv)"""
+        buffer_tensor_id = 0
+        for recv_rank, global_expert_id_to_recv in expert_recv_info:
+            for buffer_tensor in self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]:
+                self.comm_op_list.append(
+                    dist.P2POp(dist.irecv, buffer_tensor, recv_rank))
+            local_expert_to_replace = updated_expert_map[global_expert_id_to_recv].item()
+            self.recv_expert_list.append(
+                (local_expert_to_replace, buffer_tensor_id))
+            buffer_tensor_id += 1
+    
+    def generate_expert_d2d_transfer_task(self,
+                                          expert_send_info,
+                                          expert_recv_info,updated_expert_map,
+                                          layer_id
+                                          ):
+        if not (expert_send_info or expert_recv_info):
+            return
+        self.updated_expert_map = updated_expert_map
+        self.layer_id = layer_id
+        self.comm_op_list = []
+        self.prepare_send(expert_send_info, layer_id)
+
+
+
+    def asyn_expert_weight_transfer(self, reqs):
+
+        # set asynchronous stream for d2d expert weight transfer
+        if self.comm_op_list:
+            ret_list = dist.batch_isend_irecv(self.comm_op_list)
+            reqs.extend(ret_list)
+
+    def update_expert_map_and_weight(self, reqs):
+
+        # Waiting for send/recv tasks finish
+        for req in reqs:
+            req.wait()
+
+        if self.comm_op_list is not None:
+            self.comm_op_list = None
+
+        # update expert_map
+        #解耦adaptor与loader
+        self.eplb_adaptor.do_update_expert_map(self.layer_id,
+                                               self.updated_expert_map)
+
+        # update log2phy_map
+        self.eplb_adaptor.do_update_log2phy_map(self.layer_id,
+                                                self.updated_log2phy_map)
+
+        # update expert weight
+        buffer_tensor_id = 0
+        for recv_expert_info in self.recv_expert_list:
+            local_expert_to_replace, buffer_tensor_id = recv_expert_info
+            self.eplb_adaptor.do_update_expert_weight(self.layer_id,
+                                                      local_expert_to_replace,
+                                                      buffer_tensor_id)
+
+
+        self.recv_expert_list = []
+        self.updated_expert_map = None
+        self.layer_id = -1
+
+    def set_log2phy_map(self, log2phy_map_this_rank):
+        self.updated_log2phy_map = log2phy_map_this_rank
+
+

@@ -40,8 +40,9 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.distributed.eplb.eplb_data.eplb_data import EplbData
 from vllm.distributed.eplb.eplb_loader.eplb_weight_loader import EplbWeightLoader
 from vllm.distributed.eplb.eplb_updator.eplb_updator import EplbUpdator
+from vllm.distributed.eplb.eplb_process.eplb_process import EplbProcess
 
-from .rebalance_algo import rebalance_experts
+
 
 logger = init_logger(__name__)
 
@@ -51,6 +52,14 @@ class EplbState:
         self.eplb_data = None
         self.eplb_loader = EplbWeightLoader()
         self.eplb_updator = None
+        self._async_processor = None
+        self.eplb_policy = None
+
+    def __post_init__(self):
+        # Initialize asynchronous process manager
+        self._async_processor = EplbProcess(
+            target_func=self.eplb_policy.rebalance_experts,
+            num_wait_worker_iterations=self.eplb_data.num_wait_worker_iterations)
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -174,7 +183,7 @@ class EplbState:
                 new_physical_to_logical_map,
                 new_logical_to_physical_map,
                 new_logical_replica_count,
-            ) = (rebalance_experts(
+            ) = (self.eplb_policy.rebalance_experts(
                 global_expert_load,
                 num_replicas,
                 num_groups,
@@ -218,7 +227,8 @@ class EplbState:
             expert_rearrangement_step=expert_rearrangement_step,
             expert_rearrangement_step_interval=eplb_step_interval,
         )
-        self.eplb_updator = EplbUpdator(eplb_data=self.eplb_data, eplb_loader=self.eplb_loader)
+        self.__post_init__()
+        self.eplb_updator = EplbUpdator(eplb_data=self.eplb_data, eplb_loader=self.eplb_loader, eplb_process=self._async_processor)
 
         return self
 
