@@ -773,7 +773,7 @@ class OpenAIServingChat(OpenAIServing):
                             _, _, content = \
                                 reasoning_parser.extract_reasoning_content(
                                     current_text,
-                                    None,
+                                    [],
                                     request
                                 )
                         else:
