@@ -321,18 +321,6 @@ class MotifDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-class MotifModel(LlamaModel):
-
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 prefix: str = "",
-                 decoder_layer_type: type[nn.Module] = MotifDecoderLayer):
-        super().__init__(vllm_config=vllm_config,
-                         prefix=prefix,
-                         layer_type=layer_type)
-
-
 # Motif model uses differential attention
 # Only supported in v0 (no chunked prefill support)
 class MotifForCausalLM(LlamaForCausalLM, SupportsV0Only):
