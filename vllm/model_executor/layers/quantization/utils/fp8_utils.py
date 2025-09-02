@@ -60,7 +60,7 @@ def dispatch_w8a8_blockscale_func(
     if use_cutlass:
         return cutlass_scaled_mm
     if use_aiter_and_is_supported:
-        return rocm_aiter_ops.gemm_w8a8
+        return rocm_aiter_ops.gemm_w8a8_blockscale
     return w8a8_block_fp8_matmul
 
 

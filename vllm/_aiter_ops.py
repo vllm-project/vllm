@@ -282,6 +282,32 @@ def _rocm_aiter_gemm_w8a8_fake(
     return Y
 
 
+def _rocm_aiter_gemm_w8a8_blockscale_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    from aiter import gemm_a8w8_blockscale
+
+    return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
+
+
+def _rocm_aiter_gemm_w8a8_blockscale_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+
+    m = A.shape[0]
+    n = B.shape[0]
+    Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
+    return Y
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -418,6 +444,14 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_gemm_w8a8_blockscale",
+                op_func=_rocm_aiter_gemm_w8a8_blockscale_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_gemm_w8a8_blockscale_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -431,6 +465,18 @@ class rocm_aiter_ops:
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_gemm_w8a8(A, B, As, Bs, bias,
                                                    output_dtype)
+
+    @staticmethod
+    def gemm_w8a8_blockscale(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        block_size: list[int],
+        output_dtype: torch.dtype = torch.float16,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_gemm_w8a8_blocksale(
+            A, B, As, Bs, output_dtype)
 
     @staticmethod
     def fused_moe(
