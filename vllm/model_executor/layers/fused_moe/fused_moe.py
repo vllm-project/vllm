@@ -1729,8 +1729,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
+        curr_M: int,
         M: int,
         N: int,
         K: int,
@@ -1738,11 +1737,11 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-        workspace1 = (M, topk, max(N // 2, K))
-        workspace2 = (M, topk, max(N, K))
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        workspace1 = (curr_M, topk, max(N // 2, K))
+        workspace2 = (curr_M, topk, max(N, K))
         output = (M, K)
-        return (workspace1, workspace2, output, a.dtype)
+        return (workspace1, workspace2, output)
 
     def apply(
         self,

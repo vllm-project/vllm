@@ -476,11 +476,16 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         """
         raise NotImplementedError
 
+    def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
+        """
+        Workspace type: The dtype to use for the workspace tensors.
+        """
+        return act_dtype
+
     @abstractmethod
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
+        curr_M: int,
         M: int,
         N: int,
         K: int,
@@ -488,12 +493,23 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         """
         Compute the shapes for the temporary and final outputs of the two gemms
         and activation in the fused expert function.  Since the gemms are
         independent, the workspace for the first gemm can be shared with the
         workspace for the last gemm.
+
+        Inputs:
+        - curr_M: current number of tokens due to chunking, otherwise same as M.
+        - M: number of tokens.
+        - N: Row (or column) dimension of expert weights.
+        - K: hidden dimension
+        - topk: The number of top-k experts to select.
+        - global_num_experts: global number of experts.
+        - local_num_experts: local number of experts due to DP/EP.
+        - expert_tokens_meta: number of tokens per expert metadata for batched
+                              format.
 
         Returns a tuple of:
         - workspace13 shape tuple: must be large enough to hold the
@@ -501,9 +517,10 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         - workspace2 shape tuple: must be large enough to hold the
           result of the activation function.
         - output shape tuple: must be exact size of the final gemm output.
-        - Workspace type: The dtype to use for the workspace tensors.
-        - Note: in order for activation chunking to work, the first dimension
-          of each tuple must be the number of tokens.
+        - Note: workspace shapes can be empty if the workspace is not needed.
+          But in order for activation chunking to work, the first dimension
+          of each tuple must be the number of tokens when the shape is
+          not empty.
         """
         raise NotImplementedError
 
@@ -657,34 +674,33 @@ class FusedMoEModularKernel(torch.nn.Module):
 
     def _allocate_buffers(
         self,
-        a1: torch.Tensor,
-        a1q: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_ids: torch.Tensor,
+        out_dtype: torch.dtype,
+        device: torch.device,
+        M: int,
+        N: int,
+        K: int,
+        top_k: int,
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[ExpertTokensMetadata],
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
+        """
+        Allocate temporary and output buffers for the fused experts op.
+        Inputs:
+        - out_dtype: output type of workspace and output tensors.
+        - device: device of workspace and output tensors.
+        See `workspace_shapes` for a description of additional arguments.
+        Returns a tuple of (workspace13, workspace2, output) tensors.
+        """
+        CHUNK_SIZE = (M if not self.fused_experts.supports_chunking() else
+                      envs.VLLM_FUSED_MOE_CHUNK_SIZE)
+        num_chunks = cdiv(M, CHUNK_SIZE)
 
-        if not self.fused_experts.supports_chunking():
-            num_chunks = 1
-            CHUNK_SIZE = M
-        else:
-            # Chunking required case
-            CHUNK_SIZE = envs.VLLM_FUSED_MOE_CHUNK_SIZE
-            num_chunks = cdiv(M, CHUNK_SIZE)
+        workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
-        # Use the full M to get the final output shape.
-        _, _, fused_out_shape, _ = (self.fused_experts.workspace_shapes(
-            a1, a1q, M, N, K, top_k, global_num_experts, local_num_experts,
-            expert_tokens_meta))
-
-        # Use the CHUNK_SIZE to get the workspace shapes.
-        workspace13_shape, workspace2_shape, _, workspace_dtype = (
-            self.fused_experts.workspace_shapes(a1, a1q, CHUNK_SIZE, N, K,
-                                                top_k, global_num_experts,
+        workspace13_shape, workspace2_shape, fused_out_shape = (
+            self.fused_experts.workspace_shapes(CHUNK_SIZE, M, N, K, top_k,
+                                                global_num_experts,
                                                 local_num_experts,
                                                 expert_tokens_meta))
 
@@ -705,13 +721,14 @@ class FusedMoEModularKernel(torch.nn.Module):
             f"fused_out {fused_out.shape} but expected {fused_out_shape}")
 
         # Construct the entire output that can then be processed in chunks.
-        if num_chunks == 1:
-            # reuse workspace13 for the output
+        if num_chunks == 1 and prod(workspace13_shape) >= prod(
+                fused_out_shape):
+            # Reuse workspace13 for the output in the non-chunked case.
             fused_out = _resize_cache(workspace13, fused_out_shape)
         else:
             fused_out = torch.empty(fused_out_shape,
-                                    device=a1q.device,
-                                    dtype=a1.dtype)
+                                    device=device,
+                                    dtype=out_dtype)
 
         return workspace13, workspace2, fused_out
 
@@ -879,8 +896,8 @@ class FusedMoEModularKernel(torch.nn.Module):
             # and can never run into the tensor.numel() == 0 case.
             fused_out = torch.empty_like(a1q).to(dtype=hidden_states.dtype)
         else:
-            # Current number of tokens (works for batched or non-batched).
-            M = a1q.size(-2)
+            _, M, N, K, top_k = _moe_problem_size(a1q, w1, w2, topk_ids)
+
             CHUNK_SIZE = (M if not self.fused_experts.supports_chunking() else
                           envs.VLLM_FUSED_MOE_CHUNK_SIZE)
             num_chunks = cdiv(M, CHUNK_SIZE)
@@ -891,8 +908,8 @@ class FusedMoEModularKernel(torch.nn.Module):
                 return s, e
 
             workspace13, workspace2, fused_out = self._allocate_buffers(
-                hidden_states, a1q, w1, w2, topk_ids, global_num_experts,
-                local_num_experts, expert_tokens_meta)
+                hidden_states.dtype, a1q.device, M, N, K, top_k,
+                global_num_experts, local_num_experts, expert_tokens_meta)
 
             for chunk_idx in range(num_chunks):
                 s, e = input_chunk_range(chunk_idx)
