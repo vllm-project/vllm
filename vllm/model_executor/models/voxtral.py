@@ -591,23 +591,25 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         if hasattr(quant_config, "ignore"):
             mistral_ignore = []
             for name in quant_config.ignore:
+                mistral_name = name
                 for pattern, repl in remapping_rules:
                     if re.fullmatch(pattern, name):
-                        name = re.sub(pattern, repl, name)
-                mistral_ignore.append(name)
+                        mistral_name = re.sub(pattern, repl, name)
+                mistral_ignore.append(mistral_name)
             quant_config.ignore = mistral_ignore
 
         # Update target list
         if hasattr(quant_config, "config_groups"):
             config_groups = quant_config.config_groups
             for group_name in config_groups:
-                if hasattr(config_groups[group_name], "targets"):
+                if "targets" in config_groups[group_name]:
                     targets = []
                     for name in config_groups[group_name]["targets"]:
+                        mistral_name = name
                         for pattern, repl in remapping_rules:
                             if re.fullmatch(pattern, name):
-                                name = re.sub(pattern, repl, name)
-                        targets.append(name)
+                                mistral_name = re.sub(pattern, repl, name)
+                        targets.append(mistral_name)
                 config_groups[group_name]["targets"] = targets
             quant_config.config_groups = config_groups
 
