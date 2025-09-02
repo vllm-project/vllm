@@ -804,13 +804,13 @@ class Glm4vVisionTransformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        grid_thw: Union[torch.Tensor, list[list[int]]],
+        grid_thw: list[list[int]],
     ) -> torch.Tensor:
-        # Convert grid_thw to tensor if it's a list (for compatibility with 
-        # run_dp_sharded_mrope_vision_model)
-        if isinstance(grid_thw, list):
-            grid_thw = torch.tensor(grid_thw, device=x.device, dtype=torch.long)
-        
+        # Convert grid_thw to tensor (always expecting list format now)
+        grid_thw = torch.tensor(grid_thw,
+                                device=x.device,
+                                dtype=torch.long)
+
         # patchify
         x = x.to(device=self.device, dtype=self.dtype)
         x = self.patch_embed(x)
@@ -1471,12 +1471,14 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             if self.use_data_parallel:
                 # run_dp_sharded_mrope_vision_model already
                 # returns split embeddings
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw.tolist(),
-                    rope_type="rope_3d")
+                return run_dp_sharded_mrope_vision_model(self.visual,
+                                                         pixel_values,
+                                                         grid_thw.tolist(),
+                                                         rope_type="rope_3d")
             else:
                 # Non-data parallel mode: pass list format for consistency
-                image_embeds = self.visual(pixel_values, grid_thw=grid_thw.tolist())
+                image_embeds = self.visual(pixel_values,
+                                           grid_thw=grid_thw.tolist())
                 merge_size = self.visual.spatial_merge_size
                 sizes = grid_thw.prod(-1) // merge_size // merge_size
                 return image_embeds.split(sizes.tolist())
@@ -1498,9 +1500,10 @@ class Glm4vForConditionalGeneration(nn.Module, SupportsMultiModal,
             if self.use_data_parallel:
                 # run_dp_sharded_mrope_vision_model already
                 # returns split embeddings
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values_videos, grid_thw.tolist(),
-                    rope_type="rope_3d")
+                return run_dp_sharded_mrope_vision_model(self.visual,
+                                                         pixel_values_videos,
+                                                         grid_thw.tolist(),
+                                                         rope_type="rope_3d")
             else:
                 # Non-data parallel mode: pass list format for consistency
                 video_embeds = self.visual(pixel_values_videos,
