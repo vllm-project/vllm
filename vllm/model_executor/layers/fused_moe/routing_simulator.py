@@ -10,7 +10,7 @@ like uniform random routing.
 """
 
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 
@@ -52,7 +52,7 @@ class DistributionBasedRouting(RoutingStrategy):
 
     def __init__(self,
                  distribution: str = "uniform",
-                 **distribution_params: dict):
+                 **distribution_params: Any):
         """
         Initialize distribution-based routing.
 
