@@ -201,7 +201,7 @@ def main():
         )
 
     @app.route(["/v1/chat/completions"], methods=["POST"])
-    async def handle_completion_request():
+    async def handle_chat_completion_request():
         """Handle chat completion requests"""
         return await handle_api_request(
             lambda: process_request(
