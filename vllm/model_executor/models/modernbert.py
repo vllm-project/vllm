@@ -22,11 +22,12 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import PoolingTask
+from vllm.v1.pool.metadata import PoolingMetadata
 
-from .interfaces import SupportsCrossEncoding, default_pooling_type
+from .interfaces import SupportsCrossEncoding
+from .interfaces_base import default_pooling_type
 from .utils import WeightsMapper, maybe_prefix
 
 
