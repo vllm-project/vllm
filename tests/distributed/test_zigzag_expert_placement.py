@@ -1,40 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import multiprocessing
-import os
 import random
 
 import pytest
 import torch
 import torch.distributed
+from test_eplb_execute import distributed_run
 
 from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.utils import update_environment_variables
-
-
-def distributed_run(fn, world_size):
-    """Run a function in a distributed environment."""
-    number_of_processes = world_size
-    processes: list[multiprocessing.Process] = []
-    for i in range(number_of_processes):
-        env: dict[str, str] = {}
-        env["RANK"] = str(i)
-        env["LOCAL_RANK"] = str(i)
-        env["WORLD_SIZE"] = str(number_of_processes)
-        env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
-        env["MASTER_ADDR"] = "localhost"
-        env["MASTER_PORT"] = "12345"
-        p = multiprocessing.Process(target=fn, args=(env, ))
-        processes.append(p)
-        p.start()
-
-    for p in processes:
-        p.join()
-
-    for p in processes:
-        assert p.exitcode == 0
 
 
 def worker_fn_wrapper(fn):
@@ -42,9 +18,8 @@ def worker_fn_wrapper(fn):
 
     def wrapped_fn(env):
         update_environment_variables(env)
-        local_rank = os.environ["LOCAL_RANK"]
-        device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(device)
+        device = torch.device("cpu")
+        torch.set_default_device(device)
         init_distributed_environment()
 
         # Ensure each worker process has the same random seed
@@ -56,8 +31,9 @@ def worker_fn_wrapper(fn):
     return wrapped_fn
 
 
-def verify_zigzag_pattern(expert_map, ep_rank, ep_size, global_num_experts):
-    """Verify that the expert map follows the zigzag pattern."""
+def verify_round_robin_pattern(expert_map, ep_rank, ep_size,
+                               global_num_experts):
+    """Verify that the expert map follows the round_robin pattern."""
     # Calculate expected local experts (supporting non-divisible cases)
     base_experts = global_num_experts // ep_size
     remainder = global_num_experts % ep_size
@@ -67,7 +43,7 @@ def verify_zigzag_pattern(expert_map, ep_rank, ep_size, global_num_experts):
     else:
         local_num_experts = base_experts
 
-    # Expected expert IDs for this rank in zigzag pattern
+    # Expected expert IDs for this rank in round_robin pattern
     # For non-divisible cases, ranks with extra experts start earlier
     expected_expert_ids = []
     for expert_idx in range(local_num_experts):
@@ -100,11 +76,8 @@ def verify_zigzag_pattern(expert_map, ep_rank, ep_size, global_num_experts):
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
-def test_zigzag_expert_placement_various_sizes(world_size):
-    """Test zigzag expert placement with various expert counts."""
-
-    if torch.cuda.device_count() < world_size:
-        pytest.skip(f"Need at least {world_size} GPUs to run the test")
+def test_round_robin_expert_placement_various_sizes(world_size):
+    """Test round_robin expert placement with various expert counts."""
 
     @worker_fn_wrapper
     def worker_fn():
@@ -156,12 +129,12 @@ def test_zigzag_expert_placement_various_sizes(world_size):
                 ep_size=test_ep_size,
                 ep_rank=ep_rank,
                 global_num_experts=test_global_experts,
-                enable_zigzag_expert_placement=True,
+                round_robin_expert_placement=True,
             )
 
             assert (
                 test_local_experts == expected_test_local
-            ), f"For {test_global_experts} experts on {test_ep_size} GPUs, " \
+            ), f"For {test_global_experts} experts on {test_ep_size} ranks, " \
                 f"expected {expected_test_local} local experts, got " \
                 f"{test_local_experts}"
 
@@ -171,19 +144,16 @@ def test_zigzag_expert_placement_various_sizes(world_size):
                 ), f"Expected expert map shape ({test_global_experts},), " \
                     f"got {test_expert_map.shape}"
 
-                # Verify zigzag pattern for this test case
-                verify_zigzag_pattern(test_expert_map, ep_rank, test_ep_size,
-                                      test_global_experts)
+                # Verify round_robin pattern for this test case
+                verify_round_robin_pattern(test_expert_map, ep_rank,
+                                           test_ep_size, test_global_experts)
 
     distributed_run(worker_fn, world_size)
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
-def test_zigzag_expert_placement_edge_cases(world_size):
-    """Test edge cases for zigzag expert placement."""
-
-    if torch.cuda.device_count() < world_size:
-        pytest.skip(f"Need at least {world_size} GPUs to run the test")
+def test_round_robin_expert_placement_edge_cases(world_size):
+    """Test edge cases for round_robin expert placement."""
 
     @worker_fn_wrapper
     def worker_fn():
@@ -201,7 +171,7 @@ def test_zigzag_expert_placement_edge_cases(world_size):
             ep_size=1,
             ep_rank=0,
             global_num_experts=8,
-            enable_zigzag_expert_placement=True,
+            round_robin_expert_placement=True,
         )
         assert local_num_experts == 8, "For ep_size=1, should get all experts"
         assert expert_map is None, "For ep_size=1, expert_map should be None"
@@ -213,18 +183,15 @@ def test_zigzag_expert_placement_edge_cases(world_size):
                     ep_size=0,
                     ep_rank=0,
                     global_num_experts=8,
-                    enable_zigzag_expert_placement=True,
+                    round_robin_expert_placement=True,
                 )
 
     distributed_run(worker_fn, world_size)
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
-def test_zigzag_vs_standard_expert_placement(world_size):
-    """Compare zigzag placement with standard expert placement."""
-
-    if torch.cuda.device_count() < world_size:
-        pytest.skip(f"Need at least {world_size} GPUs to run the test")
+def test_round_robin_vs_standard_expert_placement(world_size):
+    """Compare round_robin placement with standard expert placement."""
 
     @worker_fn_wrapper
     def worker_fn():
@@ -253,11 +220,11 @@ def test_zigzag_vs_standard_expert_placement(world_size):
 
         for global_num_experts, ep_size in test_cases:
             # Get both placement strategies
-            zigzag_local, zigzag_map = determine_expert_map(
+            round_robin_local, round_robin_map = determine_expert_map(
                 ep_size=ep_size,
                 ep_rank=ep_rank,
                 global_num_experts=global_num_experts,
-                enable_zigzag_expert_placement=True,
+                round_robin_expert_placement=True,
             )
 
             standard_local, standard_map = determine_expert_map(
@@ -267,19 +234,16 @@ def test_zigzag_vs_standard_expert_placement(world_size):
 
             # Both should give same number of local experts
             assert (
-                zigzag_local == standard_local
-            ), f"For {global_num_experts} experts on {ep_size} GPUs: " \
-                f"zigzag={zigzag_local}, standard={standard_local}"
+                round_robin_local == standard_local
+            ), f"For {global_num_experts} experts on {ep_size} ranks: " \
+                f"round_robin={round_robin_local}, standard={standard_local}"
 
     distributed_run(worker_fn, world_size)
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
-def test_zigzag_expert_placement_communication_pattern(world_size):
-    """Test that zigzag placement creates the expected communication pattern."""
-
-    if torch.cuda.device_count() < world_size:
-        pytest.skip(f"Need at least {world_size} GPUs to run the test")
+def test_round_robin_expert_placement_communication_pattern(world_size):
+    """Test that round_robin placement creates the expected pattern."""
 
     @worker_fn_wrapper
     def worker_fn():
@@ -311,7 +275,8 @@ def test_zigzag_expert_placement_communication_pattern(world_size):
                 ep_rank=ep_rank,
                 global_num_experts=global_num_experts)
 
-            # Verify the zigzag pattern creates interleaved expert distribution
+            # Verify the round_robin pattern creates interleaved expert
+            # distribution
             expected_expert_ids = []
             for expert_idx in range(local_num_experts):
                 global_expert_id = ep_rank + expert_idx * ep_size
@@ -349,42 +314,5 @@ def test_zigzag_expert_placement_communication_pattern(world_size):
                 else:
                     assert all(expert_id % 4 == 3
                                for expert_id in expected_expert_ids)
-
-    distributed_run(worker_fn, world_size)
-
-
-@pytest.mark.parametrize("world_size", [2, 4])
-def test_zigzag_expert_placement_invalid_configurations(world_size):
-    """Test zigzag expert placement with invalid configurations."""
-
-    if torch.cuda.device_count() < world_size:
-        pytest.skip(f"Need at least {world_size} GPUs to run the test")
-
-    @worker_fn_wrapper
-    def worker_fn():
-        ensure_model_parallel_initialized(
-            tensor_model_parallel_size=world_size,
-            pipeline_model_parallel_size=1)
-
-        ep_rank = torch.distributed.get_rank()
-
-        from vllm.model_executor.layers.fused_moe.layer import (
-            determine_expert_map)
-
-        # Test various invalid configurations
-        invalid_configs = [
-            # (ep_size, global_num_experts, expected_error)
-            (0, 8, AssertionError),  # ep_size = 0
-        ]
-
-        for ep_size, global_experts, expected_error in invalid_configs:
-            if ep_rank == 0:  # Only test on one rank to avoid multiple errors
-                with pytest.raises(expected_error):
-                    determine_expert_map(
-                        ep_size=ep_size,
-                        ep_rank=0,
-                        global_num_experts=global_experts,
-                        enable_zigzag_expert_placement=True,
-                    )
 
     distributed_run(worker_fn, world_size)

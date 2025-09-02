@@ -663,7 +663,7 @@ def determine_expert_map(
     ep_size: int,
     ep_rank: int,
     global_num_experts: int,
-    enable_zigzag_expert_placement: bool = False,
+    round_robin_expert_placement: bool = False,
 ) -> tuple[int, Optional[torch.Tensor]]:
     """
         Calculates how many experts should be assigned to each rank for EP and
@@ -674,7 +674,7 @@ def determine_expert_map(
         Args:
             ep_size (int): The size of the expert parallel group
             global_num_experts (int): The total number of experts in the model.
-            enable_zigzag_expert_placement (bool): Whether to enable zigzag
+            round_robin_expert_placement (bool): Whether to enable round robin
                 expert placement.
 
         Returns:
@@ -701,8 +701,7 @@ def determine_expert_map(
     # Create a tensor of size num_experts filled with -1
     expert_map = torch.full((global_num_experts, ), -1, dtype=torch.int32)
 
-    if enable_zigzag_expert_placement:
-        # Generate expert IDs for this rank using zigzag pattern
+    if round_robin_expert_placement:
         local_log_experts = torch.arange(ep_rank,
                                          global_num_experts,
                                          ep_size,
@@ -836,15 +835,15 @@ class FusedMoE(CustomOp):
                 assert num_redundant_experts == 0, \
                     "Redundant experts are only supported with EPLB."
 
-            # Zigzag expert placement is only supported for models with
+            # Round robin expert placement is only supported for models with
             # multiple expert groups and no redundant experts.
-            enable_zigzag = num_expert_group is not None \
+            enable_round_robin = num_expert_group is not None \
                 and num_expert_group > 1 and num_redundant_experts == 0
             self.local_num_experts, self.expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts,
-                enable_zigzag_expert_placement=enable_zigzag,
+                round_robin_expert_placement=enable_round_robin,
             )
             logger.info_once(
                 "[EP Rank %s/%s] Expert parallelism is enabled. Local/global"
