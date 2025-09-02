@@ -42,7 +42,6 @@ async def gptoss_client(gptoss_server):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="gpt-oss can't run on CI yet.")
 async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI):
     tools = [{
         "type": "function",
