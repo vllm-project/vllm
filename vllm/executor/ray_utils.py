@@ -223,7 +223,7 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
 
     """
     # Wait until PG is ready - this will block until all
-    # requested resources are available, and will timeout
+    # requested resources are available, and will time out
     # if they cannot be provisioned.
     placement_group_specs = current_placement_group.bundle_specs
 

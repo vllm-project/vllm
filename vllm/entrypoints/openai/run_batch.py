@@ -161,7 +161,7 @@ async def write_local_file(output_path: str,
     batch_outputs: The list of batch outputs to write.
     """
     # We should make this async, but as long as run_batch runs as a
-    # standalone program, blocking the event loop won't effect performance.
+    # standalone program, blocking the event loop won't affect performance.
     with open(output_path, "w", encoding="utf-8") as f:
         for o in batch_outputs:
             print(o.model_dump_json(), file=f)

@@ -815,7 +815,7 @@ class Scheduler(SchedulerInterface):
         # NOTE: structured_output_request_ids maps
         # a request's (request that uses structured output)
         # request_id to its index in the batch.
-        # This will helps us determine to slice the grammar bitmask
+        # This will help us determine to slice the grammar bitmask
         # and only applies valid mask for requests that
         # uses structured decoding.
         structured_output_request_ids: dict[str, int] = {}
@@ -923,7 +923,7 @@ class Scheduler(SchedulerInterface):
                     request):
                 # NOTE: structured_output_request
                 # should not be None if use_structured_output, we have
-                # check above, so safe to ignore type warning
+                # checked above, so safe to ignore type warning
                 request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids)
 
@@ -1242,7 +1242,7 @@ class Scheduler(SchedulerInterface):
         finished_sending reqs to the output.
         * if finished_sending: free the blocks
         # if finished_recving: add to state so we can
-            scheduler the request during the next step.
+            schedule the request during the next step.
         """
 
         if self.connector is not None:
