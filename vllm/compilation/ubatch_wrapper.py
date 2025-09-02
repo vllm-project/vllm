@@ -2,25 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
-from typing import Any, Callable, Optional
 import threading
+from typing import Any, Callable, Optional
 
 import torch
 
 import vllm.envs as envs
+from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.forward_context import (get_forward_context, 
-                                  create_forward_context, 
+from vllm.forward_context import (create_forward_context, get_forward_context,
                                   override_forward_context)
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 from vllm.sequence import IntermediateTensors
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
-
-
+from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)
+
 
 @dataclasses.dataclass
 class UbatchMetadata:
@@ -31,19 +29,18 @@ class UbatchMetadata:
     intermediate_tensors: Optional[IntermediateTensors]
     num_tokens: int
 
+
 @dataclasses.dataclass
 class CUDAGraphMetaData:
     cudagraph: torch.cuda.CUDAGraph
     ubatch_metadata: UbatchMetadata
     outputs: Optional[Any] = None
 
+
 class UBatchWrapper:
 
-    def __init__(self,
-                 runnable: Callable,
-                 vllm_config: VllmConfig,
-                 runtime_mode: CUDAGraphMode,
-                 device: torch.cuda.device):
+    def __init__(self, runnable: Callable, vllm_config: VllmConfig,
+                 runtime_mode: CUDAGraphMode, device: torch.cuda.device):
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
@@ -56,7 +53,8 @@ class UBatchWrapper:
         self.cudagraph_wrapper = None
         self.graph_pool = None
         if runtime_mode is not CUDAGraphMode.NONE:
-            self.cudagraph_wrapper = CUDAGraphWrapper(runnable, vllm_config, runtime_mode=runtime_mode)
+            self.cudagraph_wrapper = CUDAGraphWrapper(
+                runnable, vllm_config, runtime_mode=runtime_mode)
             self.graph_pool = current_platform.get_global_graph_pool()
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
@@ -84,15 +82,14 @@ class UBatchWrapper:
         initialize its cuda context (torch.cuda.current_blas_handle())
         before going to sleep upon entering the ubatch_context.
 
-        2. The main thread starts the graph capture and wakes up the first ubatch
-        thread.
+        2. The main thread starts the graph capture and wakes up the first 
+        ubatch thread.
 
         3. Each ubatch thread runs the model to completion and returns the 
         completed output tensors back to the main thread.
 
         4. The main thread stores the captured cudagraph along with its metadata
         and returns
-
         """
 
         @torch.inference_mode()
@@ -129,7 +126,7 @@ class UBatchWrapper:
                                           ))
                 ubatch_threads.append(thread)
                 thread.start()
-            self.ready_barrier.wait() # Wait for both threads to be ready
+            self.ready_barrier.wait()  # Wait for both threads to be ready
 
             # Capture the cudagraph
             cudagraph_metadata = \
@@ -178,18 +175,18 @@ class UBatchWrapper:
                                           ))
                 ubatch_threads.append(thread)
                 thread.start()
-            self.ready_barrier.wait() # Wait for both threads to be ready
+            self.ready_barrier.wait()  # Wait for both threads to be ready
             ubatch_metadata[0].context.cpu_wait_event.set()
             for thread in ubatch_threads:
                 thread.join()
         sorted_results = [value for position, value in sorted(results)]
         result = torch.cat(sorted_results, dim=0)
         return result
-    
-    def _make_ubatch_metadata(self, ubatch_slices, attn_metadata,
-                              input_ids, positions, inputs_embeds, 
-                              intermediate_tensors, compute_stream, 
-                              num_tokens_across_dp, batch_descriptor, 
+
+    def _make_ubatch_metadata(self, ubatch_slices, attn_metadata, input_ids,
+                              positions, inputs_embeds, intermediate_tensors,
+                              compute_stream, num_tokens_across_dp,
+                              batch_descriptor,
                               cudagraph_runtime_mode) -> list[UbatchMetadata]:
 
         # Create one forward context per ubatch
@@ -213,7 +210,8 @@ class UBatchWrapper:
             forward_contexts=forward_contexts,
             ready_barrier=self.ready_barrier,
             device=self.device,
-            enable_async_comms=self.vllm_config.parallel_config.enable_async_comms)
+            enable_async_comms=self.vllm_config.parallel_config.
+            enable_async_comms)
 
         ubatch_metadata: list[UbatchMetadata] = []
         for i, ubatch_slice in enumerate(ubatch_slices):
@@ -223,28 +221,31 @@ class UBatchWrapper:
                     ubatch_slice.token_slice, input_ids, positions,
                     inputs_embeds, intermediate_tensors)
             ubatch_metadata.append(
-                UbatchMetadata(context=ubatch_ctxs[i],
-                               input_ids=sliced_input_ids,
-                               positions=sliced_positions,
-                               inputs_embeds=sliced_inputs_embeds,
-                               intermediate_tensors=sliced_intermediate_tensors,
-                               num_tokens=ubatch_slice.token_slice.stop -
-                               ubatch_slice.token_slice.start))
+                UbatchMetadata(
+                    context=ubatch_ctxs[i],
+                    input_ids=sliced_input_ids,
+                    positions=sliced_positions,
+                    inputs_embeds=sliced_inputs_embeds,
+                    intermediate_tensors=sliced_intermediate_tensors,
+                    num_tokens=ubatch_slice.token_slice.stop -
+                    ubatch_slice.token_slice.start))
 
         return ubatch_metadata
 
-
-    def _slice_model_inputs(self, tokens_slice: slice, input_ids, positions, inputs_embeds, intermediate_tensors):
+    def _slice_model_inputs(self, tokens_slice: slice, input_ids, positions,
+                            inputs_embeds, intermediate_tensors):
         sliced_input_ids = input_ids[tokens_slice]
         # if we are using mrope
         if positions.ndim == 2:
             sliced_positions = positions[:, tokens_slice]
         else:
             sliced_positions = positions[tokens_slice]
-        sliced_inputs_embeds = inputs_embeds[tokens_slice] if inputs_embeds else None
-        sliced_intermediate_tensors = intermediate_tensors[tokens_slice] if intermediate_tensors else None
+        sliced_inputs_embeds = inputs_embeds[
+            tokens_slice] if inputs_embeds else None
+        sliced_intermediate_tensors = intermediate_tensors[
+            tokens_slice] if intermediate_tensors else None
 
-        return (sliced_input_ids, sliced_positions, sliced_inputs_embeds, 
+        return (sliced_input_ids, sliced_positions, sliced_inputs_embeds,
                 sliced_intermediate_tensors)
 
     def __call__(self, *args, **kwargs):
@@ -262,7 +263,8 @@ class UBatchWrapper:
                 return self.cudagraph_wrapper(*args, **kwargs)
 
         attn_metadata = forward_context.attn_metadata
-        num_tokens = (ubatch_slices[0].token_slice.stop - ubatch_slices[0].token_slice.start) * 2
+        num_tokens = (ubatch_slices[0].token_slice.stop -
+                      ubatch_slices[0].token_slice.start) * 2
         input_ids = kwargs['input_ids']
         positions = kwargs['positions']
         intermediate_tensors = kwargs['intermediate_tensors']
@@ -276,16 +278,16 @@ class UBatchWrapper:
         if num_tokens not in self.cudagraphs \
             and cudagraph_runtime_mode is CUDAGraphMode.FULL:
             ubatch_metadata = self._make_ubatch_metadata(
-                    ubatch_slices=ubatch_slices,
-                    attn_metadata=attn_metadata,
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                    compute_stream=compute_stream,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    batch_descriptor=batch_descriptor,
-                    cudagraph_runtime_mode=CUDAGraphMode.NONE)
+                ubatch_slices=ubatch_slices,
+                attn_metadata=attn_metadata,
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                compute_stream=compute_stream,
+                num_tokens_across_dp=num_tokens_across_dp,
+                batch_descriptor=batch_descriptor,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE)
 
             return self._capture_ubatches(ubatch_metadata, self.model)
         elif num_tokens in self.cudagraphs:
@@ -294,14 +296,14 @@ class UBatchWrapper:
             return cudagraph_metadata.outputs
         else:
             ubatch_metadata = self._make_ubatch_metadata(
-                    ubatch_slices=ubatch_slices,
-                    attn_metadata=attn_metadata,
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                    compute_stream=compute_stream,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    batch_descriptor=batch_descriptor,
-                    cudagraph_runtime_mode=CUDAGraphMode.NONE)
+                ubatch_slices=ubatch_slices,
+                attn_metadata=attn_metadata,
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                compute_stream=compute_stream,
+                num_tokens_across_dp=num_tokens_across_dp,
+                batch_descriptor=batch_descriptor,
+                cudagraph_runtime_mode=CUDAGraphMode.NONE)
             return self._run_ubatches(ubatch_metadata, self.model)
