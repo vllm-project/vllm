@@ -119,8 +119,9 @@ def test_structured_output(
     llm = LLM(model=model_name,
               enforce_eager=enforce_eager,
               max_model_len=1024,
-              structured_outputs_config=dict(
-                  disable_any_whitespace=backend in {"xgrammar", "guidance"}),
+              structured_outputs_config=dict(backend=backend,
+                                             disable_any_whitespace=backend
+                                             in {"xgrammar", "guidance"}),
               tokenizer_mode=tokenizer_mode,
               speculative_config=speculative_config)
 
