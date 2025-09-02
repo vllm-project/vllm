@@ -92,11 +92,11 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS, indirect=True)
+@pytest.mark.parametrize("raw_image_url", TEST_IMAGE_URLS)
 async def test_single_chat_session_image_base64encoded(
     client: openai.AsyncOpenAI,
     model_name: str,
-    image_url: str,
+    raw_image_url: str,
     base64_encoded_image: dict[str, str],
 ):
     content_text = "What's in this image?"
@@ -107,7 +107,7 @@ async def test_single_chat_session_image_base64encoded(
             {
                 "type": "input_image",
                 "image_url":
-                f"data:image/jpeg;base64,{base64_encoded_image[image_url]}",
+                f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}",
                 "detail": "auto",
             },
             {

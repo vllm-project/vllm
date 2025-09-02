@@ -224,10 +224,11 @@ async def test_single_chat_session_image_beamsearch(client: openai.AsyncOpenAI,
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("raw_image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS, indirect=True)
 async def test_single_chat_session_image_base64encoded(
-        client: openai.AsyncOpenAI, model_name: str, image_url: str,
-        base64_encoded_image: dict[str, str]):
+        client: openai.AsyncOpenAI, model_name: str, raw_image_url: str,
+        image_url: str, base64_encoded_image: dict[str, str]):
 
     content_text = "What's in this image?"
     messages = [{
@@ -238,7 +239,7 @@ async def test_single_chat_session_image_base64encoded(
                 "type": "image_url",
                 "image_url": {
                     "url":
-                    f"data:image/jpeg;base64,{base64_encoded_image[image_url]}"
+                    f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}"
                 }
             },
             {
@@ -293,7 +294,7 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
         client: openai.AsyncOpenAI, model_name: str, image_idx: int,
         base64_encoded_image: dict[str, str]):
     # NOTE: This test also validates that we pass MM data through beam search
-    image_url = TEST_IMAGE_URLS[image_idx]
+    raw_image_url = TEST_IMAGE_URLS[image_idx]
     expected_res = EXPECTED_MM_BEAM_SEARCH_RES[image_idx]
 
     messages = [{
@@ -304,7 +305,7 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
                 "type": "image_url",
                 "image_url": {
                     "url":
-                    f"data:image/jpeg;base64,{base64_encoded_image[image_url]}"
+                    f"data:image/jpeg;base64,{base64_encoded_image[raw_image_url]}"
                 }
             },
             {
