@@ -1,5 +1,7 @@
 from abc import abstractmethod
 
+import torch
+
 
 class DynamicConfig:
     placement_policy = None
@@ -39,3 +41,17 @@ class EplbPolicy:
             physical replicas for each logical expert
         """
         pass
+
+    @staticmethod
+    def convert_format(current_expert_table, expert_workload, num_expert=256):
+        num_layer = expert_workload.shape[0]
+        converted_expert_workload = torch.zeros((num_layer, num_expert))
+        for layer_id, layer in enumerate(current_expert_table):
+            for rank_id, rank in enumerate(layer):
+                for index, expert_id in enumerate(rank):
+                    converted_expert_workload[layer_id][expert_id] += expert_workload[layer_id][rank_id][index]
+
+        return converted_expert_workload
+    @staticmethod
+    def convert_table(current_expert_table, num_layer):
+        return current_expert_table.reshape(num_layer, -1)
