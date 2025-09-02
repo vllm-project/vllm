@@ -88,7 +88,8 @@ def test_traces(
         model = "facebook/opt-125m"
         llm = LLM(model=model,
                   otlp_traces_endpoint=FAKE_TRACE_SERVER_ADDRESS,
-                  gpu_memory_utilization=0.3)
+                  gpu_memory_utilization=0.3,
+                  disable_log_stats=False)
         prompts = ["This is a short prompt"]
         outputs = llm.generate(prompts, sampling_params=sampling_params)
         print(f"test_traces outputs is : {outputs}")
@@ -162,7 +163,8 @@ def test_traces_with_detailed_steps(
         llm = LLM(model=model,
                   otlp_traces_endpoint=FAKE_TRACE_SERVER_ADDRESS,
                   collect_detailed_traces=["all"],
-                  gpu_memory_utilization=0.3)
+                  gpu_memory_utilization=0.3,
+                  disable_log_stats=False)
         prompts = ["This is a short prompt"]
         outputs = llm.generate(prompts, sampling_params=sampling_params)
 
