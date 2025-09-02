@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
-
 import numpy as np
 import torch
 
@@ -161,15 +159,12 @@ class MultiGroupBlockTable:
         for block_table in self.block_tables:
             block_table.swap_row(src, tgt)
 
-    def compute_slot_mapping(
-            self, req_indices: np.ndarray, positions: np.ndarray,
-            num_reqs: int, num_decodes: int,
-            num_computed_tokens_cpu: np.ndarray, seq_lens_np: np.ndarray,
-            cp_num_computed_tokens_cpu: np.ndarray,
-            cp_local_token_select_indices_np: np.ndarray) -> Optional[int]:
-        # Note(hc): cp_local_token_cnt records the number of KV entries
-        # will be stored on the current CP rank.
-        cp_local_token_cnt: Optional[int] = None
+    def compute_slot_mapping(self, req_indices: np.ndarray,
+                             positions: np.ndarray, num_reqs: int,
+                             num_decodes: int,
+                             num_computed_tokens_cpu: np.ndarray,
+                             seq_lens_np: np.ndarray,
+                             cp_num_computed_tokens_cpu: np.ndarray) -> None:
         if self.cp_world_size > 1:
             assert len(self.block_tables) == 1
             block_size = self.block_tables[0].block_size
@@ -177,7 +172,6 @@ class MultiGroupBlockTable:
             max_num_blocks_per_req = self.block_tables[
                 0].max_num_blocks_per_req
             slot_mapping_np = self.block_tables[0].slot_mapping_np
-            cp_local_token_cnt = 0
             cu_token_idx = 0
             for req_idx in range(num_reqs):
                 context_len = num_computed_tokens_cpu[req_idx]
@@ -204,17 +198,14 @@ class MultiGroupBlockTable:
                         block_number = block_table_array[block_table_indice]
                         block_offset = position % block_size
                         slot_mapping_np[
-                            cp_local_token_cnt] = block_number * block_size \
+                            cu_token_idx] = block_number * block_size \
                                 + block_offset
-                        cp_local_token_select_indices_np[
-                            cp_local_token_cnt] = cu_token_idx + token_idx \
-                                - context_len
-                        cp_local_token_cnt += 1
-                cu_token_idx += seq_len - context_len
+                    else:
+                        slot_mapping_np[cu_token_idx] = -1
+                    cu_token_idx += 1
         else:
             for block_table in self.block_tables:
                 block_table.compute_slot_mapping(req_indices, positions)
-        return cp_local_token_cnt
 
     def commit_block_table(self, num_reqs: int) -> None:
         for block_table in self.block_tables:

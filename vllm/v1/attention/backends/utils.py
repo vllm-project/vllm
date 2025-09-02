@@ -73,11 +73,6 @@ class CommonAttentionMetadata:
     num_logits_indices: Optional[int] = None
 
     # Needed by CP
-    cp_local_token_cnt: Optional[int] = None
-    """The number of kv should be stored on the current cp rank."""
-    cp_local_token_select_indices_cpu: torch.Tensor = None
-    """The selected indices used for masking the KV-cache should
-    be stored on the current CP rank."""
     cp_num_computed_tokens_cpu_tensor: torch.Tensor = None
     """The context lengths in the perspective of cp rank0."""
 

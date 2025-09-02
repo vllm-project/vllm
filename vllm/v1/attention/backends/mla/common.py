@@ -399,10 +399,6 @@ class MLACommonMetadata(Generic[D]):
                             FlashInferPrefillMetadata,
                             CudnnPrefillMetadata]] = None
 
-    # Note(hc): cp_local_token_select_indices specifies which
-    # indices of kv should be stored on the current cp rank.
-    cp_local_token_select_indices: Optional[torch.Tensor] = None
-
     def __post_init__(self):
         if self.head_dim is not None:
             MLACommonBackend.validate_head_size(self.head_dim)
@@ -643,14 +639,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
-        if common_attn_metadata.cp_local_token_cnt is not None:
-            # TODO(hc): CP need support mla fullgraph in
-            # the future, which is not difficult.
-            cp_local_token_select_indices = \
-                common_attn_metadata.cp_local_token_select_indices_cpu[
-                    :common_attn_metadata.cp_local_token_cnt].to(
-                device, non_blocking=True).long()
-
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
@@ -832,8 +820,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             num_prefills=num_prefills,
             prefill=prefill_metadata,
             decode=decode_metadata,
-            cp_local_token_select_indices=cp_local_token_select_indices
-            if common_attn_metadata.cp_local_token_cnt is not None else None,
         )
 
         if self._use_fi_prefill and num_prefills > 0:
@@ -1469,100 +1455,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def context_parallel_forward(
-        self,
-        layer: AttentionLayer,
-        q: torch.Tensor,  # query in unified attn
-        k_c_normed: torch.Tensor,  # key in unified attn
-        k_pe: torch.Tensor,  # value in unified attn
-        kv_cache: torch.Tensor,
-        attn_metadata: M,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        assert output is not None, "Output tensor must be provided."
-
-        if output_scale is not None or output_block_scale is not None:
-            raise NotImplementedError(
-                "fused output quantization is not yet supported"
-                " for MLACommonImpl")
-
-        if attn_metadata is None:
-            # The zero fill is required when used with DP + EP
-            # to ensure all ranks within a DP group compute the
-            # same expert outputs.
-            return output.fill_(0)
-
-        fp8_attention = self.kv_cache_dtype.startswith("fp8")
-        assert not fp8_attention, "CP not support fp8 kvcache now."
-
-        num_actual_toks = attn_metadata.num_actual_tokens
-
-        # Inputs and outputs may be padded for CUDA graphs
-        output_padded = output
-        output = output[:num_actual_toks, ...]
-        q = q[:num_actual_toks, ...]
-        k_c_normed = k_c_normed[:num_actual_toks, ...]
-        k_pe = k_pe[:num_actual_toks, ...]
-
-        assert attn_metadata.num_decodes is not None and \
-            attn_metadata.num_prefills is not None and \
-            attn_metadata.num_decode_tokens is not None
-
-        has_decode = attn_metadata.num_decodes > 0
-        has_prefill = attn_metadata.num_prefills > 0
-        num_decode_tokens = attn_metadata.num_decode_tokens
-
-        decode_q = q[:num_decode_tokens]
-
-        prefill_q = q[num_decode_tokens:]
-        prefill_k_pe = k_pe[num_decode_tokens:]
-        prefill_k_c_normed = k_c_normed[num_decode_tokens:]
-
-        # write the latent and rope to kv cache for CP.
-        assert attn_metadata.cp_local_token_select_indices is not None
-        cp_local_token_select_indices = \
-            attn_metadata.cp_local_token_select_indices
-        # Note(hc): need revisit when we support mla fullgraph for CP.
-        if kv_cache.numel() > 0 and cp_local_token_select_indices.numel() > 0:
-            # Note(hc): cp_fused_concat_and_cache_mla fuses the following
-            # three kernel calls into one:
-            # k_c_normed.index_select(0, cp_local_token_select_indices) + \
-            # k_pe.squeeze(1).index_select(0, cp_local_token_select_indices) + \
-            # concat_and_cache_mla.
-            ops.cp_fused_concat_and_cache_mla(
-                k_c_normed,
-                k_pe.squeeze(1),
-                cp_local_token_select_indices,
-                kv_cache,
-                attn_metadata.slot_mapping.flatten()
-                [:cp_local_token_select_indices.shape[0]],
-                kv_cache_dtype=self.kv_cache_dtype,
-                scale=layer._k_scale,
-            )
-
-        if has_prefill:
-            output[num_decode_tokens:] = self._forward_prefill(
-                prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
-                attn_metadata, layer._k_scale)
-
-        if has_decode:
-            assert attn_metadata.decode is not None
-            decode_q_nope, decode_q_pe = decode_q.split(
-                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-            # Convert from (B, N, P) to (N, B, P)
-            decode_q_nope = decode_q_nope.transpose(0, 1)
-            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-            decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
-            # Convert from (N, B, L) to (B, N, L)
-            decode_ql_nope = decode_ql_nope.transpose(0, 1)
-
-            output[:num_decode_tokens] = self._forward_decode(
-                decode_ql_nope, decode_q_pe, kv_cache, attn_metadata, layer)
-
-        return output_padded
-
     def forward(
         self,
         layer: AttentionLayer,
@@ -1575,12 +1467,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         output_scale: Optional[torch.Tensor] = None,
         output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if get_cp_group().world_size > 1:
-            return self.context_parallel_forward(layer, q, k_c_normed, k_pe,
-                                                 kv_cache, attn_metadata,
-                                                 output, output_scale,
-                                                 output_block_scale)
-
         assert output is not None, "Output tensor must be provided."
 
         if output_scale is not None or output_block_scale is not None:

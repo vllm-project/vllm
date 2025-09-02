@@ -29,8 +29,8 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.parallel_state import (
-    get_cp_group, get_pp_group, get_tp_group, graph_capture,
-    is_global_first_rank, prepare_communication_buffer_for_model)
+    get_pp_group, get_tp_group, graph_capture, is_global_first_rank,
+    prepare_communication_buffer_for_model)
 from vllm.forward_context import (BatchDescriptor, DPMetadata,
                                   set_forward_context)
 from vllm.logger import init_logger
@@ -324,9 +324,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory)
 
         # for CP
-        self.cp_rank = get_cp_group().rank_in_group
-        self.cp_local_token_select_indices = self._make_buffer(
-            self.max_num_tokens, dtype=torch.int32)
         self.num_decodes = 0
 
     def _make_buffer(self, *args, dtype: torch.dtype) -> CpuGpuBuffer:
@@ -744,9 +741,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.cp_world_size > 1:
             assert self.attn_groups[0][
                 0].backend is FlashMLABackend, "CP only support flashmla now."
-        # Note(hc): cp_local_token_cnt records the number of KV entries will
-        # be stored on the current CP rank.
-        cp_local_token_cnt = self.input_batch.block_table.compute_slot_mapping(
+        self.input_batch.block_table.compute_slot_mapping(
             req_indices,
             positions_np,
             num_reqs=num_reqs,
@@ -754,9 +749,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu,
             seq_lens_np=self.seq_lens.np,
             cp_num_computed_tokens_cpu=self.input_batch.
-            cp_num_computed_tokens_cpu,
-            cp_local_token_select_indices_np=self.
-            cp_local_token_select_indices.np)
+            cp_num_computed_tokens_cpu)
         self.input_batch.block_table.commit_slot_mapping(
             total_num_scheduled_tokens)
 
@@ -864,9 +857,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logits_indices_padded=logits_indices_padded,
                 num_logits_indices=logits_indices.size(0),
                 causal=True,
-                cp_local_token_cnt=cp_local_token_cnt,
-                cp_local_token_select_indices_cpu=self.
-                cp_local_token_select_indices.cpu,
                 cp_num_computed_tokens_cpu_tensor=self.input_batch.
                 cp_num_computed_tokens_cpu_tensor,
             )
