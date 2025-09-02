@@ -59,7 +59,7 @@ class RequestStateStats:
 
     num_generation_tokens: int = 0
 
-    # This is a engine frontend timestamp (wall-clock)
+    # This is an engine frontend timestamp (wall-clock)
     arrival_time: float = 0.0
 
     # These are engine core timestamps (monotonic)
