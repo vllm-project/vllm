@@ -3,18 +3,7 @@ from abc import abstractmethod
 import torch
 
 
-class DynamicConfig:
-    placement_policy = None
-
-    max_transferred_expert_per_layer = 100
-    ep_worldsize = 64
-    num_die_per_host = 8
-
-
 class EplbPolicy:
-
-    def __init__(self, config: DynamicConfig):
-        self.config = config
 
     @abstractmethod
     def rebalance_experts(self, old_global_expert_indices, weight, num_replicas, num_groups, num_nodes, num_ranks):

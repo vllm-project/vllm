@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 import json
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -55,6 +56,23 @@ class EplbAdaptor(BaseAdaptor):
         self.all_topk_ids = []
 
         self.buffer_tensor_list = []
+
+    def init(self):        
+        self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
+        
+        for layer_idx in range(self.num_moe_layers):
+            self.expert_map_per_layer[self.num_dense_layers + layer_idx] = \
+                self.model.get_expert_map(self.num_dense_layers + layer_idx)
+        num_buffer_tensor = torch.where(
+            self.expert_map_per_layer[self.num_dense_layers] != -1)[0].numel()
+        self.buffer_tensor_list: list[list[Any]] = [
+            [] for _ in range(num_buffer_tensor)
+        ]
+        self.init_buffer_tensor(num_buffer_tensor)
+        self.init_expert_param_per_layer()
+        for layer_idx in range(self.num_moe_layers):
+            self.log2phy_map_per_layer[self.num_dense_layers + layer_idx] = \
+                self.model.get_log2phy_map(self.num_dense_layers + layer_idx)
 
     def init_buffer_tensor(self, num_buffer_tensor):
         for name in self.expert_weight_names:
