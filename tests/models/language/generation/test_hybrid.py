@@ -65,6 +65,11 @@ V0_UNSUPPORTED_MODELS = [
     "LiquidAI/LFM2-1.2B",
 ]
 
+FP32_STATE_MODELS = [
+    "state-spaces/mamba-130m-hf",
+    "Zyphra/Zamba2-1.2B-instruct",
+]
+
 # Avoid OOM
 MAX_NUM_SEQS = 4
 
@@ -434,7 +439,7 @@ def test_full_cuda_graph(
     )
 
 
-@pytest.mark.parametrize("model", ["Zyphra/Zamba2-1.2B-instruct"])
+@pytest.mark.parametrize("model", FP32_STATE_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_fp32_state(
