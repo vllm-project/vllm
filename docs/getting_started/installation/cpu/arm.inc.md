@@ -50,7 +50,7 @@ docker run --rm \
 ```
 
 !!! tip
-    An alternative of `--privileged=true` is `--cap-add SYS_NICE --security-opt seccomp=unconfined `.
+    An alternative of `--privileged=true` is `--cap-add SYS_NICE --security-opt seccomp=unconfined`.
 
 # --8<-- [end:build-image-from-source]
 # --8<-- [start:extra-information]
