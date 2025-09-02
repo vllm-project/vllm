@@ -12,7 +12,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear
 __all__ = ["is_qutlass_fp4_scheme", "QutlassFP4LinearMethod"]
 
 
-def is_qutlass_fp4_scheme(quant_scheme: CompressedTensorsScheme,
+def is_qutlass_fp4_scheme(quant_scheme: Optional[CompressedTensorsScheme],
                           input_tfms: dict[int, TransformTuple]) -> bool:
     return isinstance(
         quant_scheme,
