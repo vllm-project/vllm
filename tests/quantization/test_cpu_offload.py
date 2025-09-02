@@ -20,7 +20,7 @@ def test_cpu_offload_fp8():
                          ["--quantization", "fp8", "--cpu-offload-gb", "1"],
                          max_wait_seconds=480)
     # Test loading a quantized checkpoint
-    compare_two_settings("neuralmagic/Qwen2-1.5B-Instruct-FP8", [],
+    compare_two_settings("neuralmagic/Qwen2-0.5B-Instruct-FP8", [],
                          ["--cpu-offload-gb", "1"],
                          max_wait_seconds=480)
 
@@ -31,11 +31,11 @@ def test_cpu_offload_gptq(monkeypatch):
     # This quant method is sensitive to dummy weights, so we force real weights
     monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
     # Test GPTQ Marlin
-    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4", [],
+    compare_two_settings("Qwen/Qwen2-0.5B-Instruct-GPTQ-Int4", [],
                          ["--cpu-offload-gb", "1"],
                          max_wait_seconds=480)
     # Test GPTQ
-    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-GPTQ-Int4",
+    compare_two_settings("Qwen/Qwen2-0.5B-Instruct-GPTQ-Int4",
                          ["--quantization", "gptq"],
                          ["--quantization", "gptq", "--cpu-offload-gb", "1"],
                          max_wait_seconds=480)
@@ -47,11 +47,11 @@ def test_cpu_offload_awq(monkeypatch):
     # This quant method is sensitive to dummy weights, so we force real weights
     monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
     # Test AWQ Marlin
-    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ", [],
+    compare_two_settings("Qwen/Qwen2-0.5B-Instruct-AWQ", [],
                          ["--cpu-offload-gb", "1"],
                          max_wait_seconds=480)
     # Test AWQ
-    compare_two_settings("Qwen/Qwen2-1.5B-Instruct-AWQ",
+    compare_two_settings("Qwen/Qwen2-0.5B-Instruct-AWQ",
                          ["--quantization", "awq"],
                          ["--quantization", "awq", "--cpu-offload-gb", "1"],
                          max_wait_seconds=480)
