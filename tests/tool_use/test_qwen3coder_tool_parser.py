@@ -16,6 +16,8 @@ from vllm.entrypoints.openai.tool_parsers.qwen3coder_tool_parser import (
 from vllm.transformers_utils.detokenizer import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
+pytestmark = pytest.mark.cpu_test
+
 MODEL = "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8"
 
 

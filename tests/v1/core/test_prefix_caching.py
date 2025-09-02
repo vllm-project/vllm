@@ -24,6 +24,8 @@ from vllm.v1.core.kv_cache_utils import (BlockHash, KVCacheBlock,
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, SlidingWindowSpec)
 
+pytestmark = pytest.mark.cpu_test
+
 
 @pytest.fixture(autouse=True)
 def _auto_init_hash_fn(request):
@@ -1268,7 +1270,7 @@ def test_kv_cache_events(blocks_to_cache: int):
 
 
 def test_eagle_enabled_removes_last_block():
-    """Verify Eagle does NOT remove blocks when request 
+    """Verify Eagle does NOT remove blocks when request
     length is divisible by block size."""
     block_size = 16
     manager = KVCacheManager(

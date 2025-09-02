@@ -12,6 +12,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               ChatCompletionToolsParam)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 
+pytestmark = pytest.mark.cpu_test
+
 EXAMPLE_TOOLS = [
     {
         "type": "function",

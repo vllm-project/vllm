@@ -7,6 +7,8 @@ import pytest
 from vllm.v1.metrics.reader import (Counter, Gauge, Histogram, Vector,
                                     get_metrics_snapshot)
 
+pytestmark = pytest.mark.cpu_test
+
 
 @pytest.fixture(autouse=True)
 def test_registry(monkeypatch):
