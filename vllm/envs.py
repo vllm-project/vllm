@@ -135,8 +135,8 @@ if TYPE_CHECKING:
     VLLM_USE_DEEP_GEMM_E8M0_HOPPER: bool = False
     VLLM_SKIP_DEEP_GEMM_WARMUP: bool = False
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
-    VLLM_USE_FLASHINFER_MOE_FP8: bool = False
-    VLLM_USE_FLASHINFER_MOE_FP4: bool = False
+    VLLM_USE_FLASHINFER_MOE_FP8: Optional[bool] = None
+    VLLM_USE_FLASHINFER_MOE_FP4: Optional[bool] = None
     VLLM_FLASHINFER_MOE_BACKEND: str = "throughput"
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -983,11 +983,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Allow use of FlashInfer MoE kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP8":
-    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))),
+    lambda: bool(int(os.environ["VLLM_USE_FLASHINFER_MOE_FP8"]))
+    if "VLLM_USE_FLASHINFER_MOE_FP8" in os.environ else None,
 
     # Allow use of FlashInfer CUTLASS kernels for fused moe ops.
     "VLLM_USE_FLASHINFER_MOE_FP4":
-    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))),
+    lambda: bool(int(os.environ["VLLM_USE_FLASHINFER_MOE_FP4"]))
+    if "VLLM_USE_FLASHINFER_MOE_FP4" in os.environ else None,
 
     # If set to 1, use the FlashInfer
     # MXFP8 (activation) x MXFP4 (weight) MoE backend.

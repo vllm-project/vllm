@@ -403,7 +403,8 @@ class FusedMoEConfig:
         """
         return (self.quant_config is not None
                 and self.quant_config.quant_dtype == "nvfp4"
-                and envs.VLLM_USE_FLASHINFER_MOE_FP4
+                and (envs.VLLM_USE_FLASHINFER_MOE_FP4
+                     or envs.VLLM_USE_FLASHINFER_MOE_FP4 is not None)
                 and has_flashinfer_cutlass_fused_moe()
                 and envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput")
 
