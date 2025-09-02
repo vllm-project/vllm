@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
@@ -88,6 +89,11 @@ def get_processor(
     """Load a processor for the given model name via HuggingFace."""
     if revision is None:
         revision = "main"
+
+    # Global fallback for LiteWhisper models
+    if "lite-whisper" in str(processor_name).lower():
+        processor_name = "openai/whisper-large-v3"
+        contextlib.suppress(Exception)
 
     try:
         if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
