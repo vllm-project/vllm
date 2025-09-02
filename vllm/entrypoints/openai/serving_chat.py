@@ -1042,20 +1042,20 @@ class OpenAIServingChat(OpenAIServing):
 
             # once the final token is handled, if stream_options.include_usage
             # is sent, send the usage
-            valid_reasoning_tokens = [tokens for tokens in num_reasoning_tokens_per_choice if tokens is not None]
             if include_usage:
                 completion_tokens = sum(previous_num_tokens)
                 # [修改] 最终使用量，累加所有 choice 的 reasoning_tokens
-                valid_reasoning_tokens = [tokens for tokens in num_reasoning_tokens_per_choice if tokens is not None]
                 final_usage = UsageInfo(prompt_tokens=num_prompt_tokens,
                                         completion_tokens=completion_tokens,
-                                        reasoning_tokens=sum(valid_reasoning_tokens), 
                                         total_tokens=num_prompt_tokens +
                                         completion_tokens)
                 if self.enable_prompt_tokens_details and num_cached_tokens:
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens)
-
+                if any(num_reasoning_tokens_per_choice):
+                    usage.completion_tokens_details = CompletionTokenUsageInfo(
+                        reasoning_tokens=sum([tokens for tokens in num_reasoning_tokens_per_choice if tokens is not None]))
+            
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
                     object=chunk_object_type,
@@ -1069,11 +1069,9 @@ class OpenAIServingChat(OpenAIServing):
 
             # report to FastAPI middleware aggregate usage across all choices
             num_completion_tokens = sum(previous_num_tokens)
-            # [修改] 元数据使用量，累加所有 choice 的 reasoning_tokens
             request_metadata.final_usage_info = UsageInfo(
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=num_completion_tokens,
-                reasoning_tokens=sum(valid_reasoning_tokens), 
                 total_tokens=num_prompt_tokens + num_completion_tokens,
             )
 
@@ -1359,15 +1357,17 @@ class OpenAIServingChat(OpenAIServing):
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs)
 
-        valid_reasoning_tokens = [tokens for tokens in num_reasoning_tokens_per_choice if tokens is not None]
         usage = UsageInfo(prompt_tokens=num_prompt_tokens,
-                          reasoning_tokens=sum(valid_reasoning_tokens),
                           completion_tokens=num_generated_tokens,
                           total_tokens=num_prompt_tokens +
                           num_generated_tokens)
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens)
+        # if num_reasoning_tokens_per_choice中存在非None和大于0的值
+        if any(num_reasoning_tokens_per_choice):
+            usage.completion_tokens_details = CompletionTokenUsageInfo(
+                reasoning_tokens=sum([tokens for tokens in num_reasoning_tokens_per_choice if tokens is not None]))
 
         request_metadata.final_usage_info = usage
 

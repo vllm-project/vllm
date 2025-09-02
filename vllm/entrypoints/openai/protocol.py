@@ -132,12 +132,14 @@ class ModelList(OpenAIBaseModel):
 class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: Optional[int] = None
 
+class CompletionTokenUsageInfo(OpenAIBaseModel):
+    reasoning_tokens: Optional[int] = None
 
 class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0
     total_tokens: int = 0
     completion_tokens: Optional[int] = 0
-    reasoning_tokens: Optional[int] = 0   # Since completion_token_ids include reasoning_token_ids, the number of completion_tokens is greater than the number of reasoning_tokens.
+    completion_tokens_details: Optional[CompletionTokenUsageInfo] = None
     prompt_tokens_details: Optional[PromptTokenUsageInfo] = None
 
 
