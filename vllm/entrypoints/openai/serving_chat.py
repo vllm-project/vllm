@@ -1338,8 +1338,6 @@ class OpenAIServingChat(OpenAIServing):
 
             choices.append(choice_data)
 
-            if reasoning_content and self.reasoning_parser:
-                num_reasoning_tokens += len(tokenizer.encode(reasoning_content, add_special_tokens=False))
                 
         if request.echo:
             last_msg_content: Union[str, list[dict[str, str]]] = ""
