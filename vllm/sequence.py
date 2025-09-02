@@ -1193,7 +1193,7 @@ class HiddenStates(msgspec.Struct, array_like=True,
     seq_ids are the sequence ids of each entry of the batch
     dimension of the hidden_states tensor"""
     # Scorer hidden states. For prefill step, it is used for hidden states of
-    # all tokens, whereas for decode step, it use used for last accepted tokens.
+    # all tokens, whereas for decode step, it is used for last accepted tokens.
     hidden_states: torch.Tensor
     # The sequence group metadata list. Only needed for decode step.
     seq_group_metadata_list: Optional[list[SequenceGroupMetadata]] = None

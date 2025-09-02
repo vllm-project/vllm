@@ -185,7 +185,7 @@ _EMBEDDING_MODELS = {
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
     # Technically PrithviGeoSpatialMAE is a model that works on images, both in
-    # input and output. I am adding it here because it piggy-backs on embedding
+    # input and output. I am adding it here because it piggybacks on embedding
     # models for the time being.
     "PrithviGeoSpatialMAE": ("prithvi_geospatial_mae", "PrithviGeoSpatialMAE"),
 }
