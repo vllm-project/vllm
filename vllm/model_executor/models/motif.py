@@ -290,7 +290,7 @@ class MotifDecoderLayer(nn.Module):
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
-            bias=getattr(config, "mlp_bias", False),
+            bias=getattr(config, "use_bias", False),
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size,
