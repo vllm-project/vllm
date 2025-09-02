@@ -512,8 +512,6 @@ class AWQMoEMethod(FusedMoEMethodBase):
             raise NotImplementedError(
                 "EPLB not supported for `AWQMoEMethod` yet.")
 
-        assert activation == "silu", "Only SiLU activation is supported."
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -542,6 +540,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
             quant_type_id=self.quant_type.id,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
+            activation=activation,
             expert_map=expert_map,
             w1_zeros=layer.w13_qzeros,
             w2_zeros=layer.w2_qzeros,

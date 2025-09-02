@@ -661,8 +661,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             raise NotImplementedError(
                 "EPLB not supported for `GPTQMarlinMoEMethod` yet.")
 
-        assert activation == "silu", "Only SiLU activation is supported."
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -691,6 +689,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             quant_type_id=self.quant_type.id,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
+            activation=activation,
             expert_map=expert_map,
             g_idx1=layer.w13_g_idx,
             g_idx2=layer.w2_g_idx,

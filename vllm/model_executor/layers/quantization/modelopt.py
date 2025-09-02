@@ -1370,13 +1370,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptNvFp4FusedMoE` yet.")
-        assert activation == "silu", "Only SiLU activation is supported."
 
         if self.allow_flashinfer and \
             self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
             import flashinfer
 
             from vllm.model_executor.models.llama4 import Llama4MoE
+            assert activation == "silu", "Only SiLU activation is supported."
 
             a1_gscale = layer.w13_input_scale_quant
             (hidden_states_fp4,
@@ -1458,7 +1458,10 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float4_e2m1f.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
+                activation=activation,
                 expert_map=expert_map)
+
+        assert activation == "silu", "Only SiLU activation is supported."
 
         if self.fused_experts is not None:
             assert self.allow_flashinfer and \
