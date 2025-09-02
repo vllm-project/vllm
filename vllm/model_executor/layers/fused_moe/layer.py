@@ -760,8 +760,6 @@ class FusedMoE(CustomOp):
         renomalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.
-        enable_zigzag_expert_placement: Whether to enable zigzag expert
-            placement for MoE layers.
     """
 
     def __init__(
@@ -838,21 +836,16 @@ class FusedMoE(CustomOp):
                 assert num_redundant_experts == 0, \
                     "Redundant experts are only supported with EPLB."
 
-            # Check if zigzag expert placement can be enabled
-            zigzag_requested = vllm_config.parallel_config.\
-                enable_zigzag_expert_placement
-            if zigzag_requested:
-                assert num_redundant_experts == 0, (
-                    "Zigzag expert placement is not supported with redundant "
-                    "experts (num_redundant_experts > 0).")
-                assert num_expert_group is not None and num_expert_group > 1, (
-                    "Zigzag expert placement is only supported for models with "
-                    "multiple expert groups (num_expert_group > 1).")
+            # Zigzag expert placement is only supported for models with
+            # multiple expert groups and no redundant experts.
+            enable_zigzag = num_expert_group is not None \
+                and num_expert_group > 1 and num_redundant_experts == 0
+            if enable_zigzag:
                 self.local_num_experts, self.expert_map = determine_expert_map(
                     ep_size=self.ep_size,
                     ep_rank=self.ep_rank,
                     global_num_experts=self.global_num_experts,
-                    enable_zigzag_expert_placement=zigzag_requested,
+                    enable_zigzag_expert_placement=enable_zigzag,
                 )
             else:
                 self.local_num_experts, self.expert_map = determine_expert_map(
