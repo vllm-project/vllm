@@ -55,10 +55,12 @@ class MultiprocExecutor(Executor):
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
         pp_parallel_size = self.parallel_config.pipeline_parallel_size
-        assert self.world_size == tensor_parallel_size * pp_parallel_size, (
+        context_parallel_size = self.parallel_config.context_parallel_size
+        assert self.world_size == tensor_parallel_size * pp_parallel_size * context_parallel_size, (
             f"world_size ({self.world_size}) must be equal to the "
             f"tensor_parallel_size ({tensor_parallel_size}) x pipeline"
-            f"_parallel_size ({pp_parallel_size}). ")
+            f"_parallel_size ({pp_parallel_size}) x context"
+            f"_parallel_size ({context_parallel_size}). ")
 
         # Set multiprocessing envs that are common to V0 and V1
         set_multiprocessing_worker_envs(self.parallel_config)
@@ -317,7 +319,7 @@ class MultiprocExecutor(Executor):
         # 16-23, PP rank 2
         # 24-31, PP rank 3
         # so world_size - tp_size = 32 - 8 = 24 should be PP rank = -1 (i.e. 3)
-        return self.world_size - self.parallel_config.tensor_parallel_size
+        return self.world_size - self.parallel_config.tensor_parallel_size * self.parallel_config.context_parallel_size
 
 
 @dataclass

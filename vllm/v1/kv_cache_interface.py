@@ -85,7 +85,10 @@ class FullAttentionSpec(AttentionSpec):
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
-        return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+        cp_size = vllm_config.parallel_config.context_parallel_size
+        enable_sp = vllm_config.parallel_config.enable_sequence_parallel
+        sp_size = vllm_config.parallel_config.tensor_parallel_size if enable_sp else 1
+        return cdiv(max_model_len // cp_size // sp_size, self.block_size) * self.page_size_bytes
 
     @classmethod
     def merge_window_sizes(cls, window_sizes: set[int]) -> Optional[int]:
