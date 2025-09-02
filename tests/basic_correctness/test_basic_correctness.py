@@ -31,7 +31,7 @@ def v1(run_with_both_engines):
 
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""
-    llm = LLM("distilbert/distilgpt2")
+    llm = LLM("hmellor/tiny-random-LlamaForCausalLM")
     weak_llm = weakref.ref(llm)
     del llm
     # If there's any circular reference to vllm, this fails
@@ -175,18 +175,18 @@ def test_gemma_sliding_window(
 @pytest.mark.parametrize(
     "model, distributed_executor_backend, attention_backend, "
     "test_suite, extra_env", [
-        ("distilbert/distilgpt2", "ray", "", "L4", {}),
-        ("distilbert/distilgpt2", "mp", "", "L4", {}),
-        ("distilbert/distilgpt2", "ray", "", "L4", {
+        ("hmellor/tiny-random-LlamaForCausalLM", "ray", "", "L4", {}),
+        ("hmellor/tiny-random-LlamaForCausalLM", "mp", "", "L4", {}),
+        ("hmellor/tiny-random-LlamaForCausalLM", "ray", "", "L4", {
             "VLLM_SLEEP_WHEN_IDLE": "1"
         }),
-        ("distilbert/distilgpt2", "mp", "", "L4", {
+        ("hmellor/tiny-random-LlamaForCausalLM", "mp", "", "L4", {
             "VLLM_SLEEP_WHEN_IDLE": "1"
         }),
         ("meta-llama/Llama-3.2-1B-Instruct", "ray", "", "L4", {}),
         ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4", {}),
-        ("distilbert/distilgpt2", "ray", "", "A100", {}),
-        ("distilbert/distilgpt2", "mp", "", "A100", {}),
+        ("hmellor/tiny-random-LlamaForCausalLM", "ray", "", "A100", {}),
+        ("hmellor/tiny-random-LlamaForCausalLM", "mp", "", "A100", {}),
     ])
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
 def test_models_distributed(
@@ -279,7 +279,8 @@ def test_failed_model_execution(vllm_runner, monkeypatch) -> None:
     # Needed to mock an error in the same process
     monkeypatch.setenv('VLLM_ENABLE_V1_MULTIPROCESSING', '0')
 
-    with vllm_runner('facebook/opt-125m', enforce_eager=True) as vllm_model:
+    with vllm_runner('hmellor/tiny-random-LlamaForCausalLM',
+                     enforce_eager=True) as vllm_model:
         if isinstance(vllm_model.llm.llm_engine, LLMEngineV1):
             v1_test_failed_model_execution(vllm_model)
 

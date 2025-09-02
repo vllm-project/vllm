@@ -15,7 +15,7 @@ from vllm.entrypoints.openai.serving_models import (BaseModelPath,
                                                     OpenAIServingModels)
 from vllm.lora.request import LoRARequest
 
-MODEL_NAME = "EleutherAI/pythia-14m"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
 LORA_LOADING_SUCCESS_MESSAGE = (
     "Success: LoRA adapter '{lora_name}' added successfully.")

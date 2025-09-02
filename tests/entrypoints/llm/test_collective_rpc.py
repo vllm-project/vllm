@@ -26,7 +26,7 @@ def test_collective_rpc(tp_size, backend, monkeypatch):
         return self.rank
 
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-    llm = LLM(model="facebook/opt-125m",
+    llm = LLM(model="hmellor/tiny-random-LlamaForCausalLM",
               enforce_eager=True,
               load_format="dummy",
               tensor_parallel_size=tp_size,

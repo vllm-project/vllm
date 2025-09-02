@@ -14,7 +14,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.utils import cuda_device_count_stateless
 from vllm.v1.engine.async_llm import AsyncLLM
 
-MODELS = ["JackFram/llama-68m"]
+MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
 
 
 def evil_method(self, *args, **kwargs):

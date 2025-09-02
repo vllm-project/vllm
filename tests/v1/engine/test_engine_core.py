@@ -25,11 +25,11 @@ if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.",
                 allow_module_level=True)
 
-MODEL_NAME = "EleutherAI/pythia-14m"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 # test_engine_core_concurrent_batches assumes exactly 12 tokens per prompt.
 # Adjust prompt if changing model to maintain 12-token length.
-PROMPT = "My name is Gyoubu Masataka Oniwa"
+PROMPT = "I am Gyoubu Masataka Oniwa"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
 

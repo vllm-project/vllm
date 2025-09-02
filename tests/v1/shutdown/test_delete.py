@@ -13,7 +13,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.utils import cuda_device_count_stateless
 from vllm.v1.engine.async_llm import AsyncLLM
 
-MODELS = ["EleutherAI/pythia-14m"]
+MODELS = ["hmellor/tiny-random-LlamaForCausalLM"]
 
 
 @pytest.mark.asyncio

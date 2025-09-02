@@ -9,7 +9,7 @@ from vllm import LLM, SamplingParams
 if os.getenv("VLLM_USE_V1", "0") != "1":
     pytest.skip("Test package requires V1", allow_module_level=True)
 
-MODEL = "EleutherAI/pythia-14m"
+MODEL = "hmellor/tiny-random-LlamaForCausalLM"
 PROMPT = "Hello my name is Robert and I"
 
 

@@ -11,7 +11,7 @@ import pytest
 
 from ...utils import get_open_port
 
-MODEL_NAME = "EleutherAI/pythia-14m"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 
 @pytest.mark.asyncio
