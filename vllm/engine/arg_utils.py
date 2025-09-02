@@ -1341,9 +1341,6 @@ class EngineArgs:
 
         load_config = self.create_load_config()
 
-        structured_outputs_config = StructuredOutputsConfig(
-            **self.structured_outputs)
-
         observability_config = ObservabilityConfig(
             show_hidden_metrics_for_version=(
                 self.show_hidden_metrics_for_version),
@@ -1360,7 +1357,7 @@ class EngineArgs:
             lora_config=lora_config,
             speculative_config=speculative_config,
             load_config=load_config,
-            structured_outputs_config=structured_outputs_config,
+            structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
