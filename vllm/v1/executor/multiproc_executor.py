@@ -605,8 +605,12 @@ class WorkerProc:
         FAILURE = auto()
 
     def enqueue_worker_output(self, output: Any) -> None:
-        if isinstance(output, AsyncModelRunnerOutput):
-            output = output.serialize(self.async_output_copy_stream)
+        if isinstance(output, Exception):
+            self.worker_response_mq.enqueue(
+                (WorkerProc.ResponseStatus.FAILURE, str(output)))
+            return
+        elif isinstance(output, AsyncModelRunnerOutput):
+            output = output.copy_to_host()
         self.worker_response_mq.enqueue(
             (WorkerProc.ResponseStatus.SUCCESS, output))
 
@@ -635,8 +639,7 @@ class WorkerProc:
                 # exception might not be serializable, so we convert it to
                 # string, only for logging purpose.
                 if output_rank is None or self.rank == output_rank:
-                    self.worker_response_mq.enqueue(
-                        (WorkerProc.ResponseStatus.FAILURE, str(e)))
+                    self.async_output_queue.put(e)
                 continue
 
             if output_rank is None or self.rank == output_rank:
