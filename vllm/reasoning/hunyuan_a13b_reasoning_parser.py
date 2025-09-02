@@ -94,7 +94,7 @@ class HunyuanA13BReasoningParser(ReasoningParser):
             self, model_output: str, 
             model_output_tokens: Sequence[int],
             request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[list[int]], Optional[str]]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
         something else, all content is considered non-reasoning content.

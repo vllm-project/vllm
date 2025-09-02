@@ -119,7 +119,7 @@ class Qwen3ReasoningParser(ReasoningParser):
             self, model_output: str, 
             model_output_tokens: Sequence[int],
             request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[Optional[str], Optional[list[int]], Optional[str]]:
         """
         Extract reasoning content from the model output.
 

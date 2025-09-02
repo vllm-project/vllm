@@ -771,7 +771,7 @@ class OpenAIServingChat(OpenAIServing):
                             _, _, content = \
                                 reasoning_parser.extract_reasoning_content(
                                     current_text,
-                                    [],
+                                    current_token_ids,
                                     request
                                 )
                         else:
@@ -1192,14 +1192,14 @@ class OpenAIServingChat(OpenAIServing):
                 reasoning_content, reasoning_content_tokens, content = (
                     reasoning_parser.extract_reasoning_content(
                         output.text, output.token_ids, request=request))
-                num_reasoning_tokens_per_choice[i] = len(reasoning_content_tokens)
+                num_reasoning_tokens_per_choice[i] = len(reasoning_content_tokens) if reasoning_content_tokens else 0
 
                 if not request.include_reasoning:
                     reasoning_content = None
-                    num_reasoning_tokens_per_choice[i] = None
+                    num_reasoning_tokens_per_choice[i] = 0
             else:
                 reasoning_content = None
-                num_reasoning_tokens_per_choice[i] = None
+                num_reasoning_tokens_per_choice[i] = 0
                 content = output.text
 
             auto_tools_called = False
