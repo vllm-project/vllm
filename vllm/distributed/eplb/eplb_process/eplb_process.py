@@ -1,5 +1,5 @@
 from queue import Queue, Empty
-from typing import Optional, Any, Callable
+from typing import Optional, Any, Callable,List
 from contextlib import suppress
 import multiprocessing as mp
 import threading
@@ -142,7 +142,19 @@ class EplbProcess:
             self._result = None
             logger.warning(
                 "Asynchronous thread completed but no result was returned")
-
+    
+    def get_at_index(self,i) -> List[Any]:
+        if not self._result_queue or self._result_queue.empty():
+            raise ValueError("Queue is empty, cannot retrieve element")
+        size = self._result_queue.qsize()
+        # check if queue length matches the of layers
+        if size != 94: #layer of qwen
+            raise ValueError(f"Queue length {size} does not match the expected layer numbers of qwen")
+        if i <=0 or i > size:
+            raise ValueError(f"Index {i} out of range for queue of size {size}")
+        result_result_queue = list(self._result_queue)
+        return result_result_queue[i-1]
+    
     def cleanup(self) -> None:
         """Clean up thread resources"""
         # Threads can't be terminated, so we just mark it as not running
