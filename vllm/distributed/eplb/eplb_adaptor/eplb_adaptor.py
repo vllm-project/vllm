@@ -32,6 +32,13 @@ class EplbAdaptor(BaseAdaptor):
         self.rank_id = dist.get_rank()
         self.world_size = dist.get_world_size()
         self.param_dict = dict(self.model.named_parameters())
+        if self.model.config.model_type == "qwen3_moe":
+            self.num_dense_layers = 0
+            self.global_expert_num = self.model.config.num_experts
+        else:
+            self.num_dense_layers = self.model.config.first_k_dense_replace
+            self.global_expert_num = self.model.config.n_routed_experts
+        self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
 
         # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 and qwen3-moe is supported here
         if self.model.quant_config is not None:
@@ -46,33 +53,27 @@ class EplbAdaptor(BaseAdaptor):
         )  # reference to expert map on device for expert map update
         self.expert_map_per_layer_cpu = dict(
         )  # copy of expert map on CPU to avoid device synchronize frequently
-
-        # TODO: here we set number of buffer tensor equal to number of expert in each laryer, which can be improved
-
-        self.expert_param_per_layer = dict()
-
-        self.log2phy_map_per_layer = dict()
-
-        self.all_topk_ids = []
-
-        self.buffer_tensor_list = []
-
-    def init(self):        
-        self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
-        
         for layer_idx in range(self.num_moe_layers):
             self.expert_map_per_layer[self.num_dense_layers + layer_idx] = \
                 self.model.get_expert_map(self.num_dense_layers + layer_idx)
+
+        # TODO: here we set number of buffer tensor equal to number of expert in each laryer, which can be improved
         num_buffer_tensor = torch.where(
             self.expert_map_per_layer[self.num_dense_layers] != -1)[0].numel()
         self.buffer_tensor_list: list[list[Any]] = [
             [] for _ in range(num_buffer_tensor)
         ]
         self.init_buffer_tensor(num_buffer_tensor)
+
+        self.expert_param_per_layer = dict()
         self.init_expert_param_per_layer()
+
+        self.log2phy_map_per_layer = dict()
         for layer_idx in range(self.num_moe_layers):
             self.log2phy_map_per_layer[self.num_dense_layers + layer_idx] = \
                 self.model.get_log2phy_map(self.num_dense_layers + layer_idx)
+
+        self.all_topk_ids = []
 
     def init_buffer_tensor(self, num_buffer_tensor):
         for name in self.expert_weight_names:
@@ -122,6 +123,24 @@ class EplbAdaptor(BaseAdaptor):
                 all_expert_maps[layer_idx][self.rank_id]
 
         return all_expert_maps
+
+    def get_init_expert_map_from_file(self, num_moe_layers, expert_map_path):
+
+        try:
+            expert_map_tensor, layers_num, ranks_num = self._expert_file_to_tensor(
+                expert_map_path)
+            expert_map_all = self.local2global(expert_map_tensor)
+        except (TypeError, FileNotFoundError, OSError):
+            expert_map_all = self.determine_expert_map_all()
+
+        for layer_idx in range(num_moe_layers):
+            if self.model.config.model_type == "qwen3_moe":
+                self.expert_map_per_layer_cpu[layer_idx] = \
+                    expert_map_all[layer_idx][self.rank_id]
+            else:
+                self.expert_map_per_layer_cpu[layer_idx + 3] = \
+                    expert_map_all[layer_idx][self.rank_id]
+        return expert_map_all
 
     def _expert_file_to_tensor(self, expert_map_path: str):
         with open(expert_map_path, "r") as f:
