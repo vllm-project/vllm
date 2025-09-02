@@ -37,4 +37,6 @@ def test_mteb_embed(server):
     print("SentenceTransformer main score: ", st_main_score)
     print("Difference: ", st_main_score - vllm_main_score)
 
+    # We are not concerned that the vllm mteb results are better
+    # than SentenceTransformers, so we only perform one-sided testing.
     assert st_main_score - vllm_main_score < MTEB_EMBED_TOL
