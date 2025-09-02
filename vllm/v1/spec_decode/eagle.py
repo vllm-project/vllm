@@ -245,10 +245,7 @@ class EagleProposer:
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
             # [batch_size, 1] and [batch_size, 1, vocab_size]
-            return (
-                draft_token_ids.view(-1, 1).tolist(),
-                draft_probs.unsqueeze(1).unbind(0),
-            )
+            return (draft_token_ids.view(-1, 1), draft_probs.unsqueeze(1))
 
         # TODO: Currently, MTP module released by deepseek only has
         # one layer. Adapt this code to support multiple layers once
@@ -343,11 +340,12 @@ class EagleProposer:
             draft_token_ids_list.append(draft_token_ids)
             draft_probs_list.append(draft_probs)
 
-        # [batch_size, num_speculative_tokens]
-        draft_token_ids = torch.stack(draft_token_ids_list, dim=1).tolist()
-        # [batch_size, num_speculative_tokens, vocab_size]
-        draft_probs_list = torch.stack(draft_probs_list, dim=1).unbind(0)
-        return draft_token_ids, draft_probs_list
+        return (
+            # [batch_size, num_speculative_tokens]
+            torch.stack(draft_token_ids_list, dim=1),
+            # [batch_size, num_speculative_tokens, vocab_size]
+            torch.stack(draft_probs_list, dim=1),
+        )
 
     def propose_tree(
         self,

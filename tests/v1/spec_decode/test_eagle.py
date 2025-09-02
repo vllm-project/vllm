@@ -385,8 +385,10 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
     if num_speculative_tokens == 1:
         # Example for num_speculative_tokens=1:
         # [[42], [60]]
-        expected_tokens = torch.tensor([[base_token_ids[0]],
-                                        [base_token_ids[1]]])
+        expected_tokens = torch.tensor(
+            [[base_token_ids[0]], [base_token_ids[1]]],
+            dtype=torch.int64,
+            device=device)
         expected_probs = torch.zeros((batch_size, 1, vocab_size),
                                      device=device)
         for i, token_id in enumerate(base_token_ids):
@@ -395,7 +397,8 @@ def test_propose(method, attn_backend, num_speculative_tokens, monkeypatch):
         # Example for num_speculative_tokens=3:
         # [[42, 43, 44], [60, 61, 62]]
         expected_tokens = torch.zeros((batch_size, num_speculative_tokens),
-                                      dtype=torch.int64)
+                                      dtype=torch.int64,
+                                      device=device)
         expected_probs = torch.zeros(
             (batch_size, num_speculative_tokens, vocab_size), device=device)
         for i in range(batch_size):
