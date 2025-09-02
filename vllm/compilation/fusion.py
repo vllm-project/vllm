@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 from .fx_utils import find_getitem_maybe
+from .inductor_pass import enable_fake_mode
 from .multi_output_match import MultiOutputMatch
 from .vllm_inductor_pass import VllmInductorPass
 
@@ -528,6 +529,7 @@ class FusionPass(VllmInductorPass):
             cls._instance.pass_config = config.compilation_config.pass_config
         return cls._instance
 
+    @enable_fake_mode
     def __init__(self, config: VllmConfig):
         assert self.__class__._instance is None, \
             "FusionPass singleton instance already exists"
