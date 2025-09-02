@@ -90,6 +90,7 @@ if current_platform.is_rocm():
 
         aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
 
+
 def rocm_aiter_ck_tile_gemm_w8a8_blockscale_impl(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -100,7 +101,11 @@ def rocm_aiter_ck_tile_gemm_w8a8_blockscale_impl(
 ) -> torch.Tensor:
     import aiter as rocm_aiter
 
-    return rocm_aiter.gemm_a8w8_blockscale_ck_tile(A, B, As, Bs, dtype=output_dtype)
+    return rocm_aiter.gemm_a8w8_blockscale_ck_tile(A,
+                                                   B,
+                                                   As,
+                                                   Bs,
+                                                   dtype=output_dtype)
 
 
 def rocm_aiter_ck_tile_gemm_w8a8_blockscale_fake(
@@ -136,7 +141,8 @@ if current_platform.is_rocm():
 
 
 def dispatch_w8a8_blockscale_func(
-    use_cutlass: bool, use_aiter_and_is_supported: bool, use_ck_tile_and_is_supported: bool
+    use_cutlass: bool, use_aiter_and_is_supported: bool,
+    use_ck_tile_and_is_supported: bool
 ) -> Callable[[
         torch.Tensor,
         torch.Tensor,

@@ -754,7 +754,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_CK_TILE_LINEAR":
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_CK_TILE_LINEAR", "True").lower() in
              ("true", "1")),
-    
+
     # Whether to use aiter moe ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE":

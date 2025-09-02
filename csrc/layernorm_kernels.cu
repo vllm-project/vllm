@@ -51,8 +51,8 @@ __global__ void rms_norm_kernel(
 template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 fused_add_rms_norm_kernel(
-    scalar_t* __restrict__ output,   // [..., hidden_size]
-    const scalar_t* __restrict__ input,     // [..., hidden_size]
+    scalar_t* __restrict__ output,       // [..., hidden_size]
+    const scalar_t* __restrict__ input,  // [..., hidden_size]
     const int64_t input_stride,
     scalar_t* __restrict__ residual_out,    // [..., hidden_size]
     const scalar_t* __restrict__ residual,  // [..., hidden_size]
@@ -114,8 +114,8 @@ fused_add_rms_norm_kernel(
 template <typename scalar_t, int width>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 fused_add_rms_norm_kernel(
-    scalar_t* __restrict__ output,   // [..., hidden_size]
-    const scalar_t* __restrict__ input,     // [..., hidden_size]
+    scalar_t* __restrict__ output,       // [..., hidden_size]
+    const scalar_t* __restrict__ input,  // [..., hidden_size]
     const int64_t input_stride,
     scalar_t* __restrict__ residual_out,    // [..., hidden_size]
     const scalar_t* __restrict__ residual,  // [..., hidden_size]
@@ -221,9 +221,10 @@ void fused_add_rms_norm(torch::Tensor& out,           // [..., hidden_size]
   constexpr int req_alignment_bytes =
       vector_width * 2;  // vector_width * sizeof(bfloat16 or float16) (float32
                          // falls back to non-vectorized version anyway)
-  bool ptrs_are_aligned = out_ptr % 16 == 0 && inp_ptr % req_alignment_bytes == 0 &&
-                          res_out_ptr % 16 == 0 && res_ptr % req_alignment_bytes == 0 &&
-                          wt_ptr % req_alignment_bytes == 0;
+  bool ptrs_are_aligned =
+      out_ptr % 16 == 0 && inp_ptr % req_alignment_bytes == 0 &&
+      res_out_ptr % 16 == 0 && res_ptr % req_alignment_bytes == 0 &&
+      wt_ptr % req_alignment_bytes == 0;
   bool offsets_are_multiple_of_vector_width =
       hidden_size % vector_width == 0 && input_stride % vector_width == 0;
   if (ptrs_are_aligned && offsets_are_multiple_of_vector_width) {

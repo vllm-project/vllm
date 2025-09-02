@@ -205,11 +205,11 @@ class Fp8LinearMethod(LinearMethodBase):
                                            and envs.VLLM_ROCM_USE_AITER
                                            and envs.VLLM_ROCM_USE_AITER_LINEAR
                                            and current_platform.is_fp8_fnuz())
-        self.use_ck_tile_and_is_supported = (current_platform.is_rocm()
-                                           and envs.VLLM_ROCM_USE_AITER
-                                           and envs.VLLM_ROCM_USE_AITER_CK_TILE_LINEAR
-                                           and current_platform.is_fp8_fnuz())
-        
+        self.use_ck_tile_and_is_supported = (
+            current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER
+            and envs.VLLM_ROCM_USE_AITER_CK_TILE_LINEAR
+            and current_platform.is_fp8_fnuz())
+
         self.block_quant = self.quant_config.weight_block_size is not None
         self.act_q_static = self.quant_config.activation_scheme == "static"
         # Use per-token quantization for better perf if dynamic and cutlass
