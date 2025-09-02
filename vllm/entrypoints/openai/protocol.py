@@ -660,8 +660,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         structural_tag, StructuralTagResponseFormat)
                     s_tag_obj = structural_tag.model_dump(by_alias=True)
                     structured_outputs.structural_tag = json.dumps(s_tag_obj)
-            if json_schema := self._get_json_schema_from_tool():
-                structured_outputs.json = json_schema
+            if structured_outputs_json := self._get_json_schema_from_tool():
+                structured_outputs.json = structured_outputs_json
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -700,8 +700,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args=extra_args or None,
         )
 
-    def _get_json_schema_from_tool(
-            self) -> Optional[Union[str, dict, BaseModel]]:
+    def _get_json_schema_from_tool(self) -> Optional[Union[str, dict]]:
         # user has chosen to not use any tool
         if self.tool_choice == "none" or self.tools is None:
             return None
