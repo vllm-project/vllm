@@ -1906,20 +1906,19 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def workspace_shapes(
         self,
-        a: torch.Tensor,
-        aq: torch.Tensor,
-        M: int,
+        M_chunk: int,
+        M_full: int,
         N: int,
         K: int,
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
-        workspace1 = (M, topk, max(N // 2, K))
-        workspace2 = (M, topk, max(N, K))
-        output = (M, K)
-        return (workspace1, workspace2, output, a.dtype)
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        workspace1 = (M_chunk, topk, max(N // 2, K))
+        workspace2 = (M_chunk, topk, max(N, K))
+        output = (M_full, K)
+        return (workspace1, workspace2, output)
 
     def apply(
         self,
