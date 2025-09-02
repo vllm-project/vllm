@@ -267,8 +267,9 @@ def apply_penalties_and_sample(logits: torch.Tensor, prev_tokens: torch.Tensor,
     # Apply frequency penalty
     if "frequency_penalty" in penalty_params:
         penalty = penalty_params["frequency_penalty"]
-        token_counts = torch.bincount(prev_tokens[i], minlength=logits.size(1))
-        modified_logits[i] -= token_counts * penalty
+        for i in range(logits.size(0)):
+            token_counts = torch.bincount(prev_tokens[i], minlength=logits.size(1))
+            modified_logits[i] -= token_counts * penalty
 
     # Apply presence penalty
     if "presence_penalty" in penalty_params:
