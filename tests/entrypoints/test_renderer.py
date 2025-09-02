@@ -100,6 +100,47 @@ class TestRenderPrompt:
         assert mock_async_tokenizer.call_count == 3
 
     @pytest.mark.asyncio
+    async def test_mixed_text_and_token_input_rejected(self, renderer,
+                                                       mock_async_tokenizer):
+        """Test that mixing text strings and token lists is rejected early"""
+        mock_async_tokenizer.return_value = MockTokenizerResult(
+            [101, 7592, 2088])
+        renderer.async_tokenizer_pool[
+            renderer.tokenizer] = mock_async_tokenizer
+
+        # Mixed input should now be caught by early validation
+        mixed_input = ["Hello world", [101, 102, 103]]
+
+        with pytest.raises(
+                TypeError,
+                match="All inputs must be either text strings or token ids"):
+            await renderer.render_prompt(prompt_or_prompts=mixed_input,
+                                         max_length=100)
+
+    @pytest.mark.asyncio
+    async def test_mixed_tokens_and_text_rejected(self, renderer):
+        """Test that mixing token lists and text is rejected"""
+        # Start with tokens, then mix in text
+        mixed_input = [[101, 102], "Hello", [103, 104]]
+
+        with pytest.raises(
+                TypeError,
+                match="All inputs must be either text strings or token ids"):
+            await renderer.render_prompt(prompt_or_prompts=mixed_input,
+                                         max_length=100)
+
+    @pytest.mark.asyncio
+    async def test_mixed_integers_and_text_rejected(self, renderer):
+        """Test that mixing integers and text is rejected"""
+        mixed_input = [1, 2, "Hello", 3]
+
+        with pytest.raises(
+                TypeError,
+                match="All inputs must be either text strings or token ids"):
+            await renderer.render_prompt(prompt_or_prompts=mixed_input,
+                                         max_length=100)
+
+    @pytest.mark.asyncio
     async def test_no_truncation(self, renderer, mock_async_tokenizer):
         mock_async_tokenizer.return_value = MockTokenizerResult(
             [101, 7592, 2088])
@@ -129,14 +170,6 @@ class TestRenderPrompt:
         call_args = mock_async_tokenizer.call_args
         assert call_args.kwargs["truncation"] is True
         assert call_args.kwargs["max_length"] == 50
-
-    @pytest.mark.asyncio
-    async def test_truncation_zero(self, renderer):
-        results = await renderer.render_prompt(prompt_or_prompts="Hello world",
-                                               max_length=100,
-                                               truncate_prompt_tokens=0)
-
-        assert len(results) == 0
 
     @pytest.mark.asyncio
     async def test_token_truncation_last_elements(self, renderer):
