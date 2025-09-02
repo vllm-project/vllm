@@ -3,46 +3,21 @@
 
 import base64
 import io
-import shutil
-from tempfile import TemporaryDirectory
 
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import torch
 # downloading lora to test lora requests
-from huggingface_hub import snapshot_download
 from openai import BadRequestError
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoConfig
 
 from ...utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
-LORA_NAME = "typeof/zephyr-7b-beta-lora"
 
 CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
-
-
-@pytest.fixture(scope="module")
-def zephyr_lora_files():
-    return snapshot_download(repo_id=LORA_NAME)
-
-
-@pytest.fixture(scope="module")
-def zephyr_lora_added_tokens_files(zephyr_lora_files):
-    tmp_dir = TemporaryDirectory()
-    tmp_model_dir = f"{tmp_dir.name}/zephyr"
-    shutil.copytree(zephyr_lora_files, tmp_model_dir)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    # Copy tokenizer to adapter and add some unique tokens
-    # 32000, 32001, 32002
-    added = tokenizer.add_tokens(["vllm1", "vllm2", "vllm3"],
-                                 special_tokens=True)
-    assert added == 3
-    tokenizer.save_pretrained(tmp_model_dir)
-    yield tmp_model_dir
-    tmp_dir.cleanup()
 
 
 @pytest.fixture(scope="module")
