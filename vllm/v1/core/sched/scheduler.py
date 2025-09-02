@@ -851,6 +851,9 @@ class Scheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
+        kv_transfer_stats = (
+            model_runner_output.kv_connector_output.kv_transfer_stats
+            if model_runner_output.kv_connector_output else None)
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -935,9 +938,6 @@ class Scheduler(SchedulerInterface):
             if new_token_ids or pooler_output is not None \
                 or kv_transfer_params:
 
-                kv_transfer_stats = (
-                    model_runner_output.kv_connector_output.kv_transfer_stats
-                    if model_runner_output.kv_connector_output else None)
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
                     EngineCoreOutput(
@@ -953,7 +953,6 @@ class Scheduler(SchedulerInterface):
                         num_cached_tokens=request.num_cached_tokens,
                         kv_transfer_stats=kv_transfer_stats,
                     ))
-
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
                 assert not prompt_logprobs_tensors

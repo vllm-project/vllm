@@ -71,6 +71,13 @@ class UniProcExecutor(ExecutorBase):
             self.shutdown()
         return
 
+    def execute_model(self, *args, **kwargs):
+        output = super().execute_model(*args, **kwargs)
+        if output.kv_connector_output:
+            print("UNIPROCEXECUTOR OUTPUT",
+                  output.kv_connector_output.kv_transfer_stats, "\n")
+        return output
+
 
 UniProcExecutorAsync = UniProcExecutor
 
