@@ -164,6 +164,7 @@ def main():
                 status=500,
                 content_type="application/json",
             )
+
     async def handle_api_request(process_func):
         """Handle incoming API requests with concurrency and rate limiting"""
         # Create task for request processing
@@ -192,12 +193,22 @@ def main():
     @app.route(["/v1/completions"], methods=["POST"])
     async def handle_completion_request():
         """Handle completion requests"""
-        return await handle_api_request(lambda: process_request(f"{PREFILL_SERVICE_URL}/v1/completions", f"{DECODE_SERVICE_URL}/v1/completions"))
+        return await handle_api_request(
+            lambda: process_request(
+                f"{PREFILL_SERVICE_URL}/v1/completions",
+                f"{DECODE_SERVICE_URL}/v1/completions",
+            )
+        )
 
     @app.route(["/v1/chat/completions"], methods=["POST"])
     async def handle_completion_request():
         """Handle chat completion requests"""
-        return await handle_api_request(lambda: process_request(f"{PREFILL_SERVICE_URL}/v1/chat/completions", f"{DECODE_SERVICE_URL}/v1/chat/completions"))
+        return await handle_api_request(
+            lambda: process_request(
+                f"{PREFILL_SERVICE_URL}/v1/chat/completions",
+                f"{DECODE_SERVICE_URL}/v1/chat/completions",
+            )
+        )
 
     # Start the Quart server with host can be set to 0.0.0.0
     app.run(port=PORT)
