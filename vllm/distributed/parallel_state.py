@@ -939,8 +939,8 @@ def get_pipeline_model_parallel_group():
 def graph_capture(device: torch.device):
     """
     `graph_capture` is a context manager which should surround the code that
-    is capturing the CUDA graph. Its main purpose is to ensure that the
-    some operations will be run after the graph is captured, before the graph
+    is capturing the CUDA graph. Its main purpose is to ensure that some
+    operations will be run after the graph is captured, before the graph
     is replayed. It returns a `GraphCaptureContext` object which contains the
     necessary data for the graph capture. Currently, it only contains the
     stream that the graph capture is running on. This stream is set to the

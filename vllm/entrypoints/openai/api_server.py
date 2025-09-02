@@ -64,6 +64,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorInfo,
                                               ErrorResponse,
+                                              IOProcessorResponse,
                                               LoadLoRAAdapterRequest,
                                               PoolingRequest, PoolingResponse,
                                               RerankRequest, RerankResponse,
@@ -795,7 +796,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
-    elif isinstance(generator, PoolingResponse):
+    elif isinstance(generator, (PoolingResponse, IOProcessorResponse)):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
@@ -1784,7 +1785,7 @@ async def init_app_state(
     ) if "generate" in supported_tasks else None
     state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
-        model_config,
+        vllm_config,
         state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
@@ -1807,17 +1808,13 @@ async def init_app_state(
         request_logger=request_logger,
         log_error_stack=args.log_error_stack,
     ) if "classify" in supported_tasks else None
-
-    enable_serving_reranking = ("classify" in supported_tasks and getattr(
-        model_config.hf_config, "num_labels", 0) == 1)
     state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
         log_error_stack=args.log_error_stack,
-    ) if ("embed" in supported_tasks or enable_serving_reranking) else None
-
+    ) if ("embed" in supported_tasks or "score" in supported_tasks) else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
