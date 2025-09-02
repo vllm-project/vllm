@@ -475,7 +475,7 @@ class rocm_aiter_ops:
         block_size: list[int],
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_gemm_w8a8_blocksale(
+        return torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale(
             A, B, As, Bs, output_dtype)
 
     @staticmethod
