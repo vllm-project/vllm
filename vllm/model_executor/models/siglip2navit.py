@@ -374,7 +374,7 @@ class Siglip2EncoderLayer(nn.Module):
                               use_data_parallel=use_data_parallel)
 
     def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor,
-                position_embeddings: torch.Tensor) -> tuple[torch.FloatTensor]:
+                position_embeddings: Optional[torch.Tensor] = None) -> tuple[torch.FloatTensor]:
         """
         Args:
             hidden_states (`torch.FloatTensor`):
@@ -529,7 +529,7 @@ class Siglip2Encoder(nn.Module):
             cu_seqlens (`torch.Tensor`):
                 1-D tensor of cumulative sequence length for text input.
         """
-        if grid_thws:  # vision input
+        if grid_thws is not None:  # vision input
             rotary_pos_emb = self.rot_pos_emb(grid_thws)
             window_index, cu_window_seqlens = self.get_window_index(grid_thws)
             cu_window_seqlens = torch.tensor(
@@ -741,7 +741,7 @@ class Siglip2TextTransformer(nn.Module):
         # For input of 2 sequences size 4 and 3, `positions` will be [0, 1, 2, 3, 0, 1, 2].
         # The corresponding cu_seqlens is [0, 4, 7].
         cu_seqlens = []
-        for i, pos in positions:
+        for i, pos in enumerate(positions):
             if pos == 0:
                 cu_seqlens.append(i)
         cu_seqlens.append(len(positions))
@@ -758,7 +758,7 @@ class Siglip2TextModel(torch.nn.Module):
     config: Siglip2TextConfig
 
     def __init__(self, config: Siglip2TextConfig, prefix: str = "",):
-        super().__init__(config)
+        super().__init__()
         self.text_model = Siglip2TextTransformer(config)
 
     def get_input_embeddings(
