@@ -127,6 +127,15 @@ class BlockPool:
         new_hashes: Optional[list[int]] = ([] if self.enable_kv_cache_events
                                            else None)
         for i, blk in enumerate(new_full_blocks):
+            # Defensive check: ensure the block doesn't have a hash before caching
+            if blk.block_hash is not None:
+                blk.reset_hash()
+                
+                # Second check: verify reset worked, force reset if needed
+                if blk.block_hash is not None:
+                    logger.error(f"reset_hash() failed for block {blk.block_id}, forcing reset")
+                    blk._block_hash = None
+
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
 
