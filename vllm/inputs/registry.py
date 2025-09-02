@@ -16,13 +16,12 @@ from vllm.utils.jsontree import JSONTree, json_map_leaves
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
     from vllm.multimodal import (MultiModalDataDict, MultiModalPlaceholderDict,
-                                 MultiModalRegistry, MultiModalUUIDDict)
+                                 MultiModalRegistry)
     from vllm.sequence import SequenceData
     from vllm.transformers_utils.tokenizer import AnyTokenizer
 else:
     ModelConfig = Any
     MultiModalDataDict = Any
-    MultiModalUUIDDict = Any
     MultiModalPlaceholderDict = Any
     MultiModalRegistry = Any
     SequenceData = Any
