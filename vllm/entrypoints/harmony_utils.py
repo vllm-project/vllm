@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from __future__ import annotations
+
 import datetime
 import json
 from collections.abc import Iterable, Sequence
@@ -64,7 +67,7 @@ def get_system_message(
     return sys_msg
 
 
-def create_tool_definition(tool):
+def create_tool_definition(tool: Union[ChatCompletionToolsParam, Tool]):
     if isinstance(tool, ChatCompletionToolsParam):
         return ToolDescription.new(
             name=tool.function.name,
@@ -78,13 +81,15 @@ def create_tool_definition(tool):
     )
 
 
-def get_developer_message(instructions: Optional[str] = None,
-                          tools: Optional[list[Tool]] = None) -> Message:
+def get_developer_message(
+    instructions: Optional[str] = None,
+    tools: Optional[list[Union[Tool, ChatCompletionToolsParam]]] = None,
+) -> Message:
     dev_msg_content = DeveloperContent.new()
     if instructions is not None:
         dev_msg_content = dev_msg_content.with_instructions(instructions)
     if tools is not None:
-        function_tools = []
+        function_tools: list[Union[Tool, ChatCompletionToolsParam]] = []
         for tool in tools:
             if tool.type in ("web_search_preview", "code_interpreter"):
                 # These are built-in tools that are added to the system message.
@@ -186,7 +191,8 @@ def parse_chat_input(chat_msg) -> list[Message]:
         name = chat_msg.get("name", "")
         content = chat_msg.get("content", "") or ""
         msg = Message.from_author_and_content(
-            Author.new(Role.TOOL, f"functions.{name}"), content)
+            Author.new(Role.TOOL, f"functions.{name}"),
+            content).with_channel("commentary")
         return [msg]
 
     # Default: user/assistant/system messages with content
