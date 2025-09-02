@@ -248,6 +248,8 @@ class LLM:
                     )))
             else:
                 structured_outputs_instance = structured_outputs_config
+        else:
+            structured_outputs_instance = StructuredOutputsConfig()
 
         engine_args = EngineArgs(
             model=model,
