@@ -195,11 +195,11 @@ vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel
     - `VLLM_CPU_MOE_PREPACK` can provides better performance for MoE models
     - `VLLM_CPU_SGL_KERNEL` can provides better performance for MoE models and small-batch scenarios.
 
-### Why do I see `get_mempolicy: Operation not permitted`when running in Docker?
+### Why do I see `get_mempolicy: Operation not permitted` when running in Docker?
 
-    In some container environments, NUMA-related syscalls used by vLLM (e.g., `get_mempolicy`, `migrate_pages`) are not denied in the runtime's default seccomp/capabilities settings. This may lead to warnings like `get_mempolicy: Operation not permitted`. Functionality is not affected, but NUMA memory binding/migration optimizations may not take effect and performance can be suboptimal.
+In some container environments (like Docker), NUMA-related syscalls used by vLLM (e.g., `get_mempolicy`, `migrate_pages`) are blocked/denied in the runtime's default seccomp/capabilities settings. This may lead to warnings like `get_mempolicy: Operation not permitted`. Functionality is not affected, but NUMA memory binding/migration optimizations may not take effect and performance can be suboptimal.
 
-    To enable these optimizations inside Docker with the least privilege, you can follow below tips:
+To enable these optimizations inside Docker with the least privilege, you can follow below tips:
 
     ```bash
     docker run ... --cap-add SYS_NICE --security-opt seccomp=unconfined  ...
@@ -213,11 +213,10 @@ vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel
 
     # reference : https://docs.docker.com/engine/security/seccomp/
 
-    Alternatively, running with `--privileged=true` also works but is broader and not generally recommended.
+Alternatively, running with `--privileged=true` also works but is broader and not generally recommended.
 
-
-    In K8S, the following configuration can be added to workload yaml to achieve the same effect as above:
-    ```
+In K8S, the following configuration can be added to workload yaml to achieve the same effect as above:
+    ```yaml
     securityContext:
       seccompProfile:
         type: Unconfined
