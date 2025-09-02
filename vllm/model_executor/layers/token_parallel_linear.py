@@ -9,6 +9,7 @@ computation for their assigned token partitions.
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 from typing import Optional, Tuple, Union, List
 
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
@@ -38,18 +39,27 @@ class TokenParallelQKVLinear(QKVParallelLinear):
     
     def __init__(self, *args, **kwargs):
         # Only initialize weights on root rank
+        # Always initialize the nn.Module internals
+        nn.Module.__init__(self)
+
+        # Decide role
+        self.is_root_rank = (not is_tknp_initialized()) or (get_tknp_rank() == 0)
         if not is_tknp_initialized() or get_tknp_rank() == 0:
             super().__init__(*args, **kwargs)
-            self.is_root_rank = True
+            # self.is_root_rank = True
         else:
             # Non-root ranks don't need weights, just store config
-            self.is_root_rank = False
+            # self.is_root_rank = False
             # Store essential attributes for interface compatibility
             self.hidden_size = kwargs.get('hidden_size', args[0] if args else None)
+            # self.hidden_size = 1
             self.head_size = kwargs.get('head_size', args[1] if len(args) > 1 else None)
             self.total_num_heads = kwargs.get('total_num_heads', args[2] if len(args) > 2 else None)
             self.total_num_kv_heads = kwargs.get('total_num_kv_heads', args[3] if len(args) > 3 else None)
-            self.bias = kwargs.get('bias', False)
+            # self.bias = kwargs.get('bias', False)
+            
+            self.register_parameter('weight', None)
+            self.register_parameter('bias', None)
             
         logger.debug(f"TokenParallelQKVLinear initialized on rank {get_tknp_rank()}, "
                     f"is_root_rank: {self.is_root_rank}")

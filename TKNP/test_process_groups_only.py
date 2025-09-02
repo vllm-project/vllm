@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# torchrun --nproc-per-node=8 HTTP/test_process_groups_only.py --tensor-parallel-size 4 --pipeline-parallel-size 1 --token-parallel-size 2 --enable-token-parallel
+# torchrun --nproc-per-node=2 TKNP/test_process_groups_only.py --tensor-parallel-size 1 --pipeline-parallel-size 1 --token-parallel-size 2 --enable-token-parallel
 """
 Simple script to test token parallel process group setup without full LLM instantiation.
 This is useful for verifying the distributed infrastructure before testing the full attention implementation.

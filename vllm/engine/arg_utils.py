@@ -971,11 +971,11 @@ class EngineArgs:
         #     help="Number of token parallel groups for HTTP attention"
         # )
         
-        parser.add_argument(
-            "--enable-http",
-            action="store_true",
-            help="Enable Hybrid Tensor and Token Parallelism"
-        )
+        # parser.add_argument(
+        #     "--enable-http",
+        #     action="store_true",
+        #     help="Enable Hybrid Tensor and Token Parallelism"
+        # )
 
         return parser
 

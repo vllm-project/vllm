@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# python HTTP/test_dist_ranks.py --tensor-parallel-size 2 --pipeline-parallel-size 1 --data-parallel-size 1
-# python HTTP/test_dist_ranks.py --tensor-parallel-size 2 --pipeline-parallel-size 2 --token-parallel-size 2 --enable-tknp
+# python TKNP/test_dist_ranks.py --tensor-parallel-size 2 --pipeline-parallel-size 1 --data-parallel-size 1
+# python TKNP/test_dist_ranks.py --tensor-parallel-size 1 --pipeline-parallel-size 1 --token-parallel-size 2 --enable-token-parallel
 """
 Test script to instantiate a vLLM LLM with distributed configuration
 and print rank information from worker processes using the new print_worker_ranks flag.
 
 Usage:
-    python test_distributed_ranks_with_flag.py --tensor-parallel-size 2 --pipeline-parallel-size 1 --data-parallel-size 1
+    python test_distributed_ranks_with_flag.py --tensor-parallel-size 1 --pipeline-parallel-size 1 --data-parallel-size 1
     python test_distributed_ranks_with_flag.py --tensor-parallel-size 2 --pipeline-parallel-size 2 --data-parallel-size 1
     python test_distributed_ranks_with_flag.py --tensor-parallel-size 1 --pipeline-parallel-size 1 --data-parallel-size 2
 """

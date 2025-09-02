@@ -1,5 +1,5 @@
 # Simple distributed test without token parallelism
-# torchrun --nproc-per-node=4 HTTP/test_http_simple.py --tensor-parallel-size 4 --pipeline-parallel-size 1
+# torchrun --nproc-per-node=2 HTTP/test_http_simple.py --tensor-parallel-size 2 --pipeline-parallel-size 1
 
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project

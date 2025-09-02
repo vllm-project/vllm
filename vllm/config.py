@@ -4856,6 +4856,7 @@ class VllmConfig:
             f"load_format={self.load_config.load_format}, "
             f"tensor_parallel_size={self.parallel_config.tensor_parallel_size},"
             f" pipeline_parallel_size={self.parallel_config.pipeline_parallel_size}, "  # noqa
+            f"token_parallel_size={self.parallel_config.token_parallel_size}, "
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
             f"enforce_eager={self.model_config.enforce_eager}, "
