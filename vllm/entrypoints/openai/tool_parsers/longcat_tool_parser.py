@@ -24,7 +24,7 @@ logger = init_logger(__name__)
 
 
 @ToolParserManager.register_module("longcat")
-class LongCatFlashChatToolParser(ToolParser):
+class LongcatFlashToolParser(ToolParser):
 
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
