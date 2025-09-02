@@ -229,12 +229,17 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         kv_c_cache = kv_c_and_k_pe_cache[..., :self.kv_lora_rank]
         k_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank:]
 
+        # NOTE(matt): During CUDA graph capture, max_query_len can be 0, but the
+        # kernel uses this to calculate grid dimensions. Ensure it's at least 1
+        # to prevent invalid grid configuration during graph capture.
+        max_seqlen_q = max(attn_metadata.decode.max_query_len, 1)
+
         o = flash_attn_varlen_func(
             q=q_pe,
             k=k_pe_cache.unsqueeze(-2),  # Add head dim of 1
             v=kv_c_cache.unsqueeze(-2),  # Add head dim of 1
             q_v=q_nope,
-            max_seqlen_q=attn_metadata.decode.max_query_len,
+            max_seqlen_q=max_seqlen_q,
             cu_seqlens_q=attn_metadata.decode.query_start_loc,
             max_seqlen_k=attn_metadata.decode.max_seq_len,
             seqused_k=attn_metadata.decode.seq_lens,
