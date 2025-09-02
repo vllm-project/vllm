@@ -48,17 +48,7 @@ class LinearLowRank(nn.Module):
     
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, shard_id: str | None = None):
         """Custom weight loader for low-rank matrices."""
-        if shard_id is None:
-            # This is a regular linear weight that needs to be decomposed
-            # For now, we'll initialize with SVD decomposition
-            U, S, V = torch.svd(loaded_weight)
-            rank = min(self.weight1.shape[1], U.shape[1], V.shape[0])
-            
-            # Initialize weight1 and weight2 using SVD
-            sqrt_s = torch.sqrt(S[:rank])
-            self.weight1.data.copy_(U[:, :rank] * sqrt_s.unsqueeze(0))
-            self.weight2.data.copy_((V[:rank, :] * sqrt_s.unsqueeze(1)))
-        elif shard_id == "weight1":
+        if shard_id == "weight1":
             self.weight1.data.copy_(loaded_weight)
         elif shard_id == "weight2":
             self.weight2.data.copy_(loaded_weight)
