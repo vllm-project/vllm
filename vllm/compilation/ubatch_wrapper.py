@@ -81,8 +81,8 @@ class UBatchWrapper:
 
         The flow is as follows:
         1. The main thread starts up each ubatch thread. Each thread will 
-        initialize its cuda context before going to sleep upon entering 
-        the ubatch_context.
+        initialize its cuda context (torch.cuda.current_blas_handle())
+        before going to sleep upon entering the ubatch_context.
 
         2. The main thread starts the graph capture and wakes up the first ubatch
         thread.
