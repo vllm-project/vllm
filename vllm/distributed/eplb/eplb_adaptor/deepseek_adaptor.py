@@ -15,8 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Any
-
 import torch
 
 from vllm.distributed.eplb.eplb_adaptor.eplb_adaptor import EplbAdaptor
@@ -25,25 +23,11 @@ from vllm.distributed.eplb.eplb_adaptor.eplb_adaptor import EplbAdaptor
 class DeepseekEplbAdaptor(EplbAdaptor):
 
     def __init__(self, model, **args):
-        super().__init__(**args)
+        super().__init__(model, **args)
         self.num_dense_layers = self.model.config.first_k_dense_replace
         self.global_expert_num = self.model.config.n_routed_experts
 
-        self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
-        
-        for layer_idx in range(self.num_moe_layers):
-            self.expert_map_per_layer[self.num_dense_layers + layer_idx] = \
-                self.model.get_expert_map(self.num_dense_layers + layer_idx)
-        num_buffer_tensor = torch.where(
-            self.expert_map_per_layer[self.num_dense_layers] != -1)[0].numel()
-        self.buffer_tensor_list: list[list[Any]] = [
-            [] for _ in range(num_buffer_tensor)
-        ]
-        self.init_buffer_tensor(num_buffer_tensor)
-        self.init_expert_param_per_layer()
-        for layer_idx in range(self.num_moe_layers):
-            self.log2phy_map_per_layer[self.num_dense_layers + layer_idx] = \
-                self.model.get_log2phy_map(self.num_dense_layers + layer_idx)
+        self.init()
 
     def get_init_expert_map_from_file(self, num_moe_layers, expert_map_path):
 
