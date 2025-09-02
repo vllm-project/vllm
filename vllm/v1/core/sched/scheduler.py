@@ -815,7 +815,7 @@ class Scheduler(SchedulerInterface):
         # NOTE: structured_output_request_ids maps
         # a request's (request that uses structured output)
         # request_id to its index in the batch.
-        # This will helps us determine to slice the grammar bitmask
+        # This will help us determine to slice the grammar bitmask
         # and only applies valid mask for requests that
         # uses structured decoding.
         structured_output_request_ids: dict[str, int] = {}
@@ -873,19 +873,19 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
+                num_draft_tokens = len(scheduled_spec_token_ids)
+                num_accepted = len(generated_token_ids) - 1
+                num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
                 # num_computed_tokens is decreased by the number of rejected
-                # tokens, where is given by:
-                # len(scheduled_spec_token_ids) + 1 - len(generated_token_ids).
-                num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
-                                       len(generated_token_ids))
-                request.num_computed_tokens -= num_tokens_rejected
+                # tokens.
+                request.num_computed_tokens -= num_rejected
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
-                    num_draft_tokens=len(scheduled_spec_token_ids),
-                    num_accepted_tokens=len(generated_token_ids) - 1)
+                    num_draft_tokens=num_draft_tokens,
+                    num_accepted_tokens=num_accepted)
 
             stopped = False
             new_logprobs = None
@@ -923,7 +923,7 @@ class Scheduler(SchedulerInterface):
                     request):
                 # NOTE: structured_output_request
                 # should not be None if use_structured_output, we have
-                # check above, so safe to ignore type warning
+                # checked above, so safe to ignore type warning
                 request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids)
 
@@ -1242,7 +1242,7 @@ class Scheduler(SchedulerInterface):
         finished_sending reqs to the output.
         * if finished_sending: free the blocks
         # if finished_recving: add to state so we can
-            scheduler the request during the next step.
+            schedule the request during the next step.
         """
 
         if self.connector is not None:
