@@ -449,13 +449,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampling_params = new_req_data.sampling_params
             pooling_params = new_req_data.pooling_params
 
-            if sampling_params and \
-                sampling_params.sampling_type == SamplingType.RANDOM_SEED:
-                generator = torch.Generator(device=self.device)
-                generator.manual_seed(sampling_params.seed)
-            else:
-                generator = None
-
             if pooling_params:
                 task = pooling_params.task
                 assert task is not None, "You did not set `task` in the API"
@@ -472,7 +465,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 mm_hashes=new_req_data.mm_hashes,
                 sampling_params=sampling_params,
                 pooling_params=pooling_params,
-                generator=generator,
+                # generator is populated in _update_sampling_states()
+                generator=None,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
@@ -576,7 +570,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.input_batch.condense()
         # Allow attention backend to reorder the batch, potentially
         self._may_reorder_batch(scheduler_output)
-        # Refresh batch metadata with any pending updates.
+
+    def _update_sampling_states(self,
+                                scheduler_output: "SchedulerOutput") -> None:
+        # Initialize generators for new seeded requests.
+        for new_req_data in scheduler_output.scheduled_new_reqs:
+            req_id = new_req_data.req_id
+            req_state = self.requests[req_id]
+            sampling_params = req_state.sampling_params
+            if sampling_params and \
+                    sampling_params.sampling_type == SamplingType.RANDOM_SEED:
+                req_state.generator = torch.Generator(device=self.device)
+                req_state.generator.manual_seed(sampling_params.seed)
+                req_index = self.input_batch.req_id_to_index[req_id]
+                self.input_batch.generators[req_index] = req_state.generator
+
+        # Refresh logits processor states and sampling metadata
+        # with any pending updates.
         self.input_batch.refresh_metadata()
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
@@ -1594,7 +1604,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Broadcast PP output for external_launcher (torchrun)
         # to make sure we are synced across pp ranks
-        # TODO: Support overlapping mirco-batches
+        # TODO: Support overlapping micro-batches
         # https://github.com/vllm-project/vllm/issues/18019
         broadcast_pp_output = \
             self.parallel_config.distributed_executor_backend \
@@ -1610,6 +1620,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logits = None
         else:
             if self.input_batch.pooling_params:
+                # This is currently required for pooling because the
+                # sampling_metadata.prompt_token_ids tensor might be needed.
+                #TODO(nick) decouple this
+                self.input_batch.refresh_metadata()
+
                 return self._pool(hidden_states, num_scheduled_tokens,
                                   num_scheduled_tokens_np, kv_connector_output)
 
@@ -1623,6 +1638,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 model_output_broadcast_data, src=len(get_pp_group().ranks) - 1)
             assert model_output_broadcast_data is not None
             logits = model_output_broadcast_data["logits"]
+
+        # Apply batch state updates required for sampling stage;
+        # can run in parallel with model forward-pass.
+        self._update_sampling_states(scheduler_output)
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
