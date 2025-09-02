@@ -388,11 +388,11 @@ class HunYuanSparseMoeBlock(nn.Module):
 
         # Load balancing settings.
         vllm_config = get_current_vllm_config()
-        parallel_config = vllm_config.parallel_config
+        eplb_config = vllm_config.parallel_config.eplb_config
         self.enable_eplb = enable_eplb
 
         self.n_logical_experts = self.n_routed_experts
-        self.n_redundant_experts = parallel_config.num_redundant_experts
+        self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_physical_experts = (self.n_logical_experts +
                                    self.n_redundant_experts)
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
@@ -588,9 +588,9 @@ class HunYuanModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-        parallel_config = vllm_config.parallel_config
-        enable_eplb = parallel_config.enable_eplb
-        self.num_redundant_experts = parallel_config.num_redundant_experts
+        eplb_config = vllm_config.parallel_config.eplb_config
+        enable_eplb = vllm_config.parallel_config.enable_eplb
+        self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
         self.quant_config = quant_config
