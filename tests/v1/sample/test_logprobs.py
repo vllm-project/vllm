@@ -459,7 +459,7 @@ def test_all_logprobs(example_prompts, monkeypatch: pytest.MonkeyPatch):
             for logprob in logprobs:
                 assert len(logprob) == vocab_size
             assert prompt_logprobs is not None
-            # Skip the 0th prompt logprob, which is None
+            assert prompt_logprobs[0] is None
             for prompt_logprob in prompt_logprobs[1:]:
                 assert len(prompt_logprob) == vocab_size
 
