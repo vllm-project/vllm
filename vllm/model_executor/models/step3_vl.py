@@ -713,13 +713,8 @@ class Step3VisionAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
         
-        # Reshape for MultiHeadAttention: (batch, seq, hidden_size)
-        q_reshaped = q.view(bsz, tgt_len, -1)
-        k_reshaped = k.view(bsz, tgt_len, -1)
-        v_reshaped = v.view(bsz, tgt_len, -1)
-        
         # Use unified MultiHeadAttention with automatic backend selection
-        attn_output = self.attn(q_reshaped, k_reshaped, v_reshaped)
+        attn_output = self.attn(q, k, v)
 
         attn_output, _ = self.out_proj(attn_output)
 

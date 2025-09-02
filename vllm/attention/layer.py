@@ -350,16 +350,12 @@ class MultiHeadAttention(nn.Module):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         dtype = torch.get_default_dtype()
-        try:
-            attn_backend = get_attn_backend(head_size,
-                                            dtype,
-                                            kv_cache_dtype=None,
-                                            block_size=16,
-                                            is_attention_free=False)
-            backend = backend_name_to_enum(attn_backend.get_name())
-        except (ValueError, AttributeError):
-            # Fallback to TORCH_SDPA if backend detection fails
-            backend = _Backend.TORCH_SDPA
+        attn_backend = get_attn_backend(head_size,
+                                        dtype,
+                                        kv_cache_dtype=None,
+                                        block_size=16,
+                                        is_attention_free=False)
+        backend = backend_name_to_enum(attn_backend.get_name())
         if current_platform.is_rocm():
             # currently, only torch_sdpa is supported on rocm
             self.attn_backend = _Backend.TORCH_SDPA
@@ -416,15 +412,16 @@ class MultiHeadAttention(nn.Module):
             out = out.transpose(1, 2)
         elif self.attn_backend in (_Backend.FLASH_ATTN, 
                                   _Backend.FLASH_ATTN_VLLM_V1):
-            # Flash Attention for ViT is not essential, fallback to PyTorch SDPA
-            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
-            out = F.scaled_dot_product_attention(
-                query, key, value, scale=self.scale)
-            out = out.transpose(1, 2)
+            # Use real Flash Attention implementation
+            from flash_attn import flash_attn_func
+            # Flash Attention expects (batch, seq, heads, head_dim)
+            out = flash_attn_func(query, key, value, softmax_scale=self.scale)
+            out = out.reshape(bsz, q_len, -1)
         elif self.attn_backend == _Backend.ROCM_AITER_FA:
-            from aiter import flash_attn_varlen_func
-            out = flash_attn_varlen_func(
-                query, key, value, softmax_scale=self.scale)
+            from aiter import flash_attn_func
+            # ROCm Flash Attention expects (batch, seq, heads, head_dim)
+            out = flash_attn_func(query, key, value, softmax_scale=self.scale)
+            out = out.reshape(bsz, q_len, -1)
         elif self.attn_backend == _Backend.FLEX_ATTENTION:
             # FlexAttention requires specific tensor format
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))

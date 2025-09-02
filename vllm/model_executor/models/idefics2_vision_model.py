@@ -184,9 +184,8 @@ class Idefics2VisionAttention(nn.Module):
         query_states, key_states, value_states = qkv.chunk(3, dim=-1)
         
         # Use unified MultiHeadAttention implementation
-        attn_output = self.attn(query_states, key_states, value_states)
-        
-        attn_output, _ = self.out_proj(attn_output)
+        out = self.attn(query_states, key_states, value_states)
+        attn_output, _ = self.out_proj(out)
         return attn_output
 
 
