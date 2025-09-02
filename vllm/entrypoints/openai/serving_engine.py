@@ -49,9 +49,11 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorInfo,
-                                              ErrorResponse, PoolingResponse,
-                                              RerankRequest, ResponsesRequest,
-                                              ScoreRequest, ScoreResponse,
+                                              ErrorResponse,
+                                              IOProcessorRequest,
+                                              PoolingResponse, RerankRequest,
+                                              ResponsesRequest, ScoreRequest,
+                                              ScoreResponse,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
                                               TokenizeResponse,
@@ -65,13 +67,13 @@ from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import (  # noqa: F401 - Required to resolve Pydantic error in RequestProcessingMixin
     MultiModalDataDict, MultiModalUUIDDict)
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.sequence import Logprob, PromptLogprobs
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
@@ -93,12 +95,8 @@ CompletionLikeRequest = Union[
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
 SpeechToTextRequest = Union[TranscriptionRequest, TranslationRequest]
-AnyRequest = Union[
-    CompletionLikeRequest,
-    ChatLikeRequest,
-    SpeechToTextRequest,
-    ResponsesRequest,
-]
+AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest, SpeechToTextRequest,
+                   ResponsesRequest, IOProcessorRequest]
 
 AnyResponse = Union[
     CompletionResponse,
@@ -180,7 +178,6 @@ class ServeContext(
 
     # Shared across most requests
     tokenizer: Optional[AnyTokenizer] = None
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
 
     # `protected_namespaces` resolves Pydantic v2's warning
     # on conflict with protected namespace "model_"
@@ -312,14 +309,12 @@ class OpenAIServing:
         truncate_prompt_tokens = getattr(ctx.request, "truncate_prompt_tokens",
                                          None)
 
-        if truncate_prompt_tokens is not None:
-            if truncate_prompt_tokens <= self.max_model_len:
-                ctx.truncate_prompt_tokens = truncate_prompt_tokens
-            else:
-                return self.create_error_response(
-                    "truncate_prompt_tokens value is "
-                    "greater than max_model_len."
-                    " Please, select a smaller truncation size.")
+        if truncate_prompt_tokens is not None and \
+            truncate_prompt_tokens > self.max_model_len:
+            return self.create_error_response(
+                "truncate_prompt_tokens value is "
+                "greater than max_model_len."
+                " Please, select a smaller truncation size.")
         return None
 
     def _create_pooling_params(
@@ -543,9 +538,8 @@ class OpenAIServing:
     async def _normalize_prompt_text_to_input(
         self,
         request: AnyRequest,
-        tokenizer: AnyTokenizer,
         prompt: str,
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]],
+        tokenizer: AnyTokenizer,
         add_special_tokens: bool,
     ) -> TextTokensPrompt:
         async_tokenizer = self._get_async_tokenizer(tokenizer)
@@ -554,6 +548,9 @@ class OpenAIServing:
                 and self.model_config.encoder_config.get(
                     "do_lower_case", False)):
             prompt = prompt.lower()
+
+        truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens",
+                                         None)
 
         if truncate_prompt_tokens is None:
             encoded = await async_tokenizer(
@@ -582,11 +579,11 @@ class OpenAIServing:
     async def _normalize_prompt_tokens_to_input(
         self,
         request: AnyRequest,
-        tokenizer: AnyTokenizer,
         prompt_ids: list[int],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]],
+        tokenizer: Optional[AnyTokenizer],
     ) -> TextTokensPrompt:
-        async_tokenizer = self._get_async_tokenizer(tokenizer)
+        truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens",
+                                         None)
 
         if truncate_prompt_tokens is None:
             input_ids = prompt_ids
@@ -595,7 +592,11 @@ class OpenAIServing:
         else:
             input_ids = prompt_ids[-truncate_prompt_tokens:]
 
-        input_text = await async_tokenizer.decode(input_ids)
+        if tokenizer is None:
+            input_text = ""
+        else:
+            async_tokenizer = self._get_async_tokenizer(tokenizer)
+            input_text = await async_tokenizer.decode(input_ids)
 
         return self._validate_input(request, input_ids, input_text)
 
@@ -678,7 +679,6 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt_input: Union[str, list[int]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> TextTokensPrompt:
         """
@@ -690,7 +690,6 @@ class OpenAIServing:
                 request,
                 tokenizer,
             [prompt_input],
-                truncate_prompt_tokens=truncate_prompt_tokens,
                 add_special_tokens=add_special_tokens,
         ):
             return result
@@ -701,7 +700,6 @@ class OpenAIServing:
         request: AnyRequest,
         tokenizer: AnyTokenizer,
         prompt_inputs: Iterable[Union[str, list[int]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> AsyncGenerator[TextTokensPrompt, None]:
         """
@@ -709,30 +707,27 @@ class OpenAIServing:
         [`_tokenize_prompt_input_or_inputs`][vllm.entrypoints.openai.serving_engine.OpenAIServing._tokenize_prompt_input_or_inputs]
         that assumes multiple inputs.
         """
-        for text in prompt_inputs:
-            if isinstance(text, str):
+        for prompt in prompt_inputs:
+            if isinstance(prompt, str):
                 yield await self._normalize_prompt_text_to_input(
                     request,
-                    tokenizer,
-                    prompt=text,
-                    truncate_prompt_tokens=truncate_prompt_tokens,
+                    prompt=prompt,
+                    tokenizer=tokenizer,
                     add_special_tokens=add_special_tokens,
                 )
             else:
                 yield await self._normalize_prompt_tokens_to_input(
                     request,
-                    tokenizer,
-                    prompt_ids=text,
-                    truncate_prompt_tokens=truncate_prompt_tokens,
+                    prompt_ids=prompt,
+                    tokenizer=tokenizer,
                 )
 
     async def _tokenize_prompt_input_or_inputs_async(
         self,
         request: AnyRequest,
-        tokenizer: AnyTokenizer,
+        tokenizer: Optional[AnyTokenizer],
         input_or_inputs: Optional[Union[str, list[str], list[int],
                                         list[list[int]]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> tuple[list[TextTokensPrompt], list[EmbedsPrompt]]:
         """
@@ -744,6 +739,12 @@ class OpenAIServing:
         """
         inputs_embeds = list[EmbedsPrompt]()
         inputs_text = list[TextTokensPrompt]()
+
+        truncate_prompt_tokens = getattr(request, "truncate_prompt_tokens",
+                                         None)
+
+        if (truncate_prompt_tokens or 0) < 0:
+            truncate_prompt_tokens = self.max_model_len
 
         if (isinstance(request, CompletionRequest)
                 and request.prompt_embeds is not None):
@@ -768,20 +769,16 @@ class OpenAIServing:
         tasks = []
         for prompt_input in batch_inputs:
             if prompt_input["is_tokens"] is False:
+                assert tokenizer is not None, \
+                    "Tokenizer is required for text prompts"
                 task = self._normalize_prompt_text_to_input(
                     request,
-                    tokenizer,
                     prompt_input["content"],
-                    truncate_prompt_tokens=truncate_prompt_tokens,
-                    add_special_tokens=add_special_tokens,
-                )
+                    tokenizer=tokenizer,
+                    add_special_tokens=add_special_tokens)
             else:
                 task = self._normalize_prompt_tokens_to_input(
-                    request,
-                    tokenizer,
-                    prompt_input["content"],
-                    truncate_prompt_tokens=truncate_prompt_tokens,
-                )
+                    request, prompt_input["content"], tokenizer=tokenizer)
             tasks.append(task)
 
         # Wait for all tokenization tasks to complete
@@ -793,17 +790,11 @@ class OpenAIServing:
     @overload
     async def _preprocess_completion(
         self,
-        request: Union[
-            DetokenizeRequest,
-            EmbeddingCompletionRequest,
-            RerankRequest,
-            ClassificationRequest,
-            ScoreRequest,
-            TokenizeCompletionRequest,
-        ],
-        tokenizer: AnyTokenizer,
+        request: Union[DetokenizeRequest, EmbeddingCompletionRequest,
+                       RerankRequest, ClassificationRequest, ScoreRequest,
+                       TokenizeCompletionRequest],
+        tokenizer: Optional[AnyTokenizer],
         input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = ...,
         add_special_tokens: bool = ...,
     ) -> tuple[list[TextTokensPrompt], list[EngineTokensPrompt]]:
         ...
@@ -812,10 +803,9 @@ class OpenAIServing:
     async def _preprocess_completion(
         self,
         request: CompletionRequest,
-        tokenizer: AnyTokenizer,
+        tokenizer: Optional[AnyTokenizer],
         input_or_inputs: Optional[Union[str, list[str], list[int],
                                         list[list[int]]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = ...,
         add_special_tokens: bool = ...,
     ) -> tuple[
             list[Union[TextTokensPrompt, EmbedsPrompt]],
@@ -826,10 +816,9 @@ class OpenAIServing:
     async def _preprocess_completion(
         self,
         request: CompletionLikeRequest,
-        tokenizer: AnyTokenizer,
+        tokenizer: Optional[AnyTokenizer],
         input_or_inputs: Optional[Union[str, list[str], list[int],
                                         list[list[int]]]],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None,
         add_special_tokens: bool = True,
     ) -> tuple[
             Union[list[TextTokensPrompt], list[Union[TextTokensPrompt,
@@ -845,16 +834,13 @@ class OpenAIServing:
                 "Prompt embeds with non-completion requests is not"
                 " currently supported.")
 
-        (
-            request_prompts_text,
-            request_prompts_embeds,
-        ) = await self._tokenize_prompt_input_or_inputs_async(
-            request,
-            tokenizer,
-            input_or_inputs,
-            truncate_prompt_tokens=truncate_prompt_tokens,
-            add_special_tokens=add_special_tokens,
-        )
+        (request_prompts_text, request_prompts_embeds
+         ) = await self._tokenize_prompt_input_or_inputs_async(
+             request,
+             tokenizer,
+             input_or_inputs,
+             add_special_tokens=add_special_tokens,
+         )
 
         engine_prompts_text = [
             EngineTokensPrompt(
@@ -905,7 +891,6 @@ class OpenAIServing:
         documents: Optional[list[dict[str, str]]] = None,
         chat_template_kwargs: Optional[dict[str, Any]] = None,
         tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None,
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = False,
     ) -> tuple[
             list[ConversationMessage],
@@ -983,7 +968,6 @@ class OpenAIServing:
                 request,
                 tokenizer,
                 request_prompt,
-                truncate_prompt_tokens=truncate_prompt_tokens,
                 add_special_tokens=add_special_tokens,
             )
         else:

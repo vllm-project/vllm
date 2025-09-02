@@ -24,7 +24,7 @@ from .hasher import MultiModalHasher
 from .inputs import (MultiModalDataDict, MultiModalEncDecInputs,
                      MultiModalFieldConfig, MultiModalInputs,
                      MultiModalKwargsItem, MultiModalKwargsItems,
-                     MultiModalKwargsOptionalItems, MultiModalUUIDs,
+                     MultiModalKwargsOptionalItems, MultiModalUUIDDict,
                      PlaceholderRange)
 from .parse import (DictEmbeddingItems, EmbeddingItems, MultiModalDataItems,
                     MultiModalDataParser)
@@ -1023,7 +1023,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         *,
         mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDs]] = None,
+                                          MultiModalUUIDDict]] = None,
     ) -> MultiModalInputs:
         return self.apply(prompt,
                           mm_data,
@@ -1365,7 +1365,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenization_kwargs: Mapping[str, object],
         *,
         mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDs]] = None,
+                                          MultiModalUUIDDict]] = None,
     ) -> MultiModalHashes:
         """Create MM hashes to be returned (only used in V1).
 
@@ -1515,7 +1515,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenization_kwargs: Mapping[str, object],
         *,
         mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDs]] = None,
+                                          MultiModalUUIDDict]] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         (
             prompt_ids,
@@ -1563,7 +1563,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenization_kwargs: Mapping[str, object],
         *,
         mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDs]] = None,
+                                          MultiModalUUIDDict]] = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         """
         Apply the HF processor on the full prompt text,
@@ -1786,7 +1786,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
         *,
         mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDs]] = None,
+                                          MultiModalUUIDDict]] = None,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -1902,7 +1902,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
         *,
         mm_hash_overrides: Optional[Union[dict[str, list[str]],
-                                          MultiModalUUIDs]] = None,
+                                          MultiModalUUIDDict]] = None,
     ) -> MultiModalEncDecInputs:
         """
         Process multi-modal inputs to be used in vLLM.

@@ -8,7 +8,7 @@ from typing_extensions import NotRequired, TypedDict, TypeIs, TypeVar
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalInputs,
-                                        MultiModalUUIDs)
+                                        MultiModalUUIDDict)
 
 
 class TextPrompt(TypedDict):
@@ -31,7 +31,7 @@ class TextPrompt(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
-    multi_modal_uuids: NotRequired["MultiModalUUIDs"]
+    multi_modal_uuids: NotRequired["MultiModalUUIDDict"]
     """
     Optional user-specified UUIDs for multimodal items, mapped by modality.
     Lists must match the number of items per modality and may contain `None`.
@@ -69,7 +69,7 @@ class TokensPrompt(TypedDict):
     to pass the mm_processor_kwargs to each of them.
     """
 
-    multi_modal_uuids: NotRequired["MultiModalUUIDs"]
+    multi_modal_uuids: NotRequired["MultiModalUUIDDict"]
     """
     Optional user-specified UUIDs for multimodal items, mapped by modality.
     Lists must match the number of items per modality and may contain `None`.
@@ -93,6 +93,16 @@ class EmbedsPrompt(TypedDict):
     """
     Optional cache salt to be used for prefix caching.
     """
+
+
+class DataPrompt(TypedDict):
+    """Represents generic inputs handled by IO processor plugins."""
+
+    data: Any
+    """The input data"""
+
+    data_format: str
+    """The input data format"""
 
 
 SingletonPrompt = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
@@ -192,9 +202,6 @@ class TokenInputs(TypedDict):
     prompt_token_ids: list[int]
     """The token IDs of the prompt."""
 
-    token_type_ids: NotRequired[list[int]]
-    """The token type IDs of the prompt."""
-
     prompt: NotRequired[str]
     """
     The original prompt text corresponding to the token IDs, if available.
@@ -208,7 +215,6 @@ class TokenInputs(TypedDict):
 
 def token_inputs(
     prompt_token_ids: list[int],
-    token_type_ids: Optional[list[int]] = None,
     prompt: Optional[str] = None,
     cache_salt: Optional[str] = None,
 ) -> TokenInputs:
@@ -218,8 +224,6 @@ def token_inputs(
 
     if prompt is not None:
         inputs["prompt"] = prompt
-    if token_type_ids is not None:
-        inputs["token_type_ids"] = token_type_ids
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
 

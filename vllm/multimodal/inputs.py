@@ -88,6 +88,7 @@ these are directly passed to the model without HF processing.
 ModalityData: TypeAlias = Union[_T, list[_T]]
 """
 Either a single data item, or a list of data items.
+
 The number of data items allowed per modality is restricted by
 `--limit-mm-per-prompt`.
 """
@@ -115,7 +116,7 @@ The built-in modalities are defined by
 [`MultiModalDataBuiltins`][vllm.multimodal.inputs.MultiModalDataBuiltins].
 """
 
-MultiModalUUIDs: TypeAlias = Mapping[str, Union[list[Optional[str]], str]]
+MultiModalUUIDDict: TypeAlias = Mapping[str, Union[list[Optional[str]], str]]
 """
 A dictionary containing user-provided UUIDs for items in each modality.
 If a UUID for an item is not provided, its entry will be `None` and
@@ -206,6 +207,29 @@ BatchedTensorInputs: TypeAlias = Mapping[str, NestedTensors]
 A dictionary containing nested tensors which have been batched via
 [`MultiModalKwargs.batch`][vllm.multimodal.inputs.MultiModalKwargs.batch].
 """
+
+
+@dataclass
+class MultiModalFeatureSpec:
+    """
+    Represents a single multimodal input with its processed data and metadata.
+    
+    Used by the V1 engine to track multimodal data through processing and
+    caching. A request containing multiple multimodal items will have one
+    MultiModalFeatureSpec per item.
+    """
+
+    data: Optional["MultiModalKwargsItem"]
+    """Multimodal data for this feature"""
+
+    modality: str
+    """Based on the input, e.g., "image", "audio", "video"."""
+
+    identifier: str
+    """mm_hash or uuid for caching encoder outputs."""
+
+    mm_position: PlaceholderRange
+    """e.g., PlaceholderRange(offset=2, length=336)"""
 
 
 @dataclass
@@ -923,9 +947,6 @@ class MultiModalInputs(TypedDict):
     prompt_token_ids: list[int]
     """The processed token IDs which includes placeholder tokens."""
 
-    token_type_ids: NotRequired[list[int]]
-    """The token type IDs of the prompt."""
-
     mm_kwargs: MultiModalKwargsOptionalItems
     """Keyword arguments to be directly passed to the model after batching."""
 
@@ -956,6 +977,3 @@ class MultiModalEncDecInputs(MultiModalInputs):
 
     encoder_prompt_token_ids: list[int]
     """The processed token IDs of the encoder prompt."""
-
-    encoder_token_type_ids: NotRequired[list[int]]
-    """The token type IDs of the encoder prompt."""

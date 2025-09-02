@@ -12,7 +12,7 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
-from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
@@ -158,7 +158,7 @@ class Processor:
         auto-hashed downstream.
         """
 
-        def _validate_single(single_prompt: Union[dict, str]) -> None:
+        def _validate_single_prompt(single_prompt: Union[dict, str]) -> None:
             if not isinstance(single_prompt, dict):
                 return
             mm_data = single_prompt.get("multi_modal_data")
@@ -187,11 +187,11 @@ class Processor:
             enc = prompt.get("encoder_prompt")
             dec = prompt.get("decoder_prompt")
             if enc is not None:
-                _validate_single(enc)
+                _validate_single_prompt(enc)
             if dec is not None:
-                _validate_single(dec)
+                _validate_single_prompt(dec)
         else:
-            _validate_single(prompt)  # type: ignore[arg-type]
+            _validate_single_prompt(prompt)  # type: ignore[arg-type]
 
     def _validate_lora(self, lora_request: Optional[LoRARequest]) -> None:
         if lora_request is not None and not self.lora_config:
@@ -349,7 +349,10 @@ class Processor:
             # Otherwise, use user-provided uuids as multimodal hash overrides
             # if provided.
             self._validate_multi_modal_uuids(prompt)
-            mm_hash_overrides = prompt.get("multi_modal_uuids")
+            if isinstance(prompt, dict):
+                mm_hash_overrides = prompt.get("multi_modal_uuids")
+            else:
+                mm_hash_overrides = None
 
         # Process inputs, which includes:
         # 1. Tokenize text prompt, with LoRA request if one exists.
@@ -397,9 +400,8 @@ class Processor:
             pooling_params = params.clone()
 
         # Multimodal related.
-        sorted_mm_inputs: Optional[list[Optional[MultiModalKwargsItem]]] = None
-        sorted_mm_positions: Optional[list[PlaceholderRange]] = None
-        sorted_mm_hashes: Optional[list[str]] = None
+        mm_features: Optional[list[MultiModalFeatureSpec]] = None
+
         if decoder_inputs["type"] == "multimodal":
             decoder_mm_inputs = decoder_inputs["mm_kwargs"]
             decoder_mm_positions = decoder_inputs["mm_placeholders"]
@@ -410,25 +412,19 @@ class Processor:
             # in the input sequence.
             sorted_mm_idxs = argsort_mm_positions(decoder_mm_positions)
 
-            sorted_mm_inputs = [
-                decoder_mm_inputs[modality][idx]
-                for modality, idx in sorted_mm_idxs
-            ]
-            sorted_mm_positions = [
-                decoder_mm_positions[modality][idx]
-                for modality, idx in sorted_mm_idxs
-            ]
-            sorted_mm_hashes = [
-                decoder_mm_hashes[modality][idx]
-                for modality, idx in sorted_mm_idxs
-            ]
+            mm_features = []
+            for modality, idx in sorted_mm_idxs:
+                mm_features.append(
+                    MultiModalFeatureSpec(
+                        data=decoder_mm_inputs[modality][idx],
+                        modality=modality,
+                        identifier=decoder_mm_hashes[modality][idx],
+                        mm_position=decoder_mm_positions[modality][idx]))
 
         return decoder_inputs.get("prompt"), EngineCoreRequest(
             request_id=request_id,
             prompt_token_ids=decoder_inputs["prompt_token_ids"],
-            mm_kwargs=sorted_mm_inputs,
-            mm_hashes=sorted_mm_hashes,
-            mm_placeholders=sorted_mm_positions,
+            mm_features=mm_features,
             sampling_params=sampling_params,
             pooling_params=pooling_params,
             eos_token_id=eos_token_id,
@@ -474,7 +470,19 @@ class Processor:
         else:
             tokenizer = self.tokenizer.get_lora_tokenizer(lora_request)
             max_input_id = max(prompt_ids, default=0)
-            if max_input_id > tokenizer.max_token_id:
+
+            # NOTE: tokenizer.max_token_id is the tokenizer’s vocab size while
+            # self.model_config.get_vocab_size() is the model’s vocab size.
+            # For Qwen3 models, the language model has extra tokens that do
+            # not exist in the tokenizer, and vice versa for multimodal
+            # placeholder tokens in some multimodal models.
+            # See https://github.com/QwenLM/Qwen3/issues/29#issuecomment-1933720399 # noqa: E501
+            # and https://github.com/vllm-project/vllm/pull/22471#discussion_r2312251421 # noqa: E501
+
+            # Here we take the max of the two to determine if a token id is
+            # truly out-of-vocabulary.
+            if max_input_id > max(tokenizer.max_token_id,
+                                  self.model_config.get_vocab_size() - 1):
                 raise ValueError(
                     f"Token id {max_input_id} is out of vocabulary")
 
