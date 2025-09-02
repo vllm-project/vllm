@@ -19,7 +19,6 @@ from threading import Thread
 from typing import Any, Callable, Optional, Union, cast
 
 import cloudpickle
-import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -416,7 +415,6 @@ class WorkerProc:
         self.worker_response_mq = MessageQueue(1, 1)
 
         self.async_output_queue: queue.Queue = queue.Queue()
-        self.async_output_copy_stream = torch.cuda.Stream()
         self.async_output_copy_thread = Thread(
             target=self.async_output_busy_loop,
             daemon=True,
