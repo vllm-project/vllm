@@ -35,7 +35,7 @@ __all__ = [
     "Llama3JsonToolParser",
     "JambaToolParser",
     "Llama4PythonicToolParser",
-    "LongCatFlashChatToolParser"
+    "LongcatFlashToolParser"
     "PythonicToolParser",
     "Phi4MiniJsonToolParser",
     "DeepSeekV3ToolParser",
