@@ -850,6 +850,10 @@ class Scheduler(SchedulerInterface):
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
 
+        if sampled_token_ids is not None:
+            # Optimization: Avoid a .tolist() call for each request.
+            sampled_token_ids = sampled_token_ids.tolist()
+
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: Optional[SpecDecodingStats] = None
 
@@ -868,11 +872,13 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            num_sampled = num_sampled_tokens[req_index]
-            if num_sampled > 0:
-                generated_token_ids = sampled_token_ids[:num_sampled].tolist()
-            else:
-                generated_token_ids = []
+            generated_token_ids: list[int] = []
+            if sampled_token_ids is not None:
+                assert num_sampled_tokens is not None
+                num_sampled = num_sampled_tokens[req_index]
+                if num_sampled > 0:
+                    generated_token_ids = sampled_token_ids[
+                        req_index][:num_sampled]
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))

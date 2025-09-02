@@ -92,9 +92,9 @@ class ModelRunnerOutput:
     # [num_reqs]
     # Number of tokens sampled in the current step. Each request may generate
     # different number of tokens due to chunked prefilling and spec decoding.
-    num_sampled_tokens: np.ndarray
+    num_sampled_tokens: Optional[np.ndarray]
     # [num_reqs, max_num_sampled_tokens]
-    sampled_token_ids: np.ndarray
+    sampled_token_ids: Optional[np.ndarray]
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
@@ -128,8 +128,8 @@ class DraftTokenIds:
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
     req_ids=[],
     req_id_to_index={},
-    num_sampled_tokens=np.empty(0, dtype=np.int32),
-    sampled_token_ids=np.empty((0, 0), dtype=np.int32),
+    num_sampled_tokens=None,
+    sampled_token_ids=None,
     logprobs=None,
     prompt_logprobs_dict={},
     pooler_output=[],
