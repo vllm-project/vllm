@@ -20,6 +20,8 @@ from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
+from vllm.entrypoints.constants import (H11_MAX_HEADER_COUNT_DEFAULT,
+                                        H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT)
 from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
@@ -44,10 +46,10 @@ class LoRAParserAction(argparse.Action):
 
         lora_list: list[LoRAModulePath] = []
         for item in values:
-            if item in [None, '']:  # Skip if item is None or empty string
+            if item in [None, ""]:  # Skip if item is None or empty string
                 continue
-            if '=' in item and ',' not in item:  # Old format: name=path
-                name, path = item.split('=')
+            if "=" in item and "," not in item:  # Old format: name=path
+                name, path = item.split("=")
                 lora_list.append(LoRAModulePath(name, path))
             else:  # Assume JSON format
                 try:
@@ -72,6 +74,8 @@ class FrontendArgs:
     """Host name."""
     port: int = 8000
     """Port number."""
+    uds: Optional[str] = None
+    """Unix domain socket path. If set, host and port arguments are ignored."""
     uvicorn_log_level: Literal["debug", "info", "warning", "error", "critical",
                                "trace"] = "info"
     """Log level for uvicorn."""
@@ -147,6 +151,10 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     """Special the tool parser plugin write to parse the model-generated tool
     into OpenAI API format, the name register in this plugin can be used in
     `--tool-call-parser`."""
+    tool_server: Optional[str] = None
+    """Comma-separated list of host:port pairs (IPv4, IPv6, or hostname).
+    Examples: 127.0.0.1:8000, [::1]:8000, localhost:1234. Or `demo` for demo
+    purpose."""
     log_config_file: Optional[str] = envs.VLLM_LOGGING_CONFIG_PATH
     """Path to logging config JSON file for both vllm and uvicorn"""
     max_log_len: Optional[int] = None
@@ -163,6 +171,17 @@ schema. Example: `[{"type": "text", "text": "Hello world!"}]`"""
     enable_tokenizer_info_endpoint: bool = False
     """Enable the /get_tokenizer_info endpoint. May expose chat
     templates and other tokenizer configuration."""
+    enable_log_outputs: bool = False
+    """If set to True, enable logging of model outputs (generations) 
+    in addition to the input logging that is enabled by default."""
+    h11_max_incomplete_event_size: int = H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT
+    """Maximum size (bytes) of an incomplete HTTP event (header or body) for
+    h11 parser. Helps mitigate header abuse. Default: 4194304 (4 MB)."""
+    h11_max_header_count: int = H11_MAX_HEADER_COUNT_DEFAULT
+    """Maximum number of HTTP headers allowed in a request for h11 parser.
+    Helps mitigate header abuse. Default: 256."""
+    log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
+    """If set to True, log the stack trace of error responses"""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:

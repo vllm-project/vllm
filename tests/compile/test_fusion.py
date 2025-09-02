@@ -7,16 +7,18 @@ import torch
 import vllm.envs as envs
 import vllm.plugins
 from vllm.compilation.fusion import (FUSED_OPS, QUANT_OPS, FusedRMSQuantKey,
-                                     FusionPass, GroupShape, QuantKey)
+                                     FusionPass)
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.config import (CompilationConfig, CompilationLevel, PassConfig,
                          VllmConfig)
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape, QuantKey, ScaleDesc)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    CUTLASS_FP8_SUPPORTED, Fp8LinearOp, maybe_create_device_identity)
+    Fp8LinearOp, maybe_create_device_identity)
 from vllm.platforms import current_platform
 
-from .backend import TestBackend, TestPassManager
+from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -24,16 +26,14 @@ FP8_DTYPE = current_platform.fp8_dtype()
 class TestModel(torch.nn.Module):
 
     def __init__(self, hidden_size: int, eps: float, static: bool,
-                 cutlass_fp8_enabled: bool, *args, **kwargs):
+                 force_fp8_e4m3fnuz: bool, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.cutlass_fp8_enabled = cutlass_fp8_enabled
+        self.force_fp8_e4m3fnuz = force_fp8_e4m3fnuz
         self.norm = [RMSNorm(hidden_size, eps) for _ in range(3)]
         self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(2)]
         group_shape = GroupShape.PER_TENSOR if static else GroupShape.PER_TOKEN
-        self.key = QuantKey(dtype=FP8_DTYPE,
-                            static=static,
-                            group_shape=group_shape,
-                            symmetric=True)
+        quant_scale = ScaleDesc(torch.float32, static, group_shape)
+        self.key = QuantKey(dtype=FP8_DTYPE, scale=quant_scale, symmetric=True)
         if static:
             self.scale = [torch.rand(1, dtype=torch.float32) for _ in range(2)]
         else:
@@ -43,7 +43,7 @@ class TestModel(torch.nn.Module):
             for _ in range(2)
         ]
         self.fp8_linear = Fp8LinearOp(
-            cutlass_fp8_supported=cutlass_fp8_enabled,
+            force_fp8_e4m3fnuz=force_fp8_e4m3fnuz,
             act_quant_static=static,
             act_quant_group_shape=group_shape,
         )
@@ -81,12 +81,11 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("num_tokens", [7, 256, 533, 2048, 2049])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.parametrize("static", [True, False])
-@pytest.mark.parametrize("cutlass_fp8_enabled",
-                         [True, False] if CUTLASS_FP8_SUPPORTED else [False])
+@pytest.mark.parametrize("force_fp8_e4m3fnuz", [True, False])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda", "rocm"],
                     reason="Only test on CUDA and ROCm")
 def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
-                              cutlass_fp8_enabled):
+                              force_fp8_e4m3fnuz):
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(1)
@@ -102,17 +101,8 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
         noop_pass = NoOpEliminationPass(vllm_config)
         fusion_pass = FusionPass.instance(vllm_config)
 
-        model = TestModel(hidden_size, eps, static, cutlass_fp8_enabled)
-
-        def check(test_pass_manager: TestPassManager):
-            # In pre-nodes, fp8 quant should be there
-            # and fused kernels should not
-            test_pass_manager.check_before_ops(model.ops_in_model_before())
-            # In post-nodes, fused kernels should be there
-            # and fp8 quant should not
-            test_pass_manager.check_after_ops(model.ops_in_model_after())
-
-        backend = TestBackend(noop_pass, fusion_pass, check_fn=check)
+        backend = TestBackend(noop_pass, fusion_pass)
+        model = TestModel(hidden_size, eps, static, force_fp8_e4m3fnuz)
 
         # First dimension dynamic
         x = torch.rand(num_tokens, hidden_size)
@@ -132,3 +122,9 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static,
             ATOL, RTOL = (1e-2, 1e-2)
 
         torch.testing.assert_close(result, result2, atol=ATOL, rtol=RTOL)
+
+        # In pre-nodes, fp8 quant should be there and fused kernels should not
+        backend.check_before_ops(model.ops_in_model_before())
+
+        # In post-nodes, fused kernels should be there and fp8 quant should not
+        backend.check_after_ops(model.ops_in_model_after())

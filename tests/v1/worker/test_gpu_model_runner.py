@@ -120,7 +120,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
             NewRequestData(
                 req_id=req_id,
                 prompt_token_ids=[1, 2, 3],
-                mm_inputs=[],
+                mm_kwargs=[],
                 mm_hashes=[],
                 mm_positions=[],
                 sampling_params=SamplingParams(),
@@ -141,7 +141,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -207,7 +207,7 @@ def test_update_states_request_finished(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids={req_id},
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -239,7 +239,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -266,7 +266,7 @@ def test_update_states_request_resumed(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -347,7 +347,7 @@ def test_update_states_no_changes(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -384,7 +384,7 @@ def test_update_states_request_unscheduled(model_runner, dist_init):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -417,12 +417,12 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
         return rnd_stride
 
     # Patch the attention backend class and re-trigger the KV cache creation.
-    for attn_backend in model_runner.attn_backends:
+    for attn_group in model_runner._attn_group_iterator():
+        attn_backend = attn_group.backend
         monkeypatch.setattr(attn_backend, "get_kv_cache_stride_order",
                             rnd_stride_order)
 
-    model_runner.attn_backends = []
-    model_runner.attn_metadata_builders = []
+    model_runner.attn_groups = []
     model_runner.initialize_kv_cache(model_runner.kv_cache_config)
 
     # Shape is unchanged, but layout may differ
@@ -680,6 +680,7 @@ def test_init_kv_cache_with_kv_sharing_valid():
         kv_cache_spec[layer_0].page_size_bytes
 
     runner.initialize_kv_cache(kv_cache_config)
+    kv_cache_config_after_init = runner.kv_cache_config
 
     layer_0_kv = vllm_ctx[layer_0].kv_cache[0]
     layer_1_kv = vllm_ctx[layer_1].kv_cache[0]
@@ -687,10 +688,12 @@ def test_init_kv_cache_with_kv_sharing_valid():
     assert id(layer_1_kv) == id(layer_0_kv)
 
     # check layer 1 added to kv cache group's layer names
-    assert len(kv_cache_config.kv_cache_groups) == 1
-    assert len(kv_cache_config.kv_cache_groups[0].layer_names) == 2
-    assert kv_cache_config.kv_cache_groups[0].layer_names[0] == layer_0
-    assert kv_cache_config.kv_cache_groups[0].layer_names[1] == layer_1
+    assert len(kv_cache_config_after_init.kv_cache_groups) == 1
+    assert len(kv_cache_config_after_init.kv_cache_groups[0].layer_names) == 2
+    assert kv_cache_config_after_init.kv_cache_groups[0].layer_names[
+        0] == layer_0
+    assert kv_cache_config_after_init.kv_cache_groups[0].layer_names[
+        1] == layer_1
 
 
 def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
@@ -772,6 +775,8 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
                 head_dim=hf_config.mamba_d_head,
                 rms_norm_eps=hf_config.rms_norm_eps,
                 activation=hf_config.hidden_act,
+                cache_config=cache_config,
+                model_config=model_config,
                 prefix=key,
             )
         # suppress var not used error

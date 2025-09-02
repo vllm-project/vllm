@@ -34,11 +34,13 @@ theme:
     - content.action.edit
     - content.code.copy
     - content.tabs.link
+    - navigation.instant
+    - navigation.instant.progress
     - navigation.tracking
     - navigation.tabs
     - navigation.tabs.sticky
     - navigation.sections
-    - navigation.prune
+    - navigation.indexes
     - navigation.top
     - search.highlight
     - search.share
@@ -50,11 +52,6 @@ hooks:
   - docs/mkdocs/hooks/generate_examples.py
   - docs/mkdocs/hooks/generate_argparse.py
   - docs/mkdocs/hooks/url_schemes.py
-
-# Required to stop api-autonav from raising an error
-# https://github.com/tlambert03/mkdocs-api-autonav/issues/16
-nav:
-  - api
 
 plugins:
   - meta
@@ -132,15 +129,16 @@ markdown_extensions:
   - toc:
       permalink: true
   # For math rendering
-  - mdx_math:
-      enable_dollar_delimiter: true
+  - pymdownx.arithmatex:
+      generic: true
 
 extra_css:
   - mkdocs/stylesheets/extra.css
 
 extra_javascript:
   - mkdocs/javascript/run_llm_widget.js
-  - https://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS_HTML
+  - mkdocs/javascript/mathjax.js
+  - https://unpkg.com/mathjax@3.2.2/es5/tex-mml-chtml.js
   - mkdocs/javascript/edit_and_feedback.js
   - mkdocs/javascript/slack_and_forum.js
 

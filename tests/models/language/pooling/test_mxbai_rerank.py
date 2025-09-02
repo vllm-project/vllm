@@ -7,15 +7,16 @@ import torch
 
 from tests.conftest import HfRunner
 
-from .mteb_utils import RerankModelInfo, mteb_test_rerank_models
+from ...utils import LASTPoolingRerankModelInfo, RerankModelInfo
+from .mteb_utils import mteb_test_rerank_models
 
 RERANK_MODELS = [
-    RerankModelInfo("mixedbread-ai/mxbai-rerank-base-v2",
-                    architecture="Qwen2ForSequenceClassification",
-                    enable_test=True),
-    RerankModelInfo("mixedbread-ai/mxbai-rerank-large-v2",
-                    architecture="Qwen2ForSequenceClassification",
-                    enable_test=False)
+    LASTPoolingRerankModelInfo("mixedbread-ai/mxbai-rerank-base-v2",
+                               architecture="Qwen2ForSequenceClassification",
+                               enable_test=True),
+    LASTPoolingRerankModelInfo("mixedbread-ai/mxbai-rerank-large-v2",
+                               architecture="Qwen2ForSequenceClassification",
+                               enable_test=False)
 ]
 
 

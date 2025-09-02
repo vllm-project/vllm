@@ -8,8 +8,174 @@ import numpy as np
 import torch
 from transformers import PretrainedConfig
 
+from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
+
 from .base import RotaryEmbedding
 from .common import apply_rotary_emb_dispatch
+
+
+@triton.jit
+def _triton_qwen2vl_mrope_forward(
+    q_ptr,
+    k_ptr,
+    cos,
+    sin,
+    num_tokens,
+    n_qh: tl.constexpr,
+    n_kh: tl.constexpr,
+    hd: tl.constexpr,
+    rd: tl.constexpr,
+    pad_n_qh: tl.constexpr,
+    pad_n_kh: tl.constexpr,
+    pad_hd: tl.constexpr,
+    mrope_section_t: tl.constexpr,
+    mrope_section_h: tl.constexpr,
+):
+    # Adapted from
+    # https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/qwen2vl_mrope.py
+    # This version supports flatten input tensors from vllm
+    # and supports cos and sin cache with shape (3, num_tokens, head_dim // 2)
+    # instead of (3, bsz, seq_len, head_dim)
+    pid = tl.program_id(0)
+    # locate start address
+    q_ptr = q_ptr + pid * (n_qh * hd)
+    k_ptr = k_ptr + pid * (n_kh * hd)
+
+    # ####################################################################
+    # get the cos(mθ_{i...d/2}) and sin(mθ_{i...d/2}) for token position
+    # m of this program instance
+    # ####################################################################
+    # Note: cos and sin now have shape (3, num_tokens, head_dim // 2)
+
+    t_end = mrope_section_t
+    h_end = t_end + mrope_section_h
+
+    # Updated stride calculation for half head_dim
+    half_rd = rd // 2
+    t_cos = cos + pid * half_rd
+    h_cos = t_cos + num_tokens * half_rd
+    w_cos = h_cos + num_tokens * half_rd
+    t_sin = sin + pid * half_rd
+    h_sin = t_sin + num_tokens * half_rd
+    w_sin = h_sin + num_tokens * half_rd
+
+    # Updated offsets for half head_dim
+    cos_offsets = tl.arange(0, pad_hd // 2)
+    t_mask = cos_offsets < t_end
+    h_mask = (t_end <= cos_offsets) & (cos_offsets < h_end)
+    w_mask = (h_end <= cos_offsets) & (cos_offsets < half_rd)
+
+    t_cos_row = tl.load(t_cos + cos_offsets, mask=t_mask, other=0)
+    h_cos_row = tl.load(h_cos + cos_offsets, mask=h_mask, other=0)
+    w_cos_row = tl.load(w_cos + cos_offsets, mask=w_mask, other=0)
+    t_sin_row = tl.load(t_sin + cos_offsets, mask=t_mask, other=0)
+    h_sin_row = tl.load(h_sin + cos_offsets, mask=h_mask, other=0)
+    w_sin_row = tl.load(w_sin + cos_offsets, mask=w_mask, other=0)
+
+    cos_row = t_cos_row + h_cos_row + w_cos_row
+    sin_row = t_sin_row + h_sin_row + w_sin_row
+
+    # ####################################################################
+    # Load the left and right half of q and k for the current
+    # program instance (i.e. for the current token) separately
+    # ####################################################################
+    # left half of the head
+    first_half_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + tl.arange(
+        0, pad_hd // 2)[None, :]
+    first_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + tl.arange(
+        0, pad_hd // 2)[None, :]
+    first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (tl.arange(
+        0, pad_hd // 2)[None, :] < rd // 2)
+    first_k_mask = (tl.arange(0, pad_n_kh)[:, None] < n_kh) & (tl.arange(
+        0, pad_hd // 2)[None, :] < rd // 2)
+
+    q_tile_1 = tl.load(q_ptr + first_half_q_offsets,
+                       mask=first_q_mask,
+                       other=0).to(sin_row.dtype)
+    k_tile_1 = tl.load(k_ptr + first_half_k_offsets,
+                       mask=first_k_mask,
+                       other=0).to(sin_row.dtype)
+
+    # right half of the head
+    second_half_q_offsets = first_half_q_offsets + (rd // 2)
+    second_half_k_offsets = first_half_k_offsets + (rd // 2)
+    second_q_mask = first_q_mask
+    second_k_mask = first_k_mask
+
+    q_tile_2 = tl.load(q_ptr + second_half_q_offsets,
+                       mask=second_q_mask,
+                       other=0).to(sin_row.dtype)
+    k_tile_2 = tl.load(k_ptr + second_half_k_offsets,
+                       mask=second_k_mask,
+                       other=0).to(sin_row.dtype)
+
+    # y = [x1, x2] * [cos, cos] + [-x2, x1] * [sin, sin]
+    # Since cos and sin are now half-size,
+    # we use the same cos_row and sin_row for both halves
+    new_q_tile_1 = q_tile_1 * cos_row - q_tile_2 * sin_row
+    tl.store(q_ptr + first_half_q_offsets, new_q_tile_1, mask=first_q_mask)
+    new_q_tile_2 = q_tile_2 * cos_row + q_tile_1 * sin_row
+    tl.store(q_ptr + second_half_q_offsets, new_q_tile_2, mask=second_q_mask)
+
+    new_k_tile_1 = k_tile_1 * cos_row - k_tile_2 * sin_row
+    tl.store(k_ptr + first_half_k_offsets, new_k_tile_1, mask=first_k_mask)
+    new_k_tile_2 = k_tile_2 * cos_row + k_tile_1 * sin_row
+    tl.store(k_ptr + second_half_k_offsets, new_k_tile_2, mask=second_k_mask)
+
+
+def triton_mrope(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    mrope_section: list[int],
+    head_size: int,
+    rotary_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Qwen2VL mrope kernel.
+
+    Args:
+        query: [num_tokens, num_heads * head_size]
+        key: [num_tokens, num_kv_heads * head_size]
+        cos: [3, num_tokens, head_size //2 ]
+            (T/H/W positions with multimodal inputs)
+        sin: [3, num_tokens, head_size //2 ]
+            (T/H/W positions with multimodal inputs)
+        mrope_section: [t, h, w]
+        head_size: int
+    """
+    n_row, n_q_head_head_dim = q.shape
+    n_q_head = n_q_head_head_dim // head_size
+    n_kv_head = k.shape[1] // head_size
+    pad_hd = triton.next_power_of_2(head_size)
+    pad_n_q_head = triton.next_power_of_2(n_q_head)
+    pad_n_kv_head = triton.next_power_of_2(n_kv_head)
+
+    # ensure tensors passed into the kernel are contiguous.
+    # It will be no-op if they are already contiguous
+    q = q.contiguous()
+    k = k.contiguous()
+    cos = cos.contiguous()
+    sin = sin.contiguous()
+
+    _triton_qwen2vl_mrope_forward[(n_row, )](
+        q,
+        k,
+        cos,
+        sin,
+        n_row,
+        n_q_head,
+        n_kv_head,
+        head_size,
+        rotary_dim,
+        pad_n_q_head,
+        pad_n_kv_head,
+        pad_hd,
+        mrope_section[0],
+        mrope_section[1],
+    )
+    return q, k
 
 
 class MRotaryEmbedding(RotaryEmbedding):
@@ -36,11 +202,34 @@ class MRotaryEmbedding(RotaryEmbedding):
         if self.mrope_section:
             assert sum(self.mrope_section) == rotary_dim // 2
 
+        self.use_triton = current_platform.is_cuda_alike()
+
     def forward(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
         key: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """MRope forward.
+
+        Args:
+            positions:
+                [num_tokens,] (text only) or
+                [3, num_tokens] (T/H/W positions with multimodal inputs)
+            query: [num_tokens, num_heads * head_size]
+            key: [num_tokens, num_kv_heads * head_size]
+        """
+        if self.use_triton:
+            return self.forward_cuda(positions, query, key)
+        else:
+            return self.forward_native(positions, query, key)
+
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+        offsets: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """PyTorch-native implementation equivalent to forward().
 
@@ -80,6 +269,52 @@ class MRotaryEmbedding(RotaryEmbedding):
         query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
         key_shape = key.shape
+        key = key.view(num_tokens, -1, self.head_size)
+        key_rot = key[..., :self.rotary_dim]
+        key_pass = key[..., self.rotary_dim:]
+        key_rot = apply_rotary_emb_dispatch(key_rot, cos, sin,
+                                            self.is_neox_style)
+        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
+        return query, key
+
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: Optional[torch.Tensor] = None,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+
+        assert positions.ndim == 1 or positions.ndim == 2
+        assert key is not None
+
+        num_tokens = positions.shape[-1]
+        cos_sin = self.cos_sin_cache[positions]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        query_shape = query.shape
+        key_shape = key.shape
+        if positions.ndim == 2:
+            assert self.mrope_section
+
+            q, k = triton_mrope(
+                query,
+                key,
+                cos,
+                sin,
+                self.mrope_section,
+                self.head_size,
+                self.rotary_dim,
+            )
+
+            return q.reshape(query_shape), k.reshape(key_shape)
+
+        query = query.view(num_tokens, -1, self.head_size)
+        query_rot = query[..., :self.rotary_dim]
+        query_pass = query[..., self.rotary_dim:]
+        query_rot = apply_rotary_emb_dispatch(query_rot, cos, sin,
+                                              self.is_neox_style)
+        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
+
         key = key.view(num_tokens, -1, self.head_size)
         key_rot = key[..., :self.rotary_dim]
         key_pass = key[..., self.rotary_dim:]
@@ -151,6 +386,15 @@ class MRotaryEmbedding(RotaryEmbedding):
             )
         elif hf_config.model_type in ["glm4v", "glm4v_moe"]:
             return cls._glm4v_get_input_positions_tensor(
+                input_tokens=input_tokens,
+                hf_config=hf_config,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                context_len=context_len,
+                seq_len=seq_len,
+            )
+        elif hf_config.model_type in ["ernie4_5_moe_vl", "ernie4_5_vl"]:
+            return cls._ernie_get_input_positions_tensor(
                 input_tokens=input_tokens,
                 hf_config=hf_config,
                 image_grid_thw=image_grid_thw,
@@ -246,6 +490,120 @@ class MRotaryEmbedding(RotaryEmbedding):
                     )
                     llm_grid_t, llm_grid_h, llm_grid_w = \
                         t, h // spatial_merge_size, w // spatial_merge_size
+
+                    for t_idx in range(llm_grid_t):
+                        t_index = torch.tensor(t_idx).view(-1, 1).expand(
+                            -1, llm_grid_h * llm_grid_w).flatten()
+                        h_index = torch.arange(llm_grid_h).view(
+                            1, -1, 1).expand(1, -1, llm_grid_w).flatten()
+                        w_index = torch.arange(llm_grid_w).view(
+                            1, 1, -1).expand(1, llm_grid_h, -1).flatten()
+                        llm_pos_ids_list.append(
+                            torch.stack([t_index, h_index, w_index]) + st_idx)
+
+                    mm_data_idx += 1
+                    video_frame_num += 1
+
+                else:
+                    text_len = end_idx - start_idx
+                    llm_pos_ids_list.append(
+                        torch.arange(text_len).view(1, -1).expand(3, -1) +
+                        st_idx)
+                    video_frame_num = 1
+
+        else:
+            text_len = len(input_tokens)
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1))
+
+        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        llm_positions = llm_positions[:, context_len:seq_len]
+        mrope_position_delta = (llm_positions.max() + 1 -
+                                len(input_tokens)).item()
+        return llm_positions, mrope_position_delta
+
+    @classmethod
+    def _ernie_get_input_positions_tensor(
+        cls,
+        input_tokens: list[int],
+        hf_config: PretrainedConfig,
+        image_grid_thw: Union[list[list[int]], torch.Tensor],
+        video_grid_thw: Union[list[list[int]], torch.Tensor],
+        context_len: int = 0,
+        seq_len: Optional[int] = None,
+    ) -> tuple[torch.Tensor, int]:
+        """Get mrope input positions and delta value for Ernie VL."""
+
+        image_token_id = hf_config.im_patch_id
+        video_start_token_id = hf_config.video_start_token_id
+        video_end_token_id = hf_config.video_end_token_id
+        spatial_conv_size = hf_config.spatial_conv_size
+        temporal_conv_size = hf_config.temporal_conv_size
+        llm_pos_ids_list: list = []
+
+        if not (image_grid_thw is None and video_grid_thw is None):
+            if isinstance(image_grid_thw, torch.Tensor):
+                image_grid_thw = image_grid_thw.tolist()
+
+            input_token_type: list[str] = []
+            video_check_flg = False
+            for token in input_tokens:
+                if token == video_start_token_id:
+                    video_check_flg = True
+                elif token == video_end_token_id:
+                    video_check_flg = False
+
+                if (token == image_token_id) and (video_check_flg is False):
+                    input_token_type.append("image")
+                elif (token == image_token_id) and (video_check_flg is True):
+                    input_token_type.append("video")
+                else:
+                    input_token_type.append("text")
+
+            input_type_group: list[tuple[str, int, int]] = []
+            for key, group_iter in itertools.groupby(
+                    enumerate(input_token_type), lambda x: x[1]):
+                group_list = list(group_iter)
+                start_index = group_list[0][0]
+                end_index = group_list[-1][0] + 1
+                input_type_group.append((key, start_index, end_index))
+
+            video_frame_num = 1
+            mm_data_idx = 0
+            for modality_type, start_idx, end_idx in input_type_group:
+                st_idx = llm_pos_ids_list[-1].max() + 1 if len(
+                    llm_pos_ids_list) > 0 else 0
+                if modality_type == "image":
+                    t, h, w = (
+                        image_grid_thw[mm_data_idx][0],
+                        image_grid_thw[mm_data_idx][1],
+                        image_grid_thw[mm_data_idx][2],
+                    )
+                    llm_grid_t, llm_grid_h, llm_grid_w = \
+                        t, h // spatial_conv_size, w // spatial_conv_size
+
+                    t_index = torch.arange(llm_grid_t).view(-1, 1).expand(
+                        -1, llm_grid_h * llm_grid_w).flatten()
+                    h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(
+                        llm_grid_t, -1, llm_grid_w).flatten()
+                    w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(
+                        llm_grid_t, llm_grid_h, -1).flatten()
+                    llm_pos_ids_list.append(
+                        torch.stack([t_index, h_index, w_index]) + st_idx)
+                    mm_data_idx += 1
+
+                elif modality_type == "video":
+                    t, h, w = (
+                        video_grid_thw[mm_data_idx][0],
+                        video_grid_thw[mm_data_idx][1],
+                        video_grid_thw[mm_data_idx][2],
+                    )
+                    llm_grid_t, llm_grid_h, llm_grid_w = (t //
+                                                          temporal_conv_size,
+                                                          h //
+                                                          spatial_conv_size,
+                                                          w //
+                                                          spatial_conv_size)
 
                     for t_idx in range(llm_grid_t):
                         t_index = torch.tensor(t_idx).view(-1, 1).expand(

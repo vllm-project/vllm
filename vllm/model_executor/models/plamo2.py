@@ -767,8 +767,12 @@ class Plamo2ForCausalLM(Plamo2PreTrainedModel, HasInnerState, SupportsPP,
                 self.vllm_config.parallel_config, LayerBlockType.mamba)
 
             self.mamba_cache = MambaCacheManager(
-                self.vllm_config, self.lm_head.weight.dtype, num_mamba_layers,
-                *self._get_mamba_cache_shape())
+                self.vllm_config,
+                num_mamba_layers,
+                *self._get_mamba_cache_shape(),
+                self.lm_head.weight.dtype,
+                self.lm_head.weight.dtype,
+            )
 
         mamba_cache_params = self.mamba_cache.current_run_tensors(**kwargs)
 

@@ -456,7 +456,15 @@ class HfRunner:
         outputs = []
         for inputs in all_inputs:
             output = self.model(**self.wrap_device(inputs))
-            logits = output.logits.softmax(dim=-1)[0].tolist()
+
+            problem_type = getattr(self.config, "problem_type", "")
+
+            if problem_type == "regression":
+                logits = output.logits[0].tolist()
+            elif problem_type == "multi_label_classification":
+                logits = output.logits.sigmoid()[0].tolist()
+            else:
+                logits = output.logits.softmax(dim=-1)[0].tolist()
             outputs.append(logits)
 
         return outputs
@@ -1014,15 +1022,17 @@ class VllmRunner:
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
+        concurrency_limit: Optional[int] = None,
     ) -> list[tuple[list[list[int]], list[str]]]:
         inputs = self.get_inputs(prompts,
                                  images=images,
                                  videos=videos,
                                  audios=audios)
 
-        outputs = self.llm.beam_search(
-            inputs,
-            BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
+        outputs = self.llm.beam_search(inputs,
+                                       BeamSearchParams(beam_width=beam_width,
+                                                        max_tokens=max_tokens),
+                                       concurrency_limit=concurrency_limit)
         returned_outputs = []
         for output in outputs:
             token_ids = [x.tokens for x in output.sequences]

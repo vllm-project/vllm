@@ -231,7 +231,7 @@ class XFormersAttentionMetadataBuilder(
         q_seqlens = torch.diff(q_start_loc)
         max_query_len = common_attn_metadata.max_query_len
         kv_seqlens = common_attn_metadata.seq_lens
-        max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
+        max_seq_len = common_attn_metadata.max_seq_len
         block_table = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
@@ -322,6 +322,7 @@ class XFormersAttentionImpl(AttentionImpl):
         attn_metadata: XFormersAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with XFormers.
 
@@ -336,7 +337,7 @@ class XFormersAttentionImpl(AttentionImpl):
         """
         assert output is not None, "Output tensor must be provided."
 
-        if output_scale is not None:
+        if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported"
                 " for XFormersAttentionImpl")

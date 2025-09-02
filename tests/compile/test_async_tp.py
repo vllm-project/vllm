@@ -20,7 +20,7 @@ from vllm.utils import update_environment_variables
 from ..models.registry import HF_EXAMPLE_MODELS
 from ..utils import (compare_two_settings, create_new_process_for_each_test,
                      multi_gpu_test)
-from .backend import TestBackend, TestPassManager
+from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -282,20 +282,10 @@ def async_tp_pass_on_test_model(local_rank: int, world_size: int,
                                            seed=42)
 
     async_tp_pass = AsyncTPPass(vllm_config)
+    backend = TestBackend(async_tp_pass)
+
     model = test_model_cls(hidden_size,
                            dtype)  # Pass dtype to model constructor
-
-    def check(test_pass_manager: TestPassManager):
-        # In pre-nodes, all gather or reduce scatter should exist,
-        # fused_matmul_reduce_scatter or fused_all_gather_matmul should not
-        test_pass_manager.check_before_ops(model.ops_in_model_before(),
-                                           fully_replaced=False)
-
-        # In post-nodes, fused_matmul_reduce_scatter or \
-        # fused_all_gather_matmul should exist
-        test_pass_manager.check_after_ops(model.ops_in_model_after())
-
-    backend = TestBackend(async_tp_pass, check_fn=check)
 
     hidden_states = torch.randn((batch_size * seq_len, hidden_size),
                                 dtype=dtype,
@@ -303,6 +293,14 @@ def async_tp_pass_on_test_model(local_rank: int, world_size: int,
 
     compiled_model = torch.compile(model, backend=backend)
     compiled_model(hidden_states)
+
+    # In pre-nodes, all gather or reduce scatter should exist,
+    # fused_matmul_reduce_scatter or fused_all_gather_matmul should not
+    backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
+
+    # In post-nodes, fused_matmul_reduce_scatter or \
+    # fused_all_gather_matmul should exist
+    backend.check_after_ops(model.ops_in_model_after())
 
 
 @create_new_process_for_each_test()
