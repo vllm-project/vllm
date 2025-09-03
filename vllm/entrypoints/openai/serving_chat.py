@@ -33,7 +33,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
     DeltaToolCall, ErrorResponse, FunctionCall, FunctionDefinition,
-    PromptTokenUsageInfo, CompletionTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo)
+    PromptTokenUsageInfo, CompletionTokenUsageInfo, 
+    RequestResponseMetadata, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
@@ -890,10 +891,10 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         delta_message = DeltaMessage(content=delta_text)
 
-                    if delta_message is not None 
-                    and (delta_message.reasoning_content 
-                         or (self.use_harmony and 
-                             not harmony_parsers[i].current_channel == "final")):
+                    if (delta_message is not None  
+                        and (delta_message.reasoning_content 
+                             or (self.use_harmony 
+                                 and not harmony_parsers[i].current_channel == "final"))):
                         num_reasoning_tokens_per_choice[i] += len(output.token_ids)
 
                     # update the previous values for the next iteration
@@ -1197,7 +1198,8 @@ class OpenAIServingChat(OpenAIServing):
                 reasoning_content, reasoning_content_tokens, content = (
                     reasoning_parser.extract_reasoning_content(
                         output.text, output.token_ids, request=request))
-                num_reasoning_tokens_per_choice[i] = len(reasoning_content_tokens) if reasoning_content_tokens else 0
+                num_reasoning_tokens_per_choice[i] = \
+                    len(reasoning_content_tokens) if reasoning_content_tokens else 0
 
                 if not request.include_reasoning:
                     reasoning_content = None
@@ -1364,7 +1366,9 @@ class OpenAIServingChat(OpenAIServing):
                 cached_tokens=final_res.num_cached_tokens)
         if any(num_reasoning_tokens_per_choice):
             usage.completion_tokens_details = CompletionTokenUsageInfo(
-                reasoning_tokens=sum([tokens for tokens in num_reasoning_tokens_per_choice if tokens is not None]))
+                reasoning_tokens=sum(
+                    [tokens for tokens in num_reasoning_tokens_per_choice
+                     if tokens is not None]))
 
         request_metadata.final_usage_info = usage
 
