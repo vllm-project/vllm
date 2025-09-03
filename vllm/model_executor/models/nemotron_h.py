@@ -436,15 +436,6 @@ class NemotronHModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if "A" in name:
-                loaded_weight = loaded_weight.to(torch.float32)
-
-            if "D" in name:
-                loaded_weight = loaded_weight.to(torch.float32)
-
-            if "dt_bias" in name:
-                loaded_weight = loaded_weight.to(torch.float32)
-
             # load stacked params
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
