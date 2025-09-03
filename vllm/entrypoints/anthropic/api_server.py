@@ -111,8 +111,7 @@ async def create_messages(request: AnthropicMessagesRequest,
     generator = await handler.create_messages(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+        return JSONResponse(content=generator.model_dump())
 
     elif isinstance(generator, AnthropicMessagesResponse):
         return JSONResponse(content=generator.model_dump(exclude_none=True))

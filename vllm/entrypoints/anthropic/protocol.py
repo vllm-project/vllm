@@ -80,7 +80,7 @@ class AnthropicMessagesRequest(BaseModel):
     metadata: Optional[dict[str, Any]] = None
     stop_sequences: Optional[list[str]] = None
     stream: Optional[bool] = False
-    system: Optional[str] = None
+    system: Optional[Union[str, list[AnthropicContentBlock]]] = None
     temperature: Optional[float] = None
     tool_choice: Optional[AnthropicToolChoice] = None
     tools: Optional[list[AnthropicTool]] = None

@@ -86,8 +86,18 @@ class AnthropicServingMessages(OpenAIServingChat):
 
         # Add system message if provided
         if anthropic_request.system:
-            openai_messages.append(
-                {"role": "system", "content": anthropic_request.system})
+            if isinstance(anthropic_request.system, str):
+                openai_messages.append(
+                    {"role": "system", "content": anthropic_request.system}
+                )
+            else:
+                system_prompt = ""
+                for block in anthropic_request.system:
+                    if block.type == "text" and block.text:
+                        system_prompt += block.text
+                openai_messages.append(
+                    {"role": "system", "content": system_prompt}
+                )
 
         for msg in anthropic_request.messages:
             openai_msg = {"role": msg.role}
