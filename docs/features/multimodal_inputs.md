@@ -13,6 +13,41 @@ To input multi-modal data, follow this schema in [vllm.inputs.PromptType][]:
 - `prompt`: The prompt should follow the format that is documented on HuggingFace.
 - `multi_modal_data`: This is a dictionary that follows the schema defined in [vllm.multimodal.inputs.MultiModalDataDict][].
 
+### Stable UUIDs for Caching (multi_modal_uuids)
+
+When using multi-modal inputs, vLLM normally hashes each media item by content to enable caching across requests. You can optionally pass `multi_modal_uuids` to provide your own stable IDs for each item so caching can reuse work across requests without rehashing the raw content.
+
+??? code
+
+    ```python
+    from vllm import LLM
+    from PIL import Image
+
+    # Qwen2.5-VL example with two images
+    llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct")
+
+    prompt = "USER: <image><image>\nDescribe the differences.\nASSISTANT:"
+    img_a = Image.open("/path/to/a.jpg")
+    img_b = Image.open("/path/to/b.jpg")
+
+    outputs = llm.generate({
+        "prompt": prompt,
+        "multi_modal_data": {"image": [img_a, img_b]},
+        # Provide stable IDs for caching.
+        # Requirements (matched by this example):
+        #  - Include every modality present in multi_modal_data.
+        #  - For lists, provide the same number of entries.
+        #  - Use None to fall back to content hashing for that item.
+        "multi_modal_uuids": {"image": ["sku-1234-a", None]},
+    })
+
+    for o in outputs:
+        print(o.outputs[0].text)
+    ```
+
+!!! warning
+    If both multimodal processor caching and prefix caching are disabled, user-provided `multi_modal_uuids` are ignored.
+
 ### Image Inputs
 
 You can pass a single image to the `'image'` field of the multi-modal dictionary, as shown in the following examples:
@@ -172,6 +207,36 @@ Multi-image input can be extended to perform video captioning. We show this with
         print(generated_text)
     ```
 
+#### Custom RGBA Background Color
+
+When loading RGBA images (images with transparency), vLLM converts them to RGB format. By default, transparent pixels are replaced with white background. You can customize this background color using the `rgba_background_color` parameter in `media_io_kwargs`.
+
+??? code
+
+    ```python
+    from vllm import LLM
+    
+    # Default white background (no configuration needed)
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+    
+    # Custom black background for dark theme
+    llm = LLM(
+        model="llava-hf/llava-1.5-7b-hf",
+        media_io_kwargs={"image": {"rgba_background_color": [0, 0, 0]}}
+    )
+    
+    # Custom brand color background (e.g., blue)
+    llm = LLM(
+        model="llava-hf/llava-1.5-7b-hf", 
+        media_io_kwargs={"image": {"rgba_background_color": [0, 0, 255]}}
+    )
+    ```
+
+!!! note
+    - The `rgba_background_color` accepts RGB values as a list `[R, G, B]` or tuple `(R, G, B)` where each value is 0-255
+    - This setting only affects RGBA images with transparency; RGB images are unchanged
+    - If not specified, the default white background `(255, 255, 255)` is used for backward compatibility
+
 ### Video Inputs
 
 You can pass a list of NumPy arrays directly to the `'video'` field of the multi-modal dictionary
@@ -186,7 +251,7 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
     from vllm import LLM, SamplingParams
     from qwen_vl_utils import process_vision_info
 
-    model_path = "Qwen/Qwen2.5-VL-3B-Instruct/"
+    model_path = "Qwen/Qwen2.5-VL-3B-Instruct"
     video_path = "https://content.pexels.com/videos/free-videos.mp4"
 
     llm = LLM(
@@ -477,6 +542,20 @@ Full example: <gh-file:examples/online_serving/openai_chat_completion_client_for
     ```bash
     export VLLM_VIDEO_FETCH_TIMEOUT=<timeout>
     ```
+
+#### Custom RGBA Background Color
+
+To use a custom background color for RGBA images, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
+
+```bash
+# Example: Black background for dark theme
+vllm serve llava-hf/llava-1.5-7b-hf \
+  --media-io-kwargs '{"image": {"rgba_background_color": [0, 0, 0]}}'
+
+# Example: Custom gray background
+vllm serve llava-hf/llava-1.5-7b-hf \
+  --media-io-kwargs '{"image": {"rgba_background_color": [128, 128, 128]}}'
+```
 
 ### Audio Inputs
 

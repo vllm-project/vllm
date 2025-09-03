@@ -14,7 +14,7 @@ from huggingface_hub import get_safetensors_metadata, hf_hub_download
 from huggingface_hub import list_repo_files as hf_list_repo_files
 from huggingface_hub import try_to_load_from_cache
 from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
-                                   HFValidationError, LocalEntryNotFoundError,
+                                   LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
                                    RevisionNotFoundError)
 from transformers import GenerationConfig, PretrainedConfig
@@ -27,17 +27,6 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
-# yapf conflicts with isort for this block
-# yapf: disable
-from vllm.transformers_utils.configs import (ChatGLMConfig, DeepseekVLV2Config,
-                                             EAGLEConfig, JAISConfig,
-                                             KimiVLConfig, MedusaConfig,
-                                             MllamaConfig, MLPSpeculatorConfig,
-                                             Nemotron_Nano_VL_Config,
-                                             NemotronConfig, NVLM_D_Config,
-                                             RWConfig, UltravoxConfig)
-# yapf: enable
-from vllm.transformers_utils.configs.mistral import adapt_config_dict
 from vllm.transformers_utils.utils import check_gguf_file
 
 if envs.VLLM_USE_MODELSCOPE:
@@ -65,29 +54,48 @@ def _get_hf_token() -> Optional[str]:
     return None
 
 
-_CONFIG_REGISTRY_OVERRIDE_HF: dict[str, type[PretrainedConfig]] = {
-    "mllama": MllamaConfig
-}
+class LazyConfigDict(dict):
 
-_CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = {
-    "chatglm": ChatGLMConfig,
-    "deepseek_vl_v2": DeepseekVLV2Config,
-    "kimi_vl": KimiVLConfig,
-    "Llama_Nemotron_Nano_VL": Nemotron_Nano_VL_Config,
-    "RefinedWeb": RWConfig,  # For tiiuae/falcon-40b(-instruct)
-    "RefinedWebModel": RWConfig,  # For tiiuae/falcon-7b(-instruct)
-    "jais": JAISConfig,
-    "mlp_speculator": MLPSpeculatorConfig,
-    "medusa": MedusaConfig,
-    "eagle": EAGLEConfig,
-    "nemotron": NemotronConfig,
-    "NVLM_D": NVLM_D_Config,
-    "ultravox": UltravoxConfig,
-    **_CONFIG_REGISTRY_OVERRIDE_HF
-}
+    def __getitem__(self, key):
+        import vllm.transformers_utils.configs as configs
+        return getattr(configs, super().__getitem__(key))
+
+
+_CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
+    chatglm="ChatGLMConfig",
+    deepseek_vl_v2="DeepseekVLV2Config",
+    kimi_vl="KimiVLConfig",
+    Llama_Nemotron_Nano_VL="Nemotron_Nano_VL_Config",
+    RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
+    RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
+    jais="JAISConfig",
+    mlp_speculator="MLPSpeculatorConfig",
+    medusa="MedusaConfig",
+    eagle="EAGLEConfig",
+    speculators="SpeculatorsConfig",
+    nemotron="NemotronConfig",
+    ovis="OvisConfig",
+    ultravox="UltravoxConfig",
+    step3_vl="Step3VLConfig",
+    step3_text="Step3TextConfig",
+)
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
+}
+
+_AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
+    "internvl_chat": {
+        "has_no_defaults_at_init": True
+    },
+    # transformers regards mllama as is_encoder_decoder=False
+    # vllm needs is_encoder_decoder=True to enable cross-attention
+    "mllama": {
+        "is_encoder_decoder": True
+    },
+    "NVLM_D": {
+        "has_no_defaults_at_init": True
+    },
 }
 
 
@@ -247,7 +255,8 @@ def _uses_mrope(config: PretrainedConfig) -> bool:
 
 def uses_mrope(config: PretrainedConfig) -> bool:
     """Detect if the model with this config uses M-ROPE."""
-    return _uses_mrope(config) or thinker_uses_mrope(config)
+    return _uses_mrope(config) or _uses_mrope(
+        config.get_text_config()) or thinker_uses_mrope(config)
 
 
 def thinker_uses_mrope(config: PretrainedConfig) -> bool:
@@ -265,11 +274,32 @@ def thinker_uses_mrope(config: PretrainedConfig) -> bool:
 
 def is_encoder_decoder(config: PretrainedConfig) -> bool:
     """Detect if the model with this config is used as an encoder/decoder."""
-    text_config = getattr(config, "text_config", None)
-    if text_config is not None:
-        return is_encoder_decoder(text_config)
 
-    return getattr(config, "is_encoder_decoder", False)
+    def _is_encoder_decoder(config: PretrainedConfig) -> bool:
+        return getattr(config, "is_encoder_decoder", False)
+
+    return (_is_encoder_decoder(config)
+            or _is_encoder_decoder(config.get_text_config()))
+
+
+def is_interleaved(config: PretrainedConfig) -> bool:
+    """
+    Detect if the model with this config is used with interleaved attention.
+    """
+    text_config = config.get_text_config()
+    if layer_types := getattr(text_config, "layer_types", None):
+        interleaved_types = {"full_attention", "sliding_attention"}
+        return interleaved_types.issubset(layer_types)
+    return False
+
+
+def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
+    """
+    Update kwargs for AutoConfig initialization based on model_type
+    """
+    if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:
+        kwargs.update(_AUTO_CONFIG_KWARGS_OVERRIDES[model_type])
+    return kwargs
 
 
 def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
@@ -278,10 +308,40 @@ def _maybe_remap_hf_config_attrs(config: PretrainedConfig) -> PretrainedConfig:
         if hasattr(config, old_attr):
             if not hasattr(config, new_attr):
                 config.update({new_attr: getattr(config, old_attr)})
-            delattr(config, old_attr)
             logger.debug("Remapped config attribute '%s' to '%s'", old_attr,
                          new_attr)
     return config
+
+
+def maybe_override_with_speculators_target_model(
+    model: str,
+    tokenizer: str,
+    trust_remote_code: bool,
+    revision: Optional[str] = None,
+    **kwargs,
+) -> tuple[str, str]:
+    """
+    If running a speculators config, override running model with target model
+    """
+    is_gguf = check_gguf_file(model)
+    if is_gguf:
+        kwargs["gguf_file"] = Path(model).name
+        gguf_model_repo = Path(model).parent
+    else:
+        gguf_model_repo = None
+    kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
+    config_dict, _ = PretrainedConfig.get_config_dict(
+        model if gguf_model_repo is None else gguf_model_repo,
+        revision=revision,
+        trust_remote_code=trust_remote_code,
+        token=_get_hf_token(),
+        **kwargs,
+    )
+    spec_config = config_dict.get("speculators_config", None)
+    # Return the target model
+    if spec_config is not None:
+        model = tokenizer = spec_config["verifier"]["name_or_path"]
+    return model, tokenizer
 
 
 def get_config(
@@ -335,6 +395,7 @@ def get_config(
             raise ValueError(error_message) from e
 
     if config_format == ConfigFormat.HF:
+        kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
         config_dict, _ = PretrainedConfig.get_config_dict(
             model,
             revision=revision,
@@ -342,9 +403,12 @@ def get_config(
             token=_get_hf_token(),
             **kwargs,
         )
-
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
+        if model_type is None:
+            model_type = "speculators" if config_dict.get(
+                "speculators_config") is not None else model_type
+
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
@@ -356,15 +420,14 @@ def get_config(
             )
         else:
             try:
+                kwargs = _maybe_update_auto_config_kwargs(
+                    kwargs, model_type=model_type)
                 config = AutoConfig.from_pretrained(
                     model,
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
                     token=_get_hf_token(),
-                    # some old custom model's config needs
-                    # `has_no_defaults_at_init=True` to work.
-                    has_no_defaults_at_init=trust_remote_code,
                     **kwargs,
                 )
             except ValueError as e:
@@ -392,7 +455,21 @@ def get_config(
                 model, revision, **kwargs)
             config_dict["max_position_embeddings"] = max_position_embeddings
 
+        from vllm.transformers_utils.configs.mistral import adapt_config_dict
+
         config = adapt_config_dict(config_dict)
+
+        # Mistral configs may define sliding_window as list[int]. Convert it
+        # to int and add the layer_types list[str] to make it HF compatible
+        if ((sliding_window := getattr(config, "sliding_window", None))
+                and isinstance(sliding_window, list)):
+            pattern_repeats = config.num_hidden_layers // len(sliding_window)
+            layer_types = sliding_window * pattern_repeats
+            config.layer_types = [
+                "full_attention" if layer_type is None else "sliding_attention"
+                for layer_type in layer_types
+            ]
+            config.sliding_window = next(filter(None, sliding_window), None)
     else:
         supported_formats = [
             fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
@@ -410,6 +487,38 @@ def get_config(
                 f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
+
+    # ModelOpt 0.31.0 and after saves the quantization config in the model
+    # config file.
+    quantization_config = config_dict.get("quantization_config", None)
+
+    # ModelOpt 0.29.0 and before saves the quantization config in a separate
+    # "hf_quant_config.json" in the same directory as the model config file.
+    if quantization_config is None \
+        and file_or_path_exists(model, "hf_quant_config.json", revision):
+        quantization_config = get_hf_file_to_dict("hf_quant_config.json",
+                                                  model, revision)
+
+    if quantization_config is not None:
+        config.quantization_config = quantization_config
+        # auto-enable DeepGEMM UE8M0 on Hopper if model config requests it
+        scale_fmt = quantization_config.get("scale_fmt", None)
+        if scale_fmt in ("ue8m0", ):
+            if not envs.is_set("VLLM_USE_DEEP_GEMM_E8M0_HOPPER"):
+                os.environ["VLLM_USE_DEEP_GEMM_E8M0_HOPPER"] = "1"
+                logger.info_once(
+                    ("Detected quantization_config.scale_fmt=%s; "
+                     "enabling Hopper UE8M0."),
+                    scale_fmt,
+                )
+            elif not envs.VLLM_USE_DEEP_GEMM_E8M0_HOPPER:
+                logger.warning_once(
+                    ("Model config requests UE8M0 "
+                     "(quantization_config.scale_fmt=%s), but "
+                     "VLLM_USE_DEEP_GEMM_E8M0_HOPPER=0 is set; "
+                     "Hopper UE8M0 disabled."),
+                    scale_fmt,
+                )
 
     if hf_overrides_kw:
         logger.debug("Overriding HF config with %s", hf_overrides_kw)
@@ -439,7 +548,7 @@ def try_get_local_file(model: Union[str, Path],
                                                      revision=revision)
             if isinstance(cached_filepath, str):
                 return Path(cached_filepath)
-        except HFValidationError:
+        except ValueError:
             ...
     return None
 
@@ -815,3 +924,42 @@ def _maybe_retrieve_max_pos_from_hf(model, revision, **kwargs) -> int:
             exc_info=e)
 
     return max_position_embeddings
+
+
+def get_model_path(model: Union[str, Path], revision: Optional[str] = None):
+    if os.path.exists(model):
+        return model
+    assert huggingface_hub.constants.HF_HUB_OFFLINE
+    common_kwargs = {
+        "local_files_only": huggingface_hub.constants.HF_HUB_OFFLINE,
+        "revision": revision,
+    }
+
+    if envs.VLLM_USE_MODELSCOPE:
+        from modelscope.hub.snapshot_download import snapshot_download
+        return snapshot_download(model_id=model, **common_kwargs)
+
+    from huggingface_hub import snapshot_download
+    return snapshot_download(repo_id=model, **common_kwargs)
+
+
+def get_hf_file_bytes(file_name: str,
+                      model: Union[str, Path],
+                      revision: Optional[str] = 'main') -> Optional[bytes]:
+    """Get file contents from HuggingFace repository as bytes."""
+    file_path = try_get_local_file(model=model,
+                                   file_name=file_name,
+                                   revision=revision)
+
+    if file_path is None:
+        hf_hub_file = hf_hub_download(model,
+                                      file_name,
+                                      revision=revision,
+                                      token=_get_hf_token())
+        file_path = Path(hf_hub_file)
+
+    if file_path is not None and file_path.is_file():
+        with open(file_path, 'rb') as file:
+            return file.read()
+
+    return None

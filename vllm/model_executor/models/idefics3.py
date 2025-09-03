@@ -34,7 +34,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs)
+                                    MultiModalKwargsItems)
 from vllm.multimodal.parse import ImageProcessorItems, ImageSize
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -88,15 +88,7 @@ ImageInputs = Union[Idefics3ImagePixelInputs, Idefics3ImageEmbeddingInputs]
 
 class Idefics3ProcessingInfo(BaseProcessingInfo):
 
-    def get_hf_processor(
-        self,
-        *,
-        size: Optional[dict[str, int]] = None,
-        **kwargs: object,
-    ) -> Idefics3Processor:
-        if size is not None:
-            kwargs["size"] = size
-
+    def get_hf_processor(self, **kwargs: object) -> Idefics3Processor:
         return self.ctx.get_hf_processor(Idefics3Processor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
@@ -382,7 +374,7 @@ class Idefics3MultiModalProcessor(
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
         image_token, _, _ = self.info._get_image_token(hf_processor)

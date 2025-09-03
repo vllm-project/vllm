@@ -8,10 +8,10 @@ import importlib
 import inspect
 import json
 import multiprocessing
+import multiprocessing.forkserver as forkserver
 import os
 import signal
 import socket
-import sys
 import tempfile
 import uuid
 from argparse import Namespace
@@ -62,7 +62,9 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeRequest,
                                               DetokenizeResponse,
                                               EmbeddingRequest,
-                                              EmbeddingResponse, ErrorResponse,
+                                              EmbeddingResponse, ErrorInfo,
+                                              ErrorResponse,
+                                              IOProcessorResponse,
                                               LoadLoRAAdapterRequest,
                                               PoolingRequest, PoolingResponse,
                                               RerankRequest, RerankResponse,
@@ -93,17 +95,19 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription, OpenAIServingTranslation)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.tool_server import (DemoToolServer, MCPToolServer,
+                                          ToolServer)
 from vllm.entrypoints.utils import (cli_env_setup, load_aware_call,
                                     log_non_default_args, with_cancellation)
-from vllm.executor.multiproc_worker_utils import _add_prefix
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (Device, FlexibleArgumentParser, get_open_zmq_ipc_path,
-                        is_valid_ipv6_address, set_process_title, set_ulimit)
+from vllm.utils import (Device, FlexibleArgumentParser, decorate_logs,
+                        get_open_zmq_ipc_path, is_valid_ipv6_address,
+                        set_ulimit)
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -123,7 +127,7 @@ async def lifespan(app: FastAPI):
 
             async def _force_log():
                 while True:
-                    await asyncio.sleep(10.)
+                    await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
                     await engine_client.do_log_stats()
 
             task = asyncio.create_task(_force_log())
@@ -154,6 +158,15 @@ async def build_async_engine_client(
     disable_frontend_multiprocessing: Optional[bool] = None,
     client_config: Optional[dict[str, Any]] = None,
 ) -> AsyncIterator[EngineClient]:
+
+    if os.getenv("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver":
+        # The executor is expected to be mp.
+        # Pre-import heavy modules in the forkserver process
+        logger.debug("Setup forkserver with pre-imports")
+        multiprocessing.set_start_method('forkserver')
+        multiprocessing.set_forkserver_preload(["vllm.v1.engine.async_llm"])
+        forkserver.ensure_running()
+        logger.debug("Forkserver setup complete!")
 
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
@@ -200,15 +213,18 @@ async def build_async_engine_client_from_engine_args(
 
         from vllm.v1.engine.async_llm import AsyncLLM
         async_llm: Optional[AsyncLLM] = None
+        client_count = client_config.pop(
+            "client_count") if client_config else 1
         client_index = client_config.pop(
             "client_index") if client_config else 0
         try:
             async_llm = AsyncLLM.from_vllm_config(
                 vllm_config=vllm_config,
                 usage_context=usage_context,
-                disable_log_requests=engine_args.disable_log_requests,
+                enable_log_requests=engine_args.enable_log_requests,
                 disable_log_stats=engine_args.disable_log_stats,
                 client_addresses=client_config,
+                client_count=client_count,
                 client_index=client_index)
 
             # Don't keep the dummy data in memory
@@ -228,7 +244,7 @@ async def build_async_engine_client_from_engine_args(
             engine_client = AsyncLLMEngine.from_vllm_config(
                 vllm_config=vllm_config,
                 usage_context=usage_context,
-                disable_log_requests=engine_args.disable_log_requests,
+                enable_log_requests=engine_args.enable_log_requests,
                 disable_log_stats=engine_args.disable_log_stats)
             yield engine_client
         finally:
@@ -273,7 +289,7 @@ async def build_async_engine_client_from_engine_args(
             target=run_mp_engine,
             args=(vllm_config, UsageContext.OPENAI_API_SERVER, ipc_path,
                   engine_args.disable_log_stats,
-                  engine_args.disable_log_requests, engine_alive))
+                  engine_args.enable_log_requests, engine_alive))
         engine_process.start()
         engine_pid = engine_process.pid
         assert engine_pid is not None, "Engine process failed to start."
@@ -493,7 +509,7 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, TokenizeResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -527,7 +543,7 @@ async def detokenize(request: DetokenizeRequest, raw_request: Request):
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, DetokenizeResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -543,7 +559,7 @@ def maybe_register_tokenizer_info_endpoint(args):
             """Get comprehensive tokenizer information."""
             result = await tokenization(raw_request).get_tokenizer_info()
             return JSONResponse(content=result.model_dump(),
-                                status_code=result.code if isinstance(
+                                status_code=result.error.code if isinstance(
                                     result, ErrorResponse) else 200)
 
 
@@ -585,12 +601,15 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Responses API")
-
-    generator = await handler.create_responses(request, raw_request)
+    try:
+        generator = await handler.create_responses(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, ResponsesResponse):
         return JSONResponse(content=generator.model_dump())
     return StreamingResponse(content=generator, media_type="text/event-stream")
@@ -603,11 +622,15 @@ async def retrieve_responses(response_id: str, raw_request: Request):
         return base(raw_request).create_error_response(
             message="The model does not support Responses API")
 
-    response = await handler.retrieve_responses(response_id)
+    try:
+        response = await handler.retrieve_responses(response_id)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
 
     if isinstance(response, ErrorResponse):
         return JSONResponse(content=response.model_dump(),
-                            status_code=response.code)
+                            status_code=response.error.code)
     return JSONResponse(content=response.model_dump())
 
 
@@ -618,11 +641,15 @@ async def cancel_responses(response_id: str, raw_request: Request):
         return base(raw_request).create_error_response(
             message="The model does not support Responses API")
 
-    response = await handler.cancel_responses(response_id)
+    try:
+        response = await handler.cancel_responses(response_id)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
 
     if isinstance(response, ErrorResponse):
         return JSONResponse(content=response.model_dump(),
-                            status_code=response.code)
+                            status_code=response.error.code)
     return JSONResponse(content=response.model_dump())
 
 
@@ -652,12 +679,14 @@ async def create_chat_completion(request: ChatCompletionRequest,
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Chat Completions API")
-
-    generator = await handler.create_chat_completion(request, raw_request)
-
+    try:
+        generator = await handler.create_chat_completion(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
 
     elif isinstance(generator, ChatCompletionResponse):
         return JSONResponse(content=generator.model_dump())
@@ -702,7 +731,7 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, CompletionResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -727,11 +756,15 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
         return base(raw_request).create_error_response(
             message="The model does not support Embeddings API")
 
-    generator = await handler.create_embedding(request, raw_request)
+    try:
+        generator = await handler.create_embedding(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, EmbeddingResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -755,12 +788,15 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Pooling API")
-
-    generator = await handler.create_pooling(request, raw_request)
+    try:
+        generator = await handler.create_pooling(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
-    elif isinstance(generator, PoolingResponse):
+                            status_code=generator.error.code)
+    elif isinstance(generator, (PoolingResponse, IOProcessorResponse)):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
@@ -776,10 +812,14 @@ async def create_classify(request: ClassificationRequest,
         return base(raw_request).create_error_response(
             message="The model does not support Classification API")
 
-    generator = await handler.create_classify(request, raw_request)
+    try:
+        generator = await handler.create_classify(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
 
     elif isinstance(generator, ClassificationResponse):
         return JSONResponse(content=generator.model_dump())
@@ -805,10 +845,14 @@ async def create_score(request: ScoreRequest, raw_request: Request):
         return base(raw_request).create_error_response(
             message="The model does not support Score API")
 
-    generator = await handler.create_score(request, raw_request)
+    try:
+        generator = await handler.create_score(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, ScoreResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -863,12 +907,16 @@ async def create_transcriptions(raw_request: Request,
             message="The model does not support Transcriptions API")
 
     audio_data = await request.file.read()
-    generator = await handler.create_transcription(audio_data, request,
-                                                   raw_request)
+    try:
+        generator = await handler.create_transcription(audio_data, request,
+                                                       raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
 
     elif isinstance(generator, TranscriptionResponse):
         return JSONResponse(content=generator.model_dump())
@@ -904,12 +952,16 @@ async def create_translations(request: Annotated[TranslationRequest,
             message="The model does not support Translations API")
 
     audio_data = await request.file.read()
-    generator = await handler.create_translation(audio_data, request,
-                                                 raw_request)
+    try:
+        generator = await handler.create_translation(audio_data, request,
+                                                     raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
 
     elif isinstance(generator, TranslationResponse):
         return JSONResponse(content=generator.model_dump())
@@ -934,10 +986,14 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
     if handler is None:
         return base(raw_request).create_error_response(
             message="The model does not support Rerank (Score) API")
-    generator = await handler.do_rerank(request, raw_request)
+    try:
+        generator = await handler.do_rerank(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
-                            status_code=generator.code)
+                            status_code=generator.error.code)
     elif isinstance(generator, RerankResponse):
         return JSONResponse(content=generator.model_dump())
 
@@ -1028,6 +1084,34 @@ if envs.VLLM_SERVER_DEV_MODE:
         logger.info("check whether the engine is sleeping")
         is_sleeping = await engine_client(raw_request).is_sleeping()
         return JSONResponse(content={"is_sleeping": is_sleeping})
+
+    @router.post("/collective_rpc")
+    async def collective_rpc(raw_request: Request):
+        try:
+            body = await raw_request.json()
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
+                                detail=f"JSON decode error: {e}") from e
+        method = body.get("method")
+        if method is None:
+            raise HTTPException(status_code=HTTPStatus.BAD_REQUEST.value,
+                                detail="Missing 'method' in request body")
+        # For security reason, only serialized string args/kwargs are passed.
+        # User-defined `method` is responsible for deserialization if needed.
+        args: list[str] = body.get("args", [])
+        kwargs: dict[str, str] = body.get("kwargs", {})
+        timeout: Optional[float] = body.get("timeout")
+        results = await engine_client(raw_request).collective_rpc(
+            method=method, timeout=timeout, args=tuple(args), kwargs=kwargs)
+        if results is None:
+            return Response(status_code=200)
+        response: list[Any] = []
+        for result in results:
+            if result is None or isinstance(result, (dict, list)):
+                response.append(result)
+            else:
+                response.append(str(result))
+        return JSONResponse(content={"results": response})
 
 
 @router.post("/scale_elastic_ep",
@@ -1162,7 +1246,7 @@ async def invocations(raw_request: Request):
     msg = ("Cannot find suitable handler for request. "
            f"Expected one of: {type_names}")
     res = base(raw_request).create_error_response(message=msg)
-    return JSONResponse(content=res.model_dump(), status_code=res.code)
+    return JSONResponse(content=res.model_dump(), status_code=res.error.code)
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
@@ -1198,7 +1282,7 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         response = await handler.load_lora_adapter(request)
         if isinstance(response, ErrorResponse):
             return JSONResponse(content=response.model_dump(),
-                                status_code=response.code)
+                                status_code=response.error.code)
 
         return Response(status_code=200, content=response)
 
@@ -1210,7 +1294,7 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         response = await handler.unload_lora_adapter(request)
         if isinstance(response, ErrorResponse):
             return JSONResponse(content=response.model_dump(),
-                                status_code=response.code)
+                                status_code=response.error.code)
 
         return Response(status_code=200, content=response)
 
@@ -1489,9 +1573,10 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException):
-        err = ErrorResponse(message=exc.detail,
+        err = ErrorResponse(
+            error=ErrorInfo(message=exc.detail,
                             type=HTTPStatus(exc.status_code).phrase,
-                            code=exc.status_code)
+                            code=exc.status_code))
         return JSONResponse(err.model_dump(), status_code=exc.status_code)
 
     @app.exception_handler(RequestValidationError)
@@ -1505,9 +1590,9 @@ def build_app(args: Namespace) -> FastAPI:
         else:
             message = exc_str
 
-        err = ErrorResponse(message=message,
-                            type=HTTPStatus.BAD_REQUEST.phrase,
-                            code=HTTPStatus.BAD_REQUEST)
+        err = ErrorResponse(error=ErrorInfo(message=message,
+                                            type=HTTPStatus.BAD_REQUEST.phrase,
+                                            code=HTTPStatus.BAD_REQUEST))
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
 
@@ -1571,10 +1656,10 @@ async def init_app_state(
     else:
         served_model_names = [args.model]
 
-    if args.disable_log_requests:
-        request_logger = None
-    else:
+    if args.enable_log_requests:
         request_logger = RequestLogger(max_log_len=args.max_log_len)
+    else:
+        request_logger = None
 
     base_model_paths = [
         BaseModelPath(name=name, model_path=args.model)
@@ -1618,6 +1703,14 @@ async def init_app_state(
                     "This discrepancy may lead to performance degradation.",
                     resolved_chat_template, args.model)
 
+    if args.tool_server == "demo":
+        tool_server: Optional[ToolServer] = DemoToolServer()
+    elif args.tool_server:
+        tool_server = MCPToolServer()
+        await tool_server.add_tool_server(args.tool_server)
+    else:
+        tool_server = None
+
     # Merge default_mm_loras into the static lora_modules
     default_mm_loras = (vllm_config.lora_config.default_mm_loras
                         if vllm_config.lora_config is not None else {})
@@ -1652,9 +1745,12 @@ async def init_app_state(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
+        tool_server=tool_server,
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
+        enable_log_outputs=args.enable_log_outputs,
+        log_error_stack=args.log_error_stack,
     ) if "generate" in supported_tasks else None
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
@@ -1672,6 +1768,8 @@ async def init_app_state(
         reasoning_parser=args.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
+        enable_log_outputs=args.enable_log_outputs,
+        log_error_stack=args.log_error_stack,
     ) if "generate" in supported_tasks else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
@@ -1681,14 +1779,16 @@ async def init_app_state(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
+        log_error_stack=args.log_error_stack,
     ) if "generate" in supported_tasks else None
     state.openai_serving_pooling = OpenAIServingPooling(
         engine_client,
-        model_config,
+        vllm_config,
         state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+        log_error_stack=args.log_error_stack,
     ) if "encode" in supported_tasks else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
@@ -1697,23 +1797,22 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+        log_error_stack=args.log_error_stack,
     ) if "embed" in supported_tasks else None
     state.openai_serving_classification = ServingClassification(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
+        log_error_stack=args.log_error_stack,
     ) if "classify" in supported_tasks else None
-
-    enable_serving_reranking = ("classify" in supported_tasks and getattr(
-        model_config.hf_config, "num_labels", 0) == 1)
     state.openai_serving_scores = ServingScores(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
-    ) if ("embed" in supported_tasks or enable_serving_reranking) else None
-
+        log_error_stack=args.log_error_stack,
+    ) if ("embed" in supported_tasks or "score" in supported_tasks) else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
@@ -1721,18 +1820,21 @@ async def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+        log_error_stack=args.log_error_stack,
     )
     state.openai_serving_transcription = OpenAIServingTranscription(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
+        log_error_stack=args.log_error_stack,
     ) if "transcription" in supported_tasks else None
     state.openai_serving_translation = OpenAIServingTranslation(
         engine_client,
         model_config,
         state.openai_serving_models,
         request_logger=request_logger,
+        log_error_stack=args.log_error_stack,
     ) if "transcription" in supported_tasks else None
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
@@ -1749,6 +1851,12 @@ def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.bind(addr)
 
+    return sock
+
+
+def create_server_unix_socket(path: str) -> socket.socket:
+    sock = socket.socket(family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    sock.bind(path)
     return sock
 
 
@@ -1782,8 +1890,11 @@ def setup_server(args):
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
-    sock_addr = (args.host or "", args.port)
-    sock = create_server_socket(sock_addr)
+    if args.uds:
+        sock = create_server_unix_socket(args.uds)
+    else:
+        sock_addr = (args.host or "", args.port)
+        sock = create_server_socket(sock_addr)
 
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
@@ -1795,12 +1906,14 @@ def setup_server(args):
 
     signal.signal(signal.SIGTERM, signal_handler)
 
-    addr, port = sock_addr
-    is_ssl = args.ssl_keyfile and args.ssl_certfile
-    host_part = f"[{addr}]" if is_valid_ipv6_address(
-        addr) else addr or "0.0.0.0"
-    listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
-
+    if args.uds:
+        listen_address = f"unix:{args.uds}"
+    else:
+        addr, port = sock_addr
+        is_ssl = args.ssl_keyfile and args.ssl_certfile
+        host_part = f"[{addr}]" if is_valid_ipv6_address(
+            addr) else addr or "0.0.0.0"
+        listen_address = f"http{'s' if is_ssl else ''}://{host_part}:{port}"
     return listen_address, sock
 
 
@@ -1808,10 +1921,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
 
     # Add process-specific prefix to stdout and stderr.
-    process_name = "APIServer"
-    pid = os.getpid()
-    _add_prefix(sys.stdout, process_name, pid)
-    _add_prefix(sys.stderr, process_name, pid)
+    decorate_logs("APIServer")
 
     listen_address, sock = setup_server(args)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
@@ -1828,7 +1938,7 @@ async def run_server_worker(listen_address,
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
 
     server_index = client_config.get("client_index", 0) if client_config else 0
-    set_process_title("APIServer", str(server_index))
+
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
     if log_config is not None:
@@ -1861,6 +1971,8 @@ async def run_server_worker(listen_address,
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
+            h11_max_incomplete_event_size=args.h11_max_incomplete_event_size,
+            h11_max_header_count=args.h11_max_header_count,
             **uvicorn_kwargs,
         )
 

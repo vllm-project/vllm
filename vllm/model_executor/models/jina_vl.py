@@ -90,22 +90,16 @@ class JinaVLForSequenceClassification(Qwen2VLForConditionalGeneration,
                          prefix=maybe_prefix(prefix, "qwen2_vl"))
         config = vllm_config.model_config.hf_config
         pooler_config = vllm_config.model_config.pooler_config
-
-        # logit bias for sigmoid normalization
-        self.LOGIT_BIAS = 2.65
-
-        self.score = JinaVLScorer(config)
-
-        pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
+        self.score = JinaVLScorer(config)
         self.pooler = DispatchPooler({
             "encode":
             Pooler.for_encode(pooler_config),
             "classify":
-            Pooler.for_classify(pooler_config, classifier=None),
+            Pooler.for_classify(pooler_config, classifier=self.score),
             "score":
-            Pooler.for_classify(pooler_config, classifier=None),
+            Pooler.for_classify(pooler_config, classifier=self.score),
         })
 
     @classmethod
@@ -140,9 +134,7 @@ class JinaVLForSequenceClassification(Qwen2VLForConditionalGeneration,
             inputs_embeds=inputs_embeds,
             **kwargs,
         )
-
-        logits = self.score(hidden_states) - self.LOGIT_BIAS
-        return logits
+        return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)

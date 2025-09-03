@@ -48,9 +48,6 @@ def _get_lora_device(base_layer: nn.Module) -> torch.device:
     # GPTQ/AWQ
     elif hasattr(base_layer, "qweight"):
         return base_layer.qweight.device
-    # marlin
-    elif hasattr(base_layer, "B"):
-        return base_layer.B.device
     # HQQ marlin
     elif hasattr(base_layer, "W_q"):
         return base_layer.W_q.device
@@ -608,7 +605,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
 
 class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     """ColumnParallelLinear layer that is composed of 2 sublayers (slices)
-    packed together (eg. gate_proj + up_proj -> gate_up_proj).
+    packed together (e.g. gate_proj + up_proj -> gate_up_proj).
 
     This means we have 2 LoRAs, each applied to one half of the layer.
 
@@ -682,12 +679,14 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def slice_lora_b(
         self, lora_b: list[Union[torch.Tensor, None]]
     ) -> list[Union[torch.Tensor, None]]:
+        sliced_lora_b = [None] * self.n_slices
         for i, (shard_id, shard_size) in enumerate(
                 zip(self.output_ids, self.output_slices)):
             if (lora_b_i := lora_b[i]) is not None:
-                lora_b[i] = lora_b_i[:, shard_size * shard_id:shard_size *
-                                     (shard_id + 1)]
-        return lora_b
+                sliced_lora_b[i] = lora_b_i[:,
+                                            shard_size * shard_id:shard_size *
+                                            (shard_id + 1)]
+        return sliced_lora_b
 
     def slice_bias(
         self, bias: list[Union[torch.Tensor,
@@ -1152,7 +1151,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         lora_logits = lora_logits.mT
         indices_padded = self.punica_wrapper.sampler_indices_padded
 
-        if current_platform.is_tpu():
+        if current_platform.is_tpu() or current_platform.is_xpu():
             indices_padded = indices_padded[:logits.size(0)]
 
         lora_logits = (lora_logits.reshape(

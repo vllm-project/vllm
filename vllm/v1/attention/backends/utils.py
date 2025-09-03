@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import abc
+import enum
 import functools
 from abc import abstractmethod
-from dataclasses import dataclass, make_dataclass
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypeVar
+from dataclasses import dataclass, fields, make_dataclass
+from typing import (TYPE_CHECKING, Any, ClassVar, Generic, Optional, Protocol,
+                    TypeVar)
 
 import numpy as np
 import torch
+from typing_extensions import runtime_checkable
 
-from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.utils import cdiv
 
@@ -19,6 +21,9 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
 import vllm.envs as envs
+from vllm.attention.backends.abstract import (AttentionBackend,
+                                              AttentionMetadata)
+from vllm.attention.layer import Attention
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout)
 from vllm.logger import init_logger
@@ -55,19 +60,134 @@ class CommonAttentionMetadata:
     """Total number of tokens in batch"""
     max_query_len: int
     """Longest query in batch"""
+    max_seq_len: int
+    """Longest context length in batch"""
 
     block_table_tensor: torch.Tensor
     slot_mapping: torch.Tensor
 
     causal: bool = True
 
+    # Needed by FastPrefillAttentionBuilder
+    logits_indices_padded: Optional[torch.Tensor] = None
+    num_logits_indices: Optional[int] = None
+
+
+@dataclass
+class UbatchSlice:
+    request_slice: slice
+    token_slice: slice
+
+
+def slice_query_start_locs(
+    query_start_loc: torch.Tensor,
+    request_slice: slice,
+) -> torch.Tensor:
+    """
+    Creates a new query_start_loc that corresponds to the requests in 
+    request_slice.
+
+    Note: This function creates a new tensor to hold the new query_start_locs.
+    This will break cudagraph compatibility.
+    """
+    return query_start_loc[request_slice.start: request_slice.stop + 1] -\
+        query_start_loc[request_slice.start]
+
+
+def _make_metadata_with_slice(
+        ubatch_slice: UbatchSlice,
+        attn_metadata: CommonAttentionMetadata) -> CommonAttentionMetadata:
+    """
+    This function creates a new CommonAttentionMetadata that corresponds to 
+    the requests included in ubatch_slice
+    """
+
+    request_slice = ubatch_slice.request_slice
+    token_slice = ubatch_slice.token_slice
+
+    query_start_loc = slice_query_start_locs(attn_metadata.query_start_loc,
+                                             request_slice)
+    assert len(query_start_loc) >= 2, (
+        f"query_start_loc must have at least 2 elements, "
+        f"got {len(query_start_loc)}")
+    query_start_loc_cpu = slice_query_start_locs(
+        attn_metadata.query_start_loc_cpu, request_slice)
+
+    seq_lens = attn_metadata.seq_lens[request_slice]
+    seq_lens_cpu = attn_metadata.seq_lens_cpu[request_slice]
+    max_seq_len = int(seq_lens_cpu.max())
+    num_computed_tokens_cpu = attn_metadata.num_computed_tokens_cpu[
+        request_slice]
+
+    num_requests = request_slice.stop - request_slice.start
+    num_actual_tokens = token_slice.stop - token_slice.start
+    max_query_len = int(
+        torch.max(torch.abs(query_start_loc_cpu[1:] -
+                            query_start_loc_cpu[:-1])).item())
+
+    block_table_tensor = attn_metadata.block_table_tensor[request_slice]
+    slot_mapping = attn_metadata.slot_mapping[token_slice]
+
+    return CommonAttentionMetadata(
+        query_start_loc=query_start_loc,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens,
+        seq_lens_cpu=seq_lens_cpu,
+        num_computed_tokens_cpu=num_computed_tokens_cpu,
+        num_reqs=num_requests,
+        num_actual_tokens=num_actual_tokens,
+        max_query_len=max_query_len,
+        max_seq_len=max_seq_len,
+        block_table_tensor=block_table_tensor,
+        slot_mapping=slot_mapping,
+    )
+
+
+def split_attn_metadata(
+    ubatch_slices: list[UbatchSlice],
+    common_attn_metadata: CommonAttentionMetadata,
+) -> list[CommonAttentionMetadata]:
+    """
+    Creates a new CommonAttentionMetadata instance that corresponds to the 
+    requests for each UbatchSlice in ubatch_slices.
+
+    Note: This function does not modify common_attn_metadata
+    """
+    results = []
+    for ubatch_slice in ubatch_slices:
+        results.append(
+            _make_metadata_with_slice(ubatch_slice, common_attn_metadata))
+    return results
+
 
 M = TypeVar("M")
 
 
+class AttentionCGSupport(enum.Enum):
+    """ Constants for the cudagraph support of the attention backend
+    Here we do not consider the cascade attention, as currently
+    it is never cudagraph supported."""
+
+    ALWAYS = 3
+    """Cudagraph always supported; supports mixed-prefill-decode"""
+    UNIFORM_BATCH = 2
+    """Cudagraph supported for batches the only contain query lengths that are
+    the same, this can be used for spec-decode 
+        i.e. "decodes" are 1 + num_speculative_tokens"""
+    UNIFORM_SINGLE_TOKEN_DECODE = 1
+    """Cudagraph supported for batches the only contain query_len==1 decodes"""
+    NEVER = 0
+    """NO cudagraph support"""
+
+
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
-    # Does this backend/builder support CUDA Graphs for attention.
-    full_cudagraph_supported: ClassVar[bool] = False
+    # Does this backend/builder support CUDA Graphs for attention (default: no).
+    cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.NEVER
+    # Does this backend/builder reorder the batch?
+    # If not, set this to None. Otherwise set it to the query
+    # length that will be pulled into the front of the batch.
+    reorder_batch_threshold: ClassVar[Optional[int]] = None
 
     @abstractmethod
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
@@ -92,12 +212,22 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         """
         raise NotImplementedError
 
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
+    def reorder_batch(self, input_batch: "InputBatch",
+                      scheduler_output: "SchedulerOutput") -> bool:
         """
-        Can this batch (with given metadata) use CUDA Graphs for attention.
+        Update the order of requests in the batch based on the attention
+        backend's needs. For example, some attention backends (namely MLA) may
+        want to separate requests based on if the attention computation will be
+        compute-bound or memory-bound.
+
+        Args:
+            input_batch: input batch
+            scheduler_output: scheduler output.
+
+        Returns:
+            True if the batch was modified, False otherwise.
         """
-        return False
+        raise NotImplementedError
 
     def build_for_cudagraph_capture(
             self, common_attn_metadata: CommonAttentionMetadata) -> M:
@@ -108,6 +238,26 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         """
         return self.build(common_prefix_len=0,
                           common_attn_metadata=common_attn_metadata)
+
+    def build_for_drafting(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        draft_index: int,
+    ) -> M:
+        """
+        Build attention metadata for draft model. Uses build by default.
+        
+        Args:
+            common_attn_metadata: The common attention metadata.
+            draft_index: The index of the current draft operation.
+                When speculating a chain of tokens, this index refers to the
+                draft attempt for the i-th token.
+                For tree-based attention, this index instead refers to the
+                draft attempt for the i-th level in the tree of tokens.
+        """
+        return self.build(common_prefix_len=0,
+                          common_attn_metadata=common_attn_metadata,
+                          fast_build=True)
 
     def use_cascade_attention(
         self,
@@ -122,27 +272,26 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     ) -> bool:
         return False
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        """
-        This method can reorder the batch if desired by the backend.
-        :return: Has the batch been reordered (default False).
-        """
-        return False
-
 
 @functools.lru_cache
 def get_kv_cache_layout():
+    # Format specified by the code.
     global _KV_CACHE_LAYOUT_OVERRIDE
-    # Override with format specified by the user.
+
+    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
+        cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
+        logger.info_once("`_KV_CACHE_LAYOUT_OVERRIDE` variable detected. " \
+                         "Setting KV cache layout to %s.", cache_layout)
+        return cache_layout
+
+    # Format specified by the user.
     cache_layout = envs.VLLM_KV_CACHE_LAYOUT
+    # When neither the user nor the override specified a layout, get default
     if cache_layout is None:
         cache_layout = get_kv_connector_cache_layout()
     else:
         logger.info_once("`VLLM_KV_CACHE_LAYOUT` environment variable " \
         "detected. Setting KV cache layout to %s.", cache_layout)
-    if _KV_CACHE_LAYOUT_OVERRIDE is not None:
-        cache_layout = _KV_CACHE_LAYOUT_OVERRIDE
     return cache_layout
 
 
@@ -155,12 +304,15 @@ def set_kv_cache_layout(cache_layout: str):
 class PerLayerParameters:
     """
     Currently, FlashInfer backend only support models in which all layers share
-    the same values for the following hyperparameters.
+    the same values for the following hyperparameters. Should not be used for
+    trtllm-gen backend since it supports different values for the following
+    hyperparameters.
     """
 
     window_left: int
     logits_soft_cap: Optional[float]
     sm_scale: float
+    has_sinks: bool = False
 
 
 def get_per_layer_parameters(
@@ -183,9 +335,11 @@ def get_per_layer_parameters(
         window_left = window_size[0] if window_size is not None else -1
         logits_soft_cap = getattr(impl, "logits_soft_cap", None)
         sm_scale = impl.scale
+        has_sinks = getattr(impl, "sinks", None) is not None
 
         per_layer_params[key] = PerLayerParameters(window_left,
-                                                   logits_soft_cap, sm_scale)
+                                                   logits_soft_cap, sm_scale,
+                                                   has_sinks)
 
     return per_layer_params
 
@@ -193,7 +347,8 @@ def get_per_layer_parameters(
 def infer_global_hyperparameters(
         per_layer_params: dict[str, PerLayerParameters]) -> PerLayerParameters:
     """
-    Currently, FlashInfer backend only support models in which all layers share
+    Currently, FlashInfer backend other than trtllm-gen 
+    only support models in which all layers share
     the same values for the following hyperparameters:
     - `window_left`
     - `logits_soft_cap`
@@ -207,15 +362,19 @@ def infer_global_hyperparameters(
 
     param_sets = list(per_layer_params.values())
     global_params = param_sets[0]
-    for params in param_sets:
-        if params.window_left != global_params.window_left:
-            raise ValueError(
-                "Window left is not the same for all layers. One potential fix "
-                "is to set disable_sliding_window=True")
-        assert params == global_params, (
-            "FlashInfer backend currently only supports models in which all "
-            "layers share the same values for the following hyperparameters: "
-            "`window_left`, `logits_soft_cap`, `sm_scale`.")
+
+    # trtllm attention doesn't need global hyper params so disable the check
+    if not envs.VLLM_USE_TRTLLM_ATTENTION:
+        for params in param_sets:
+            if params.window_left != global_params.window_left:
+                raise ValueError(
+                    "Window left is not the same for all layers. " \
+                    "One potential fix is to set disable_sliding_window=True")
+            assert params == global_params, (
+                "FlashInfer backend currently only supports models in which all"
+                "layers share the same values "
+                "for the following hyperparameters:"
+                "`window_left`, `logits_soft_cap`, `sm_scale`.")
 
     return global_params
 
@@ -332,8 +491,9 @@ def make_local_attention_virtual_batches(
         attn_chunk_size)[arange > 0]
 
     # convert from q_seqlens to cu_seqlens_q
-    cu_seqlens_q_local = np.pad(np.cumsum(seqlens_q_local), (1, 0))\
-        .astype(np.int32)
+    cu_seqlens_q_local = np.empty(virtual_batches + 1, dtype=np.int32)
+    np.cumsum(seqlens_q_local, out=cu_seqlens_q_local[1:])
+    cu_seqlens_q_local[0] = 0
 
     # compute the seqlens_k_local,
     #  basically a full local attention block for all but the last block in each
@@ -376,11 +536,10 @@ def make_local_attention_virtual_batches(
     #     [ 22, 23 ], < local-batch 6, (batch 2, starting from k[4])
     #     [ 24, 25 ], < local-batch 7, (batch 2, starting from k[8])
     #   ]
-    block_indices= np.broadcast_to(
-        np.arange(pages_per_local_batch, dtype=np.int32),
-        (virtual_batches, pages_per_local_batch)) \
-            + np.expand_dims(block_starts, axis=1)
-    block_indices = block_indices.flatten().clip(max=block_table.shape[1] - 1)
+    block_indices = (block_starts[:, None] +
+                     np.arange(pages_per_local_batch, dtype=np.int32))
+    block_indices = block_indices.reshape(-1).clip(max=block_table.shape[1] -
+                                                   1)
     batch_indices = np.repeat(np.arange(actual_batch_size, dtype=np.int32),
                               local_blocks * pages_per_local_batch)
     block_table_local = block_table[batch_indices, block_indices]\
@@ -388,6 +547,7 @@ def make_local_attention_virtual_batches(
 
     query_start_loc_cpu = torch.from_numpy(cu_seqlens_q_local)
     seq_lens_cpu = torch.from_numpy(seqlens_k_local)
+    max_seq_len = int(seq_lens_cpu.max())
 
     return CommonAttentionMetadata(
         query_start_loc_cpu=query_start_loc_cpu,
@@ -399,10 +559,87 @@ def make_local_attention_virtual_batches(
         num_reqs=len(seq_lens_cpu),
         num_actual_tokens=common_attn_metadata.num_actual_tokens,
         max_query_len=seqlens_q_local.max(),
+        max_seq_len=max_seq_len,
         block_table_tensor=block_table_local,
         slot_mapping=common_attn_metadata.slot_mapping,
         causal=True,
     )
+
+
+def make_kv_sharing_fast_prefill_common_attn_metadata(
+    common_attn_metadata: CommonAttentionMetadata,
+) -> CommonAttentionMetadata:
+    if common_attn_metadata.max_query_len == 1:
+        # All requests are decode (assume 1 token for now)
+        # Skip computing fast prefill path
+        return common_attn_metadata
+
+    assert common_attn_metadata.logits_indices_padded is not None
+    assert common_attn_metadata.num_logits_indices is not None
+
+    logits_indices_padded = common_attn_metadata.logits_indices_padded
+    num_logits_indices = common_attn_metadata.num_logits_indices
+    # Get rid of CUDAGraph padding, if any
+    logits_indices = logits_indices_padded[:num_logits_indices]
+    num_reqs = common_attn_metadata.num_reqs
+    query_start_loc = common_attn_metadata.query_start_loc
+    seq_lens = common_attn_metadata.seq_lens
+    # Example inputs
+    # num_reqs: 3
+    # generation_indices:  [14, 18, 19, 27]
+    # query_start_loc: [0, 15, 20, 28]
+    # seq_lens:        [41, 31, 40]
+
+    # Find how many decode indices belong to each request
+    # request_ids: [0, 1, 1, 2]
+    request_ids = torch.bucketize(logits_indices,
+                                  query_start_loc[1:],
+                                  right=True)
+
+    # Figure out how many tokens are in each request
+    # num_decode_tokens: [1, 2, 1]
+    num_decode_tokens = torch.bincount(request_ids, minlength=num_reqs)
+
+    # Calculate new query_start_loc with tokens in generation_indices
+    # decode_query_start_loc: [0, 1, 3, 4]
+    decode_query_start_loc = torch.empty(num_reqs + 1,
+                                         device=query_start_loc.device,
+                                         dtype=query_start_loc.dtype)
+
+    decode_query_start_loc[0] = 0
+    decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
+    decode_max_query_len = int(num_decode_tokens.max().item())
+    total_num_decode_tokens = int(num_decode_tokens.sum().item())
+
+    common_attn_metadata = CommonAttentionMetadata(
+        query_start_loc=decode_query_start_loc,
+        query_start_loc_cpu=decode_query_start_loc.to("cpu",
+                                                      non_blocking=True),
+        seq_lens=seq_lens,
+        seq_lens_cpu=seq_lens.to("cpu", non_blocking=True),
+        num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
+        num_reqs=num_reqs,
+        num_actual_tokens=total_num_decode_tokens,
+        max_query_len=decode_max_query_len,
+        max_seq_len=common_attn_metadata.max_seq_len,
+        block_table_tensor=common_attn_metadata.block_table_tensor,
+        slot_mapping=common_attn_metadata.slot_mapping,
+        causal=True,
+    )
+    return common_attn_metadata
+
+
+def subclass_attention_backend(
+        name_prefix: str, attention_backend_cls: type[AttentionBackend],
+        builder_cls: type[AttentionMetadataBuilder[M]]
+) -> type[AttentionBackend]:
+    """
+    Return a new subclass where `get_builder_cls` returns `builder_cls`.
+    """
+    name: str = name_prefix + attention_backend_cls.__name__  # type: ignore
+
+    return type(name, (attention_backend_cls, ),
+                {"get_builder_cls": lambda: builder_cls})
 
 
 def split_decodes_and_prefills(
@@ -472,7 +709,7 @@ def reorder_batch_to_split_decodes_and_prefills(
 
     for i, req_id in enumerate(input_batch.req_ids):
         num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        # for now treat 1 scheduled token as "decode" even if its not,
+        # for now treat 1 scheduled token as "decode" even if it's not,
         # we should update this to something like < 8 in the future but
         # currently the TritonMLA._forward_decode only supports
         # num_tokens = 1
@@ -529,13 +766,56 @@ def subclass_attention_metadata(
     return Wrapped
 
 
-def make_kv_sharing_fast_prefill_attention_metadata(
-    metadata_cls: Any, ) -> Any:
-    """
-    Return a new subclass of `metadata_cls` for fast prefill
-    """
-    return subclass_attention_metadata(
-        name_prefix="KVSharingFastPrefill",
-        metadata_cls=metadata_cls,
-        fields=KV_SHARING_FAST_PREFILL_METADATA_FIELDS,
-    )
+@runtime_checkable
+class KVSharingFastPrefillMetadata(Protocol):
+    logits_indices_padded: torch.Tensor
+    num_logits_indices: int
+
+
+def create_fast_prefill_custom_backend(
+    prefix: str,
+    underlying_attn_backend: AttentionBackend,
+) -> type[AttentionBackend]:
+
+    underlying_builder = underlying_attn_backend.get_builder_cls()
+
+    class FastPrefillAttentionBuilder(underlying_builder):  # type: ignore
+
+        def build(self,
+                  common_prefix_len: int,
+                  common_attn_metadata: CommonAttentionMetadata,
+                  fast_build: bool = False) -> AttentionMetadata:
+            new_common_attn_metadata =\
+            make_kv_sharing_fast_prefill_common_attn_metadata(common_attn_metadata)
+            metadata = super().build(common_prefix_len,
+                                     new_common_attn_metadata, fast_build)
+
+            class KVSharingFastPrefillAttentionMetadata(
+                    metadata.__class__,  #  type: ignore
+                    KVSharingFastPrefillMetadata):
+
+                def __init__(self, metadata, common_attn_metadata):
+                    # Shallow copy all fields in metadata cls
+                    for field in fields(metadata.__class__):
+                        setattr(self, field.name,
+                                getattr(metadata, field.name))
+
+                    # Set additional fields that will be used in model code
+                    assert (common_attn_metadata.logits_indices_padded
+                            is not None
+                            and common_attn_metadata.num_logits_indices
+                            is not None)
+                    self.logits_indices_padded = \
+                        common_attn_metadata.logits_indices_padded
+                    self.num_logits_indices = \
+                        common_attn_metadata.num_logits_indices
+
+            return KVSharingFastPrefillAttentionMetadata(
+                metadata, common_attn_metadata)
+
+    attn_backend = subclass_attention_backend(
+        name_prefix=prefix,
+        attention_backend_cls=underlying_attn_backend,
+        builder_cls=FastPrefillAttentionBuilder)
+
+    return attn_backend

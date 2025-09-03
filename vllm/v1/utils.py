@@ -34,22 +34,22 @@ class ConstantList(Generic[T], Sequence):
         self._x = x
 
     def append(self, item):
-        raise Exception("Cannot append to a constant list")
+        raise TypeError("Cannot append to a constant list")
 
     def extend(self, item):
-        raise Exception("Cannot extend a constant list")
+        raise TypeError("Cannot extend a constant list")
 
     def insert(self, item):
-        raise Exception("Cannot insert into a constant list")
+        raise TypeError("Cannot insert into a constant list")
 
     def pop(self, item):
-        raise Exception("Cannot pop from a constant list")
+        raise TypeError("Cannot pop from a constant list")
 
     def remove(self, item):
-        raise Exception("Cannot remove from a constant list")
+        raise TypeError("Cannot remove from a constant list")
 
     def clear(self):
-        raise Exception("Cannot clear a constant list")
+        raise TypeError("Cannot clear a constant list")
 
     def index(self,
               item: T,
@@ -78,10 +78,10 @@ class ConstantList(Generic[T], Sequence):
         ...
 
     def __setitem__(self, item: Union[int, slice], value: Union[T, list[T]]):
-        raise Exception("Cannot set item in a constant list")
+        raise TypeError("Cannot set item in a constant list")
 
     def __delitem__(self, item):
-        raise Exception("Cannot delete item from a constant list")
+        raise TypeError("Cannot delete item from a constant list")
 
     def __iter__(self):
         return iter(self._x)
@@ -94,6 +94,35 @@ class ConstantList(Generic[T], Sequence):
 
     def __repr__(self):
         return f"ConstantList({self._x})"
+
+
+class CpuGpuBuffer:
+
+    def __init__(
+        self,
+        *args,
+        dtype: torch.dtype,
+        device: torch.device,
+        pin_memory: bool,
+    ):
+        self.cpu = torch.zeros(*args,
+                               dtype=dtype,
+                               device="cpu",
+                               pin_memory=pin_memory)
+        self.np = self.cpu.numpy()
+        self.gpu = self.cpu.to(device)
+
+    def copy_to_gpu(self, n: Optional[int] = None) -> torch.Tensor:
+        if n is None:
+            return self.gpu.copy_(self.cpu, non_blocking=True)
+        return self.gpu[:n].copy_(self.cpu[:n], non_blocking=True)
+
+    def copy_to_cpu(self, n: Optional[int] = None) -> torch.Tensor:
+        """NOTE: Because this method is non-blocking, explicit synchronization
+        is needed to ensure the data is copied to CPU."""
+        if n is None:
+            return self.cpu.copy_(self.gpu, non_blocking=True)
+        return self.cpu[:n].copy_(self.gpu[:n], non_blocking=True)
 
 
 def get_engine_client_zmq_addr(local_only: bool,
@@ -154,6 +183,7 @@ class APIServerProcessManager:
             client_config = {
                 "input_address": in_addr,
                 "output_address": out_addr,
+                "client_count": num_servers,
                 "client_index": i
             }
             if stats_update_address is not None:

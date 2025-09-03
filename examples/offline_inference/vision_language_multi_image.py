@@ -107,6 +107,42 @@ def load_aya_vision(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_command_a_vision(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "CohereLabs/command-a-vision-07-2025"
+
+    # NOTE: This model is 122B parameters and requires tensor parallelism
+    # Recommended to use tp=4 on H100 GPUs
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=32768,
+        tensor_parallel_size=4,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_deepseek_vl2(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "deepseek-ai/deepseek-vl2-tiny"
 
@@ -197,6 +233,53 @@ def load_h2ovl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_hyperclovax_seed_vision(
+    question: str, image_urls: list[str]
+) -> ModelRequestData:
+    model_name = "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B"
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=16384,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    message = {"role": "user", "content": list()}
+    for _image_url in image_urls:
+        message["content"].append(
+            {
+                "type": "image",
+                "image": _image_url,
+                "ocr": "",
+                "lens_keywords": "",
+                "lens_local_keywords": "",
+            }
+        )
+    message["content"].append(
+        {
+            "type": "text",
+            "text": question,
+        }
+    )
+
+    prompt = tokenizer.apply_chat_template(
+        [
+            message,
+        ],
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        stop_token_ids=None,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_idefics3(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "HuggingFaceM4/Idefics3-8B-Llama3"
 
@@ -218,34 +301,6 @@ def load_idefics3(question: str, image_urls: list[str]) -> ModelRequestData:
         f"Image-{i}: <image>\n" for i, _ in enumerate(image_urls, start=1)
     )
     prompt = f"<|begin_of_text|>User:{placeholders}\n{question}<end_of_utterance>\nAssistant:"  # noqa: E501
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
-    )
-
-
-def load_smolvlm(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
-
-    # The configuration below has been confirmed to launch on a single L40 GPU.
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=8192,
-        max_num_seqs=16,
-        enforce_eager=True,
-        limit_mm_per_prompt={"image": len(image_urls)},
-        mm_processor_kwargs={
-            "max_image_size": {"longest_edge": 384},
-        },
-    )
-
-    placeholders = "\n".join(
-        f"Image-{i}: <image>\n" for i, _ in enumerate(image_urls, start=1)
-    )
-    prompt = (
-        f"<|im_start|>User:{placeholders}\n{question}<end_of_utterance>\nAssistant:"  # noqa: E501
-    )
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
@@ -316,49 +371,36 @@ def load_internvl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
-def load_hyperclovax_seed_vision(
-    question: str, image_urls: list[str]
-) -> ModelRequestData:
-    model_name = "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B"
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+def load_llama4(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
 
     engine_args = EngineArgs(
         model=model_name,
-        trust_remote_code=True,
-        max_model_len=16384,
+        max_model_len=131072,
+        tensor_parallel_size=8,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
-    message = {"role": "user", "content": list()}
-    for _image_url in image_urls:
-        message["content"].append(
-            {
-                "type": "image",
-                "image": _image_url,
-                "ocr": "",
-                "lens_keywords": "",
-                "lens_local_keywords": "",
-            }
-        )
-    message["content"].append(
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
         {
-            "type": "text",
-            "text": question,
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
         }
-    )
+    ]
 
-    prompt = tokenizer.apply_chat_template(
-        [
-            message,
-        ],
-        tokenize=False,
-        add_generation_prompt=True,
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
     )
 
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        stop_token_ids=None,
         image_data=[fetch_image(url) for url in image_urls],
     )
 
@@ -463,13 +505,14 @@ def load_llava_onevision(question: str, image_urls: list[str]) -> ModelRequestDa
     )
 
 
-def load_llama4(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "meta-llama/Llama-4-Scout-17B-16E-Instruct"
+def load_keye_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "Kwai-Keye/Keye-VL-8B-Preview"
 
     engine_args = EngineArgs(
         model=model_name,
-        max_model_len=131072,
-        tensor_parallel_size=8,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=5,
         limit_mm_per_prompt={"image": len(image_urls)},
     )
 
@@ -481,24 +524,26 @@ def load_llama4(question: str, image_urls: list[str]) -> ModelRequestData:
                 *placeholders,
                 {"type": "text", "text": question},
             ],
-        }
+        },
     ]
 
-    processor = AutoProcessor.from_pretrained(model_name)
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
 
     prompt = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
 
+    image_data = [fetch_image(url) for url in image_urls]
+
     return ModelRequestData(
         engine_args=engine_args,
         prompt=prompt,
-        image_data=[fetch_image(url) for url in image_urls],
+        image_data=image_data,
     )
 
 
-def load_keye_vl(question: str, image_urls: list[str]) -> ModelRequestData:
-    model_name = "Kwai-Keye/Keye-VL-8B-Preview"
+def load_keye_vl1_5(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "Kwai-Keye/Keye-VL-1_5-8B"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -645,6 +690,36 @@ def load_nvlm_d(question: str, image_urls: list[str]) -> ModelRequestData:
 # Ovis
 def load_ovis(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "AIDC-AI/Ovis2-1B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        trust_remote_code=True,
+        dtype="half",
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = "\n".join(
+        f"Image-{i}: <image>\n" for i, _ in enumerate(image_urls, start=1)
+    )
+    messages = [{"role": "user", "content": f"{placeholders}\n{question}"}]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    prompt = tokenizer.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+# ovis2_5
+def load_ovis2_5(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "AIDC-AI/Ovis2.5-2B"
 
     engine_args = EngineArgs(
         model=model_name,
@@ -954,6 +1029,95 @@ def load_qwen2_5_vl(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_r_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "YannQi/R-4B"
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=16384,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+def load_smolvlm(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "HuggingFaceTB/SmolVLM2-2.2B-Instruct"
+
+    # The configuration below has been confirmed to launch on a single L40 GPU.
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=16,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_kwargs={
+            "max_image_size": {"longest_edge": 384},
+        },
+    )
+
+    placeholders = "\n".join(
+        f"Image-{i}: <image>\n" for i, _ in enumerate(image_urls, start=1)
+    )
+    prompt = (
+        f"<|im_start|>User:{placeholders}\n{question}<end_of_utterance>\nAssistant:"  # noqa: E501
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
+def load_step3(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "stepfun-ai/step3-fp8"
+
+    # NOTE: Below are verified configurations for step3-fp8
+    # on 8xH100 GPUs.
+    engine_args = EngineArgs(
+        model=model_name,
+        max_num_batched_tokens=4096,
+        gpu_memory_utilization=0.85,
+        tensor_parallel_size=8,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        reasoning_parser="step3",
+    )
+
+    prompt = (
+        "<｜begin▁of▁sentence｜> You are a helpful assistant. <|BOT|>user\n "
+        f"{'<im_patch>' * len(image_urls)}{question} <|EOT|><|BOT|"
+        ">assistant\n<think>\n"
+    )
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
 def load_tarsier(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "omni-research/Tarsier-7b"
 
@@ -1000,26 +1164,99 @@ def load_tarsier2(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+# GLM-4.5V
+def load_glm4_5v(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "zai-org/GLM-4.5V"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=32768,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        enforce_eager=True,
+        tensor_parallel_size=4,
+    )
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+    processor = AutoProcessor.from_pretrained(model_name)
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
+# GLM-4.5V-FP8
+def load_glm4_5v_fp8(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "zai-org/GLM-4.5V-FP8"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=32768,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        enforce_eager=True,
+        tensor_parallel_size=4,
+    )
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+    processor = AutoProcessor.from_pretrained(model_name)
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+    image_data = [fetch_image(url) for url in image_urls]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=image_data,
+    )
+
+
 model_example_map = {
     "aria": load_aria,
     "aya_vision": load_aya_vision,
+    "command_a_vision": load_command_a_vision,
     "deepseek_vl_v2": load_deepseek_vl2,
     "gemma3": load_gemma3,
     "h2ovl_chat": load_h2ovl,
+    "hyperclovax_seed_vision": load_hyperclovax_seed_vision,
     "idefics3": load_idefics3,
     "interns1": load_interns1,
     "internvl_chat": load_internvl,
-    "hyperclovax_seed_vision": load_hyperclovax_seed_vision,
     "keye_vl": load_keye_vl,
+    "keye_vl1_5": load_keye_vl1_5,
     "kimi_vl": load_kimi_vl,
+    "llama4": load_llama4,
     "llava": load_llava,
     "llava-next": load_llava_next,
     "llava-onevision": load_llava_onevision,
-    "llama4": load_llama4,
     "mistral3": load_mistral3,
     "mllama": load_mllama,
     "NVLM_D": load_nvlm_d,
     "ovis": load_ovis,
+    "ovis2_5": load_ovis2_5,
     "phi3_v": load_phi3v,
     "phi4_mm": load_phi4mm,
     "phi4_multimodal": load_phi4_multimodal,
@@ -1027,9 +1264,13 @@ model_example_map = {
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
     "qwen2_5_vl": load_qwen2_5_vl,
+    "rvl": load_r_vl,
     "smolvlm": load_smolvlm,
+    "step3": load_step3,
     "tarsier": load_tarsier,
     "tarsier2": load_tarsier2,
+    "glm4_5v": load_glm4_5v,
+    "glm4_5v_fp8": load_glm4_5v_fp8,
 }
 
 

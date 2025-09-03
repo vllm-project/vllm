@@ -4,7 +4,7 @@ r"""Benchmark online serving throughput with structured outputs.
 
 On the server side, run one of the following commands:
     (vLLM OpenAI API server)
-    vllm serve <your_model> --disable-log-requests
+    vllm serve <your_model>
 
 On the client side, run:
     python benchmarks/benchmark_serving_structured_output.py \
@@ -998,7 +998,7 @@ def create_argument_parser():
         "--percentile-metrics",
         type=str,
         default="ttft,tpot,itl",
-        help="Comma-separated list of selected metrics to report percentils. "
+        help="Comma-separated list of selected metrics to report percentiles. "
         "This argument specifies the metrics to report percentiles. "
         'Allowed metric names are "ttft", "tpot", "itl", "e2el". '
         'Default value is "ttft,tpot,itl".',
