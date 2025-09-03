@@ -224,7 +224,7 @@ async def test_comparison_with_prompt_logprobs_and_logprobs(server):
                 logprobs_token_ids.append(token_id)
 
         # When echo=True, the logprobs include both prompt and response tokens
-        # The token_ids field should match the the suffix of response portion
+        # The token_ids field should match the suffix of response portion
         # The prompt_token_ids should match the prompt portion
         assert len(completion.choices[0].token_ids) < len(logprobs_token_ids)
         response_token_ids_length = len(completion.choices[0].token_ids)

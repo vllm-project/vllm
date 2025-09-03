@@ -83,7 +83,7 @@ def test_ngram_correctness(
     model_name: str,
 ):
     '''
-    Compare the outputs of a original LLM and a speculative LLM
+    Compare the outputs of an original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
     '''
     with monkeypatch.context() as m:

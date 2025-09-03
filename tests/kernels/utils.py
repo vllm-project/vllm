@@ -1236,7 +1236,7 @@ def baseline_scaled_mm(a: torch.Tensor,
                        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
 
     # We treat N-dimensional group scaling as extended numpy-style broadcasting
-    # in numpy simply stretches dimensions with an extent of 1 to match the
+    # in numpy simply stretches dimensions with an extent of 1 to match
     # the target shape by repeating the data along that dimension (broadcasting)
     # , we extend these semantics to say if the extent of a dimension in the
     # source shape is not 1 and does not match the target shape we repeat each
