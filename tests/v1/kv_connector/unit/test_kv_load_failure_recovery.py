@@ -73,6 +73,7 @@ def test_async_load_failure(
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens,
                                          async_load=True))
+    scheduler.connector.take_events.return_value = ()
 
     scheduler_output = scheduler.schedule()
 
@@ -150,6 +151,7 @@ def test_sync_load_failure(
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens,
                                          async_load=False))
     scheduler.connector.request_finished.return_value = (False, None)
+    scheduler.connector.take_events.return_value = ()
 
     scheduler_output = scheduler.schedule()
 
@@ -228,6 +230,7 @@ def test_sync_load_failure_with_shared_blocks(
     scheduler.connector.get_num_new_matched_tokens.side_effect = (
         _make_get_num_new_matched_tokens(req_num_new_matched_tokens,
                                          async_load=False))
+    scheduler.connector.take_events.return_value = ()
 
     scheduler_output = scheduler.schedule()
 
