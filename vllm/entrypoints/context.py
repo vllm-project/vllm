@@ -94,10 +94,14 @@ class HarmonyContext(ConversationContext):
         self.num_init_messages = len(messages)
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
-        # TODO(woosuk): Implement the following fields.
         self.num_cached_tokens = 0
         self.num_reasoning_tokens = 0
+        self.num_tool_output_tokens = 0
+        self.num_last_turn_input_tokens = 0
+        self.num_last_turn_output_tokens = 0
+        self.first_turn = True
 
+    # TODO(yeq): unify token usage logic with streaming case
     def _update_num_prompt_tokens(self, output: RequestOutput):
         if output.prompt_token_ids and len(output.prompt_token_ids) > 0:
             # NOTE: with built-in tools, there might be multiple rounds in
@@ -110,17 +114,48 @@ class HarmonyContext(ConversationContext):
 
     def append_output(self, output) -> None:
         if isinstance(output, RequestOutput):
-            self._update_num_prompt_tokens(output)
             output_token_ids = output.outputs[0].token_ids
-            self._update_num_output_tokens(output_token_ids)
             self.parser = get_streamable_parser_for_assistant()
             for token_id in output_token_ids:
                 self.parser.process(token_id)
+                if self.parser.current_channel == "analysis":
+                    self.num_reasoning_tokens += 1
             output_msgs = self.parser.messages
+            self._update_token_usage(output)
         else:
             # Tool output.
             output_msgs = output
         self._messages.extend(output_msgs)
+
+    def _update_token_usage(self, output: RequestOutput) -> None:
+        if output.prompt_token_ids is not None:
+            this_turn_input_tokens = len(output.prompt_token_ids)
+        else:
+            this_turn_input_tokens = 0
+            logger.error(
+                "RequestOutput appended contains no prompt_token_ids.")
+
+        if self.first_turn: 
+            self.first_turn = False
+        else:
+            # start counting tool after first turn
+            # tool tokens = this turn prefill - last turn prefill - last turn decode
+            this_turn_tool_tokens = this_turn_input_tokens \
+                - self.num_last_turn_input_tokens \
+                - self.num_last_turn_output_tokens
+            self.num_tool_output_tokens += this_turn_tool_tokens
+
+        self.num_prompt_tokens += this_turn_input_tokens
+        self.num_cached_tokens += output.num_cached_tokens
+        self.num_last_turn_input_tokens = this_turn_input_tokens
+
+        if output.outputs:
+            this_turn_output_token_count = 0
+            for completion_output in output.outputs:
+                # only keep last round
+                this_turn_output_token_count += len(completion_output.token_ids)
+            self.num_output_tokens += this_turn_output_token_count
+            self.num_last_turn_output_tokens = this_turn_output_token_count
 
     @property
     def messages(self) -> list:
