@@ -3,22 +3,23 @@
 
 from collections.abc import Iterable
 from typing import Optional, Union
+
 import torch
 from einops import rearrange, repeat
 from torch import nn
 from torch.nn import functional as F
-from transformers import Siglip2VisionConfig
+from transformers import Siglip2TextConfig, Siglip2VisionConfig
 from transformers.configuration_utils import PretrainedConfig
-from transformers.models.siglip2.configuration_siglip2 import Siglip2TextConfig, Siglip2VisionConfig
 
-from vllm.config import QuantizationConfig
+from vllm.config import QuantizationConfig, VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import _Backend
 
@@ -30,7 +31,7 @@ class VisionRotaryEmbedding(nn.Module):
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
         inv_freq = 1.0 / (theta
-                          ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
+                          **(torch.arange(0, dim, 2, dtype=torch.float) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, seqlen: int) -> torch.Tensor:
@@ -232,7 +233,7 @@ class Siglip2Attention(nn.Module):
         self.tp_size = (1 if use_data_parallel else
                         get_tensor_model_parallel_world_size())
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
-        self.use_rope = config.use_rope
+        self.use_rope = getattr(config, "use_rope", False)
 
         # Detect attention implementation.
         self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
@@ -373,8 +374,12 @@ class Siglip2EncoderLayer(nn.Module):
                               prefix=f"{prefix}.mlp",
                               use_data_parallel=use_data_parallel)
 
-    def forward(self, hidden_states: torch.Tensor, cu_seqlens: torch.Tensor,
-                position_embeddings: Optional[torch.Tensor] = None) -> tuple[torch.FloatTensor]:
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        position_embeddings: Optional[torch.Tensor] = None
+    ) -> tuple[torch.FloatTensor]:
         """
         Args:
             hidden_states (`torch.FloatTensor`):
@@ -523,7 +528,8 @@ class Siglip2Encoder(nn.Module):
         r"""
         Args:
             inputs_embeds (`torch.FloatTensor`):
-                Flattened text input tensor of shape `(seq_len, hidden_state_size)`.
+                Flattened text input tensor of shape 
+                    `(seq_len, hidden_state_size)`.
             grid_thws (`torch.LongTensor`):
                 grid shape (num_patches, 3)
             cu_seqlens (`torch.Tensor`):
@@ -535,17 +541,20 @@ class Siglip2Encoder(nn.Module):
             cu_window_seqlens = torch.tensor(
                 cu_window_seqlens,
                 device=inputs_embeds.device,
-                dtype=grid_thws.dtype if torch.jit.is_tracing() else torch.int32,
+                dtype=grid_thws.dtype
+                if torch.jit.is_tracing() else torch.int32,
             )
             cu_window_seqlens = torch.unique_consecutive(cu_window_seqlens)
 
             seq_len, _ = inputs_embeds.size()
             inputs_embeds = inputs_embeds.reshape(
-                seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+                seq_len // self.spatial_merge_unit, self.spatial_merge_unit,
+                -1)
             inputs_embeds = inputs_embeds[window_index, :, :]
             inputs_embeds = inputs_embeds.reshape(seq_len, -1)
             rotary_pos_emb = rotary_pos_emb.reshape(
-                seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+                seq_len // self.spatial_merge_unit, self.spatial_merge_unit,
+                -1)
             rotary_pos_emb = rotary_pos_emb[window_index, :, :]
             rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
             emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
@@ -561,7 +570,8 @@ class Siglip2Encoder(nn.Module):
                 #    same dtype as grid_thw
                 # See https://github.com/huggingface/transformers/pull/34852
                 # for more information
-                dtype=grid_thws.dtype if torch.jit.is_tracing() else torch.int32,
+                dtype=grid_thws.dtype
+                if torch.jit.is_tracing() else torch.int32,
             )
             cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
@@ -578,15 +588,16 @@ class Siglip2Encoder(nn.Module):
                                       position_embeddings)
 
             hidden_states = hidden_states.reshape(
-                seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+                seq_len // self.spatial_merge_unit, self.spatial_merge_unit,
+                -1)
             hidden_states = hidden_states[reverse_indices, :].reshape(
                 seq_len, -1)
 
         else:  # text input
             hidden_states = inputs_embeds
             for layer in self.layers:
-                hidden_states = layer(
-                    hidden_states=hidden_states, cu_seqlens=cu_seqlens)
+                hidden_states = layer(hidden_states=hidden_states,
+                                      cu_seqlens=cu_seqlens)
 
         return hidden_states
 
@@ -688,6 +699,7 @@ class Siglip2NavitModel(torch.nn.Module):
 
 
 class Siglip2TextEmbeddings(nn.Module):
+
     def __init__(self, config: Siglip2TextConfig, prefix: str = ""):
         super().__init__()
         embed_dim = config.hidden_size
@@ -695,11 +707,13 @@ class Siglip2TextEmbeddings(nn.Module):
         self.token_embedding = VocabParallelEmbedding(
             config.vocab_size, embed_dim, prefix=f"{prefix}.token_embedding")
         self.position_embedding = VocabParallelEmbedding(
-            config.max_position_embeddings, embed_dim, prefix=f"{prefix}.position_embedding")
+            config.max_position_embeddings,
+            embed_dim,
+            prefix=f"{prefix}.position_embedding")
 
-        self.register_buffer(
-            "position_ids", torch.arange(config.max_position_embeddings), persistent=False
-        )
+        self.register_buffer("position_ids",
+                             torch.arange(config.max_position_embeddings),
+                             persistent=False)
 
     def forward(
         self,
@@ -716,14 +730,19 @@ class Siglip2TextEmbeddings(nn.Module):
 
 
 class Siglip2TextTransformer(nn.Module):
-    def __init__(self, config: Siglip2TextConfig, prefix: str = "",):
+
+    def __init__(
+        self,
+        config: Siglip2TextConfig,
+        prefix: str = "",
+    ):
         super().__init__()
         self.config = config
         embed_dim = config.hidden_size
         self.embeddings = Siglip2TextEmbeddings(config)
         self.encoder = Siglip2Encoder(config)
-        self.final_layer_norm = nn.LayerNorm(
-            embed_dim, eps=config.layer_norm_eps)
+        self.final_layer_norm = nn.LayerNorm(embed_dim,
+                                             eps=config.layer_norm_eps)
 
     def forward(
         self,
@@ -734,11 +753,12 @@ class Siglip2TextTransformer(nn.Module):
         if input_ids is None:
             raise ValueError("You have to specify input_ids")
 
-        hidden_states = self.embeddings(
-            input_ids=input_ids, position_ids=positions)
+        hidden_states = self.embeddings(input_ids=input_ids,
+                                        position_ids=positions)
 
         # Calculate cumulative sequence length.
-        # For input of 2 sequences size 4 and 3, `positions` will be [0, 1, 2, 3, 0, 1, 2].
+        # For input of 2 sequences size 4 and 3, `positions`
+        # will be [0, 1, 2, 3, 0, 1, 2].
         # The corresponding cu_seqlens is [0, 4, 7].
         cu_seqlens = []
         for i, pos in enumerate(positions):
@@ -747,18 +767,24 @@ class Siglip2TextTransformer(nn.Module):
         cu_seqlens.append(len(positions))
         cu_seqlens = torch.tensor(cu_seqlens)
 
-        last_hidden_state = self.encoder(
-            inputs_embeds=hidden_states, cu_seqlens=cu_seqlens)
+        last_hidden_state = self.encoder(inputs_embeds=hidden_states,
+                                         cu_seqlens=cu_seqlens)
         last_hidden_state = self.final_layer_norm(last_hidden_state)
 
         return last_hidden_state
 
 
 class Siglip2TextModel(torch.nn.Module):
-    config: Siglip2TextConfig
 
-    def __init__(self, config: Siglip2TextConfig, prefix: str = "",):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ):
         super().__init__()
+        config = vllm_config.model_config.hf_config.text_config
+        print(vllm_config.model_config.hf_config.vision_config)
+        print('A' * 30)
         self.text_model = Siglip2TextTransformer(config)
 
     def get_input_embeddings(
@@ -767,16 +793,10 @@ class Siglip2TextModel(torch.nn.Module):
     ) -> torch.Tensor:
         return self.text_model.embeddings(input_ids)
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor,
+                positions: torch.Tensor) -> torch.Tensor:
 
-        return self.text_model(
-            input_ids=input_ids,
-            positions=positions
-        )
+        return self.text_model(input_ids=input_ids, positions=positions)
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
