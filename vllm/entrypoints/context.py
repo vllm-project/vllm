@@ -93,17 +93,35 @@ class HarmonyContext(ConversationContext):
             # as new prompt each time. Hence the sum.
             self.num_prompt_tokens += len(output.prompt_token_ids)
 
+    def _update_num_cached_tokens(self, output: RequestOutput):
+        if output.num_cached_tokens is not None:
+            #Similar to num_prompt_tokens
+            self.num_cached_tokens += output.num_cached_tokens
+
     def _update_num_output_tokens(self, token_ids: Sequence[int]):
         self.num_output_tokens += len(token_ids)
+
+    def _update_num_reasoning_tokens(self, token_ids: Sequence[int]):
+        # Count tokens that are part of reasoning content (analysis channel
+        # or tool-directed messages like python/browser calls)
+        is_analysis = self.parser.current_channel == "analysis"
+        is_tool_call = (self.parser.current_recipient is not None and
+                        (self.parser.current_recipient.startswith("python") or
+                         self.parser.current_recipient.startswith("browser.")))
+        if is_analysis or is_tool_call:
+            self.num_reasoning_tokens += len(token_ids)
 
     def append_output(self, output) -> None:
         if isinstance(output, RequestOutput):
             self._update_num_prompt_tokens(output)
+            self._update_num_cached_tokens(output)
             output_token_ids = output.outputs[0].token_ids
             self._update_num_output_tokens(output_token_ids)
             self.parser = get_streamable_parser_for_assistant()
             for token_id in output_token_ids:
                 self.parser.process(token_id)
+                # Check if the current token is part of reasoning content
+                self._update_num_reasoning_tokens([token_id])
             output_msgs = self.parser.messages
         else:
             # Tool output.
@@ -204,6 +222,7 @@ class StreamingHarmonyContext(HarmonyContext):
             # so we only want to add the prompt tokens once for each message.
             if self.first_tok_of_message:
                 self._update_num_prompt_tokens(output)
+                self._update_num_cached_tokens(output)
             # Reset self.first_tok_of_message if needed:
             # if the current token is the last one of the current message
             # (finished=True), then the next token processed will mark the
@@ -212,6 +231,8 @@ class StreamingHarmonyContext(HarmonyContext):
             tok = output.outputs[0].token_ids[0]
             self.parser.process(tok)
             self._update_num_output_tokens(output.outputs[0].token_ids)
+            # Check if the current token is part of reasoning content
+            self._update_num_reasoning_tokens([tok])
             self.last_tok = tok
         else:
             # Handle the case of tool output in direct message format
