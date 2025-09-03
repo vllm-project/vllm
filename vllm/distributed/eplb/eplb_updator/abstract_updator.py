@@ -12,44 +12,87 @@ logger = init_logger(__name__)
 
 
 class BaseUpdator(ABC):
+    """
+    Abstract Base Class (ABC) for updator mechanisms in a distributed system.
+    This class defines the interface that any concrete updator must implement,
+    providing hooks for various stages of a distributed operation cycle,
+    such as initialization, profiling, warm-up, step execution, and rearrangement.
+    """
     @abstractmethod
     def init(self):
         pass
 
     @abstractmethod
     def profile(self):
+        """
+        Performs profiling operations. This could involve measuring performance
+        or collecting statistics.
+        """
         pass
 
     @abstractmethod
     def warm_up(self):
+        """
+        Executes warm-up steps. This is typically used to pre-allocate resources
+        or stabilize performance before actual operations begin.
+        """
         pass
 
     @abstractmethod
     def dummy(self):
+        """
+        Executes a dummy operation. This might be used for testing or
+        to simulate a workload without actual data processing.
+        """
         pass
 
     @abstractmethod
     def step(self):
+        """
+        Performs a single synchronous step of the updator's main operation.
+        """
         pass
 
     @abstractmethod
     def step_async(self):
+        """
+        Performs a single asynchronous step of the updator's main operation.
+        This method should return immediately, allowing other operations to
+        proceed concurrently.
+        """
         pass
 
     @abstractmethod
     def step_before_forward(self):
+        """
+        Executes operations that need to occur before the forward pass
+        of a model.
+        """
         pass
 
     @abstractmethod
     def step_after_forward(self):
+        """
+        Executes operations that need to occur after the forward pass
+        of a model.
+        """
+
         pass
 
     @abstractmethod
     def rearrange(self):
+        """
+        Handles the rearrangement of data or states, often in response to
+        load balancing or topology changes.
+        """
         pass
 
     @abstractmethod
     def recv_state(self):
+        """
+        Receives state information from other components or ranks in the
+        distributed system.
+        """
         pass
 
     @staticmethod
@@ -57,6 +100,18 @@ class BaseUpdator(ABC):
             pg: Union[ProcessGroup, StatelessProcessGroup],
             rank_mapping: dict[int, int],
     ) -> int:
+        """
+        Calculates the number of distinct physical nodes involved in a process group,
+        considering a given rank mapping.
+
+        Args:
+            pg: The PyTorch distributed ProcessGroup or a custom StatelessProcessGroup.
+            rank_mapping: A dictionary mapping global ranks to their logical ranks
+                          or a special value like -1 (for pending shutdown).
+
+        Returns:
+            The total number of distinct physical nodes.
+        """
         if isinstance(pg, ProcessGroup):
             world_size = torch.distributed.get_world_size(group=pg)
         else:

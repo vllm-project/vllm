@@ -8,7 +8,7 @@ from torch._C._distributed_c10d import ProcessGroup
 from torch.distributed import all_reduce, all_gather
 
 from vllm.distributed import get_ep_group, get_node_count
-from vllm.distributed.eplb import rebalance_experts, EplbWeightLoader
+from vllm.distributed.eplb import EplbWeightLoader
 from vllm.distributed.eplb.eplb_data.eplb_data import EplbData
 from vllm.distributed.eplb.eplb_updator.abstract_updator import BaseUpdator
 from vllm.distributed.eplb.eplb_process.eplb_process import EplbProcess
@@ -21,7 +21,29 @@ from overrides import override
 
 
 class EplbUpdator(BaseUpdator):
+    """
+    Manages the Expert Parallel Load Balancing (EPLB) update process,
+    orchestrating the collection of expert load metrics, the re-balancing
+    of experts across ranks, and the transfer of expert weights.
+
+    It interacts with `EplbData` for shared state, `EplbWeightLoader` for
+    weight transfer, and `EplbProcess` for expert mapping calculations.
+    """
     def __init__(self, eplb_data: EplbData, eplb_loader: EplbWeightLoader,adaptor, eplb_process: EplbProcess):
+        """
+        Initializes the EplbUpdator.
+
+        Args:
+            eplb_data: An instance of EplbData holding shared EPLB configuration and metrics.
+            eplb_loader: An instance of EplbWeightLoader responsible for expert weight transfer.
+            adaptor: An adaptor to interact with the vLLM model's expert parameters.
+            eplb_process: An instance of EplbProcess for handling expert mapping logic.
+        """
+        self.cur_iterations = None
+        self.device = None
+        self.world_size = None
+        self._gather_buffer = None
+        self.eplb_policy = None
         self.reqs = None
         self.eplb_process = eplb_process
         self.eplb_data = eplb_data
@@ -41,11 +63,27 @@ class EplbUpdator(BaseUpdator):
 
     @override
     def profile(self, model: MixtureOfExperts, is_profile):
+        """
+        Profiles the expert rearrangement process.
+        During profiling, it performs a dummy rearrangement to reserve memory.
+
+        Args:
+            model: The MoE model.
+            is_profile: If True, indicates a profiling run.
+        """
         self.rearrange(model, is_profile)
         return
 
     @override
     def dummy(self, model: MixtureOfExperts):
+        """
+        Performs a dummy step for expert load balancing.
+        It clears the expert load and increments the rearrangement step counter.
+        If the counter reaches the interval, it triggers a rearrangement.
+
+        Args:
+            model: The MoE model.
+        """
         self.eplb_data.expert_load_pass.zero_()
         self.eplb_data.expert_rearrangement_step += 1
         if (self.eplb_data.expert_rearrangement_step
@@ -116,7 +154,7 @@ class EplbUpdator(BaseUpdator):
             self.eplb_data.expert_load_pass.clone())
         self.eplb_data.expert_load_window_step += 1
         if self.eplb_data.expert_load_window_step >= self.eplb_data.expert_load_window_size:
-            self.expert_load_window_step = 0
+            self.eplb_data.expert_load_window_step = 0
         self.eplb_data.expert_load_pass.zero_()
 
         # Step the expert rearrangement step
@@ -131,7 +169,11 @@ class EplbUpdator(BaseUpdator):
 
     @override
     def step_before_forward(self):
-        # process与updator解耦，方法挪到process里
+        """
+        Executes operations before the model's forward pass.
+        If the EPLB process indicates it should process (e.g., a rearrangement
+        is pending), it initiates asynchronous shuffling for each MoE layer.
+        """
         if self.eplb_process._should_process():
             # adaptor与updator解耦，数据相关的类型放到数据侧
             for layer_id in range(self.eplb_adaptor.num_moe_layers):
@@ -139,6 +181,15 @@ class EplbUpdator(BaseUpdator):
                 
     @override           
     def shuffer_layer_async(self,layer):
+        """
+        Initiates asynchronous shuffling of experts for a specific MoE layer.
+        This method retrieves the necessary information from `eplb_process`,
+        prepares the weight loader for transfer tasks, and starts the
+        asynchronous communication.
+
+        Args:
+            layer: The ID of the MoE layer to shuffle.
+        """
         if self.eplb_process._should_process():
             (expert_send_info, expert_recv_info, updated_expert_map, 
             log2phy_map, layer_id) = self.eplb_process.get_at_index(layer)
@@ -153,13 +204,17 @@ class EplbUpdator(BaseUpdator):
                     updated_expert_map_this_rank, 
                     layer_id + self.eplb_adaptor.num_dense_layers)
             self.reqs = []
-            self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
+            self.eplb_loader.async_expert_weight_transfer(self.reqs)
             
     @override
     def step_after_forward(self):
+        """
+        Executes operations after the model's forward pass.
+        This includes waking up the EPLB worker, computing and setting MoE load,
+        and updating expert weights if conditions are met.
+        """
         if self.wakeup_eplb_worker_flag():
-            self.compute_and_set_moe_load(is_clear=True) 
-            # self.wakeup_eplb_worker()
+            self.compute_and_set_moe_load(is_clear=True)
  
         if self.update_expert_weight_flag():
             self.eplb_loader.update_expert_map_and_weight(self.reqs) 
@@ -168,20 +223,42 @@ class EplbUpdator(BaseUpdator):
 
     @override
     def update_expert_weight_flag(self):
+        """
+        Determines if expert weights should be updated in the current iteration.
+        This is typically true for a short window after the EPLB update and worker wait.
+
+        Returns:
+            True if expert weights should be updated, False otherwise.
+        """
         weight_update_counter = self.cur_iterations - (
             self.eplb_data.num_iterations_eplb_update + self.eplb_data.num_wait_worker_iterations)
-        return (weight_update_counter >= 0
-                and weight_update_counter < self.eplb_data.num_moe_layers)
+        return 0 <= weight_update_counter < self.eplb_data.num_moe_layers
 
     @override
     def wakeup_eplb_worker_flag(self):
+        """
+        Determines if the EPLB worker process should be woken up in the current iteration.
+        This typically happens just before the expert weight update phase.
+
+        Returns:
+            True if the EPLB worker should be woken up, False otherwise.
+        """
         return self.cur_iterations == (self.eplb_data.num_iterations_eplb_update - 1)
 
     @override 
     def compute_and_set_moe_load(self, is_clear=False):
+        """
+        Computes the MoE load across all ranks and sets it in the shared dictionary.
+        It gathers local expert load from all ranks and combines them.
+
+        Args:
+            is_clear: If True, indicates a clear operation (though not explicitly used here).
+
+        Returns:
+            The gathered MoE load tensor.
+        """
         local_load = self.eplb_adaptor.get_rank_expert_workload() #取local load逻辑
 
-        self._gather_buffer = None
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
             self.device = local_load.device #local load换成self.expert_load_view
@@ -205,10 +282,6 @@ class EplbUpdator(BaseUpdator):
                 f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
             )
         return moe_load
-    
-    # @override
-    # def wakeup_eplb_worker(self):
-    #     self.eplb.block_update_q.put(1)
 
     @override
     def rearrange(self,
@@ -218,9 +291,18 @@ class EplbUpdator(BaseUpdator):
                   global_expert_load: Optional[torch.Tensor] = None,
                   rank_mapping: Optional[dict[int, int]] = None) -> None:
         """
-        Rearrange the experts according to the current load.
-        """
+        Rearranges the experts according to the current load and the chosen EPLB policy.
+        This involves aggregating global expert load, applying the rebalancing policy,
+        and then physically moving expert weights.
 
+        Args:
+            model: The MoE model.
+            is_profile: If `True`, performs a dummy rearrangement for profiling.
+            execute_shuffle: If `True`, actually shuffles the weights; otherwise,
+                             only calculates new mappings.
+            global_expert_load: Pre-computed global expert load (optional).
+            rank_mapping: A dictionary mapping old rank to new rank, used for scaling.
+        """
         ep_group = get_ep_group().device_group
         ep_rank = ep_group.rank()
 
@@ -305,7 +387,7 @@ class EplbUpdator(BaseUpdator):
             new_physical_to_logical_map,
             new_logical_to_physical_map,
             new_logical_replica_count,
-        ) = (rebalance_experts(
+        ) = (self.eplb_policy.rebalance_experts(
             global_expert_load_window,
             num_replicas,
             num_groups,
@@ -354,7 +436,14 @@ class EplbUpdator(BaseUpdator):
     @override
     def recv_state(self) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Receive the expert load and old placement from the master rank.
+        Receives the global expert load and old expert placement information
+        from the master rank (rank 0). This is used when a rank is not the
+        master and needs to synchronize state for rearrangement.
+
+        Returns:
+            A tuple containing:
+            - global_expert_load: The aggregated expert load across all ranks.
+            - old_global_expert_indices: The previous mapping of physical to logical experts.
         """
         ep_group = get_ep_group()
         metadata = torch.empty(3, dtype=torch.int32, device="cpu")
@@ -552,7 +641,7 @@ class EplbUpdator(BaseUpdator):
 
         for old_rank in range(old_ep_size):
             new_rank = rank_mapping[old_rank]
-            if new_rank >= 0 and new_rank < new_ep_size:
+            if 0 <= new_rank < new_ep_size:
                 old_start_idx = old_rank * num_local_physical_experts
                 old_end_idx = (old_rank + 1) * num_local_physical_experts
                 new_start_idx = new_rank * num_local_physical_experts
@@ -565,7 +654,7 @@ class EplbUpdator(BaseUpdator):
 
     def update_iteration(self):
         self.cur_iterations += 1
-        if self.cur_iterations == (self.eplb_data.num_iterations_eplb_update + \
+        if self.cur_iterations == (self.eplb_data.num_iterations_eplb_update +
                                    self.eplb_data.num_wait_worker_iterations + self.eplb_data.num_moe_layers):
             self.eplb_adaptor.model.clear_all_moe_loads()
             if not self.eplb_data.gate_eplb:

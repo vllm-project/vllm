@@ -25,14 +25,13 @@ total. And when deploying, we'll have 288 sets of linear layer weights for each
 MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
-
 from collections.abc import Sequence
-from dataclasses import dataclass
 from typing import Optional
 
 import torch
 
 from vllm.config import ParallelConfig
+from vllm.distributed.eplb.eplb_adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm.distributed.parallel_state import get_ep_group, get_node_count
 
 from vllm.logger import init_logger
@@ -48,12 +47,14 @@ logger = init_logger(__name__)
 
 
 class EplbState:
-    def __init__(self):
+    def __init__(self, model):
         self.eplb_data = None
-        self.eplb_loader = EplbWeightLoader()
         self.eplb_updator = None
         self._async_processor = None
         self.eplb_policy = None
+        self.model = model
+        self.eplb_adaptor = VllmEplbAdaptor(self.model)
+        self.eplb_loader = EplbWeightLoader(self.eplb_adaptor)
 
     def __post_init__(self):
         # Initialize asynchronous process manager
@@ -147,7 +148,7 @@ class EplbState:
             dtype=torch.int32,
             device=device,
         )
-        expert_load_window_size = parallel_config.window_size
+        expert_load_window_size = parallel_config.eplb_config.window_size
         expert_load_window = torch.zeros(
             (expert_load_window_size, model.num_moe_layers,
              model.num_physical_experts),
@@ -156,7 +157,7 @@ class EplbState:
         )
 
         # Set the initial progress of rearrangement to 3/4
-        eplb_step_interval = parallel_config.step_interval
+        eplb_step_interval = parallel_config.eplb_config.step_interval
         expert_rearrangement_step = max(
             0, eplb_step_interval - eplb_step_interval // 4)
 
@@ -228,7 +229,7 @@ class EplbState:
             expert_rearrangement_step_interval=eplb_step_interval,
         )
         self.__post_init__()
-        self.eplb_updator = EplbUpdator(eplb_data=self.eplb_data, eplb_loader=self.eplb_loader, eplb_process=self._async_processor)
+        self.eplb_updator = EplbUpdator(eplb_data=self.eplb_data, eplb_loader=self.eplb_loader, eplb_process=self._async_processor, adaptor=self.eplb_adaptor)
 
         return self
 

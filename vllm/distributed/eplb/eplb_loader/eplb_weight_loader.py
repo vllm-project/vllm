@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from functools import partial
 from typing import Sequence, Iterable
 
@@ -7,17 +10,29 @@ from overrides import override
 from torch._C._distributed_c10d import ProcessGroup
 from torch.distributed import P2POp, batch_isend_irecv, get_global_rank
 
+from vllm.distributed.eplb.eplb_adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm.distributed.eplb.eplb_loader.abstract_loader import BaseLoader
 from vllm.distributed.eplb.eplb_utils.eplb_utils import idx_local_to_global, get_ep_ranks_with_expert
 
 
 class EplbWeightLoader(BaseLoader):
+    """
+    A concrete implementation of BaseLoader for Expert Parallel Load Balancing (EPLB).
+    This class is responsible for managing the transfer and update of expert weights
+    across different ranks during expert rearrangement.
+    """
+    def __init__(self, eplb_adaptor: VllmEplbAdaptor):
+        """
+        Initializes the EplbWeightLoader.
 
-    def __init__(self):
-        self.recv_expert_list = None
-        self.eplb_adaptor = None
-        self.comm_op_list = None
-        self.layer_id = None
+        Args:
+            eplb_adaptor: An adaptor to interact with the vLLM model's expert
+                          parameters and buffer management.
+        """
+        self.eplb_adaptor = eplb_adaptor
+        self.layer_id = -1
+        self.recv_expert_list = list()
+        self.comm_op_list = list()
         self.updated_expert_map = None
         self.updated_log2phy_map = None
 
@@ -31,7 +46,23 @@ class EplbWeightLoader(BaseLoader):
                       ep_group: ProcessGroup,
                       ) -> None:
         """
-        Perform expert weights rearrangement of one layer.
+        Performs expert weights rearrangement for a single MoE layer.
+        This method orchestrates the entire shuffling process including local copies
+        and inter-rank P2P communications.
+
+        Args:
+            num_local_experts: The number of experts managed by the current EP rank.
+            ep_rank: The current rank within the expert parallel group.
+            old_indices: Global indices of experts before rearrangement.
+                         Shape: (num_global_experts,)
+            new_indices: Global indices of experts after rearrangement.
+                         Shape: (num_global_experts,)
+            expert_weights: An iterable of torch.Tensor, representing the actual
+                            expert weights (e.g., [w1, w2, ...]). Each w_i is
+                            (num_local_experts, expert_dim).
+            expert_weights_buffer: An iterable of torch.Tensor, representing buffers
+                                   for receiving expert weights. Same structure as expert_weights.
+            ep_group: The PyTorch distributed process group for expert parallelism.
         """
         local2global = partial(
             idx_local_to_global,
@@ -83,6 +114,21 @@ class EplbWeightLoader(BaseLoader):
     @override
     def update_weight(self, expert_weights, expert_weights_buffer, experts_recv_loc, is_received_locally, is_unchanged,
                       local2global, new_indices, num_local_experts):
+        """
+        Updates the actual expert weights from the buffer after communication.
+        This is part of the `shuffle_layer` process.
+
+        Args:
+            expert_weights: The actual expert weight tensors to be updated.
+            expert_weights_buffer: Buffers containing received or locally copied weights.
+            experts_recv_loc: A dictionary mapping global expert ID to the local buffer index
+                              where it was received.
+            is_received_locally: Boolean list indicating if an expert was copied locally.
+            is_unchanged: Boolean list indicating if an expert remained in its original slot.
+            local2global: Partial function to convert local index to global expert ID.
+            new_local_expert_indices: The new global indices mapping for experts.
+            num_local_experts: Number of local experts.
+        """
         for dst in range(num_local_experts):
             if is_unchanged[dst]:
                 continue
@@ -99,6 +145,12 @@ class EplbWeightLoader(BaseLoader):
 
     @override
     def send_recv(self, p2p_ops):
+        """
+        Executes a batch of P2P communication operations.
+
+        Args:
+            p2p_ops: A list of P2POp objects (isend/irecv operations).
+        """
         if p2p_ops:
             reqs = batch_isend_irecv(p2p_ops)
             for req in reqs:
@@ -107,6 +159,27 @@ class EplbWeightLoader(BaseLoader):
     @override
     def prepare_recv(self, ep_group, ep_rank, expert_weights_buffer, is_received_locally, local2global, new_indices,
                      num_local_experts, old_indices, p2p_ops):
+        """
+        Prepares irecv operations for experts that need to be received from other ranks
+        as part of the `shuffle_layer` process.
+
+        Args:
+            ep_group: The PyTorch distributed process group.
+            ep_rank: Current rank in the EP group.
+            expert_weights_buffer: Buffers for receiving weights.
+            is_received_locally: Boolean list indicating if an expert was copied locally.
+            local2global: Partial function for local to global index conversion.
+            new_indices: The new global expert indices mapping.
+            num_local_experts: Number of local experts.
+            old_indices: The old global expert indices mapping.
+            p2p_ops: List to append P2POp objects.
+
+        Returns:
+            A tuple containing:
+            - experts_recv_loc: A dictionary mapping global expert ID to the local buffer index
+                                where it will be received.
+            - p2p_ops: The updated list of P2POp objects.
+        """
         experts_recv_loc: dict[int, int] = {}
         for dst in range(num_local_experts):
             if is_received_locally[dst]:
@@ -148,6 +221,23 @@ class EplbWeightLoader(BaseLoader):
     @override
     def prepare_send(self, ep_group, ep_rank, expert_weights, local2global, new_indices, num_local_experts, old_indices,
                      p2p_ops):
+        """
+        Prepares isend operations for experts that need to be sent to other ranks
+        as part of the `shuffle_layer` process.
+
+        Args:
+            ep_group: The PyTorch distributed process group.
+            ep_rank: Current rank in the EP group.
+            expert_weights: The actual expert weight tensors to be sent.
+            local2global: Partial function for local to global index conversion.
+            new_indices: The new global expert indices mapping.
+            num_local_experts: Number of local experts.
+            old_indices: The old global expert indices mapping.
+            p2p_ops: List to append P2POp objects.
+
+        Returns:
+            The updated list of P2POp objects.
+        """
         experts_send_loc: dict[int, int] = {}
         for src in range(num_local_experts):
             expert = old_indices[local2global(src)]
@@ -191,7 +281,14 @@ class EplbWeightLoader(BaseLoader):
 
     @override
     def prepare_send(self, expert_send_info, layer_id):
-        """准备发送任务 (isend)"""
+        """
+        Prepares asynchronous send tasks (isend) for expert weights.
+        This method is intended to be called when setting up communication for a specific layer.
+
+        Args:
+            expert_send_info: A list of tuples, where each tuple is (destination_rank, global_expert_id_to_send).
+            layer_id: The ID of the MoE layer for which experts are being sent.
+        """
         for dst_rank, global_expert_id_to_send in expert_send_info:
             local_expert_id = self.eplb_adaptor.expert_map_per_layer_cpu[
                 layer_id][global_expert_id_to_send].item()
@@ -199,10 +296,18 @@ class EplbWeightLoader(BaseLoader):
                     layer_id][local_expert_id]:
                 self.comm_op_list.append(
                     dist.P2POp(dist.isend, src_tensor, dst_rank))
-                
+
     @override
     def prepare_recv(self, expert_recv_info, updated_expert_map):
-        """准备接收任务 (irecv)"""
+        """
+        Prepares asynchronous receive tasks (irecv) for expert weights.
+        This method is intended to be called when setting up communication for a specific layer.
+
+        Args:
+            expert_recv_info: A list of tuples, where each tuple is (source_rank, global_expert_id_to_recv).
+            updated_expert_map: The new expert map (global_expert_id -> local_expert_id) for the current layer.
+                                This is used to determine which local slot the received expert will occupy.
+        """
         buffer_tensor_id = 0
         for recv_rank, global_expert_id_to_recv in expert_recv_info:
             for buffer_tensor in self.eplb_adaptor.buffer_tensor_list[buffer_tensor_id]:
@@ -212,12 +317,22 @@ class EplbWeightLoader(BaseLoader):
             self.recv_expert_list.append(
                 (local_expert_to_replace, buffer_tensor_id))
             buffer_tensor_id += 1
-    
+
     def generate_expert_d2d_transfer_task(self,
                                           expert_send_info,
                                           expert_recv_info,updated_expert_map,
                                           layer_id
                                           ):
+        """
+        Generates the expert data-to-data transfer tasks (send and receive operations)
+        for a given layer based on the provided send/receive information and the new expert map.
+
+        Args:
+            expert_send_info: List of (destination_rank, global_expert_id) for experts to send.
+            expert_recv_info: List of (source_rank, global_expert_id) for experts to receive.
+            updated_expert_map: The new expert map for the layer.
+            layer_id: The ID of the MoE layer.
+        """
         if not (expert_send_info or expert_recv_info):
             return
         self.updated_expert_map = updated_expert_map
@@ -227,21 +342,33 @@ class EplbWeightLoader(BaseLoader):
 
 
 
-    def asyn_expert_weight_transfer(self, reqs):
+    def async_expert_weight_transfer(self, reqs):
+        """
+        Initiates the asynchronous expert weight transfer by executing the
+        prepared P2P communication operations.
 
+        Args:
+            reqs: A list to which the communication requests will be appended.
+                  These requests can then be waited upon later.
+        """
         # set asynchronous stream for d2d expert weight transfer
         if self.comm_op_list:
             ret_list = dist.batch_isend_irecv(self.comm_op_list)
             reqs.extend(ret_list)
 
     def update_expert_map_and_weight(self, reqs):
+        """
+        Waits for all pending communication requests to complete, then updates
+        the expert map, logical-to-physical map, and the expert weights based
+        on the received data.
 
+        Args:
+            reqs: A list of communication requests to wait for.
+        """
         # Waiting for send/recv tasks finish
         for req in reqs:
             req.wait()
 
-        if self.comm_op_list is not None:
-            self.comm_op_list = None
 
         # update expert_map
         #解耦adaptor与loader
@@ -260,12 +387,27 @@ class EplbWeightLoader(BaseLoader):
                                                       local_expert_to_replace,
                                                       buffer_tensor_id)
 
+        self.clear_update_data()
 
-        self.recv_expert_list = []
+    def clear_update_data(self):
+        """
+        Clears the internal lists and temporary data used for the current update cycle.
+        This prepares the loader for the next rearrangement cycle.
+        """
+        if self.comm_op_list is not None:
+            self.comm_op_list.clear()
+        self.recv_expert_list.clear()
         self.updated_expert_map = None
         self.layer_id = -1
 
     def set_log2phy_map(self, log2phy_map_this_rank):
+        """
+        Sets the logical-to-physical expert map for the current rank.
+        This map is used during the update phase.
+
+        Args:
+            log2phy_map_this_rank: The logical-to-physical map tensor specific to this rank.
+        """
         self.updated_log2phy_map = log2phy_map_this_rank
 
 

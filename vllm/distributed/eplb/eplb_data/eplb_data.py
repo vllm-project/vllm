@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from dataclasses import dataclass
 
 import torch
@@ -114,12 +117,40 @@ class EplbData:
     """
 
     num_dense_layers: int = 0
+    """
+    The total number of dense layers in the model.
+    """
 
     global_expert_num: int = 0
+    """
+    The total number of global experts across all MoE layers.
+    """
 
     num_moe_layers: int = 0
+    """
+    The total number of Mixture-of-Experts (MoE) layers in the model.
+    """
 
     num_expert_layers: int = 0
+    """
+    The total number of expert layers (could be different from num_moe_layers
+    if experts are grouped or handled differently).
+    """
 
     num_wait_worker_iterations: int = 0
+    """
+    The number of iterations to wait for workers to synchronize or catch up.
+    """
+
+    num_iterations_eplb_update: int = 0
+    """
+    The number of iterations after which EPLB (Expert Parallel Load Balancing)
+    should perform an update.
+    """
+
+    gate_eplb: bool = False
+    """
+    A boolean flag indicating whether EPLB is enabled or active.
+    If True, EPLB logic will be applied.
+    """
 

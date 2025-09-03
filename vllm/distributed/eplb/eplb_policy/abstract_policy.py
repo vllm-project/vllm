@@ -1,9 +1,12 @@
-from abc import abstractmethod
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from abc import ABC, abstractmethod
 
 import torch
 
 
-class EplbPolicy:
+class EplbPolicy(ABC):
 
     @abstractmethod
     def rebalance_experts(self, old_global_expert_indices, weight, num_replicas, num_groups, num_nodes, num_ranks):
