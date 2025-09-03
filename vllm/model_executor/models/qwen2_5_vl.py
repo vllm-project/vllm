@@ -135,7 +135,7 @@ class Qwen2_5_VLVideoPixelInputs(TypedDict):
 
     second_per_grid_ts: torch.Tensor
     """
-    The video time interval (in seconds) for each grid along the temporal 
+    The video time interval (in seconds) for each grid along the temporal
     dimension in the 3D position IDs. Returned when `videos` is not `None`.
     """
 
@@ -852,6 +852,11 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsLoRA, SupportsPP,
                                          SupportsQuant):
 
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -862,6 +867,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             "lm_head.": "language_model.lm_head.",
             "model.": "language_model.model.",
         })
+
+    supports_encoder_tp_data = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -1014,8 +1021,10 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             pixel_values = image_input["pixel_values"]
 
             if self.use_data_parallel:
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw_list)
+                return run_dp_sharded_mrope_vision_model(self.visual,
+                                                         pixel_values,
+                                                         grid_thw_list,
+                                                         rope_type="rope_3d")
             else:
                 image_embeds = self.visual(pixel_values,
                                            grid_thw=grid_thw_list)
@@ -1041,8 +1050,10 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         else:
             pixel_values_videos = video_input["pixel_values_videos"]
             if self.use_data_parallel:
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values_videos, grid_thw_list)
+                return run_dp_sharded_mrope_vision_model(self.visual,
+                                                         pixel_values_videos,
+                                                         grid_thw_list,
+                                                         rope_type="rope_3d")
             else:
                 video_embeds = self.visual(pixel_values_videos,
                                            grid_thw=grid_thw_list)

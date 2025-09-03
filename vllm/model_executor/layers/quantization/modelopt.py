@@ -311,6 +311,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         experts = select_cutlass_fp8_gemm_impl(
             moe,
@@ -482,6 +483,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -489,7 +491,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptFp8MoEMethod` yet.")
@@ -520,6 +522,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
         )
@@ -884,13 +887,21 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.alpha = Parameter(layer.input_scale * layer.weight_scale_2,
                                 requires_grad=False)
 
+        # Calculate `1 / input_scale` so that we don't need to do so at runtime
+        layer.input_scale_inv = Parameter(
+            (1 / layer.input_scale).to(torch.float32), requires_grad=False)
+
         # Swizzle the weight blockscale.
         # contracting dimension is input dimension
         # block_size = 16;
         assert (layer.weight_scale.dtype == torch.float8_e4m3fn), (
             "Weight Block scale must be represented as FP8-E4M3")
 
-        if self.backend == "flashinfer-trtllm":
+        if self.backend == "marlin":
+            prepare_fp4_layer_for_marlin(layer)
+            del layer.alpha
+            del layer.input_scale
+        elif self.backend == "flashinfer-trtllm":
             # FlashInfer TRTLLM FP4 GEMM requires a different weight layout.
             # FlashInfer provides nvfp4_quantize to quantize + shuffle the
             # layout but we use our own quantization so we have to call
@@ -907,20 +918,13 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
                 torch.uint8), epilogue_tile_m).reshape(
                     weight_scale.shape).view(torch.float8_e4m3fn))
 
-            layer.weight_scale_swizzled = Parameter(weight_scale,
-                                                    requires_grad=False)
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
             layer.weight = Parameter(weight, requires_grad=False)
         else:
             swizzled_weight_scale = swizzle_blockscale(layer.weight_scale)
-            layer.weight_scale_swizzled = Parameter(swizzled_weight_scale,
-                                                    requires_grad=False)
+            layer.weight_scale = Parameter(swizzled_weight_scale,
+                                           requires_grad=False)
             layer.weight = Parameter(layer.weight.data, requires_grad=False)
-
-            if self.backend == "marlin":
-                prepare_fp4_layer_for_marlin(layer)
-                del layer.alpha
-                del layer.input_scale
-                del layer.weight_scale_swizzled
 
     def apply(
         self,
@@ -943,22 +947,21 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         output_shape = [x.shape[0], layer.weight.shape[0]]
 
         # quantize BF16 or FP16 to (FP4 and interleaved block scale)
-        s_quant = 1 / layer.input_scale
-        x_fp4, x_blockscale = scaled_fp4_quant(x, s_quant)
+        x_fp4, x_blockscale = scaled_fp4_quant(x, layer.input_scale_inv)
 
         # validate dtypes of quantized input, input block scale,
         # weight and weight_blockscale
         assert (x_fp4.dtype == torch.uint8)
         assert (layer.weight.dtype == torch.uint8)
         assert (x_blockscale.dtype == torch.float8_e4m3fn)
-        assert (layer.weight_scale_swizzled.dtype == torch.float8_e4m3fn)
+        assert (layer.weight_scale.dtype == torch.float8_e4m3fn)
         assert (layer.alpha.dtype == torch.float32)
 
         mm_args = (
             x_fp4,
             layer.weight,
             x_blockscale,
-            layer.weight_scale_swizzled,
+            layer.weight_scale,
             layer.alpha,
             output_dtype,
         )
@@ -1034,6 +1037,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         moe: FusedMoEConfig,
+        layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
         experts = select_nvfp4_gemm_impl(
             moe,
@@ -1312,6 +1316,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             del layer.w2_weight_scale
             del layer.w13_weight
             del layer.w13_weight_scale
+        elif self.use_marlin:
+            # Marlin processing
+            prepare_moe_fp4_layer_for_marlin(layer)
+            del layer.g1_alphas
+            del layer.g2_alphas
+            del layer.w13_input_scale_quant
+            del layer.w2_input_scale_quant
         else:
             # Non-TRT-LLM processing (Cutlass or non-flashinfer)
             assert (layer.w13_weight_scale.shape[2] % 16 == 0), (
@@ -1320,27 +1331,18 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 "Weight Blockscale must be represented as FP8-E4M3")
             w13_blockscale_swizzled = swizzle_blockscale(
                 layer.w13_weight_scale)
-            layer.w13_blockscale_swizzled = Parameter(w13_blockscale_swizzled,
-                                                      requires_grad=False)
+            layer.w13_weight_scale = Parameter(w13_blockscale_swizzled,
+                                               requires_grad=False)
 
             assert (layer.w2_weight_scale.shape[2] % 16 == 0), (
                 "Expected weight_scale.dim(1) to be divisible by 16")
             assert (layer.w2_weight_scale.dtype == torch.float8_e4m3fn), (
                 "Weight Blockscale must be represented as FP8-E4M3")
             w2_blockscale_swizzled = swizzle_blockscale(layer.w2_weight_scale)
-            layer.w2_blockscale_swizzled = Parameter(w2_blockscale_swizzled,
-                                                     requires_grad=False)
+            layer.w2_weight_scale = Parameter(w2_blockscale_swizzled,
+                                              requires_grad=False)
             layer.w2_weight = Parameter(layer.w2_weight.data,
                                         requires_grad=False)
-
-        if self.use_marlin:
-            prepare_moe_fp4_layer_for_marlin(layer)
-            del layer.g1_alphas
-            del layer.g2_alphas
-            del layer.w13_input_scale_quant
-            del layer.w2_input_scale_quant
-            del layer.w13_blockscale_swizzled
-            del layer.w2_blockscale_swizzled
 
     def apply(
         self,
@@ -1356,6 +1358,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -1363,7 +1366,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
-    ):
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `ModelOptNvFp4FusedMoE` yet.")
@@ -1434,6 +1437,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype)
 
@@ -1474,8 +1478,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 activation=activation,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
-                w1_scale=layer.w13_blockscale_swizzled,
-                w2_scale=layer.w2_blockscale_swizzled,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
         elif (self.allow_flashinfer
@@ -1489,8 +1493,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                w1_scale=layer.w13_blockscale_swizzled,
-                w2_scale=layer.w2_blockscale_swizzled,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
                 g1_alphas=layer.g1_alphas,
                 g2_alphas=layer.g2_alphas,
                 a1_gscale=layer.w13_input_scale_quant,
@@ -1510,8 +1514,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 a=x,
                 w1_fp4=layer.w13_weight,
                 w2_fp4=layer.w2_weight,
-                w1_blockscale=layer.w13_blockscale_swizzled,
-                w2_blockscale=layer.w2_blockscale_swizzled,
+                w1_blockscale=layer.w13_weight_scale,
+                w2_blockscale=layer.w2_weight_scale,
                 g1_alphas=layer.g1_alphas,
                 g2_alphas=layer.g2_alphas,
                 a1_gscale=layer.w13_input_scale_quant,

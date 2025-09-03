@@ -90,29 +90,18 @@ class XPUPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
 
-        # FIXME: Temporarily forcing eager mode
-        # remove after t.compile support stabilizes.
-        if (envs.VLLM_USE_V1 and model_config is not None
-                and not vllm_config.model_config.enforce_eager):
-            from vllm.config import CompilationLevel
-            vllm_config.compilation_config.level = CompilationLevel.NO_COMPILATION  # noqa: E501
-
-        # Instances created using VllmConfig() typically have model_config as
-        # None by default. The modification involves adding a check to prevent
-        # potential null exceptions check and update model config.
-        if model_config is not None and model_config.dtype == torch.bfloat16 \
-            and not cls.device_support_bf16():
-            model_config.dtype = torch.float16
-
         # lazy import to avoid circular import
-        from vllm.config import CUDAGraphMode
+        from vllm.config import CompilationLevel, CUDAGraphMode
         compilation_config = vllm_config.compilation_config
         if compilation_config.cudagraph_mode is None or \
                 compilation_config.cudagraph_mode.max_cudagraph_mode() \
                     != CUDAGraphMode.NONE:
-            logger.info("[XPU] CUDA graph is not supported on XPU, "
-                        "disabling cudagraphs.")
+            logger.info("[XPU] CUDA graph is not supported on XPU, disabling "
+                        "cudagraphs. Fallback to cudagraph_mode=NONE")
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+        if vllm_config.lora_config is not None:
+            compilation_config.level = CompilationLevel.NO_COMPILATION
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
@@ -163,28 +152,13 @@ class XPUPlatform(Platform):
         return torch.xpu.max_memory_allocated(device)
 
     @classmethod
-    def device_support_bf16(cls) -> bool:
-        device_name = cls.get_device_name().lower()
-        if cls.is_client_gpu_a770():
-            logger.warning("Intel Arc A770 have bfloat16 accuracy known issue,"
-                           " fallback to float16")
-            return False
-        else:
-            logger.info(
-                "Device name %s supports bfloat16. Please file an issue "
-                "if you encounter any accuracy problems with bfloat16.",
-                device_name)
-            return True
+    def fp8_dtype(cls) -> torch.dtype:
+        return torch.float8_e5m2
 
     @classmethod
     def is_data_center_gpu(cls) -> bool:
         device_name = cls.get_device_name().lower()
         return device_name.count("data center gpu") > 0
-
-    @classmethod
-    def is_client_gpu_a770(cls) -> bool:
-        device_name = cls.get_device_name().lower()
-        return device_name.count("a770") > 0
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
@@ -197,3 +171,18 @@ class XPUPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return torch.xpu.device_count()
+
+    @classmethod
+    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+        if torch_dtype == torch.bfloat16:  # noqa: SIM102
+            device_name = cls.get_device_name().lower()
+            # client gpu a770
+            if device_name.count("a770") > 0:
+                raise ValueError(
+                    "Intel Arc A770 have bfloat16 accuracy known issue. "
+                    "You can use float16 instead by explicitly setting the "
+                    "`dtype` flag in CLI, for example: --dtype=half.")
+
+    @classmethod
+    def opaque_attention_op(cls) -> bool:
+        return True
