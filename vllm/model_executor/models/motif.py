@@ -331,6 +331,12 @@ class MotifForCausalLM(LlamaForCausalLM, SupportsV0Only):
                  prefix: str = "",
                  layer_type: type[nn.Module] = MotifDecoderLayer):
 
+        # Prefix caching and chunked prefill is not supported for this model.
+        assert not vllm_config.cache_config.enable_prefix_caching, \
+            "Motif currently does not support prefix caching"
+        assert not vllm_config.scheduler_config.chunked_prefill_enabled, \
+            "Motif currently does not support chunked prefill"
+
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
                          layer_type=layer_type)
