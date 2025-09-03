@@ -378,10 +378,7 @@ def group_mm_inputs_by_modality(
         elif len(mm_input) == 1:
             return next(iter(mm_input.keys()))
 
-        # FIXME(Isotr0py): Modality of mm_input from legacy pipeline is empty,
-        # this is used to make InternVL with legacy pipeline still work with v1.
-        else:
-            return ""
+        raise AssertionError("This line should be unreachable.")
 
     return [
         list(group) for _, group in groupby(mm_inputs, key=modality_group_func)
