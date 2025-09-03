@@ -585,13 +585,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             seq_lens=seq_lens,
         )
 
-    def build_for_cudagraph_capture(self, common_attn_metadata: CommonAttentionMetadata):
+    def build_for_cudagraph_capture(
+                self, common_attn_metadata: CommonAttentionMetadata) -> M:
         """
-        return 
-        - num_decodes: number of decode requests
-        - num_prefills: number of prefill requests
-        - num_decode_tokens: number of decode tokens
-        - num_prefill_tokens: number of prefill tokens
+        This method builds the metadata for full cudagraph capture.
+        Currently, only decode is supported for full cudagraphs with MLA.
         """
         m = common_attn_metadata
         assert m.num_reqs == m.num_actual_tokens, \
