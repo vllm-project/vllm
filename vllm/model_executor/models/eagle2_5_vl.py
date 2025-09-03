@@ -18,15 +18,14 @@ from PIL import Image
 from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
+from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.awq import AWQConfig
-from vllm.model_executor.models.internvl import (BaseInternVLProcessor,
-                                                 InternVLDummyInputsBuilder,
+from vllm.model_executor.models.internvl import (InternVLDummyInputsBuilder,
                                                  InternVLMultiModalProcessor,
                                                  InternVLProcessingInfo,
                                                  InternVLProcessor)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -295,7 +294,7 @@ def video_to_pixel_values_eagle2_5_vl(
 
     pixel_values = torch.stack([transform(image) for image in frames_list])
     return pixel_values
-    
+
 
 class Eagle2_5_VLProcessor(InternVLProcessor):
     """
@@ -444,7 +443,7 @@ class Eagle2_5_VLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
             prefix=maybe_prefix(prefix, "language_model"),
         )
 
-        self.mlp1 = self._init_mlp1(config,prefix,quant_config)
+        self.mlp1 = self._init_mlp1(config, prefix, quant_config)
 
         self.img_context_token_id = None
         self.video_context_token_id = None
@@ -464,16 +463,29 @@ class Eagle2_5_VLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                 (llm_quant_config is not None):
                 quant_config.modules_to_not_convert.append("vision_model")
 
-    def _init_mlp1(self, config: PretrainedConfig,prefix: str = "",quant_config: Optional[QuantizationConfig] = None) -> nn.Sequential:
+    def _init_mlp1(
+            self,
+            config: PretrainedConfig,
+            prefix: str = "",
+            quant_config: Optional[QuantizationConfig] = None
+    ) -> nn.Sequential:
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.text_config.hidden_size
 
         return nn.Sequential(
             nn.LayerNorm(vit_hidden_size * int(1 / self.downsample_ratio)**2),
-            RowParallelLinear(vit_hidden_size * int(1 / self.downsample_ratio)**2,
-                      llm_hidden_size,return_bias=False,prefix=prefix,quant_config=quant_config),
+            RowParallelLinear(vit_hidden_size *
+                              int(1 / self.downsample_ratio)**2,
+                              llm_hidden_size,
+                              return_bias=False,
+                              prefix=prefix,
+                              quant_config=quant_config),
             nn.GELU(),
-            RowParallelLinear(llm_hidden_size, llm_hidden_size,return_bias=False,prefix=prefix,quant_config=quant_config),
+            RowParallelLinear(llm_hidden_size,
+                              llm_hidden_size,
+                              return_bias=False,
+                              prefix=prefix,
+                              quant_config=quant_config),
         )
 
     def pixel_shuffle(self, x, scale_factor=0.5):
@@ -637,7 +649,6 @@ class Eagle2_5_VLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
 
         return modalities
 
-
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
@@ -715,7 +726,6 @@ class Eagle2_5_VLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
             "intermediate_tensors": intermediate_tensors,
             "inputs_embeds": inputs_embeds,
         }
-
 
         hidden_states = self.language_model.model(**forward_kwargs)
         return hidden_states
