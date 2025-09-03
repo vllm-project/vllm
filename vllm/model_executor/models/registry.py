@@ -26,7 +26,7 @@ from vllm.transformers_utils.dynamic_module import (
     try_get_class_from_dynamic_module)
 
 from .interfaces import (has_inner_state, has_noops, is_attention_free,
-                         is_hybrid, supports_cross_encoding,
+                         is_hybrid, supports_cross_encoding, supports_mrope,
                          supports_multimodal,
                          supports_multimodal_encoder_tp_data,
                          supports_multimodal_raw_input_only, supports_pp,
@@ -332,6 +332,7 @@ class _ModelInfo:
     supports_multimodal: bool
     supports_multimodal_raw_input_only: bool
     supports_multimodal_encoder_tp_data: bool
+    supports_mrope: bool
     supports_pp: bool
     has_inner_state: bool
     is_attention_free: bool
@@ -354,6 +355,7 @@ class _ModelInfo:
             supports_multimodal_raw_input_only(model),
             supports_multimodal_encoder_tp_data=
             supports_multimodal_encoder_tp_data(model),
+            supports_mrope=supports_mrope(model),
             supports_pp=supports_pp(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
@@ -755,6 +757,14 @@ class _ModelRegistry:
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.supports_multimodal_raw_input_only
+
+    def is_mrope_supported_model(
+        self,
+        architectures: Union[str, list[str]],
+        model_config: ModelConfig,
+    ) -> bool:
+        model_cls, _ = self.inspect_model_cls(architectures, model_config)
+        return model_cls.supports_mrope
 
     def is_pp_supported_model(
         self,

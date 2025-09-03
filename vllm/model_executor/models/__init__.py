@@ -4,7 +4,7 @@
 from .interfaces import (HasInnerState, SupportsLoRA, SupportsMRoPE,
                          SupportsMultiModal, SupportsPP, SupportsTranscription,
                          SupportsV0Only, has_inner_state, supports_lora,
-                         supports_multimodal, supports_pp,
+                         supports_mrope, supports_multimodal, supports_pp,
                          supports_transcription, supports_v0_only)
 from .interfaces_base import (VllmModelForPooling, VllmModelForTextGeneration,
                               is_pooling_model, is_text_generation_model)
@@ -22,6 +22,8 @@ __all__ = [
     "supports_lora",
     "SupportsMultiModal",
     "supports_multimodal",
+    "SupportsMRoPE",
+    "supports_mrope",
     "SupportsPP",
     "supports_pp",
     "SupportsTranscription",
