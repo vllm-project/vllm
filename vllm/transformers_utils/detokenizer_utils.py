@@ -160,33 +160,39 @@ def detokenize_incrementally(
             new_tokens = [new_tokens]
     else:
         new_tokens = [""]
-    output_tokens = prev_tokens + new_tokens
+    # output_tokens = prev_tokens + new_tokens
+    # introduces an expensive copy overhead in long-generation scenarios.
+    prev_tokens.extend(new_tokens)
+    res_read_offset = len(prev_tokens)
 
     # If this is the first iteration, return all tokens.
     if is_first_iter:
-        new_tokens = output_tokens
+        new_tokens = prev_tokens
 
     # The prefix text is necessary only to defeat cleanup algorithms in
     # the decode which decide to add a space or not depending on the
     # surrounding ids.
     if tokenizer.is_fast or not tokenizer.get_added_vocab():
         prefix_text = tokenizer.convert_tokens_to_string(
-            output_tokens[prefix_offset:read_offset])
+            prev_tokens[prefix_offset:read_offset])
         new_text = tokenizer.convert_tokens_to_string(
-            output_tokens[prefix_offset:])
+            prev_tokens[prefix_offset:])
     else:
         prefix_text = _convert_tokens_to_string_with_added_encoders(
             tokenizer,
-            output_tokens[prefix_offset:read_offset],
+            prev_tokens[prefix_offset:read_offset],
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
         )
         new_text = _convert_tokens_to_string_with_added_encoders(
             tokenizer,
-            output_tokens[prefix_offset:],
+            prev_tokens[prefix_offset:],
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
         )
+    
+    for _ in range(len(new_tokens)):
+        prev_tokens.pop()
 
     if len(new_text) <= len(prefix_text) or new_text.endswith("�"):
         # utf-8 char at the end means it's a potential unfinished byte sequence
@@ -196,4 +202,4 @@ def detokenize_incrementally(
         return new_tokens, "", prefix_offset, read_offset
 
     new_text = new_text[len(prefix_text):]
-    return new_tokens, new_text, read_offset, len(output_tokens)
+    return new_tokens, new_text, read_offset, res_read_offset

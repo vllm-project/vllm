@@ -138,7 +138,9 @@ class Detokenizer:
         # Decode logprobs
         logprobs = seq.output_logprobs[-1]
         if logprobs:
-            previous_tokens = all_input_ids[:-1]
+            # previous_tokens = all_input_ids[:-1]
+            # all_input_ids[:-1] introduces an expensive copy overhead 
+            # in long-generation scenarios.
             for token_id, sample_logprob in logprobs.items():
                 # If the token was generated this iteration,
                 # use the provided text.
@@ -148,7 +150,13 @@ class Detokenizer:
 
                 if (sample_logprob.decoded_token is None
                         and token_id != VLLM_INVALID_TOKEN_ID):
-                    all_input_ids_with_logprob = previous_tokens + [token_id]
+                    
+                    if len(all_input_ids) > 0:
+                        all_input_ids[-1] = token_id
+                        all_input_ids_with_logprob = all_input_ids
+                    else:
+                        all_input_ids_with_logprob = all_input_ids[:-1] + [token_id]
+                    
                     (_, new_text, _, _) = detokenize_incrementally(
                         tokenizer=tokenizer,
                         all_input_ids=all_input_ids_with_logprob,
@@ -159,6 +167,10 @@ class Detokenizer:
                         spaces_between_special_tokens=prms.
                         spaces_between_special_tokens,
                     )
+
+                    if len(all_input_ids) > 0:
+                        all_input_ids[-1] = token_id_generated_this_iteration
+
                     sample_logprob.decoded_token = new_text
 
         seq.tokens.extend(new_tokens)
