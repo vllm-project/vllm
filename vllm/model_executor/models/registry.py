@@ -185,7 +185,7 @@ _EMBEDDING_MODELS = {
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
     # Technically PrithviGeoSpatialMAE is a model that works on images, both in
-    # input and output. I am adding it here because it piggy-backs on embedding
+    # input and output. I am adding it here because it piggybacks on embedding
     # models for the time being.
     "PrithviGeoSpatialMAE": ("prithvi_geospatial_mae", "PrithviGeoSpatialMAE"),
 }
@@ -227,6 +227,7 @@ _MULTIMODAL_MODELS = {
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
     "SmolVLMForConditionalGeneration": ("smolvlm","SmolVLMForConditionalGeneration"),  # noqa: E501
     "KeyeForConditionalGeneration": ("keye", "KeyeForConditionalGeneration"),
+    "KeyeVL1_5ForConditionalGeneration": ("keye_vl1_5", "KeyeVL1_5ForConditionalGeneration"), # noqa: E501
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
