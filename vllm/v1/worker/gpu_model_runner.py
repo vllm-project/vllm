@@ -593,8 +593,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not self.parallel_config.enable_microbatching:
             return (None, 0, None)
 
+        # Check preconditions for microbatching
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        num_reqs = self.input_batch.num_reqs
         should_attempt_ubatching = \
             self.parallel_config.enable_microbatching and \
             total_num_scheduled_tokens >= \
@@ -610,11 +610,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not should_ubatch:
             return (None, 0, None)
 
-        # This doesn't actually pad the ubatch slices. It just initialize the
-        # split point to the correct value so that padding can be applied
+        # This doesn't actually pad the ubatch slices. It just initializes the
+        # split point to the padded value so that padding can be applied
         # to the second ubatch in pad_out_ubatch_slice after attention
         # metadata creation
-        assert num_pad_tokens < total_num_scheduled_tokens, f"num_pad_tokens {num_pad_tokens} original_num_tokens {total_num_scheduled_tokens}"
+        assert num_pad_tokens < total_num_scheduled_tokens,\
+            f"num_pad_tokens {num_pad_tokens} "\
+            f"original_num_tokens {total_num_scheduled_tokens}"
         total_num_tokens_per_ubatch = (total_num_scheduled_tokens +
                                        num_pad_tokens) // 2
         padded_first_ubatch_slice = slice(0, total_num_tokens_per_ubatch)
@@ -2945,7 +2947,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "decode" if uniform_decode else "mixed prefill-decode",
                     cudagraph_runtime_mode.name))
         enable_microbatching = self.parallel_config.enable_microbatching
-        # We skip EPLB here since we don't want to record dummy metrics
+        # DBO Only supports running Full cudagraphs with uniform
+        # decode lengths
         if enable_microbatching and uniform_decode:
             for num_tokens in compilation_cases:
                 # If the number of tokens is greater than the microbatching
@@ -2953,6 +2956,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if (num_tokens
                         < self.parallel_config.microbatching_token_threshold):
                     continue
+
+                # Warmup
                 for _ in range(
                         self.compilation_config.cudagraph_num_of_warmups):
                     force_attention = (
@@ -2963,13 +2968,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                     uniform_decode=True,
                                     allow_microbatching=True,
                                     skip_eplb=True)
-                # DBO Only supports running with Full cudagraphs with uniform
-                # decode lengths
+
+                # Graph Capture
                 self._dummy_run(num_tokens,
                                 cudagraph_runtime_mode=CUDAGraphMode.FULL,
                                 uniform_decode=True,
                                 allow_microbatching=True,
                                 skip_eplb=True)
+        # We skip EPLB here since we don't want to record dummy metrics
         for num_tokens in compilation_cases:
             for _ in range(self.compilation_config.cudagraph_num_of_warmups):
                 # Use CUDAGraphRuntimeStyle.NONE (default) for warmup.
