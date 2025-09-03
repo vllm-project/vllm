@@ -11,7 +11,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from vllm import LLM, envs
+from vllm import LLM
 from vllm.v1.engine.llm_engine import LLMEngine as LLMEngineV1
 
 from ..conftest import HfRunner, VllmRunner
@@ -72,11 +72,6 @@ def test_models(
     enforce_eager: bool,
     enable_prompt_embeds: bool,
 ) -> None:
-
-    if enable_prompt_embeds and envs.is_set(
-            "VLLM_USE_V1") and envs.VLLM_USE_V1:
-        pytest.skip("enable_prompt_embeds is not supported in v1.")
-
     if backend == "XFORMERS" and model == "google/gemma-2-2b-it":
         pytest.skip(
             f"{backend} does not support gemma2 with full context length.")
@@ -150,11 +145,6 @@ def test_models_distributed(
     extra_env: dict[str, str],
     enable_prompt_embeds: bool,
 ) -> None:
-
-    if enable_prompt_embeds and envs.is_set(
-            "VLLM_USE_V1") and envs.VLLM_USE_V1:
-        pytest.skip("enable_prompt_embeds is not supported in v1.")
-
     if test_suite != TARGET_TEST_SUITE:
         pytest.skip(f"Skip test for {test_suite}")
 
