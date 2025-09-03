@@ -77,6 +77,11 @@ class DeepseekV2MLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        # If is_sequence_parallel, the input and output tensors are sharded
+        # across the ranks within the tp_group. In this case the weights are
+        # replicated and no collective ops are needed.
+        # Otherwise we use standard TP with and allreduce at the end.
         if is_sequence_parallel:
             self.gate_up_proj = MergedReplicatedLinear(
                 hidden_size, [intermediate_size] * 2,
@@ -134,8 +139,14 @@ class DeepseekV2MoE(nn.Module):
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
 
-        # If using expert parallel, ensure the input to the experts is
-        # SP to avoid duplicate work.
+        # The all_reduce at the end of attention (during o_proj) means that
+        # inputs are replicated across each rank of the tensor parallel group.
+        # If using expert-parallelism with DeepEP All2All ops, replicated
+        # tokens results in useless duplicate computation and communication.
+        #
+        # In this case, ensure the input to the experts is sequence parallel
+        # to avoid the excess work.
+        #
         # Not needed for pplx-kernels as it can handle duplicate input tokens.
         self.is_sequence_parallel = (envs.VLLM_ALL2ALL_BACKEND
                                      in ("deepep_high_throughput",
@@ -237,6 +248,7 @@ class DeepseekV2MoE(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = self.sequence_parallel_chunk(hidden_states)
 
+        shared_output = None
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
 
