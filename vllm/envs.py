@@ -99,6 +99,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
+    VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -166,6 +167,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: Optional[str] = None
+    VLLM_DISABLE_PAD_FOR_CUDAGRAPH: bool = False
 
 
 def get_default_cache_root():
@@ -773,6 +775,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: (os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in
              ("true", "1")),
 
+    # Whether to use aiter triton fp8 bmm kernel
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_FP8BMM":
+    lambda: (os.getenv("VLLM_ROCM_USE_AITER_FP8BMM", "True").lower() in
+             ("true", "1")),
+
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM":
     lambda: (os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in
@@ -1144,6 +1152,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_CUDAGRAPH_GC":
     lambda: bool(int(os.getenv("VLLM_ENABLE_CUDAGRAPH_GC", "0"))),
 
+    # Disable padding to CUDA graph capture batch sizes.
+    # TODO(wentao): https://github.com/vllm-project/vllm/issues/23378
+    # After the issue is fixed, we can remove this flag.
+    "VLLM_DISABLE_PAD_FOR_CUDAGRAPH":
+    lambda: bool(int(os.getenv("VLLM_DISABLE_PAD_FOR_CUDAGRAPH", "0"))),
+
     # Used to force set up loopback IP
     "VLLM_LOOPBACK_IP":
     lambda: os.getenv("VLLM_LOOPBACK_IP", ""),
@@ -1265,6 +1279,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_USE_AITER_RMSNORM",
         "VLLM_ROCM_USE_AITER_MLA",
         "VLLM_ROCM_USE_AITER_MHA",
+        "VLLM_ROCM_USE_AITER_FP8BMM",
         "VLLM_ROCM_USE_SKINNY_GEMM",
         "VLLM_ROCM_FP8_PADDING",
         "VLLM_ROCM_MOE_PADDING",

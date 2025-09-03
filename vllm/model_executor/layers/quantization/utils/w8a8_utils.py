@@ -23,7 +23,7 @@ TORCH_DEVICE_IDENTITY = None
 # The condition to determine if it is on a platform that supports
 # torch._scaled_mm rowwise feature.
 # The condition is determined once as the operations
-# are time consuming.
+# are time-consuming.
 USE_ROWWISE_TORCH_SCALED_MM = (current_platform.is_rocm() and version.parse(
     torch.__version__) >= version.parse("2.7")
                                and current_platform.has_device_capability(94))
