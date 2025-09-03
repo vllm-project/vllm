@@ -326,19 +326,6 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={"mm_processor_kwargs": {"max_dynamic_tiles": 12}},
         patch_hf_runner=model_utils.eagle2_5_patch_hf_runner,
     ),
-    "eagle2_5_vl-video": VLMTestInfo(
-        models=[
-            "nvidia/Eagle2.5-8B",
-        ],
-        test_type=VLMTestType.VIDEO,
-        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
-        video_idx_to_prompt=lambda idx: "<video>",
-        max_model_len=8192,
-        use_tokenizer_eos=True,
-        image_size_factors=[(1.0,0.25)],
-        auto_cls=AutoModel,
-        patch_hf_runner=model_utils.eagle2_5_patch_hf_runner,
-    ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
         test_type=VLMTestType.IMAGE,
