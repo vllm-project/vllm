@@ -114,22 +114,27 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         async_output_copy_stream: torch.cuda.Stream,
     ):
         self._model_runner_output = model_runner_output
-        self._sampled_token_ids = sampled_token_ids
         self._invalid_req_indices = invalid_req_indices
         self._async_output_copy_stream = async_output_copy_stream
+
+        # Keep a reference to the device tensor to avoid it being
+        # deallocated until we finish copying it to the host.
+        self._sampled_token_ids = sampled_token_ids
+
+        # Initiate the copy on a separate stream, but do not synchronize it.
+        default_stream = torch.cuda.current_stream()
+        with torch.cuda.stream(self._async_output_copy_stream):
+            self._async_output_copy_stream.wait_stream(default_stream)
+            self._sampled_token_ids_cpu = self._sampled_token_ids.to(
+                'cpu', non_blocking=True)
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
         
         This function blocks until the copy is finished.
         """
-        default_stream = torch.cuda.current_stream()
-        with torch.cuda.stream(self._async_output_copy_stream):
-            self._async_output_copy_stream.wait_stream(default_stream)
-            sampled_token_ids_cpu = self._sampled_token_ids.to(
-                'cpu', non_blocking=True)
         self._async_output_copy_stream.synchronize()
-        valid_sampled_token_ids = sampled_token_ids_cpu.tolist()
+        valid_sampled_token_ids = self._sampled_token_ids_cpu.tolist()
         for i in self._invalid_req_indices:
             valid_sampled_token_ids[i].clear()
 
