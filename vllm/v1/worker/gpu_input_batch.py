@@ -49,6 +49,11 @@ class CachedRequestState:
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
+        # 'last_generator_offset' and 'last_gelen_last_output_token_ids' are
+        # used to allow safe rollback in case a sampled token turns out to be
+        # invalid (e.g., due to KV load errors).
+        self.last_generator_offset = 0 if self.generator else None
+        self.len_last_output_token_ids = len(self.output_token_ids)
 
     @property
     def num_tokens(self) -> int:
@@ -212,6 +217,7 @@ class InputBatch:
         # NOTE(woosuk): The indices of the requests that do not have their own
         # generator should not be included in the dictionary.
         self.generators: dict[int, torch.Generator] = {}
+        self.generators_last_offset: dict[int, int] = {}
 
         self.num_logprobs: dict[str, int] = {}
         # NOTE(rob): num_prompt_logprobs only includes reqs
@@ -349,6 +355,9 @@ class InputBatch:
             # do not have their own generator.
             if request.generator is not None:
                 self.generators[req_index] = request.generator
+                assert (request.last_generator_offset is not None)
+                self.generators_last_offset[
+                    req_index] = request.last_generator_offset
 
             if sampling_params.logprobs is not None:
                 self.num_logprobs[req_id] = (self.vocab_size
