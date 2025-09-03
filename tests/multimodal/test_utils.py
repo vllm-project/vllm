@@ -31,11 +31,11 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalPlaceholderDict
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
-TEST_IMAGE_URLS = [
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
-    "https://upload.wikimedia.org/wikipedia/commons/f/fa/Grayscale_8bits_palette_sample_image.png",
-    "https://upload.wikimedia.org/wikipedia/commons/thumb/9/91/Venn_diagram_rgb.svg/1280px-Venn_diagram_rgb.svg.png",
-    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
+TEST_IMAGE_ASSETS = [
+    "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+    "Grayscale_8bits_palette_sample_image.png",  # "https://upload.wikimedia.org/wikipedia/commons/f/fa/Grayscale_8bits_palette_sample_image.png",
+    "1280px-Venn_diagram_rgb.svg.png",  # "https://upload.wikimedia.org/wikipedia/commons/thumb/9/91/Venn_diagram_rgb.svg/1280px-Venn_diagram_rgb.svg.png",
+    "RGBA_comp.png",  # "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png",
 ]
 
 TEST_VIDEO_URLS = [
@@ -45,12 +45,11 @@ TEST_VIDEO_URLS = [
 
 
 @pytest.fixture(scope="module")
-def url_images() -> dict[str, Image.Image]:
-    connector = MediaConnector()
+def url_images(local_asset_server) -> dict[str, Image.Image]:
 
     return {
-        image_url: connector.fetch_image(image_url)
-        for image_url in TEST_IMAGE_URLS
+        image_url: local_asset_server.get_image_asset(image_url)
+        for image_url in TEST_IMAGE_ASSETS
     }
 
 
@@ -69,7 +68,7 @@ def _image_equals(a: Image.Image, b: Image.Image) -> bool:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_fetch_image_http(image_url: str):
     connector = MediaConnector()
 
@@ -79,12 +78,12 @@ async def test_fetch_image_http(image_url: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("raw_image_url", TEST_IMAGE_ASSETS)
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
 async def test_fetch_image_base64(url_images: dict[str, Image.Image],
-                                  image_url: str, suffix: str):
+                                  raw_image_url: str, suffix: str):
     connector = MediaConnector()
-    url_image = url_images[image_url]
+    url_image = url_images[raw_image_url]
 
     try:
         mime_type = Image.MIME[Image.registered_extensions()[suffix]]
@@ -117,7 +116,7 @@ async def test_fetch_image_base64(url_images: dict[str, Image.Image],
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+@pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_fetch_image_local_files(image_url: str):
     connector = MediaConnector()
 
@@ -152,8 +151,8 @@ async def test_fetch_image_local_files(image_url: str):
 
 
 @pytest.mark.asyncio
-async def test_fetch_image_local_files_with_space_in_name():
-    image_url = TEST_IMAGE_URLS[0]
+@pytest.mark.parametrize("image_url", [TEST_IMAGE_ASSETS[0]], indirect=True)
+async def test_fetch_image_local_files_with_space_in_name(image_url: str):
     connector = MediaConnector()
 
     with TemporaryDirectory() as temp_dir:

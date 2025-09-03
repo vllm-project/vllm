@@ -4,18 +4,19 @@
 import openai
 import pytest
 
-from vllm.multimodal.utils import encode_image_base64, fetch_image
+from vllm.multimodal.utils import encode_image_base64
 from vllm.platforms import current_platform
 
-from ...entrypoints.openai.test_vision import TEST_IMAGE_URLS
+from ...entrypoints.openai.test_vision import TEST_IMAGE_ASSETS
 from ...utils import RemoteOpenAIServer
 
 
 @pytest.fixture(scope="session")
-def base64_encoded_image() -> dict[str, str]:
+def base64_encoded_image(local_asset_server) -> dict[str, str]:
     return {
-        image_url: encode_image_base64(fetch_image(image_url))
-        for image_url in TEST_IMAGE_URLS
+        image_asset:
+        encode_image_base64(local_asset_server.get_image_asset(image_asset))
+        for image_asset in TEST_IMAGE_ASSETS
     }
 
 
@@ -66,7 +67,7 @@ async def test_basic_vision(model_name: str, base64_encoded_image: dict[str,
         client: openai.AsyncOpenAI = remote_server.get_async_client()
 
         # Other requests now should be much faster
-        for image_url in TEST_IMAGE_URLS:
+        for image_url in TEST_IMAGE_ASSETS:
             image_base64 = base64_encoded_image[image_url]
             chat_completion_from_base64 = await client.chat.completions\
                 .create(
