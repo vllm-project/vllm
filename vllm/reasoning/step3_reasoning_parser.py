@@ -91,6 +91,16 @@ class Step3ReasoningParser(ReasoningParser):
             # If no </think> token, everything is reasoning content
             return model_output, None, None
         else:
+            # Find the first occurrence of </think>
+            end_index = model_output.find(self.think_end_token)
+            reasoning_content = model_output[:end_index]
+
+            # Content after </think> token
+            content = model_output[end_index + len(self.think_end_token):]
+
+            if len(content) == 0:
+                content = None
+
             reasoning_content_tokens = None
             if model_output_tokens:
                 try:
@@ -103,16 +113,7 @@ class Step3ReasoningParser(ReasoningParser):
                             model_output_tokens[start_idx+1:end_idx]
                 except ValueError:
                     pass
-        
-            # Find the first occurrence of </think>
-            end_index = model_output.find(self.think_end_token)
-            reasoning_content = model_output[:end_index]
 
-            # Content after </think> token
-            content = model_output[end_index + len(self.think_end_token):]
-
-            if len(content) == 0:
-                content = None
 
             return reasoning_content, reasoning_content_tokens, content
 
