@@ -320,7 +320,8 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
-        batch_queue = self.batch_queue
+        batch_queue: Optional[deque[tuple[Future[ModelRunnerOutput],
+                                          SchedulerOutput]]] = self.batch_queue
         assert batch_queue is not None
 
         # Try to schedule a new batch if the batch queue is not full, but
@@ -362,14 +363,15 @@ class EngineCore:
         """Make asynchronous schedule in single process."""
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
-        assert self.batch_queue is not None
+        batch_queue: Optional[deque[SchedulerOutput]] = self.batch_queue
+        assert batch_queue is not None
         if not self.scheduler.has_requests():
             return {}, False
         engine_core_outputs = {}
         model_output = None
         scheduler_output = self.scheduler.schedule()
         if scheduler_output.total_num_scheduled_tokens > 0:
-            self.batch_queue.appendleft(scheduler_output)
+            batch_queue.appendleft(scheduler_output)
             model_output = self.execute_model_with_error_logging(
                 self.model_executor.execute_model,  # type: ignore
                 scheduler_output)
@@ -377,7 +379,7 @@ class EngineCore:
         # notify it's time to make  scheduleing of next step.
         # so in this situation, we don't need to call update_from_output.
         if isinstance(model_output, ModelRunnerOutput):
-            pre_scheduler_output = self.batch_queue.pop()
+            pre_scheduler_output = batch_queue.pop()
             engine_core_outputs = self.scheduler.update_from_output(
                 pre_scheduler_output, model_output)  # type: ignore
 

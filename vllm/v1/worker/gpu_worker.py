@@ -5,8 +5,8 @@ import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
-from typing import TYPE_CHECKING, Any, Optional
 from queue import Queue
+from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 import torch.distributed
