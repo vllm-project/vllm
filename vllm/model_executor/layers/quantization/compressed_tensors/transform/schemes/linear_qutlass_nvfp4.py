@@ -9,7 +9,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear import (  # noqa: E501
     CompressedTensorsLinearTransformMethod, TransformTuple)
 
-__all__ = ["is_qutlass_fp4_scheme", "QutlassFP4LinearMethod"]
+__all__ = ["is_qutlass_fp4_scheme", "QutlassNvFP4LinearMethod"]
 
 
 def is_qutlass_fp4_scheme(quant_scheme: Optional[CompressedTensorsScheme],
@@ -20,7 +20,7 @@ def is_qutlass_fp4_scheme(quant_scheme: Optional[CompressedTensorsScheme],
             0].scheme.head_dim == quant_scheme.group_size
 
 
-class QutlassFP4LinearMethod(CompressedTensorsLinearTransformMethod):
+class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
 
     def create_weights(self, layer, input_size_per_partition,
                        output_partition_sizes, input_size, output_size,
@@ -53,7 +53,8 @@ class QutlassFP4LinearMethod(CompressedTensorsLinearTransformMethod):
         # out = matmul_nvf4_bf16_tn(x_e2m1, layer.weight_scale, x_scale_block,
         #                           layer.weight)
 
-        # # TODO (@ksayers): Confirm that this is done in parallel
+        # In most cases, input transforms are preferred over output transforms
+        # (@ksayers): confirm that this is done concurrently
         # if self.output_transform is not None:
         #     for part_id, (start, length) in enumerate(self.partition_ranges):
         #         x[:, start:start + length] = self.output_transform(

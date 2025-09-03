@@ -35,13 +35,13 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         output_tfms: dict[int, TransformTuple],
     ) -> "CompressedTensorsLinearTransformMethod":
         from vllm.model_executor.layers.quantization.compressed_tensors.transform.schemes.linear_qutlass_nvfp4 import (  # noqa: E501
-            QutlassFP4LinearMethod, is_qutlass_fp4_scheme)
+            QutlassNvFP4LinearMethod, is_qutlass_fp4_scheme)
 
         assert input_tfms or output_tfms
 
         if is_qutlass_fp4_scheme(quant_scheme, input_tfms):
-            return QutlassFP4LinearMethod(quant_method, input_tfms,
-                                          output_tfms)
+            return QutlassNvFP4LinearMethod(quant_method, input_tfms,
+                                            output_tfms)
 
         # hadacore or dense gemm is selected by Transform module
 
@@ -139,7 +139,8 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         assert bias is None
         x = self.quant_method.apply(layer, x, bias)
 
-        # TODO (@ksayers): confirm that this is done concurrently
+        # In most cases, input transforms are preferred over output transforms
+        # (@ksayers): confirm that this is done concurrently
         if self.output_transform is not None:
             for part_id, (start, length) in enumerate(self.partition_ranges):
                 x[:, start:start + length] = self.output_transform(
