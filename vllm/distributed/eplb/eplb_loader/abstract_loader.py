@@ -1,7 +1,7 @@
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 
 
-class BaseLoader:
+class BaseLoader(ABC):
     @abstractmethod
     def prepare_send(self):
         pass

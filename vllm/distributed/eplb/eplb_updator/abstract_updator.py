@@ -1,5 +1,4 @@
-import abc
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from typing import Union
 
 import torch
@@ -12,7 +11,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-class BaseUpdator:
+class BaseUpdator(ABC):
     @abstractmethod
     def init(self):
         pass
