@@ -1584,7 +1584,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 batch_descriptor=batch_descriptor,
         ), self.maybe_get_kv_connector_output(
                 scheduler_output) as kv_connector_output:
-            if self.vllm_config.model_config.enable_nano_batch_split:
+            if self.vllm_config.compilation_config.enable_nano_batch_split:
                 self._prepare_nano_split(scheduler_output)
 
             model_output = self.model(

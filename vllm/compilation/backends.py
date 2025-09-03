@@ -596,9 +596,10 @@ class VllmBackend:
 
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE or \
             not self.compilation_config.cudagraph_copy_inputs:
-            if self.vllm_config.model_config.enable_nano_batch_split:
+            if self.compilation_config.enable_nano_batch_split:
                 return nano_manager.get_callable(self.split_gm,
-                                                 self.vllm_config)
+                                                 self.compilation_config,
+                                                 local_cache_dir)
             else:
                 return self.split_gm
 

@@ -503,13 +503,6 @@ class ModelConfig:
     definitions"""
     io_processor_plugin: Optional[str] = None
     """IOProcessor plugin name to load at model startup"""
-    enable_nano_batch_split: bool = False
-    """Enable splitting the input batch into nano-batches for intra-device
-    parallelism"""
-    max_num_nano_batches: int = 2
-    """Maximum number of nano-batches to split the input batch into"""
-    min_nano_split_tokens: int = 1024
-    """Minimum number of tokens to split the input batch"""
 
     def compute_hash(self) -> str:
         """
@@ -538,9 +531,6 @@ class ModelConfig:
         factors.append(self.override_generation_config)
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
-        factors.append(self.enable_nano_batch_split)
-        factors.append(self.max_num_nano_batches)
-        factors.append(self.min_nano_split_tokens)
         # hf_config can control how the model looks!
         factors.append(self.hf_config.to_json_string())
         str_factors = str(factors)
@@ -3603,25 +3593,27 @@ class VllmConfig:
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
 
-        if self.model_config.enable_nano_batch_split:
+        if self.compilation_config.enable_nano_batch_split:
             if self.model_config.enforce_eager:
                 logger.info("nano batch split is not supported with "
                             "enforce_eager. Disabling nano batch split.")
-                self.model_config.enable_nano_batch_split = False
-            elif self.compilation_config.use_cudagraph:
+                self.compilation_config.enable_nano_batch_split = False
+            elif self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
                 logger.info("nano batch split is currently not supported with "
                             "cudagraph. Disabling nano batch split.")
-                self.model_config.enable_nano_batch_split = False
+                self.compilation_config.enable_nano_batch_split = False
             elif self.compilation_config.full_cuda_graph:
                 logger.info("full_cuda_graph is not supported with "
                             "nano batch split. Disabling nano batch split.")
-                self.model_config.enable_nano_batch_split = False
+                self.compilation_config.enable_nano_batch_split = False
             elif self.compilation_config.splitting_ops:
                 logger.info("splitting_ops is not supported with "
                             "nano batch split. Disabling nano batch split.")
-                self.model_config.enable_nano_batch_split = False
+                self.compilation_config.enable_nano_batch_split = False
             else:
-                self.compilation_config.splitting_ops = ["vllm.all_reduce"]
+                self.compilation_config.splitting_ops = [
+                    "vllm.all_reduce",
+                ]
         # If the user does not explicitly set a compilation level, then
         # we use the default level. The default level depends on other
         # settings (see the below code).

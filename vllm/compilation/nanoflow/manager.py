@@ -3,6 +3,7 @@
 
 import contextlib
 import copy
+import os
 from typing import Callable, Optional
 
 import torch
@@ -13,7 +14,7 @@ from vllm.compilation.nanoflow.split_utils import (FakeModule, NanoOpInfo,
                                                    analyze_graph,
                                                    get_split_config,
                                                    split_graph, tag_graph)
-from vllm.config import VllmConfig
+from vllm.config import CompilationConfig
 
 
 class NanoSplitManager:
@@ -21,16 +22,15 @@ class NanoSplitManager:
     def __init__(
         self,
         graph_module: torch.fx.GraphModule,
-        vllm_config: VllmConfig,
+        compilation_config: CompilationConfig,
+        local_cache_dir: Optional[str],
     ) -> None:
         self.original_graph_module = graph_module
         self.original_graph = graph_module.graph
 
         # Nano split preparation
-        self.min_nano_split_tokens = \
-            vllm_config.model_config.min_nano_split_tokens
-        self.max_num_nano_batches = \
-            vllm_config.model_config.max_num_nano_batches
+        self.min_nano_split_tokens = compilation_config.min_nano_split_tokens
+        self.max_num_nano_batches = compilation_config.max_num_nano_batches
         # Initialize the base graph
         tag_graph(
             self.original_graph_module,
@@ -75,6 +75,16 @@ class NanoSplitManager:
                 torch.fx.graph_module._copy_attr(self.original_graph_module,
                                                  new_graph_module, name)
             self.graph_modules[num_splits] = new_graph_module
+            if local_cache_dir is not None:
+                graph_path = os.path.join(local_cache_dir,
+                                          f"nano_split_{num_splits}.py")
+                if not os.path.exists(graph_path):
+                    src = (
+                        "from __future__ import annotations\nimport torch\n" +
+                        new_graph_module.print_readable(print_output=False))
+                    src = src.replace("<lambda>", "GraphModule")
+                    with open(graph_path, "w") as f:
+                        f.write(src)
 
     @staticmethod
     def get_batch_size(idx: int, cached_config: NanoSplitConfig):
@@ -215,11 +225,15 @@ class NanoSplitManager:
 _split_manager = None
 
 
-def get_callable(graph_module: torch.fx.GraphModule,
-                 vllm_config: VllmConfig) -> Callable:
+def get_callable(
+    graph_module: torch.fx.GraphModule,
+    compilation_config: CompilationConfig,
+    local_cache_dir: Optional[str] = None,
+) -> Callable:
     global _split_manager
     if _split_manager is None:
-        _split_manager = NanoSplitManager(graph_module, vllm_config)
+        _split_manager = NanoSplitManager(graph_module, compilation_config,
+                                          local_cache_dir)
     return _split_manager.get_callable()
 
 
