@@ -65,6 +65,7 @@ from vllm.entrypoints.openai.tool_parsers import ToolParser
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer
 # yapf: enable
 from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
+from vllm.inputs.data import PromptType
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
@@ -1109,7 +1110,7 @@ class OpenAIServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: Union[RequestPrompt, EngineTokensPrompt],
+        inputs: Union[RequestPrompt, PromptType],
         params: Optional[Union[SamplingParams, PoolingParams,
                                BeamSearchParams]],
         lora_request: Optional[LoRARequest],
@@ -1121,11 +1122,9 @@ class OpenAIServing:
             prompt = inputs
         elif isinstance(inputs, list):
             prompt_token_ids = inputs
-        elif "prompt_embeds" in inputs:
-            prompt_embeds = inputs.get("prompt_embeds")
         else:
             prompt = getattr(inputs, 'prompt', None)
-            prompt_token_ids = inputs["prompt_token_ids"]
+            prompt_token_ids = getattr(inputs, 'prompt_token_ids', None)
 
         self.request_logger.log_inputs(
             request_id,
