@@ -146,6 +146,9 @@ class HarmonyContext(ConversationContext):
                 return await self.call_python_tool(
                     self._tool_sessions["python"], last_msg)
             elif recipient.startswith("container."):
+                # Hack so that model will see <|constrain|> json instead of what it actually generated.
+                # Will invalidate KV cache.
+                last_msg.content_type = "<|constrain|> json"
                 return await self.call_container_tool(
                     self._tool_sessions["container"], last_msg)
         raise ValueError("No tool call found")
@@ -160,7 +163,24 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         tool_name = last_msg.recipient.split(".")[1]
-        args = json.loads(last_msg.content[0].text)
+        try:
+            args = json.loads(last_msg.content[0].text)
+        except Exception as e:
+            # Return a message to the LLM with the error so it can fix and try again
+            error_msg = (
+                f"Error parsing tool arguments as JSON: {str(e)}. "
+                "Please ensure the tool call arguments are valid JSON and try again."
+            )
+            content = TextContent(text=error_msg)
+            author = Author(role=Role.TOOL, name=last_msg.recipient)
+            return [
+                Message(
+                    author=author,
+                    content=[content],
+                    recipient=Role.ASSISTANT,
+                    channel=last_msg.channel
+                )
+            ]
         result = await tool_session.call_tool(tool_name, args)
         result_str = result.content[0].text
         content = TextContent(text=result_str)
@@ -228,7 +248,34 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
-        args = json.loads(last_msg.content[0].text)
+        try:
+            args = json.loads(last_msg.content[0].text)
+            cmd = args['cmd'] if 'cmd' in args else []
+            for i,c in enumerate(cmd):
+                if c == 'lc':
+                    cmd[i] = '-lc'
+                elif 'python ' in c:
+                    # Specifically python with a space as otherwise it will mess up if the model did python3 correctly
+                    cmd[i] = c.replace('python ', 'python3 ')
+            # Override what was in the last message with the corrected command so the model uses it as an example in the future
+            args_str = json.dumps(args)
+            last_msg.content[0].text = args_str
+        except Exception as e:
+            # Return a message to the LLM with the error so it can fix and try again
+            error_msg = (
+                f"Error parsing tool arguments as JSON: {str(e)}. "
+                "Please ensure the tool call arguments are valid JSON and try again."
+            )
+            content = TextContent(text=error_msg)
+            author = Author(role=Role.TOOL, name=last_msg.recipient)
+            return [
+                Message(
+                    author=author,
+                    content=[content],
+                    recipient=Role.ASSISTANT,
+                    channel=last_msg.channel
+                )
+            ]
         result = await tool_session.call_tool(tool_name, args)
         result_str = result.content[0].text
         content = TextContent(text=result_str)
