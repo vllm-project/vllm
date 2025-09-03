@@ -600,10 +600,9 @@ def test_propose_random(method, attn_backend, num_speculative_tokens,
     lower_bound = token_probs_after_temp - 4 * std
     upper_bound = token_probs_after_temp + 4 * std
     assert torch.all(sample_dist >= lower_bound.unsqueeze(1)), (
-        f"Sample too many unlikely tokens: {sample_dist} < {lower_bound}")
+        f"Sampled too many unlikely tokens: {sample_dist} < {lower_bound}")
     assert torch.all(sample_dist <= upper_bound.unsqueeze(1)), (
-        f"Sample too few high probability tokens: {sample_dist} > {upper_bound}"
-    )
+        f"Sampled too few likely tokens: {sample_dist} > {upper_bound}")
 
     if enable_probs:
         for result_prob in result_probs:

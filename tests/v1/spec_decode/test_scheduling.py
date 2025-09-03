@@ -105,7 +105,7 @@ class TestSpecDecodeScheduling:
             scheduled_encoder_inputs={},
             num_common_prefix_blocks=[0],
             finished_req_ids=set(),
-            free_encoder_input_ids=[],
+            free_encoder_mm_hashes=[],
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
@@ -134,7 +134,7 @@ class TestSpecDecodeScheduling:
             scheduled_encoder_inputs={},
             num_common_prefix_blocks=[0],
             finished_req_ids=set(),
-            free_encoder_input_ids=[],
+            free_encoder_mm_hashes=[],
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
@@ -157,7 +157,7 @@ class TestSpecDecodeScheduling:
             scheduled_encoder_inputs={},
             num_common_prefix_blocks=[0],
             finished_req_ids={"req1", "req2"},
-            free_encoder_input_ids=[],
+            free_encoder_mm_hashes=[],
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
@@ -194,7 +194,7 @@ class TestSpecDecodeScheduling:
             scheduled_encoder_inputs={},
             num_common_prefix_blocks=[0],
             finished_req_ids=set(),
-            free_encoder_input_ids=[],
+            free_encoder_mm_hashes=[],
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
@@ -223,7 +223,7 @@ class TestSpecDecodeScheduling:
             scheduled_encoder_inputs={},
             num_common_prefix_blocks=[0],
             finished_req_ids=set(),
-            free_encoder_input_ids=[],
+            free_encoder_mm_hashes=[],
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
@@ -246,7 +246,7 @@ class TestSpecDecodeScheduling:
             scheduled_encoder_inputs={},
             num_common_prefix_blocks=[0],
             finished_req_ids={"req1", "req2"},
-            free_encoder_input_ids=[],
+            free_encoder_mm_hashes=[],
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
