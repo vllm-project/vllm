@@ -1710,16 +1710,15 @@ class FusedMoE(CustomOp):
             max_tokens_across_dp = cdiv(max_tokens_across_dp, self.sp_size)
 
         num_tokens = full_hidden_states.size(0)
+        assert (num_tokens <= max_tokens_across_dp)
         for chunk_idx, chunk_start_ in enumerate(
                 range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank)):
-
-            desired_start = chunk_start_
-            desired_end = chunk_start_ + moe_dp_chunk_size_per_rank
-
-            # Zero-safe clamping: [0, num_tokens], and end >= start
-            chunk_start = max(0, min(desired_start, num_tokens))
-            chunk_end = max(chunk_start + 1, min(desired_end, num_tokens))
-
+            chunk_start = chunk_start_
+            chunk_end = min(chunk_start + moe_dp_chunk_size_per_rank,
+                            max_tokens_across_dp)
+            # clamp start and end
+            chunk_start = min(chunk_start, num_tokens - 1)
+            chunk_end = min(chunk_end, num_tokens)
             with ctx.dp_metadata.chunked_sizes(moe_dp_chunk_size_per_rank,
                                                chunk_idx):
                 process_chunk(chunk_start,
