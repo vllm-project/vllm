@@ -722,7 +722,9 @@ class OpenAIServingChat(OpenAIServing):
                                         id=make_tool_call_id(),
                                         type="function",
                                         function=DeltaFunctionCall(
-                                            name=tool_name, arguments=""),
+                                            name=tool_name,
+                                            arguments="",
+                                        ),
                                         index=base_index,
                                     )
                                 ])

@@ -53,7 +53,8 @@ class OpenAIToolParser(ToolParser):
                             type="function",
                             function=FunctionCall(
                                 name=msg.recipient.split("functions.")[1],
-                                arguments=msg.content[0].text),
+                                arguments=msg.content[0].text,
+                            ),
                         ))
                 elif msg.channel == "final":
                     final_content = msg.content[0].text
@@ -62,7 +63,8 @@ class OpenAIToolParser(ToolParser):
             tools_called=len(tool_calls) > 0,
             tool_calls=tool_calls,
             content=final_content,
-            reasoning_content=reasoning_content)
+            reasoning_content=reasoning_content,
+        )
 
     def extract_tool_calls_streaming(
         self,
@@ -75,4 +77,5 @@ class OpenAIToolParser(ToolParser):
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
         raise NotImplementedError(
-            "Not being used, manual parsing in serving_chat.py")
+            "Not being used, manual parsing in serving_chat.py"  # noqa: E501
+        )
