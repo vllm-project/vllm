@@ -43,10 +43,10 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
 from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam)
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
-from vllm.sequence import Logprob
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
@@ -1424,9 +1424,10 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     When using plugins IOProcessor plugins, the actual input is processed
     by the plugin itself. Hence, we use a generic type for the request data
     """
+    softmax: bool = True
 
     def to_pooling_params(self):
-        return PoolingParams(task="encode")
+        return PoolingParams(task="encode", softmax=self.softmax)
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
@@ -2175,6 +2176,13 @@ class TranscriptionRequest(OpenAIBaseModel):
     )
     # --8<-- [end:transcription-extra-params]
 
+    to_language: Optional[str] = None
+    """The language of the output audio we transcribe to.
+
+    Please note that this is not currently used by supported models at this 
+    time, but it is a placeholder for future use, matching translation api.
+    """
+
     # --8<-- [start:transcription-sampling-params]
     temperature: float = Field(default=0.0)
     """The sampling temperature, between 0 and 1.
@@ -2408,6 +2416,9 @@ class TranslationRequest(OpenAIBaseModel):
 
     # TODO support additional sampling parameters
     # --8<-- [start:translation-sampling-params]
+    seed: Optional[int] = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
+    """The seed to use for sampling."""
+
     temperature: float = Field(default=0.0)
     """The sampling temperature, between 0 and 1.
 
@@ -2425,6 +2436,14 @@ class TranslationRequest(OpenAIBaseModel):
     Supplying the input language in
     [ISO-639-1](https://en.wikipedia.org/wiki/List_of_ISO_639-1_codes) format
     will improve accuracy.
+    """
+
+    to_language: Optional[str] = None
+    """The language of the input audio we translate to.
+
+    Please note that this is not supported by all models, refer to the specific
+    model documentation for more details.
+    For instance, Whisper only supports `to_language=en`.
     """
 
     stream: Optional[bool] = False
@@ -2458,6 +2477,7 @@ class TranslationRequest(OpenAIBaseModel):
 
         return SamplingParams.from_optional(temperature=temperature,
                                             max_tokens=max_tokens,
+                                            seed=self.seed,
                                             output_kind=RequestOutputKind.DELTA
                                             if self.stream \
                                             else RequestOutputKind.FINAL_ONLY)
