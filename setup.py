@@ -95,6 +95,13 @@ class cmake_build_ext(build_ext):
     # A dict of extension directories that have been configured.
     did_config: dict[str, bool] = {}
 
+    @property
+    def cmake_build_dir(self) -> str:
+        # Use a static cmake build directory for speeding up c-extension
+        # compilation by cmake build caches.
+        default = os.path.join(ROOT_DIR, "build/cmake")
+        return os.environ.get("VLLM_CMAKE_BUILD_DIR", default)
+
     #
     # Determine number of compilation jobs and optionally nvcc compile threads.
     #
@@ -209,7 +216,7 @@ class cmake_build_ext(build_ext):
             cmake_args += [f'-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc']
         subprocess.check_call(
             ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
-            cwd=self.build_temp)
+            cwd=self.cmake_build_dir)
 
     def build_extensions(self) -> None:
         # Ensure that CMake is present and working
@@ -219,8 +226,8 @@ class cmake_build_ext(build_ext):
             raise RuntimeError('Cannot find CMake executable') from e
 
         # Create build directory if it does not exist.
-        if not os.path.exists(self.build_temp):
-            os.makedirs(self.build_temp)
+        if not os.path.exists(self.cmake_build_dir):
+            os.makedirs(self.cmake_build_dir)
 
         targets = []
 
@@ -241,7 +248,7 @@ class cmake_build_ext(build_ext):
             *[f"--target={name}" for name in targets],
         ]
 
-        subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
+        subprocess.check_call(["cmake", *build_args], cwd=self.cmake_build_dir)
 
         # Install the libraries
         for ext in self.extensions:
@@ -249,7 +256,7 @@ class cmake_build_ext(build_ext):
             outdir = Path(self.get_ext_fullpath(ext.name)).parent.absolute()
 
             # Skip if the install directory is the same as the build directory
-            if outdir == self.build_temp:
+            if outdir == self.cmake_build_dir:
                 continue
 
             # CMake appends the extension prefix to the install path,
@@ -263,7 +270,7 @@ class cmake_build_ext(build_ext):
                 "cmake", "--install", ".", "--prefix", prefix, "--component",
                 target_name(ext.name)
             ]
-            subprocess.check_call(install_args, cwd=self.build_temp)
+            subprocess.check_call(install_args, cwd=self.cmake_build_dir)
 
     def run(self):
         # First, run the standard build_ext command to compile the extensions

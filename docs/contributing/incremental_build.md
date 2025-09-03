@@ -6,12 +6,11 @@ When working on vLLM's C++/CUDA kernels located in the `csrc/` directory, recomp
 
 Before setting up the incremental build:
 
-1. **vLLM Editable Install:** Ensure you have vLLM installed from source in an editable mode. Using pre-compiled wheels for the initial editable setup can be faster, as the CMake workflow will handle subsequent kernel recompilations.
+1. **Virtual environment:** Use `uv venv` or `python -m venv` to setup new virtual environment.
 
     ```console
     uv venv --python 3.12 --seed
     source .venv/bin/activate
-    VLLM_USE_PRECOMPILED=1 uv pip install -U -e . --torch-backend=auto
     ```
 
 2. **CUDA Toolkit:** Verify that the NVIDIA CUDA Toolkit is correctly installed and `nvcc` is accessible in your `PATH`. CMake relies on `nvcc` to compile CUDA code. You can typically find `nvcc` in `$CUDA_HOME/bin/nvcc` or by running `which nvcc`. If you encounter issues, refer to the [official CUDA Toolkit installation guides](https://developer.nvidia.com/cuda-toolkit-archive) and vLLM's main [GPU installation documentation](../getting_started/installation/gpu.md#troubleshooting) for troubleshooting. The `CMAKE_CUDA_COMPILER` variable in your `CMakeUserPresets.json` should also point to your `nvcc` binary.
@@ -22,7 +21,23 @@ Before setting up the incremental build:
     uv pip install -r requirements/build.txt --torch-backend=auto
     ```
 
-## Setting up the CMake Build Environment
+## Option 1: build vLLM editable install with --no-build-isolation
+
+```console
+uv pip install -v --no-build-isolation -e .
+```
+
+For the first time, it will compile all kernels and populate build directory `build/cmake/`.
+After first long time compilation finished, you can start using your editable install of vLLM, testing and making changes as needed. When you need to kernels again, simply rerun above command to build only the affected files.
+To enforce rebuild all kernels code, you can run `uv pip install -v -e .` (without --no-build-isolation), or delete `build/cmake/` directory.
+
+## Option 2: setting up the CMake Build Environment
+
+**vLLM Editable Install:** Ensure you have vLLM installed from source in an editable mode. Using pre-compiled wheels for the initial editable setup can be faster, as the CMake workflow will handle subsequent kernel recompilations.
+
+```console
+VLLM_USE_PRECOMPILED=1 uv pip install -U -e . --torch-backend=auto
+```
 
 The incremental build process is managed through CMake. You can configure your build settings using a `CMakeUserPresets.json` file at the root of the vLLM repository.
 
@@ -92,7 +107,7 @@ Below is an example of what the generated `CMakeUserPresets.json` might look lik
 - `CMAKE_JOB_POOLS` and `jobs` in build presets: Control the parallelism of the build. The script sets these based on the number of CPU cores detected on your system.
 - `binaryDir`: Specifies where the build artifacts will be stored (e.g., `cmake-build-release`).
 
-## Building and Installing with CMake
+### Building and Installing with CMake
 
 Once your `CMakeUserPresets.json` is configured:
 
@@ -117,7 +132,7 @@ Once your `CMakeUserPresets.json` is configured:
     cmake --build --preset release --target install
     ```
 
-## Verifying the Build
+### Verifying the Build
 
 After a successful build, you will find a populated build directory (e.g., `cmake-build-release/` if you used the `release` preset and the example configuration).
 
@@ -132,7 +147,7 @@ CMakeFiles      cumem_allocator.abi3.so  install_local_manifest.txt           vl
 
 The `cmake --build ... --target install` command copies the compiled shared libraries (like `_C.abi3.so`, `_moe_C.abi3.so`, etc.) into the appropriate `vllm` package directory within your source tree. This updates your editable installation with the newly compiled kernels.
 
-## Additional Tips
+### Additional Tips
 
 - **Adjust Parallelism:** Fine-tune the `CMAKE_JOB_POOLS` in `configurePresets` and `jobs` in `buildPresets` in your `CMakeUserPresets.json`. Too many jobs can overload systems with limited RAM or CPU cores, leading to slower builds or system instability. Too few won't fully utilize available resources.
 - **Clean Builds When Necessary:** If you encounter persistent or strange build errors, especially after significant changes or switching branches, consider removing the CMake build directory (e.g., `rm -rf cmake-build-release`) and re-running the `cmake --preset` and `cmake --build` commands.
