@@ -165,11 +165,13 @@ def dispatch_cpu_unquantized_gemm(
                 x, packed_weight, bias_f32
                 if bias is not None else None, True))
         if remove_weight:
-            layer.weight = None
+            layer.weight = torch.nn.Parameter(torch.empty(0),
+                                              requires_grad=False)
     elif ops._supports_onednn:
         origin_weight = layer.weight
         if remove_weight:
-            layer.weight = None
+            layer.weight = torch.nn.Parameter(torch.empty(0),
+                                              requires_grad=False)
         handler = ops.create_onednn_mm(origin_weight.t(), 32)
         layer.cpu_linear = lambda x, weight, bias: ops.onednn_mm(
             handler, x, bias)
