@@ -8,7 +8,6 @@ import dataclasses
 import functools
 import json
 import sys
-import threading
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
 from typing import (TYPE_CHECKING, Annotated, Any, Callable, Dict, List,
@@ -153,9 +152,17 @@ def is_online_quantization(quantization: Any) -> bool:
     return quantization in ["inc"]
 
 
+NEEDS_HELP = (
+    "--help" in (argv := sys.argv)  # vllm SUBCOMMAND --help
+    or (argv0 := argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
+    or argv0.endswith("mkdocs/__main__.py")  # python -m mkdocs SUBCOMMAND
+)
+
+
 @functools.lru_cache(maxsize=30)
 def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
-    cls_docs = get_attr_docs(cls)
+    # Save time only getting attr docs if we're generating help text
+    cls_docs = get_attr_docs(cls) if NEEDS_HELP else {}
     kwargs = {}
     for field in fields(cls):
         # Get the set of possible types for the field
@@ -173,7 +180,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
 
         # Get the help text for the field
         name = field.name
-        help = cls_docs[name].strip()
+        help = cls_docs.get(name, "").strip()
         # Escape % for argparse
         help = help.replace("%", "%%")
 
@@ -255,6 +262,9 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, Any]:
 def get_kwargs(cls: ConfigType) -> dict[str, Any]:
     """Return argparse kwargs for the given Config dataclass.
 
+    If `--help` or `mkdocs` are not present in the command line command, the
+    attribute documentation will not be included in the help output.
+
     The heavy computation is cached via functools.lru_cache, and a deep copy
     is returned so callers can mutate the dictionary without affecting the
     cached version.
@@ -291,7 +301,7 @@ class EngineArgs:
     # is intended for expert use only. The API may change without
     # notice.
     distributed_executor_backend: Optional[Union[
-        DistributedExecutorBackend,
+        str, DistributedExecutorBackend,
         Type[ExecutorBase]]] = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
@@ -352,8 +362,9 @@ class EngineArgs:
     mm_processor_kwargs: Optional[Dict[str, Any]] = \
         MultiModalConfig.mm_processor_kwargs
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
-    mm_processor_cache_gb: int = MultiModalConfig.mm_processor_cache_gb
+    mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
+    io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     # LoRA fields
     enable_lora: bool = False
@@ -456,8 +467,7 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(
                 **self.compilation_config)
         if isinstance(self.eplb_config, dict):
-            self.eplb_config = EPLBConfig.from_cli(json.dumps(
-                self.eplb_config))
+            self.eplb_config = EPLBConfig(**self.eplb_config)
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
@@ -568,6 +578,8 @@ class EngineArgs:
                                  **model_kwargs["override_attention_dtype"])
         model_group.add_argument("--logits-processors",
                                  **model_kwargs["logits_processors"])
+        model_group.add_argument("--io-processor-plugin",
+                                 **model_kwargs["io_processor_plugin"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -606,7 +618,7 @@ class EngineArgs:
             **guided_decoding_kwargs["disable_additional_properties"])
         guided_decoding_group.add_argument(
             "--reasoning-parser",
-            # This choices is a special case because it's not static
+            # This choice is a special case because it's not static
             choices=list(ReasoningParserManager.reasoning_parsers),
             **guided_decoding_kwargs["reasoning_backend"])
 
@@ -984,6 +996,7 @@ class EngineArgs:
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
+            io_processor_plugin=self.io_processor_plugin,
         )
 
     def validate_tensorizer_args(self):
@@ -1044,11 +1057,11 @@ class EngineArgs:
                                    self.trust_remote_code, self.revision,
                                    self.code_revision, self.config_format)
 
-            # if loading a SpeculatorsConfig, load the specualtive_config
+            # if loading a SpeculatorsConfig, load the speculative_config
             # details from the config directly
             # no user input required / expected
             if isinstance(hf_config, SpeculatorsConfig):
-                # We create one since we dont create one
+                # We create one since we don't create one
                 self.speculative_config = {}
                 self.speculative_config[
                     "num_speculative_tokens"] = hf_config.num_lookahead_tokens
@@ -1295,18 +1308,6 @@ class EngineArgs:
             worker_extension_cls=self.worker_extension_cls,
         )
 
-        if model_config.is_multimodal_model:
-            dp_supports_mm_processor_cache = (self.data_parallel_size == 1
-                                              or data_parallel_external_lb)
-            if (not dp_supports_mm_processor_cache
-                    and model_config.mm_processor_cache_gb > 0):
-                logger.warning(
-                    "Multi-modal processor cache is disabled because "
-                    "it is not compatible with data parallelism when "
-                    "there does not exist a one-to-one correspondance "
-                    "between API and engine core processes.")
-                model_config.set_mm_processor_cache_gb(0)
-
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
@@ -1435,21 +1436,9 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        # Need at least Ampere for now (FA support required).
-        # Skip this check if we are running on a non-GPU platform,
-        # or if the device capability is not available
-        # (e.g. in a Ray actor without GPUs).
-        if (current_platform.is_cuda()
-                and current_platform.get_device_capability()
-                and current_platform.get_device_capability().major < 8):
-            _raise_or_fallback(feature_name="Compute Capability < 8.0",
-                               recommend_to_remove=False)
-            return False
-
-        # No Fp8 KV cache so far.
         if self.kv_cache_dtype != "auto":
             supported = current_platform.is_kv_cache_dtype_supported(
-                self.kv_cache_dtype)
+                self.kv_cache_dtype, model_config)
             if not supported:
                 _raise_or_fallback(feature_name="--kv-cache-dtype",
                                    recommend_to_remove=False)
@@ -1465,11 +1454,6 @@ class EngineArgs:
         if not model_config.is_v1_compatible:
             _raise_or_fallback(feature_name=model_config.architectures,
                                recommend_to_remove=False)
-            return False
-
-        # V1 mamba models are unoptimized.
-        if model_config.has_inner_state and _warn_or_fallback(
-                feature_name="Mamba"):
             return False
 
         # No Concurrent Partial Prefills so far.
@@ -1527,11 +1511,6 @@ class EngineArgs:
         #############################################################
         # Experimental Features - allow users to opt in.
 
-        # Signal Handlers requires running in main thread.
-        if (threading.current_thread() != threading.main_thread()
-                and _warn_or_fallback("Engine in background thread")):
-            return False
-
         if self.pipeline_parallel_size > 1:
             supports_pp = getattr(self.distributed_executor_backend,
                                   'supports_pp', False)
@@ -1580,8 +1559,7 @@ class EngineArgs:
                 use_spec_decode = self.speculative_config is not None
 
                 if (is_gpu and not use_sliding_window and not use_spec_decode
-                        and not self.enable_lora
-                        and model_config.runner_type != "pooling"):
+                        and not self.enable_lora):
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models "
@@ -1599,10 +1577,6 @@ class EngineArgs:
                 "OOM during the initial memory profiling phase, or result "
                 "in low performance due to small KV cache size. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
-        elif (self.enable_chunked_prefill
-              and model_config.runner_type == "pooling"):
-            msg = "Chunked prefill is not supported for pooling models"
-            raise ValueError(msg)
 
         # if using prefix caching, we must set a hash algo
         if self.enable_prefix_caching:
@@ -1782,7 +1756,7 @@ class AsyncEngineArgs(EngineArgs):
     def add_cli_args(parser: FlexibleArgumentParser,
                      async_args_only: bool = False) -> FlexibleArgumentParser:
         # Initialize plugin to update the parser, for example, The plugin may
-        # adding a new kind of quantization method to --quantization argument or
+        # add a new kind of quantization method to --quantization argument or
         # a new device to --device argument.
         load_general_plugins()
         if not async_args_only:
