@@ -175,18 +175,18 @@ def test_gemma_sliding_window(
 @pytest.mark.parametrize(
     "model, distributed_executor_backend, attention_backend, "
     "test_suite, extra_env", [
-        ("EleutherAI/pythia-14m", "ray", "", "L4", {}),
-        ("EleutherAI/pythia-14m", "mp", "", "L4", {}),
-        ("EleutherAI/pythia-14m", "ray", "", "L4", {
+        ("facebook/opt-125m", "ray", "", "L4", {}),
+        ("facebook/opt-125m", "mp", "", "L4", {}),
+        ("facebook/opt-125m", "ray", "", "L4", {
             "VLLM_SLEEP_WHEN_IDLE": "1"
         }),
-        ("EleutherAI/pythia-14m", "mp", "", "L4", {
+        ("facebook/opt-125m", "mp", "", "L4", {
             "VLLM_SLEEP_WHEN_IDLE": "1"
         }),
         ("meta-llama/Llama-3.2-1B-Instruct", "ray", "", "L4", {}),
         ("meta-llama/Llama-3.2-1B-Instruct", "mp", "", "L4", {}),
-        ("EleutherAI/pythia-14m", "ray", "", "A100", {}),
-        ("EleutherAI/pythia-14m", "mp", "", "A100", {}),
+        ("facebook/opt-125m", "ray", "", "A100", {}),
+        ("facebook/opt-125m", "mp", "", "A100", {}),
     ])
 @pytest.mark.parametrize("enable_prompt_embeds", [True, False])
 def test_models_distributed(
