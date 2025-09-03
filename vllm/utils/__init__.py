@@ -1328,6 +1328,12 @@ def as_list(maybe_list: Iterable[T]) -> list[T]:
     return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
 
 
+def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
+    if isinstance(obj, str) or not isinstance(obj, Iterable):
+        obj = [obj]
+    return obj
+
+
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -1976,13 +1982,16 @@ class FlexibleArgumentParser(ArgumentParser):
 
         config_args = self.load_config_file(file_path)
 
-        # 0th index is for {serve,chat,complete}
+        # 0th index might be the sub command {serve,chat,complete,...}
         # optionally followed by model_tag (only for serve)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
-        if args[0] == "serve":
+        if args[0].startswith('-'):
+            # No sub command (e.g., api_server entry point)
+            args = config_args + args[0:index] + args[index + 2:]
+        elif args[0] == "serve":
             model_in_cli = len(args) > 1 and not args[1].startswith('-')
             model_in_config = any(arg == '--model' for arg in config_args)
 
@@ -3281,7 +3290,7 @@ def sha256_cbor_64bit(input) -> int:
     return full_hash & ((1 << 64) - 1)
 
 
-def get_hash_fn_by_name(hash_fn_name: str) -> Callable:
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], int]:
     """Get a hash function by name, or raise an error if
     the function is not found.
     Args:
