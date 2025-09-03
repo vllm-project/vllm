@@ -24,6 +24,8 @@ else:
 
 logger = init_logger(__name__)
 
+USE_TPU_COMMONS = False
+
 
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
@@ -194,13 +196,15 @@ class TpuPlatform(Platform):
             raise ValueError("Torch XLA does not support per-request seed.")
 
     @classmethod
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
         return True
 
 
 try:
     from tpu_commons.platforms import TpuPlatform as TpuCommonsPlatform
     TpuPlatform = TpuCommonsPlatform  # type: ignore
+    USE_TPU_COMMONS = True
 except ImportError:
     logger.info("tpu_commons not found, using vLLM's TpuPlatform")
     pass
