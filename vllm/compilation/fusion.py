@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import NamedTuple, Optional
+from typing import Any, NamedTuple
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -406,41 +406,18 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
         )
 
 
-class FusionPass(VllmInductorPass):
+class RMSNormQuantFusionPass(VllmInductorPass):
     """
-    This pass fuses a pre-defined set of custom ops into fused ops.
-    It uses the torch pattern matcher to find the patterns and replace them.
-    It also manually processes multi-output matches, as those are broken in
-    the torch pattern matcher.
-
-    Because patterns can only be registered once, the pass is a singleton.
-    This will be addressed in a future version of PyTorch:
-    https://github.com/pytorch/pytorch/pull/139321#issuecomment-2452354980
+    This pass fuses rms_norm & quant custom ops into a fused rms_norm_quant op.
+    It also supports fused_add_rms_norm.
     """
-
-    _instance: 'Optional[FusionPass]' = None
-
-    @classmethod
-    def instance(cls, config: VllmConfig):
-        """
-        Get the singleton instance of the FusionPass.
-        If the instance exists, the config is updated but
-        initialization is not repeated.
-        """
-        if cls._instance is None:
-            cls._instance = FusionPass(config)
-        else:
-            cls._instance.pass_config = config.compilation_config.pass_config
-        return cls._instance
 
     @enable_fake_mode
     def __init__(self, config: VllmConfig):
-        assert self.__class__._instance is None, \
-            "FusionPass singleton instance already exists"
         super().__init__(config)
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(
-            pass_name="fusion_pass")
+            pass_name="rmsnorm_quant_fusion_pass")
 
         for epsilon in [1e-5, 1e-6]:
             # Fuse rms_norm + static fp8 quant
@@ -474,3 +451,10 @@ class FusionPass(VllmInductorPass):
         logger.debug("Replaced %s patterns", count)
         self.dump_graph(graph, "after_fusion")
         self.end_and_log()
+
+    def uuid(self) -> Any:
+        return self.hash_source(self, RMSNormQuantPattern,
+                                RMSNormStaticQuantPattern,
+                                RMSNormDynamicQuantPattern,
+                                FusedAddRMSNormStaticQuantPattern,
+                                FusedAddRMSNormDynamicQuantPattern)
