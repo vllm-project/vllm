@@ -78,12 +78,12 @@ async def test_fetch_image_http(image_url: str):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
+@pytest.mark.parametrize("raw_image_url", TEST_IMAGE_ASSETS)
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
 async def test_fetch_image_base64(url_images: dict[str, Image.Image],
-                                  image_url: str, suffix: str):
+                                  raw_image_url: str, suffix: str):
     connector = MediaConnector()
-    url_image = url_images[image_url]
+    url_image = url_images[raw_image_url]
 
     try:
         mime_type = Image.MIME[Image.registered_extensions()[suffix]]
