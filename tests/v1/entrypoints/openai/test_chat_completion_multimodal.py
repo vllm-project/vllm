@@ -4,12 +4,10 @@
 import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
-from tests.utils import RemoteOpenAIServer
-from tests.conftest import ImageTestAssets
-import io
-import base64
-from pathlib import Path
 from PIL import Image
+
+from tests.conftest import ImageTestAssets
+from tests.utils import RemoteOpenAIServer
 from vllm.multimodal.utils import encode_image_base64
 
 # any model with a chat template defined in tokenizer_config should work here
@@ -25,7 +23,8 @@ def default_server_args():
         "--max-num-seqs",
         "128",
         "--enforce-eager",
-        "--limit-mm-per-prompt", "{\"image\": 1}",
+        "--limit-mm-per-prompt",
+        "{\"image\": 1}",
     ]
 
 
@@ -40,9 +39,11 @@ async def client(server):
     async with server.get_async_client() as async_client:
         yield async_client
 
+
 def pil_image_to_data_url(image: Image.Image) -> str:
     image_base64 = encode_image_base64(image)
     return f"data:image/jpeg;base64,{image_base64}"
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
@@ -60,7 +61,8 @@ async def test_completions_with_image(
                 "content": "You are a helpful assistant."
             },
             {
-                "role": "user",
+                "role":
+                "user",
                 "content": [
                     {
                         "type": "text",
@@ -98,7 +100,8 @@ async def test_completions_with_image_with_uuid(
                 "content": "You are a helpful assistant."
             },
             {
-                "role": "user",
+                "role":
+                "user",
                 "content": [
                     {
                         "type": "text",
@@ -120,6 +123,7 @@ async def test_completions_with_image_with_uuid(
     assert isinstance(chat_completion.choices[0].message.content, str)
     assert len(chat_completion.choices[0].message.content) > 0
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_completions_with_image_with_incorrect_uuid_format(
@@ -136,7 +140,8 @@ async def test_completions_with_image_with_incorrect_uuid_format(
                 "content": "You are a helpful assistant."
             },
             {
-                "role": "user",
+                "role":
+                "user",
                 "content": [
                     {
                         "type": "text",
