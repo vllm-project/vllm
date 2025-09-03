@@ -500,7 +500,8 @@ class Worker(WorkerBase):
         parallel_config = self.vllm_config.parallel_config
         moe_modules = [
             module for module in self.model_runner.model.modules()
-            if module.__class__.__name__ == "FusedMoE"
+            if (module.__class__.__name__ == "FusedMoE"
+                or module.__class__.__name__ == "SharedFusedMoE")
         ]
         num_local_experts = moe_modules[0].moe_config.num_local_experts
         assert all(module.moe_config.num_local_experts == num_local_experts

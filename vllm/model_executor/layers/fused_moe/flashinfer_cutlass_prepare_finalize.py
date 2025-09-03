@@ -56,9 +56,7 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         # TODO(bnell): use quant_config + scales instead of ctor args
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
-               Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+    ) -> mk.PrepareResultType:
 
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
