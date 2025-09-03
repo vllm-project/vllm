@@ -1390,6 +1390,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
             if use_llama4_routing:
                 routing_method_type = flashinfer.RoutingMethodType.Llama4
+            # out = torch.empty_like(x)
             out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
                 routing_logits=router_logits
                 if use_llama4_routing else router_logits.to(torch.float32),
@@ -1467,7 +1468,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             assert is_valid_flashinfer_cutlass_fused_moe(
                 x, layer.w13_weight, layer.w2_weight), (
                     "Flashinfer CUTLASS Fused MoE not applicable!")
-
             out = self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -1486,7 +1486,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
               and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS):
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 flashinfer_cutlass_moe_fp4)
-
             out = flashinfer_cutlass_moe_fp4(
                 hidden_states=x,
                 w1=layer.w13_weight,
