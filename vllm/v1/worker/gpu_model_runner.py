@@ -74,7 +74,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
-from vllm.v1.worker.utils import get_all_gather_tensors
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -83,6 +82,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin, KVConnectorOutput)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.utils import is_residual_scattered
 
 from .utils import (AttentionGroup, MultiModalBudget,
                     add_kv_sharing_layers_to_kv_cache_groups, bind_kv_cache,
@@ -1348,22 +1348,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert self.intermediate_tensors is not None
 
         tp = self.vllm_config.parallel_config.tensor_parallel_size
-        enabled_sp = self.compilation_config.pass_config. \
-            enable_sequence_parallelism
-        if enabled_sp:
-            # When sequence parallelism is enabled, we always pad num_tokens
-            # to be a multiple of tensor_parallel_size (tp) earlier
-            assert num_tokens % tp == 0
-        is_residual_scattered = tp > 1 and enabled_sp \
-            and num_tokens % tp == 0 and num_tokens in self.compilation_config.compile_sizes
+        is_rs = is_residual_scattered(self.vllm_config, num_tokens)
 
-        logger.info("num_tokens %s, is_residual_scattered %s", num_tokens, is_residual_scattered)
         # When sequence parallelism is enabled, the "residual" tensor is sharded
         # across tensor parallel ranks, so each rank only needs its own slice.
         if sync_self:
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
-                is_scattered = k == "residual" and is_residual_scattered
+                is_scattered = k == "residual" and is_rs
                 copy_len = num_tokens // tp if is_scattered else \
                     num_tokens
                 self.intermediate_tensors[k][:copy_len].copy_(
@@ -1371,8 +1363,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return IntermediateTensors({
             k:
-            v[:num_tokens // tp]
-            if k == "residual" and is_residual_scattered else v[:num_tokens]
+            v[:num_tokens //
+              tp] if k == "residual" and is_rs else v[:num_tokens]
             for k, v in self.intermediate_tensors.items()
         })
 
@@ -1458,7 +1450,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=pooler_output,
             kv_connector_output=kv_connector_output,
         )
-    
+
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
         if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
                 and not envs.VLLM_DISABLE_PAD_FOR_CUDAGRAPH
@@ -1604,11 +1596,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 hidden_states.kv_connector_output = kv_connector_output
                 return hidden_states
 
-            all_gather_tensors = get_all_gather_tensors(self.vllm_config,
-                                                        num_input_tokens)
-            get_pp_group().send_tensor_dict(hidden_states.tensors,
-                                            all_gather_group=get_tp_group(),
-                                            all_gather_tensors=all_gather_tensors)
+            all_gather_tensors = {
+                "residual":
+                not is_residual_scattered(self.vllm_config, num_input_tokens)
+            }
+            get_pp_group().send_tensor_dict(
+                hidden_states.tensors,
+                all_gather_group=get_tp_group(),
+                all_gather_tensors=all_gather_tensors)
             logits = None
         else:
             if self.input_batch.pooling_params:
