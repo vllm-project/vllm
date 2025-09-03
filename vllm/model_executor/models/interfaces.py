@@ -920,4 +920,4 @@ def supports_mrope(model: object) -> TypeIs[SupportsMRoPE]:
 def supports_mrope(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsMRoPE]], TypeIs[SupportsMRoPE]]:
-    return getattr(model, "supports_mrope", False)
+    return isinstance(model, SupportsMRoPE)
