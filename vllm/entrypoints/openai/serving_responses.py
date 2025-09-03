@@ -5,6 +5,7 @@ import asyncio
 import json
 import time
 from collections import deque
+import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
@@ -460,10 +461,6 @@ class OpenAIServingResponses(OpenAIServing):
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
             # TODO: these are all 0 for now!
-            num_prompt_tokens = context.num_prompt_tokens
-            num_generated_tokens = context.num_output_tokens
-            num_cached_tokens = context.num_cached_tokens
-            num_reasoning_tokens = context.num_reasoning_tokens
         else:
             assert isinstance(context, SimpleContext)
             final_res = context.last_output
@@ -476,10 +473,11 @@ class OpenAIServingResponses(OpenAIServing):
 
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
-            num_prompt_tokens = context.num_prompt_tokens
-            num_generated_tokens = context.num_output_tokens
-            num_cached_tokens = context.num_cached_tokens
-            num_reasoning_tokens = 0
+        assert isinstance(context, (SimpleContext, HarmonyContext))
+        num_prompt_tokens = context.num_prompt_tokens
+        num_generated_tokens = context.num_output_tokens
+        num_cached_tokens = context.num_cached_tokens
+        num_reasoning_tokens = context.num_reasoning_tokens
 
         usage = ResponseUsage(
             input_tokens=num_prompt_tokens,
@@ -947,9 +945,9 @@ class OpenAIServingResponses(OpenAIServing):
         created_time: int,
         _send_event: Callable[[BaseModel], str],
     ) -> AsyncGenerator[str, None]:
-        current_content_index = 0  # FIXME: this number is never changed
+        current_content_index = 0
         current_output_index = 0
-        current_item_id = ""  # FIXME: this number is never changed
+        current_item_id = ""
         reasoning_parser = None
         if self.reasoning_parser:
             reasoning_parser = self.reasoning_parser(tokenizer)
@@ -981,6 +979,7 @@ class OpenAIServingResponses(OpenAIServing):
                 if not delta_message:
                     continue
                 if not first_delta_sent:
+                    current_item_id = str(uuid.uuid4())
                     if delta_message.reasoning_content:
                         yield _send_event(
                             openai_responses_types.
@@ -1026,6 +1025,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 logprobs=[],
                             ),
                         ))
+                    current_content_index += 1
                     first_delta_sent = True
                 # todo(kebe7jun) tool call support
 
@@ -1048,6 +1048,7 @@ class OpenAIServingResponses(OpenAIServing):
                             content_index=current_content_index,
                             text=reason_content,
                         ))
+                    current_content_index = 0
                     reasoning_item = ResponseReasoningItem(
                         type="reasoning",
                         content=[
@@ -1081,6 +1082,7 @@ class OpenAIServingResponses(OpenAIServing):
                             ),
                         ))
                     current_output_index += 1
+                    current_item_id = str(uuid.uuid4())
                     yield _send_event(
                         openai_responses_types.ResponseContentPartAddedEvent(
                             type="response.content_part.added",
@@ -1095,6 +1097,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 logprobs=[],
                             ),
                         ))
+                    current_content_index += 1
                     # reset previous delta messages
                     previous_delta_messages = []
 
@@ -1122,9 +1125,9 @@ class OpenAIServingResponses(OpenAIServing):
                                 logprobs=output.logprobs,
                                 tokenizer=tokenizer,
                                 top_logprobs=request.top_logprobs,
-                            )
-                            if request.is_include_output_logprobs() else None,
+                            ) if request.is_include_output_logprobs() else [],
                         ))
+                current_content_index += 1
 
                 previous_delta_messages.append(delta_message)
         if previous_delta_messages:
@@ -1141,6 +1144,7 @@ class OpenAIServingResponses(OpenAIServing):
                         content_index=current_content_index,
                         text=reason_content,
                     ))
+                current_content_index += 1
                 reasoning_item = ResponseReasoningItem(
                     type="reasoning",
                     content=[
@@ -1174,6 +1178,7 @@ class OpenAIServingResponses(OpenAIServing):
                         logprobs=[],
                         item_id=current_item_id,
                     ))
+                current_content_index += 1
                 part = ResponseOutputText(
                     text=final_content,
                     type="output_text",
@@ -1188,6 +1193,7 @@ class OpenAIServingResponses(OpenAIServing):
                         content_index=current_content_index,
                         part=part,
                     ))
+                current_content_index += 1
                 item = ResponseOutputMessage(
                     type="message",
                     role="assistant",

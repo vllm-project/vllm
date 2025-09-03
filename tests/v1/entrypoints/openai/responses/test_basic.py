@@ -95,7 +95,7 @@ async def test_streaming(client: openai.AsyncOpenAI):
         input="What is 13 * 24?",
         stream=True,
     )
-    events = [event for event in stream]
+    events = [event async for event in stream]
     assert isinstance(events[0], openai_responses_types.ResponseCreatedEvent)
     assert any(
         isinstance(event, openai_responses_types.ResponseTextDeltaEvent)

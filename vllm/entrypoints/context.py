@@ -52,6 +52,8 @@ class SimpleContext(ConversationContext):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
+        # todo num_reasoning_tokens is not implemented yet.
+        self.num_reasoning_tokens = 0
 
     def append_output(self, output) -> None:
         self.last_output = output
