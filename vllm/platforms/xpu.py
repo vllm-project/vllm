@@ -91,7 +91,7 @@ class XPUPlatform(Platform):
             cache_config.block_size = 64
 
         # lazy import to avoid circular import
-        from vllm.config import CUDAGraphMode
+        from vllm.config import CompilationLevel, CUDAGraphMode
         compilation_config = vllm_config.compilation_config
         if compilation_config.cudagraph_mode is None or \
                 compilation_config.cudagraph_mode.max_cudagraph_mode() \
@@ -99,6 +99,9 @@ class XPUPlatform(Platform):
             logger.info("[XPU] CUDA graph is not supported on XPU, disabling "
                         "cudagraphs. Fallback to cudagraph_mode=NONE")
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+        if vllm_config.lora_config is not None:
+            compilation_config.level = CompilationLevel.NO_COMPILATION
 
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
