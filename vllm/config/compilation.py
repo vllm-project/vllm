@@ -548,27 +548,7 @@ class CompilationConfig:
             "set_splitting_ops_for_v1 should only be called when "
             "level is CompilationLevel.PIECEWISE")
 
-        if self.splitting_ops is None:
-            # NOTE: When using full cudagraph, instead of setting an empty
-            # list and capture the full cudagraph inside the flattened fx
-            # graph, we keep the piecewise fx graph structure but capture the
-            # full cudagraph outside the fx graph. This reduces some cpu
-            # overhead when the runtime batch_size is not cudagraph captured.
-            # see https://github.com/vllm-project/vllm/pull/20059 for details.
-            self.splitting_ops = self._attention_ops
-        elif len(self.splitting_ops) == 0:
-            logger.warning_once("Using piecewise compilation with empty "
-                                "splitting_ops.")
-            if self.cudagraph_mode == CUDAGraphMode.PIECEWISE:
-                logger.warning_once(
-                    "When compilation level is piecewise with empty "
-                    "splitting_ops, PIECEWISE cudagraph_mode will be "
-                    "treated as FULL cudagraph_mode. Please ensure you are "
-                    "using attention backends that support cudagraph or set "
-                    "cudagraph_mode to NONE explicitly if encountering "
-                    "any problems.")
-                self.cudagraph_mode = CUDAGraphMode.FULL
-            self.splitting_ops = []
+        self.splitting_ops = []
 
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and all(
