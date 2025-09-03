@@ -17,6 +17,10 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE, FusedMoEActivationFormat, FusedMoEConfig, FusedMoEMethodBase,
     FusedMoEPermuteExpertsUnpermute, FusedMoEPrepareAndFinalize,
     FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    zero_experts_compute_triton)
+from vllm.model_executor.layers.fused_moe.layer import (
+    UnquantizedFusedMoEMethod)
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -173,6 +177,10 @@ class Fp8Config(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return Fp8LinearMethod(self)
         elif isinstance(layer, FusedMoE):
+            if is_layer_skipped(prefix=prefix,
+                                ignored_layers=self.ignored_layers,
+                                fused_mapping=self.packed_modules_mapping):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
             return Fp8MoEMethod(self, layer)
         elif isinstance(layer, Attention):
             return Fp8KVCacheMethod(self)
@@ -988,6 +996,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        zero_expert_num: Optional[int] = 0,
+        zero_expert_type: Optional[str] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb:
             assert expert_load_view is not None
@@ -1003,8 +1013,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if self.block_quant:
                 assert (renormalize and use_grouped_topk
                         and custom_routing_function is None)
-
-                return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
+                result = torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
                     routing_logits=router_logits.to(torch.float32),
                     routing_bias=e_score_correction_bias,
                     x=x,
@@ -1025,7 +1034,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             else:
                 assert (not renormalize
                         and custom_routing_function is not None)
-                return apply_flashinfer_per_tensor_scale_fp8(
+                result = apply_flashinfer_per_tensor_scale_fp8(
                     layer=layer,
                     hidden_states=x,
                     router_logits=router_logits,
@@ -1055,6 +1064,14 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
         )
+        if zero_expert_num != 0 and zero_expert_type is not None:
+            zero_expert_result = zero_experts_compute_triton(
+                expert_indices=topk_ids,
+                expert_scales=topk_weights,
+                num_experts=global_num_experts,
+                zero_expert_type=zero_expert_type,
+                hidden_states=x,
+            )
 
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
@@ -1147,10 +1164,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
 
             if self.fused_experts is not None:
-                return self.fused_experts(**common_kwargs)
+                result = self.fused_experts(**common_kwargs)
             else:
                 from vllm.model_executor.layers.fused_moe import fused_experts
-                return fused_experts(
+                result = fused_experts(
                     **common_kwargs,
                     use_fp8_w8a8=True,
                     block_shape=self.quant_config.weight_block_size,
@@ -1158,6 +1175,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     allow_cutlass_block_scaled_grouped_gemm=(
                         self.allow_cutlass_block_scaled_grouped_gemm),
                 )
+        return result, zero_expert_result
 
 
 class Fp8KVCacheMethod(BaseKVCacheMethod):
