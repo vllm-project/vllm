@@ -789,7 +789,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     set(SRCS "csrc/quantization/hadamard/hadacore/hadamard_transform_cuda.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
-      CUDA_ARCHS "${CUDA_ARCHS}")
+      CUDA_ARCHS "${HADACORE_ARCHS}")
     list(APPEND VLLM_EXT_SRC "${SRCS}")
     message(STATUS "Building hadacore")
   endif()
