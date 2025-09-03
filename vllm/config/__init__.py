@@ -746,13 +746,14 @@ class ModelConfig:
 
         self.pooler_config = self._init_pooler_config()
 
-        self.dtype = _get_and_verify_dtype(
+        self.dtype: torch.dtype = _get_and_verify_dtype(
             self.model,
             self.hf_config,
             self.dtype,
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
         )
+        self.head_dtype: torch.dtype = self._get_head_dtype()
 
         # Interleaved attention is not supported by some backends in V0
         if (not self.disable_sliding_window
@@ -1778,8 +1779,10 @@ class ModelConfig:
         logger.info("Using max model len %s", max_model_len)
         return max_model_len
 
-    @property
-    def head_dtype(self) -> torch.dtype:
+    def _get_head_dtype(self) -> torch.dtype:
+        if torch.float32 not in current_platform.supported_dtypes:
+            return self.dtype
+
         if envs.VLLM_USING_FP32_HEAD:
             return torch.float32
 
