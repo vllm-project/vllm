@@ -40,6 +40,7 @@ from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.outputs import (PoolingRequestOutput, RequestOutput,
                           RequestOutputFactory)
+from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
                            Sequence, SequenceGroup, SequenceGroupBase,
@@ -371,6 +372,13 @@ class LLMEngine:
                 "vllm.llm_engine",
                 self.observability_config.otlp_traces_endpoint)
 
+        # Initialize reasoning parser if reasoning backend is set.
+        if self.decoding_config.reasoning_backend is not None:
+            reasoner_class = ReasoningParserManager.get_reasoning_parser(
+                self.decoding_config.reasoning_backend)
+            self.reasoner: ReasoningParser = reasoner_class(
+                self.tokenizer.get_lora_tokenizer())
+
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
         self.output_processor = (
@@ -380,8 +388,12 @@ class LLMEngine:
                 self.scheduler,
                 self.seq_counter,
                 get_tokenizer_for_seq,
-                stop_checker=StopChecker(self.scheduler_config.max_model_len,
-                                         get_tokenizer_for_seq),
+                stop_checker=StopChecker(
+                    self.scheduler_config.max_model_len,
+                    get_tokenizer_for_seq,
+                    self.reasoner if self.decoding_config.reasoning_backend
+                    is not None else None,
+                ),
             ))
 
         self.seq_id_to_seq_group: Dict[str, SequenceGroupBase] = {}
