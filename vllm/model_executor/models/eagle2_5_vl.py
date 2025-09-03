@@ -684,7 +684,6 @@ class Eagle2_5_VLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                 if token_id is not None
             ]
             assert len(context_token_ids) >= 1
-            self._set_visual_token_mask(input_ids)
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids,
                 inputs_embeds,
