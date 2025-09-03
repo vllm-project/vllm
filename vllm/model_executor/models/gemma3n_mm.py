@@ -179,7 +179,7 @@ class Gemma3nMultiModalProcessor(BaseMultiModalProcessor[Gemma3nProcessingInfo]
     ) -> BatchFeature:
 
         # HF Transformers audio processor no longer accepts `audios` key.
-        # We pop `audios` and replace it with `audio` key to surpress
+        # We pop `audios` and replace it with `audio` key to suppress
         # the warning.
         if 'audios' in mm_data:
             mm_data['audio'] = mm_data.pop('audios')

@@ -134,7 +134,7 @@ class SimpleModelWithTwoGraphs(ParentModel):
         # Test will fail without set_model_tag here with error:
         # "ValueError: too many values to unpack (expected 3)"
         # This is because CompiledAttention and CompiledAttentionTwo
-        # have different implmentations but the same torch.compile
+        # have different implementations but the same torch.compile
         # cache dir will be used as default prefix is 'model_tag'
         with set_model_tag("attn_one"):
             self.attn_one = CompiledAttention(

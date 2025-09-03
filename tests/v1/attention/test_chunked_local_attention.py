@@ -160,7 +160,7 @@ def test_local_attention_virtual_batches(test_data: LocalAttentionTestData):
         # Use torch.arange instead of torch.randint so we can assert on
         # block table tensor values. The block table will have shape
         # (num_batches, cdiv(max_seq_len, block_size)) and the values will be
-        # aranged from 0 to cdiv(max_seq_len, block_size)-1
+        # arranged from 0 to cdiv(max_seq_len, block_size)-1
         arange_block_indices=True,
     )
 

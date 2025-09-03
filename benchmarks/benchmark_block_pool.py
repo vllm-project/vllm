@@ -57,7 +57,7 @@ def invoke_main() -> None:
         "--num-iteration",
         type=int,
         default=1000,
-        help="Number of iterations to run to stablize final data readings",
+        help="Number of iterations to run to stabilize final data readings",
     )
     parser.add_argument(
         "--allocate-blocks",
