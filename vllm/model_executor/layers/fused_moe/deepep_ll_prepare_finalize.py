@@ -48,13 +48,13 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     SUPPORTED_HIDDEN_SIZES = [2048, 2560, 4096, 5120, 6144, 7168]
 
     def __init__(self,
-                 buffers: list[deep_ep.Buffer],
+                 buffer: deep_ep.Buffer,
                  max_tokens_per_rank: int,
                  num_dispatchers: int,
                  use_fp8_dispatch: bool = False):
         super().__init__()
 
-        self.buffers = buffers
+        self.buffer = buffer
         self.max_tokens_per_rank = max_tokens_per_rank
         self.use_fp8_dispatch = use_fp8_dispatch
         # The dispatch function returns a handle that the combine function
@@ -154,7 +154,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # Dispatch
         dbo_maybe_run_recv_hook()
         expert_x, expert_num_tokens, handle, _, recv_hook= \
-                self.buffers[a2a_idx].low_latency_dispatch(a1,
+                self.buffer.low_latency_dispatch(a1,
                                                 topk_ids,
                                                 self.max_tokens_per_rank,
                                                 num_experts,
@@ -200,7 +200,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
-        _, _, recv_hook = self.buffers[a2a_idx].low_latency_combine(fused_expert_output,
+        _, _, recv_hook = self.buffer.low_latency_combine(fused_expert_output,
                                                       topk_ids,
                                                       combine_topk_weights,
                                                       handle,

@@ -142,10 +142,10 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 all_to_all_args[
                     "group_name"] = all2all_manager.cpu_group.group_name
 
-            handles = all2all_manager.get_handles(all_to_all_args)
+            handle = all2all_manager.get_handle(all_to_all_args)
 
             prepare_finalize = PplxPrepareAndFinalize(
-                handles,
+                handle,
                 max_num_tokens=moe.max_num_tokens,
                 num_local_experts=moe.num_local_experts,
                 num_dispatchers=num_dispatchers,
@@ -171,7 +171,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 num_global_experts=moe.num_experts,
                 num_local_experts=moe.num_experts //
                 all2all_manager.world_size)
-            handles = all2all_manager.get_handles(all_to_all_args)
+            handle = all2all_manager.get_handle(all_to_all_args)
 
             # Note : We may want to use FP8 dispatch even otherwise just to
             # reduce datamovement
@@ -182,7 +182,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                                 == DEEPEP_QUANT_BLOCK_SHAPE)
 
             prepare_finalize = DeepEPLLPrepareAndFinalize(
-                handles,
+                handle,
                 max_tokens_per_rank=moe.max_num_tokens,
                 num_dispatchers=all2all_manager.world_size,
                 use_fp8_dispatch=use_fp8_dispatch,

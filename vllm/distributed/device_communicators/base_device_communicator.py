@@ -60,9 +60,6 @@ class All2AllManagerBase:
         # and reuse it for the same config.
         raise NotImplementedError
 
-    def get_handles(self, kwargs):
-        raise NotImplementedError
-
     def dispatch(self, hidden_states: torch.Tensor,
                  router_logits: torch.Tensor):
         raise NotImplementedError
