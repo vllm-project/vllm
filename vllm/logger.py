@@ -49,8 +49,31 @@ DEFAULT_LOGGING_CONFIG = {
         },
     },
     "version": 1,
-    "disable_existing_loggers": False
+    "disable_existing_loggers": False,
 }
+
+LOG_FILE_DIR = os.path.expanduser(
+    envs.VLLM_LOGS_DIR) if envs.VLLM_LOGS_DIR else None
+if envs.VLLM_PER_RANK_LOGS and not LOG_FILE_DIR:
+    raise ValueError(
+        "VLLM_PER_RANK_LOGS is set to true, but VLLM_LOGS_DIR is not set.")
+if envs.VLLM_PER_RANK_LOGS and envs.VLLM_LOGGING_CONFIG_PATH:
+    raise ValueError(
+        "VLLM_PER_RANK_LOGS with VLLM_LOGGING_CONFIG_PATH is not supported.")
+if LOG_FILE_DIR:
+    os.makedirs(LOG_FILE_DIR, exist_ok=True)
+
+if LOG_FILE_DIR:
+    LOG_FILE_NAME = os.path.join(LOG_FILE_DIR, "vllm.log")
+    DEFAULT_LOGGING_CONFIG["handlers"]["vllm_log_file"] = {
+        "class": "logging.FileHandler",
+        "formatter": "vllm",
+        "level": VLLM_LOGGING_LEVEL,
+        "filename": LOG_FILE_NAME,
+        "encoding": "utf-8",
+    }
+    DEFAULT_LOGGING_CONFIG["loggers"]["vllm"]["handlers"].append(
+        "vllm_log_file")
 
 
 @lru_cache
@@ -143,6 +166,17 @@ def _configure_vllm_root_logger() -> None:
 
     if logging_config:
         dictConfig(logging_config)
+
+
+def setup_per_rank_logger(rank) -> None:
+    if not envs.VLLM_PER_RANK_LOGS:
+        return
+    base_str = os.path.splitext(LOG_FILE_NAME)[0]
+    log_file = f"{base_str}_rank_{rank}.log"
+
+    log_config = DEFAULT_LOGGING_CONFIG.copy()
+    log_config["handlers"]["vllm_log_file"]["filename"] = log_file
+    dictConfig(log_config)
 
 
 def init_logger(name: str) -> _VllmLogger:

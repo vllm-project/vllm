@@ -38,6 +38,8 @@ if TYPE_CHECKING:
     VLLM_LOGGING_LEVEL: str = "INFO"
     VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
+    VLLM_LOGS_DIR: Optional[str] = None
+    VLLM_PER_RANK_LOGS: bool = False
     VLLM_LOGITS_PROCESSOR_THREADS: Optional[int] = None
     VLLM_LOG_STATS_INTERVAL: float = 10.
     VLLM_TRACE_FUNCTION: int = 0
@@ -434,6 +436,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
     "VLLM_LOGGING_PREFIX":
     lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
+
+    # if set, vLLM will store logs in file
+    "VLLM_LOGS_DIR":
+    lambda: os.getenv("VLLM_LOGS_DIR", None),
+
+    # if set, vLLM will store logs for each rank in a separate file
+    "VLLM_PER_RANK_LOGS":
+    lambda: bool(int(os.getenv("VLLM_PER_RANK_LOGS", "0"))),
 
     # if set, vllm will call logits processors in a thread pool with this many
     # threads. This is useful when using custom logits processors that either
