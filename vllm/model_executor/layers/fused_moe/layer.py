@@ -1716,9 +1716,9 @@ class FusedMoE(CustomOp):
             desired_start = chunk_start_
             desired_end = chunk_start_ + moe_dp_chunk_size_per_rank
 
-            # clamp start and end
+            # Zero-safe clamping: [0, num_tokens], and end >= start
             chunk_start = max(0, min(desired_start, num_tokens))
-            chunk_end = max(chunk_start, min(desired_end, num_tokens))
+            chunk_end = max(chunk_start + 1, min(desired_end, num_tokens))
 
             with ctx.dp_metadata.chunked_sizes(moe_dp_chunk_size_per_rank,
                                                chunk_idx):
