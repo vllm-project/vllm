@@ -157,6 +157,7 @@ class APIServerProcessManager:
         input_addresses: list[str],
         output_addresses: list[str],
         stats_update_address: Optional[str] = None,
+        kv_handshake_metadata: Optional[dict] = None,
     ):
         """Initialize and start API server worker processes.
         
@@ -168,7 +169,8 @@ class APIServerProcessManager:
             num_servers: Number of API server processes to start
             input_addresses: Input addresses for each API server
             output_addresses: Output addresses for each API server
-            stats_update_address: Optional stats update address 
+            stats_update_address: Optional stats update address
+            kv_handshake_metadata: Optional KV connector handshake metadata
         """
         self.listen_address = listen_address
         self.sock = sock
@@ -188,6 +190,8 @@ class APIServerProcessManager:
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
+            if kv_handshake_metadata is not None:
+                client_config["kv_handshake_metadata"] = kv_handshake_metadata
 
             proc = spawn_context.Process(target=target_server_fn,
                                          name=f"ApiServer_{i}",

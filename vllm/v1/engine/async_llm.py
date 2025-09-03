@@ -595,6 +595,10 @@ class AsyncLLM(EngineClient):
 
         return self.tokenizer.get_lora_tokenizer(lora_request)
 
+    async def get_kv_handshake_metadata(self) -> Optional[dict]:
+        """Get KV connector handshake metadata if available."""
+        return self.engine_core.get_kv_handshake_metadata()
+
     async def is_tracing_enabled(self) -> bool:
         return False
 

@@ -1,0 +1,214 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import asyncio
+from typing import Any, Optional
+
+import uvicorn
+from fastapi import FastAPI, HTTPException
+
+from vllm import envs
+from vllm.config import VllmConfig
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
+
+class KVConnHandshakeServer:
+
+    def __init__(self, host: str, port: int, kv_metadata: dict,
+                 connector_name: str):
+        self.host = host
+        self.port = port
+        self.kv_metadata = kv_metadata
+        self.connector_name = connector_name
+        self.app = FastAPI(title="vLLM KVConnector Handshake Server")
+        self.server: Optional[uvicorn.Server] = None
+        self._setup_routes()
+
+    def _get_connector_name(self) -> str:
+        return self.connector_name
+
+    def _setup_routes(self):
+
+        @self.app.get("/get_kv_connector_metadata")
+        @self.app.get("/get_kv_connector_metadata/{dp_rank}")
+        @self.app.get("/get_kv_connector_metadata/{dp_rank}/{tp_rank}")
+        async def get_kv_connector_metadata(dp_rank: Optional[int] = None,
+                                            tp_rank: Optional[int] = None):
+            kv_meta = self.kv_metadata
+
+            if kv_meta is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="KV connector handshake metadata is not available")
+            if dp_rank is None:
+                return kv_meta
+
+            if not (dp_data := kv_meta.get(dp_rank)):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Data parallel rank {dp_rank} not found")
+
+            if tp_rank is None:
+                return {dp_rank: dp_data}
+
+            if not (tp_data := dp_data.get(tp_rank)):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Tensor parallel rank {tp_rank} not found for data \
+                        parallel rank {dp_rank}")
+
+            return {dp_rank: {tp_rank: tp_data}}
+
+    async def start_async(self):
+        logger.debug("DEBUG: KVConnHandshakeServer.start_async() called")
+
+        if self.server is not None:
+            logger.warning("Side channel server is already running")
+            return
+
+        listen_address = f"http://{self.host}:{self.port}"
+        logger.info("Starting %s handshake server on %s",
+                    self._get_connector_name(), listen_address)
+        logger.debug("DEBUG: Preparing uvicorn configuration for %s",
+                     listen_address)
+
+        # prepare uvicorn configuration
+        config_kwargs: dict[str, Any] = {
+            "app": self.app,
+            "host": self.host,
+            "port": self.port,
+            "log_level": "info",
+            "access_log": True,
+        }
+
+        logger.debug("DEBUG: Creating uvicorn.Config with kwargs: %s",
+                     config_kwargs)
+        try:
+            config = uvicorn.Config(**config_kwargs)
+            logger.debug("DEBUG: uvicorn.Config created successfully")
+
+            config.load()  # need to load config to get SSL context
+            logger.debug("DEBUG: uvicorn.Config loaded successfully")
+
+            self.server = uvicorn.Server(config)
+            logger.debug("DEBUG: uvicorn.Server created successfully")
+
+            # start the server in a background task
+            if self.server is not None:
+                logger.debug(
+                    "DEBUG: Creating background task for server.serve()")
+                task = asyncio.create_task(self.server.serve())
+                logger.debug("DEBUG: Background task created: %s", task)
+
+            logger.info("%s handshake server started successfully",
+                        self._get_connector_name())
+            logger.debug(
+                "DEBUG: KVConnHandshakeServer.start_async() completed")
+
+        except Exception as e:
+            logger.error(
+                "DEBUG: Exception in KVConnHandshakeServer.start_async(): %s",
+                e)
+            raise
+
+    async def stop_async(self):
+        if self.server is not None:
+            logger.info("Stopping %s handshake server",
+                        self._get_connector_name())
+            try:
+                self.server.should_exit = True
+                await asyncio.sleep(1)  # give it time to shutdown
+            except Exception as e:
+                logger.warning("Error during side channel server shutdown: %s",
+                               e)
+            self.server = None
+            logger.info("%s handshake server stopped",
+                        self._get_connector_name())
+
+
+def should_start_kv_handshake_server(vllm_config: VllmConfig) -> bool:
+    logger.debug("DEBUG: Checking if KV handshake server should start")
+
+    if vllm_config.kv_transfer_config is None:
+        logger.debug("DEBUG: kv_transfer_config is None, not starting server")
+        return False
+
+    connector_name = vllm_config.kv_transfer_config.kv_connector
+    logger.debug("DEBUG: connector_name = %s", connector_name)
+    if connector_name is None:
+        logger.debug("DEBUG: connector_name is None, not starting server")
+        return False
+
+    # check connector-specific handshake method
+    if connector_name == "NixlConnector":
+        handshake_method = envs.VLLM_NIXL_HANDSHAKE_METHOD.lower()
+        logger.debug("DEBUG: handshake_method = '%s'", handshake_method)
+        should_start = handshake_method == "http"
+        logger.debug("DEBUG: should start handshake server = %s", should_start)
+        return should_start
+
+    # other connectors can be added here with their own logic
+    # for now, only nixl supports http handshake
+    logger.debug("DEBUG: Unknown connector %s, not starting server",
+                 connector_name)
+    return False
+
+
+def _get_handshake_server_config(vllm_config: VllmConfig) -> tuple[str, int]:
+    """get host and port for the handshake server based on connector type."""
+    if vllm_config.kv_transfer_config is None:
+        raise RuntimeError(
+            "KV transfer config is None but tried to start handshake server")
+    connector_name = vllm_config.kv_transfer_config.kv_connector
+
+    if connector_name == "NixlConnector":
+        return (envs.VLLM_NIXL_SIDE_CHANNEL_HOST,
+                envs.VLLM_NIXL_SIDE_CHANNEL_PORT)
+
+    # default fallback values
+    return "localhost", 5557
+
+
+async def set_up_kv_handshake_server(
+        vllm_config: VllmConfig,
+        kv_metadata: dict) -> Optional[KVConnHandshakeServer]:
+    logger.debug(
+        "DEBUG: set_up_kv_handshake_server called with kv_metadata keys: %s",
+        list(kv_metadata.keys()) if kv_metadata else "None")
+
+    if not should_start_kv_handshake_server(vllm_config):
+        logger.debug(
+            "DEBUG: should_start_kv_handshake_server returned False, no start")
+        return None
+
+    logger.debug(
+        "DEBUG: should_start_kv_handshake_server returned True, proceeding")
+
+    side_channel_host, side_channel_port = _get_handshake_server_config(
+        vllm_config)
+    logger.debug("DEBUG: Got handshake server config: host=%s, port=%d",
+                 side_channel_host, side_channel_port)
+
+    assert vllm_config.kv_transfer_config is not None
+    connector_name = vllm_config.kv_transfer_config.kv_connector
+    assert connector_name is not None
+
+    logger.info("Starting %s handshake server on %s:%d", connector_name,
+                side_channel_host, side_channel_port)
+
+    server = KVConnHandshakeServer(side_channel_host, side_channel_port,
+                                   kv_metadata, connector_name)
+    logger.debug("DEBUG: Created KVConnHandshakeServer instance")
+
+    try:
+        await server.start_async()
+        logger.debug(
+            "DEBUG: KVConnHandshakeServer.start_async() completed successfully"
+        )
+    except Exception as e:
+        logger.error("DEBUG: Failed to start KVConnHandshakeServer: %s", e)
+        raise
+
+    return server

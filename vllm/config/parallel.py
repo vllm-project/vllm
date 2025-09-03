@@ -21,10 +21,13 @@ if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
 
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+        KVConnectorHandshakeMetadata)
     from vllm.executor.executor_base import ExecutorBase
 else:
     RuntimeEnv = Any
     PlacementGroup = Any
+    KVConnectorHandshakeMetadata = Any
     ExecutorBase = Any
 
 logger = init_logger(__name__)
@@ -169,6 +172,11 @@ class ParallelConfig:
     """List of open port auto-queried for data parallel messaging.
     Set to be private as it's not intended to be configured by users.
     """
+
+    kv_conn_endpoint_metadata: Optional[dict[int, dict[
+        int, KVConnectorHandshakeMetadata]]] = None
+    """ Metadata for KV transfer handshake between prefill and decode engine
+    processes."""
 
     @property
     def world_size_across_dp(self) -> int:
