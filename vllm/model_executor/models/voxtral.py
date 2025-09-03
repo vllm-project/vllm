@@ -5,7 +5,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import cached_property
 from math import ceil
-from typing import Optional, Union, cast
+from typing import Literal, Optional, Union, cast
 
 import numpy as np
 import regex as re
@@ -455,8 +455,10 @@ class VoxtralForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_generation_prompt(cls, audio: np.ndarray,
                               model_config: ModelConfig,
                               stt_config: SpeechToTextConfig,
-                              language: Optional[str], task_type: str,
-                              request_prompt: str) -> PromptType:
+                              language: Optional[str],
+                              task_type: Literal["transcribe", "translate"],
+                              request_prompt: str,
+                              to_language: Optional[str]) -> PromptType:
         tokenizer = cached_tokenizer_from_config(model_config)
         audio = Audio(audio, int(stt_config.sample_rate),
                       format="wav")  # lossless
