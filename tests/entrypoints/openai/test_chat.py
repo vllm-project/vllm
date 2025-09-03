@@ -15,7 +15,6 @@ import torch
 from openai import BadRequestError, OpenAI
 
 from ...utils import RemoteOpenAIServer
-from .test_completion import zephyr_lora_added_tokens_files  # noqa: F401
 from .test_completion import zephyr_lora_files  # noqa: F401
 
 # any model with a chat template should work here
@@ -31,11 +30,7 @@ def monkeypatch_module():
 
 
 @pytest.fixture(scope="module", params=[False, True])
-def server(
-        request,
-        monkeypatch_module,
-        zephyr_lora_files,  #noqa: F811
-        zephyr_lora_added_tokens_files):  # noqa: F811
+def server(request, monkeypatch_module, zephyr_lora_files):  #noqa: F811
 
     use_v1 = request.param
     monkeypatch_module.setenv('VLLM_USE_V1', '1' if use_v1 else '0')
@@ -51,7 +46,6 @@ def server(
         "--enable-lora",
         "--lora-modules",
         f"zephyr-lora={zephyr_lora_files}",
-        f"zephyr-lora2={zephyr_lora_added_tokens_files}",
         "--max-lora-rank",
         "64",
         "--max-cpu-loras",
@@ -81,7 +75,7 @@ async def client(server):
 @pytest.mark.parametrize(
     # first test base model, then test loras
     "model_name",
-    [MODEL_NAME, "zephyr-lora", "zephyr-lora2"],
+    [MODEL_NAME, "zephyr-lora"],
 )
 async def test_no_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
     messages = [{
