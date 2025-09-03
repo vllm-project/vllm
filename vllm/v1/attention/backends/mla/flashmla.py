@@ -6,8 +6,7 @@ from typing import ClassVar, Optional
 
 import torch
 
-from vllm.attention.backends.abstract import (AttentionType,
-                                              is_quantized_kv_cache)
+from vllm.attention.backends.abstract import AttentionLayer, AttentionType
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          get_mla_metadata,
                                          is_flashmla_supported)
@@ -55,8 +54,8 @@ class FlashMLAMetadata(MLACommonMetadata[FlashMLADecodeMetadata]):
 
 
 class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
-    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.PURE_DECODE_ONLY
+    cudagraph_support: ClassVar[AttentionCGSupport] = \
+        AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -73,7 +72,7 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
         device_properties = torch.cuda.get_device_properties(self.device)
         num_sms = device_properties.multi_processor_count
 
-        if self.compilation_config.full_cuda_graph:
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             self.cg_buf_tile_scheduler_metadata = torch.zeros(
                 # Upper bound on size (<= #SMs, TileSchedulerMetaDataSize)
                 # TileSchedulerMetaDataSize = 8
@@ -95,7 +94,10 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
             1, # MQA for the decode path
         )
 
-        if self.compilation_config.full_cuda_graph:
+        # TODO: we can disambiguate between decode and mixed-prefill decode here
+        # so we can only use the persistent buffer if a cudagraph is actually
+        # being used.
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
             assert self.cg_buf_tile_scheduler_metadata is not None
             assert self.cg_buf_num_splits is not None
 
@@ -163,16 +165,13 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
                                       "are not implemented for "
                                       "FlashMLAImpl")
 
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "FlashMLA V1 with FP8 KV cache not yet supported")
-
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
         q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLAMetadata,
+        layer: AttentionLayer,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
@@ -191,6 +190,8 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             num_splits=attn_metadata.decode.num_splits,
             softmax_scale=self.scale,
             causal=True,
+            descale_q=layer._q_scale.reshape(1),
+            descale_k=layer._k_scale.reshape(1),
         )
 
         return self._v_up_proj(o)

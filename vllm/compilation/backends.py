@@ -15,7 +15,7 @@ import torch.fx as fx
 from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
-from vllm.config import CompilationConfig, VllmConfig
+from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
@@ -271,14 +271,11 @@ def split_graph(graph: fx.GraphModule,
         outputs.append(
             SplitItem(name, graph_id, (graph_id in split_op_graphs), module))
 
-    # sort by intetger graph_id, rather than string name
+    # sort by integer graph_id, rather than string name
     outputs.sort(key=lambda x: x.graph_id)
 
     return split_gm, outputs
 
-
-# we share the global graph pool among all the backends
-global_graph_pool = None
 
 compilation_start_time = 0.0
 
@@ -297,13 +294,12 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
 
     def __init__(self, module: torch.fx.GraphModule,
                  compile_submod_names: list[str], vllm_config: VllmConfig,
-                 graph_pool, vllm_backend: "VllmBackend"):
+                 vllm_backend: "VllmBackend"):
         super().__init__(module)
         from torch._guards import detect_fake_mode
         self.fake_mode = detect_fake_mode()
         self.compile_submod_names = compile_submod_names
         self.compilation_config = vllm_config.compilation_config
-        self.graph_pool = graph_pool
         self.vllm_config = vllm_config
         self.vllm_backend = vllm_backend
         # When True, it annoyingly dumps the torch.fx.Graph on errors.
@@ -339,13 +335,35 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 graph_index=index,
                 num_graphs=len(self.compile_submod_names),
                 runtime_shape=None)
+            # Lazy import here to avoid circular import
+            from .cuda_graph import CUDAGraphOptions
+            from .cuda_piecewise_backend import PiecewiseBackend
 
-            piecewise_backend = resolve_obj_by_qualname(
-                current_platform.get_piecewise_backend_cls())
-            self.module.__dict__[target] = piecewise_backend(
-                submod, self.vllm_config, self.graph_pool, index,
+            piecewise_backend = PiecewiseBackend(
+                submod, self.vllm_config, index,
                 len(self.compile_submod_names), sym_shape_indices,
                 compiled_graph_for_dynamic_shape, self.vllm_backend)
+
+            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                # resolve the static graph wrapper class (e.g. CUDAGraphWrapper
+                # class) as platform dependent.
+                static_graph_wrapper_class = resolve_obj_by_qualname(
+                    current_platform.get_static_graph_wrapper_cls())
+
+                # Always assign PIECEWISE runtime mode to the
+                # CUDAGraphWrapper for piecewise_backend, to distinguish
+                # it from the FULL cudagraph runtime mode, no matter it
+                # is wrapped on a full or piecewise fx graph.
+                self.module.__dict__[target] = static_graph_wrapper_class(
+                    runnable=piecewise_backend,
+                    vllm_config=self.vllm_config,
+                    runtime_mode=CUDAGraphMode.PIECEWISE,
+                    cudagraph_options=CUDAGraphOptions(
+                        debug_log_enable=piecewise_backend.is_first_graph,
+                        gc_disable=not piecewise_backend.is_first_graph,
+                        weak_ref_output=piecewise_backend.is_last_graph))
+            else:
+                self.module.__dict__[target] = piecewise_backend
 
             compilation_counter.num_piecewise_capturable_graphs_seen += 1
 
@@ -385,7 +403,6 @@ class VllmBackend:
 
     vllm_config: VllmConfig
     compilation_config: CompilationConfig
-    graph_pool: Any
     _called: bool = False
     # the graph we compiled
     graph: fx.GraphModule
@@ -407,20 +424,11 @@ class VllmBackend:
 
         # if the model is initialized with a non-empty prefix,
         # then usually it's enough to use that prefix,
-        # e.g. launguage_model, vision_model, etc.
+        # e.g. language_model, vision_model, etc.
         # when multiple parts are initialized as independent
         # models, we need to use the model_tag to distinguish
         # them, e.g. backbone (default), eagle_head, etc.
         self.prefix = prefix or model_tag
-
-        global global_graph_pool
-        if global_graph_pool is None:
-            global_graph_pool = current_platform.graph_pool_handle()
-
-        # TODO: in the future, if we want to use multiple
-        # streams, it might not be safe to share a global pool.
-        # only investigate this when we use multiple streams
-        self.graph_pool = global_graph_pool
 
         # Passes to run on the graph post-grad.
         self.post_grad_pass_manager = PostGradPassManager()
@@ -466,7 +474,7 @@ class VllmBackend:
 
             factors = []
             # 0. factors come from the env, for example, The values of
-            # VLLM_PP_LAYER_PARTITION will affects the computation graph.
+            # VLLM_PP_LAYER_PARTITION will affect the computation graph.
             env_hash = envs.compute_hash()
             factors.append(env_hash)
 
@@ -568,7 +576,7 @@ class VllmBackend:
         # propagate the split graph to the piecewise backend,
         # compile submodules with symbolic shapes
         PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
-                                    self.vllm_config, self.graph_pool,
+                                    self.vllm_config,
                                     self).run(*example_inputs)
 
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")
@@ -585,7 +593,7 @@ class VllmBackend:
 
         self._called = True
 
-        if not self.compilation_config.use_cudagraph or \
+        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE or \
             not self.compilation_config.cudagraph_copy_inputs:
             return self.split_gm
 

@@ -9,7 +9,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available, make_tensor_with_pad
-from vllm.v1.sample.logits_processor import LogitsProcessorManager
+from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 
@@ -173,7 +173,7 @@ def _create_default_sampling_metadata(
         no_penalties=True,
         allowed_token_ids_mask=None,
         bad_words_token_ids={},
-        logitsprocs=LogitsProcessorManager(),
+        logitsprocs=LogitsProcessors(),
     )
     return fake_sampling_metadata
 

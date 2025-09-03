@@ -52,9 +52,7 @@ def make_request(
     return EngineCoreRequest(
         request_id=str(uuid.uuid4()),
         prompt_token_ids=prompt_tokens_ids,
-        mm_inputs=None,
-        mm_hashes=None,
-        mm_placeholders=None,
+        mm_features=None,
         sampling_params=params,
         pooling_params=None,
         eos_token_id=None,
@@ -121,8 +119,13 @@ async def loop_until_fully_done_async(client: EngineCoreClient, outputs: dict):
 
 
 # Dummy utility function to monkey-patch into engine core.
-def echo(self, msg: str, err_msg: Optional[str] = None) -> str:
+def echo(self,
+         msg: str,
+         err_msg: Optional[str] = None,
+         sleep: Optional[float] = None) -> str:
     print(f"echo util function called: {msg}, {err_msg}")
+    if sleep is not None:
+        time.sleep(sleep)
     if err_msg is not None:
         raise ValueError(err_msg)
     return msg
@@ -289,6 +292,23 @@ async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
                 await core_client.call_utility_async("echo", None, "help!")
 
             assert str(e_info.value) == "Call to echo method failed: help!"
+
+            # Test that cancelling the utility call doesn't destabilize the
+            # engine.
+            util_task = asyncio.create_task(
+                core_client.call_utility_async("echo", "testarg2", None,
+                                               0.5))  # sleep for 0.5 sec
+            await asyncio.sleep(0.05)
+            cancelled = util_task.cancel()
+            assert cancelled
+
+            # Ensure client is still functional. The engine runs utility
+            # methods in a single thread so this request won't be processed
+            # until the cancelled sleeping one is complete.
+            result = await asyncio.wait_for(core_client.call_utility_async(
+                "echo", "testarg3"),
+                                            timeout=1.0)
+            assert result == "testarg3"
         finally:
             client.shutdown()
 

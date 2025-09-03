@@ -10,6 +10,7 @@ MODELS = [
     ########## BertModel
     CLSPoolingEmbedModelInfo("intfloat/e5-small",
                              architecture="BertModel",
+                             mteb_score=0.742285423,
                              enable_test=True),
     CLSPoolingEmbedModelInfo("intfloat/e5-base",
                              architecture="BertModel",
@@ -23,6 +24,7 @@ MODELS = [
     ########## XLMRobertaModel
     CLSPoolingEmbedModelInfo("intfloat/multilingual-e5-base",
                              architecture="XLMRobertaModel",
+                             mteb_score=0.779325955,
                              enable_test=True),
     CLSPoolingEmbedModelInfo("intfloat/multilingual-e5-large",
                              architecture="XLMRobertaModel",
