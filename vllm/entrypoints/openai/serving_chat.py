@@ -894,7 +894,7 @@ class OpenAIServingChat(OpenAIServing):
                     if (delta_message is not None  
                         and (delta_message.reasoning_content 
                              or (self.use_harmony 
-                                 and not harmony_parsers[i].current_channel == "final"))):
+                                 and harmony_parsers[i].current_channel != "final"))):
                         num_reasoning_tokens_per_choice[i] += len(output.token_ids)
 
                     # update the previous values for the next iteration
@@ -1199,7 +1199,8 @@ class OpenAIServingChat(OpenAIServing):
                     reasoning_parser.extract_reasoning_content(
                         output.text, output.token_ids, request=request))
                 num_reasoning_tokens_per_choice[i] = \
-                    len(reasoning_content_tokens) if reasoning_content_tokens else 0
+                    len(reasoning_content_tokens) \
+                        if reasoning_content_tokens else 0
 
                 if not request.include_reasoning:
                     reasoning_content = None
