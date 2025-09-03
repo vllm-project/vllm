@@ -373,7 +373,8 @@ class LLMEngine:
                 self.observability_config.otlp_traces_endpoint)
 
         # Initialize reasoning parser if reasoning backend is set.
-        if self.decoding_config.reasoning_backend is not None:
+        if self.decoding_config.reasoning_backend is not None and \
+                self.tokenizer is not None:
             reasoner_class = ReasoningParserManager.get_reasoning_parser(
                 self.decoding_config.reasoning_backend)
             self.reasoner: ReasoningParser = reasoner_class(
