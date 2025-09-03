@@ -6,7 +6,7 @@ import os
 from collections import defaultdict, deque
 from collections.abc import Iterable, Sequence
 from dataclasses import astuple, dataclass
-from typing import Any, Callable, NewType, Optional, Union
+from typing import Any, Callable, NamedTuple, NewType, Optional, cast, Union
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -1083,8 +1083,54 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                 )
 
     if not is_kv_cache_type_uniform(kv_cache_spec):
-        raise ValueError("Hybrid KV cache manager is disabled but failed to "
-                         "convert the KV cache specs to one unified type.")
+        # Check if this is a SPECULATIVE DECODING case with different
+        # num_kv_heads
+        # Group specs by num_kv_heads to identify outliers (like EAGLE layers)
+        kv_heads_groups: dict[int, list[tuple[str, KVCacheSpec]]] = {}
+        for layer_name, spec in kv_cache_spec.items():
+            if not hasattr(spec, 'num_kv_heads'):
+                raise ValueError(f"Spec {type(spec).__name__} does not"
+                                 "have num_kv_heads attribute")
+            # Type cast to access num_kv_heads attribute
+            attention_spec = cast(FullAttentionSpec, spec)
+            num_kv_heads = attention_spec.num_kv_heads
+            if num_kv_heads not in kv_heads_groups:
+                kv_heads_groups[num_kv_heads] = []
+            kv_heads_groups[num_kv_heads].append((layer_name, spec))
+
+        # If we have multiple groups with different KV heads,
+        # assume the larger group is the main model and force
+        # outliers to use the main model's spec
+        if len(kv_heads_groups) > 1:
+            # Find the largest group (main model layers)
+            main_group_size = max(
+                len(group) for group in kv_heads_groups.values())
+            main_spec = None
+
+            for num_kv_heads, group in kv_heads_groups.items():
+                if len(group) == main_group_size:
+                    # Use first spec from main group
+                    main_spec = group[0][1]
+                    break
+
+            if main_spec:
+                logger.warning(
+                    "SPECULATIVE DECODING compatibility: Found %d different KV "
+                    "head configurations. Forcing all layers to use main "
+                    "model's "
+                    "KV cache spec (num_kv_heads=%d)", len(kv_heads_groups),
+                    cast(FullAttentionSpec, main_spec).num_kv_heads)
+                # Force all layers to use the main model's spec
+                for layer_name in kv_cache_spec:
+                    kv_cache_spec[layer_name] = main_spec
+            else:
+                raise ValueError(
+                    "Hybrid KV cache manager is disabled but failed to "
+                    "convert the KV cache specs to one unified type.")
+        else:
+            raise ValueError(
+                "Hybrid KV cache manager is disabled but failed to "
+                "convert the KV cache specs to one unified type.")
 
 
 def get_kv_cache_config(

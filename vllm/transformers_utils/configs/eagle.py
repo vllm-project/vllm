@@ -44,15 +44,30 @@ class EAGLEConfig(PretrainedConfig):
                 truncated_vocab_size is None else truncated_vocab_size
 
         # Eagle model name should follow naming convention of
-        # LlamaForCausalLM -> EagleLlamaForCausalLM
+        # LlamaForCausalLM  EagleLlamaForCausalLM
         # LlamaForCausalLM -> Eagle3LlamaForCausalLM
         # LlamaForCausalLMEagle3 -> LlamaForCausalLMEagle3
+        # Qwen2ForCausalLM          → EagleQwen2ForCausalLM
+        # Qwen2ForCausalLMEagle     → EagleQwen2ForCausalLM
+        # EagleQwen2ForCausalLM     → EagleQwen2ForCausalLM
+        # LlamaForCausalLM          → EagleLlamaForCausalLM
+        # LlamaForCausalLMEagle     → EagleLlamaForCausalLM
         if method == "eagle":
             assert self.model is not None, \
                 "model should not be None when method is eagle"
+
+            def normalize_eagle_arch(arch):
+                # Remove Eagle suffix if present, then add Eagle prefix
+                if arch.endswith("Eagle"):
+                    base_arch = arch[:-5]  # Remove "Eagle" suffix
+                elif arch.startswith("Eagle"):
+                    return arch  # Already has Eagle prefix
+                else:
+                    base_arch = arch
+                return f"Eagle{base_arch}"
+
             kwargs["architectures"] = [
-                f"Eagle{arch}" if not arch.startswith("Eagle") \
-                    else arch for arch in self.model.architectures
+                normalize_eagle_arch(arch) for arch in self.model.architectures
             ]
 
         elif method == "eagle3":
