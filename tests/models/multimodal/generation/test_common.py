@@ -319,7 +319,7 @@ VLM_TEST_SETTINGS = {
             "cherry_blossom": "Image-1: <image>\nWhat is the season?",
         }),
         multi_image_prompt="Image-1: <image>\nImage-2: <image>\nDescribe the two images in short.",  # noqa: E501
-        max_model_len=4096,
+        max_model_len=8192,
         use_tokenizer_eos=True,
         image_size_factors=[(1.0,)],
         auto_cls=AutoModel,
