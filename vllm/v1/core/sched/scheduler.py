@@ -1033,121 +1033,6 @@ class Scheduler(SchedulerInterface):
 
         return engine_core_outputs
 
-    def _update_requests_with_invalid_blocks(
-            self, requests: Iterable[Request],
-            invalid_block_ids: set[int]) -> tuple[set[Request], int, set[int]]:
-        affected_requests: set[Request] = set()
-        num_tokens_to_reschedule = 0
-        # If a block is invalid and shared by multiple requests in the batch,
-        # all requests must be rescheduled, but only the first will recompute
-        # it. This set tracks blocks already marked for recomputation.
-        marked_invalid_block_ids: set[int] = set()
-        for request in requests:
-            is_affected = False
-            marked_invalid_block = False
-            req_id = request.request_id
-            req_block_ids = self.kv_cache_manager.get_block_ids(req_id)[0]
-            # req_num_computed_blocks is used to break early from the loop
-            # since only computed blocks (i.e., blocks containing externally
-            # computed tokens) can be invalid.
-            req_num_computed_blocks = 0
-            if request.num_cached_tokens > 0:
-                req_num_computed_blocks = (request.num_cached_tokens +
-                                           self.block_size -
-                                           1) // self.block_size
-
-            for idx, block_id in enumerate(req_block_ids):
-                if req_num_computed_blocks and idx >= req_num_computed_blocks:
-                    break
-
-                if block_id not in invalid_block_ids:
-                    continue
-
-                is_affected = True
-
-                if block_id in marked_invalid_block_ids:
-                    # This invalid block is shared with a previous request
-                    # and was already marked for recomputation.
-                    # This means this request can still consider this block
-                    # as computed when rescheduled.
-                    continue
-
-                marked_invalid_block_ids.add(block_id)
-
-                if marked_invalid_block:
-                    # This request has already marked an invalid block for
-                    # recomputation and updated its num_computed_tokens.
-                    continue
-
-                marked_invalid_block = True
-                num_tokens_to_reschedule += request.num_computed_tokens
-                request.num_computed_tokens = idx * self.block_size
-                num_tokens_to_reschedule -= request.num_computed_tokens
-
-            if is_affected:
-                if not marked_invalid_block:
-                    # All invalid blocks of this request are shared with
-                    # previous requests and will be recomputed by them.
-                    # Revert to considering only cached tokens as computed.
-                    num_tokens_to_reschedule += (request.num_computed_tokens -
-                                                 request.num_cached_tokens)
-                    request.num_computed_tokens = request.num_cached_tokens
-
-                affected_requests.add(request)
-
-        return (affected_requests, num_tokens_to_reschedule,
-                marked_invalid_block_ids)
-
-    def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
-        total_requests_to_reschedule = 0
-        total_tokens_to_reschedule = 0
-
-        # --- Handle async KV loads (WAITING_FOR_REMOTE_KVS) ---
-        async_load_reqs = (
-            req for req in self.waiting
-            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS)
-        (affected_requests, num_tokens_to_reschedule,
-         marked_invalid_block_ids) = (
-             self._update_requests_with_invalid_blocks(async_load_reqs,
-                                                       invalid_block_ids))
-
-        total_requests_to_reschedule += len(affected_requests)
-        total_tokens_to_reschedule += num_tokens_to_reschedule
-
-        for request in affected_requests:
-            if request.num_computed_tokens:
-                # Cache any valid computed tokens.
-                self.kv_cache_manager.cache_blocks(request,
-                                                   request.num_computed_tokens)
-            else:
-                # No valid computed tokens, release allocated blocks.
-                # There may be a local cache hit on retry.
-                self.kv_cache_manager.free(request)
-
-            request.status = RequestStatus.WAITING
-
-        # Remove async loaded invalid blocks already handled,
-        # as they cannot be shared with running requests.
-        invalid_block_ids.difference_update(marked_invalid_block_ids)
-
-        # --- Handle sync KV loads (running requests) ---
-        affected_requests, num_tokens_to_reschedule, _ = (
-            self._update_requests_with_invalid_blocks(self.running,
-                                                      invalid_block_ids))
-
-        total_requests_to_reschedule += len(affected_requests)
-        total_tokens_to_reschedule += num_tokens_to_reschedule
-
-        if total_requests_to_reschedule:
-            logger.info(
-                "Recovered from KV load failure: "
-                "%d request(s) rescheduled (%d tokens affected).",
-                total_requests_to_reschedule, total_tokens_to_reschedule)
-
-        # Return the IDs of affected running requests to skip in
-        # update_from_output.
-        return {r.request_id for r in affected_requests}
-
     def _update_request_with_output(
         self,
         request: Request,
@@ -1421,3 +1306,117 @@ class Scheduler(SchedulerInterface):
                     "but the request is already freed.", req_id)
             else:
                 self._free_blocks(self.requests[req_id])
+
+    def _update_requests_with_invalid_blocks(
+            self, requests: Iterable[Request],
+            invalid_block_ids: set[int]) -> tuple[set[Request], int, set[int]]:
+        affected_requests: set[Request] = set()
+        num_tokens_to_reschedule = 0
+        # If a block is invalid and shared by multiple requests in the batch,
+        # all requests must be rescheduled, but only the first will recompute
+        # it. This set tracks blocks already marked for recomputation.
+        marked_invalid_block_ids: set[int] = set()
+        for request in requests:
+            is_affected = False
+            marked_invalid_block = False
+            req_id = request.request_id
+            req_block_ids = self.kv_cache_manager.get_block_ids(req_id)[0]
+            # We iterate only over blocks that may contain externally computed
+            # tokens
+            if request.num_cached_tokens > 0:
+                req_num_computed_blocks = (request.num_cached_tokens +
+                                           self.block_size -
+                                           1) // self.block_size
+            else:
+                req_num_computed_blocks = len(req_block_ids)
+
+            for idx, block_id in zip(range(req_num_computed_blocks),
+                                     req_block_ids):
+
+                if block_id not in invalid_block_ids:
+                    continue
+
+                is_affected = True
+
+                if block_id in marked_invalid_block_ids:
+                    # This invalid block is shared with a previous request
+                    # and was already marked for recomputation.
+                    # This means this request can still consider this block
+                    # as computed when rescheduled.
+                    continue
+
+                marked_invalid_block_ids.add(block_id)
+
+                if marked_invalid_block:
+                    # This request has already marked an invalid block for
+                    # recomputation and updated its num_computed_tokens.
+                    continue
+
+                marked_invalid_block = True
+                num_tokens_to_reschedule += request.num_computed_tokens
+                request.num_computed_tokens = idx * self.block_size
+                num_tokens_to_reschedule -= request.num_computed_tokens
+
+            if is_affected:
+                if not marked_invalid_block:
+                    # All invalid blocks of this request are shared with
+                    # previous requests and will be recomputed by them.
+                    # Revert to considering only cached tokens as computed.
+                    num_tokens_to_reschedule += (request.num_computed_tokens -
+                                                 request.num_cached_tokens)
+                    request.num_computed_tokens = request.num_cached_tokens
+
+                affected_requests.add(request)
+
+        return (affected_requests, num_tokens_to_reschedule,
+                marked_invalid_block_ids)
+
+    def _handle_invalid_blocks(self, invalid_block_ids: set[int]) -> set[str]:
+        total_requests_to_reschedule = 0
+        total_tokens_to_reschedule = 0
+
+        # --- Handle async KV loads (WAITING_FOR_REMOTE_KVS) ---
+        async_load_reqs = (
+            req for req in self.waiting
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS)
+        (affected_requests, num_tokens_to_reschedule,
+         marked_invalid_block_ids) = (
+             self._update_requests_with_invalid_blocks(async_load_reqs,
+                                                       invalid_block_ids))
+
+        total_requests_to_reschedule += len(affected_requests)
+        total_tokens_to_reschedule += num_tokens_to_reschedule
+
+        for request in affected_requests:
+            if request.num_computed_tokens:
+                # Cache any valid computed tokens.
+                self.kv_cache_manager.cache_blocks(request,
+                                                   request.num_computed_tokens)
+            else:
+                # No valid computed tokens, release allocated blocks.
+                # There may be a local cache hit on retry.
+                self.kv_cache_manager.free(request)
+
+            request.status = RequestStatus.WAITING
+
+        # Remove async loaded invalid blocks already handled,
+        # as they cannot be shared with running requests.
+        invalid_block_ids.difference_update(marked_invalid_block_ids)
+
+        # --- Handle sync KV loads (running requests) ---
+        affected_requests, num_tokens_to_reschedule, _ = (
+            self._update_requests_with_invalid_blocks(self.running,
+                                                      invalid_block_ids))
+
+        total_requests_to_reschedule += len(affected_requests)
+        total_tokens_to_reschedule += num_tokens_to_reschedule
+
+        if total_requests_to_reschedule:
+            logger.info(
+                "Recovered from KV load failure: "
+                "%d request(s) rescheduled (%d tokens affected).",
+                total_requests_to_reschedule, total_tokens_to_reschedule)
+
+        # Return the IDs of affected running requests to skip in
+        # update_from_output.
+        return {r.request_id for r in affected_requests}
