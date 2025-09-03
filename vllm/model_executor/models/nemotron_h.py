@@ -435,11 +435,7 @@ class NemotronHModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if "embeddings" in name:
-                name = name.replace("embeddings", "embed_tokens")
-
-            if "A_log" in name:
-                name = name.replace("A_log", "A")
+            if "A" in name:
                 loaded_weight = loaded_weight.to(torch.float32)
 
             if "D" in name:
@@ -471,9 +467,13 @@ class NemotronHModel(nn.Module):
 
 class NemotronHForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP,
                            IsHybrid, SupportsQuant):
-    hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={
-        "backbone": "model",
-    })
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"backbone": "model"},
+        orig_to_new_substr={
+            "A_log": "A",
+            "embeddings": "embed_tokens"
+        },
+    )
 
     packed_modules_mapping = {
         "qkv_proj": [
