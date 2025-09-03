@@ -1159,17 +1159,13 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             for item in mm_data.pop("videos", []):
                 video_array, metadata = item
 
-                # FIXME(Isotr0py): Activate the below logic after we can disable
-                # resampling from video loader backend.
-                # assert metadata["total_num_frames"] == len(video_array), (
-                #     f"Total frames {metadata['total_num_frames']} does not "
-                #     f"match the length of video array {len(video_array)}.")
+                if metadata["backend"] == "opencv_dynamic":
+                    assert metadata["total_num_frames"] == len(video_array), (
+                        f"Total frames {metadata['total_num_frames']} does not "
+                        f"match the length of video array {len(video_array)}.")
+                    mm_kwargs["do_sample_frames"] = False
 
-                # NOTE: Temporary workaround for resampled videos.
-                # this can cause a divergence with HF implementation if
-                # the input video is resampled in advance.
-
-                if metadata["total_num_frames"] != len(video_array):
+                elif metadata["total_num_frames"] != len(video_array):
                     logger.warning(
                         "Total frames in metadata "
                         "(%s) does not match the length of "

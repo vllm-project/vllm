@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import base64
+import math
 from abc import abstractmethod
 from functools import partial
 from io import BytesIO
@@ -104,10 +105,12 @@ class OpenCVVideoBackend(VideoLoader):
         return api_pref
 
     @classmethod
-    def load_bytes(cls,
-                   data: bytes,
-                   num_frames: int = -1,
-                   **kwargs) -> tuple[npt.NDArray, dict[str, Any]]:
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
         import cv2
 
         backend = cls().get_cv2_video_api()
@@ -119,6 +122,15 @@ class OpenCVVideoBackend(VideoLoader):
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         duration = total_frames_num / original_fps if original_fps > 0 else 0
 
+        # Use transformers transformers.video_utils.VideoMetadata format
+        metadata = {
+            "total_num_frames": total_frames_num,
+            "fps": original_fps,
+            "duration": duration,
+            "video_backend": "opencv"
+        }
+
+        # resample video to target num_frames
         full_read = num_frames == -1 or total_frames_num < num_frames
         if full_read:
             num_frames = total_frames_num
@@ -148,13 +160,86 @@ class OpenCVVideoBackend(VideoLoader):
         assert i == num_frames, (f"Expected reading {num_frames} frames, "
                                  f"but only loaded {i} frames from video.")
 
+        return frames, metadata
+
+
+@VIDEO_LOADER_REGISTRY.register("opencv_dynamic")
+class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        requested_fps: int = 2,
+        max_duration: int = 300,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        import cv2
+
+        backend = cls().get_cv2_video_api()
+        cap = cv2.VideoCapture(BytesIO(data), backend, [])
+        if not cap.isOpened():
+            raise ValueError("Could not open video stream")
+
+        total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        original_fps = cap.get(cv2.CAP_PROP_FPS)
+        duration = total_frames_num / original_fps if original_fps > 0 else 0
+
         # Use transformers transformers.video_utils.VideoMetadata format
         metadata = {
             "total_num_frames": total_frames_num,
             "fps": original_fps,
             "duration": duration,
-            "video_backend": "opencv"
+            "video_backend": "opencv_dynamic"
         }
+
+        # resample video to target num_frames
+        max_frame_idx = total_frames_num - 1
+        duration = duration or round(max_frame_idx / original_fps) + 1
+
+        if duration <= max_duration:
+            n = int(math.floor(duration * requested_fps))
+            frame_indices = [
+                min(max_frame_idx,
+                    int(math.ceil(i * original_fps / requested_fps)))
+                for i in range(n)
+            ]
+        else:
+            num_samples = int(max_duration * requested_fps)
+            if num_samples >= total_frames_num:
+                frame_indices = list(range(total_frames_num))
+            else:
+                target_seconds = np.linspace(0,
+                                             duration,
+                                             num_samples,
+                                             endpoint=True)
+                frame_indices = [
+                    min(max_frame_idx, int(math.ceil(t * original_fps)))
+                    for t in target_seconds
+                ]
+
+        uniq_frame_idx = sorted(list(set(frame_indices)))
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frames = np.empty((len(uniq_frame_idx), height, width, 3),
+                          dtype=np.uint8)
+
+        i = 0
+        for idx in range(total_frames_num):
+            ok = cap.grab()
+            if not ok:
+                break
+            if idx in uniq_frame_idx:
+                ret, frame = cap.retrieve()
+                if ret:
+                    frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    i += 1
+
+        assert i == len(uniq_frame_idx), (
+            f"Expected reading {len(uniq_frame_idx)} frames, "
+            f"but only loaded {i} frames from video.")
 
         return frames, metadata
 
