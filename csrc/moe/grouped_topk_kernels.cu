@@ -568,7 +568,7 @@ __global__ void group_idx_and_topk_idx_kernel(
               (i < num_experts_per_group) && isfinite(cuda_cast<float, T>(
                                                  scores_with_bias[offset + i]))
                   ? scores_with_bias[offset + i]
-                  : kNegInfinity;
+                  : cuda_cast<T, float>(kNegInfinity);
           queue.add(candidates, offset + i);
         }
         if (group_scores[i_group] == topk_group_value) {
