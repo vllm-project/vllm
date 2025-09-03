@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable
-from typing import Optional, Union, Type
-
-from vllm.attention.backends.abstract import AttentionBackend
+from typing import Optional, Union, type
 
 import torch
 import torch.nn as nn
@@ -12,33 +10,37 @@ from transformers.activations import ACT2FN
 
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionMetadata, AttentionType
-from vllm.platforms import _Backend
-from vllm.config import CacheConfig, VllmConfig, ModelConfig, get_current_vllm_config
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.attention.backends.abstract import AttentionBackend
+from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
+                         get_current_vllm_config)
+from vllm.distributed import (divide, get_pp_group,
+                              get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba2_metadata import (
     Mamba2Metadata, prepare_mamba2_metadata)
-from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
+from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateDtypeCalculator, MambaStateShapeCalculator)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid)
+from vllm.model_executor.models.interfaces import HasInnerState, IsHybrid
 from vllm.model_executor.models.mamba_cache import (MambaCacheManager,
                                                     MambaCacheParams)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.model_executor.layers.mamba.mamba_utils import MambaStateDtypeCalculator, MambaStateShapeCalculator
-from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.custom_op import CustomOp
-from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op
-from vllm.distributed import divide
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
-from .utils import make_layers, maybe_prefix, make_empty_intermediate_tensors_factory
+from .utils import (make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -89,13 +91,15 @@ class SambaYMLP(nn.Module):
 
 class SambaYAttention(nn.Module):
 
-    def __init__(self,
-                 config,
-                 layer_idx: Optional[int] = None,
-                 yoco_cross: bool = False,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config=None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        config,
+        layer_idx: Optional[int] = None,
+        yoco_cross: bool = False,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config=None,
+        prefix: str = "",
+    ):
         super().__init__()
         if layer_idx is None:
             logger.warning_once(
@@ -134,8 +138,8 @@ class SambaYAttention(nn.Module):
             )
         else:
             self.Wqkv = ColumnParallelLinear(
-                self.hidden_size, 
-                op_size, 
+                self.hidden_size,
+                op_size,
                 bias=True,
                 quant_config=quant_config,
                 prefix=f"{prefix}.Wqkv",
@@ -145,8 +149,8 @@ class SambaYAttention(nn.Module):
         is_sliding = config.layer_types[layer_idx] == "sliding_attention"
         sliding_window = config.sliding_window if is_sliding else None
 
-        assert self.num_heads % 2 == 0, 'num_heads should be even'
-        assert self.num_key_value_heads % 2 == 0, 'num_heads should be even'
+        assert self.num_heads % 2 == 0, "num_heads should be even"
+        assert self.num_key_value_heads % 2 == 0, "num_heads should be even"
 
         self.lambda_init = self.lambda_init_fn(layer_idx)
         self.lambda_q1 = nn.Parameter(
@@ -166,20 +170,20 @@ class SambaYAttention(nn.Module):
                                 elementwise_affine=True)
 
         params = {
-            'differential_flash_attention_config': {
-                'lambda_init': self.lambda_init,
-                'lambda_q1': self.lambda_q1,
-                'lambda_k1': self.lambda_k1,
-                'lambda_q2': self.lambda_q2,
-                'lambda_k2': self.lambda_k2,
+            "differential_flash_attention_config": {
+                "lambda_init": self.lambda_init,
+                "lambda_q1": self.lambda_q1,
+                "lambda_k1": self.lambda_k1,
+                "lambda_q2": self.lambda_q2,
+                "lambda_k2": self.lambda_k2,
                 "subln": self.subln,
             }
         }
 
         if yoco_cross:
             kv_shared_layer_index = config.num_hidden_layers // 2 + 1
-            kv_sharing_target_layer_name = \
-                f"model.layers.{kv_shared_layer_index}.self_attn.attn"
+            kv_sharing_target_layer_name = (
+                f"model.layers.{kv_shared_layer_index}.self_attn.attn")
         else:
             kv_sharing_target_layer_name = None
 
@@ -193,9 +197,10 @@ class SambaYAttention(nn.Module):
             prefix=f"{prefix}.attn",
             attn_type=AttentionType.DECODER,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
-            **params)
-        assert self.attn.backend == _Backend.DIFFERENTIAL_FLASH_ATTN,\
-              "DIFFERENTIAL_FLASH_ATTN required"
+            **params,
+        )
+        assert self.attn.backend == _Backend.DIFFERENTIAL_FLASH_ATTN, (
+            "DIFFERENTIAL_FLASH_ATTN required")
 
     def lambda_init_fn(self, depth):
         return 0.8 - 0.6 * math.exp(-0.3 * depth)
@@ -206,18 +211,28 @@ class SambaYAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ):
-
         if not self.yoco_cross:  # need to generate kv-cache
             qkv, _ = self.Wqkv(hidden_states)
-            q, k, v = qkv.split([
-                self.hidden_size, self.num_key_value_heads * self.head_dim,
-                self.num_key_value_heads * self.head_dim
-            ],
-                                dim=-1)
-            attn_output = self.attn(q, k, v, kv_cache=kv_cache, attn_metadata=attn_metadata)
+            q, k, v = qkv.split(
+                [
+                    self.hidden_size,
+                    self.num_key_value_heads * self.head_dim,
+                    self.num_key_value_heads * self.head_dim,
+                ],
+                dim=-1,
+            )
+            attn_output = self.attn(q,
+                                    k,
+                                    v,
+                                    kv_cache=kv_cache,
+                                    attn_metadata=attn_metadata)
         else:  # reuse the kv cache, full attention
             q, _ = self.Wqkv(hidden_states)
-            attn_output = self.attn(q, None, None, kv_cache=kv_cache, attn_metadata=attn_metadata)
+            attn_output = self.attn(q,
+                                    None,
+                                    None,
+                                    kv_cache=kv_cache,
+                                    attn_metadata=attn_metadata)
         attn_output = attn_output.view(-1, self.num_heads * self.head_dim)
         output, _ = self.out_proj(attn_output)
         return output
@@ -226,8 +241,9 @@ class SambaYAttention(nn.Module):
 @CustomOp.register("phi4_mamba")
 class Phi4Mamba(MambaBase, CustomOp):
     """
-    Phi4-specific Mamba implementation following MambaMixer2 pattern for V1 compatibility.
-    
+    Phi4-specific Mamba implementation following MambaMixer2 
+    pattern for V1 compatibility.
+
     This implementation:
     1. Follows MambaMixer2 structure exactly for V1 compatibility
     2. Adds YoCo-specific logic where needed
@@ -261,19 +277,19 @@ class Phi4Mamba(MambaBase, CustomOp):
         quant_config=None,
     ):
         super().__init__()
-        
+
         # YoCo-specific attributes
         self.yoco_cross = yoco_cross
         self.yoco_kv = yoco_kv
         self.swiGluActivation = SwiGLUActivation()
-        
+
         # Follow MambaMixer2 pattern for TP and basic setup
         self.tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        
+        get_tensor_model_parallel_rank()
+
         # Calculate dimensions following MambaMixer2 pattern
         intermediate_size = int(expand * d_model)
-        
+
         # For Phi4, calculate num_heads and head_dim
         if intermediate_size % 64 == 0:
             head_dim = 64
@@ -284,10 +300,11 @@ class Phi4Mamba(MambaBase, CustomOp):
         else:
             head_dim = 64
             num_heads = max(1, intermediate_size // head_dim)
-        
+
         # Ensure TP compatibility
-        assert (num_heads % self.tp_size == 0), "Tensor parallel world size must divide num heads."
-        
+        assert num_heads % self.tp_size == 0, (
+            "Tensor parallel world size must divide num heads.")
+
         # Store key parameters
         self.ssm_state_size = d_state
         self.conv_kernel_size = d_conv
@@ -297,28 +314,28 @@ class Phi4Mamba(MambaBase, CustomOp):
         self.num_heads = num_heads
         self.n_groups = 1  # Phi4 uses single group
         self.use_rms_norm = True
-        
+
         if self.yoco_cross:
             # YoCo cross-attention mode: simple projections only
             self.in_proj = MergedColumnParallelLinear(
-                d_model, 
-                [intermediate_size], 
-                bias=bias, 
+                d_model,
+                [intermediate_size],
+                bias=bias,
                 quant_config=quant_config,
-                prefix=f"{prefix}.in_proj"
+                prefix=f"{prefix}.in_proj",
             )
             self.out_proj = RowParallelLinear(
-                intermediate_size, 
-                d_model, 
-                bias=bias, 
+                intermediate_size,
+                d_model,
+                bias=bias,
                 input_is_parallel=True,
                 quant_config=quant_config,
-                prefix=f"{prefix}.out_proj"
+                prefix=f"{prefix}.out_proj",
             )
         else:
             # Standard Mamba mode: follow MambaMixer2 structure exactly
             self.conv_dim = intermediate_size + 2 * self.n_groups * d_state
-            
+
             # Conv1D layer
             self.conv1d = ColumnParallelLinear(
                 input_size=d_conv,
@@ -328,7 +345,7 @@ class Phi4Mamba(MambaBase, CustomOp):
             )
             # Unsqueeze to fit conv1d weights shape
             self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
-            
+
             # Input projection
             self.in_proj = ColumnParallelLinear(
                 input_size=d_model,
@@ -336,15 +353,16 @@ class Phi4Mamba(MambaBase, CustomOp):
                 bias=bias,
                 quant_config=quant_config,
             )
-            
+
             # State space parameters (following MambaMixer2)
-            self.A = nn.Parameter(torch.empty(
-                divide(num_heads, self.tp_size),
-                dtype=torch.float32,
-            ))
+            self.A = nn.Parameter(
+                torch.empty(
+                    divide(num_heads, self.tp_size),
+                    dtype=torch.float32,
+                ))
             self.D = nn.Parameter(torch.ones(num_heads // self.tp_size))
             self.dt_bias = nn.Parameter(torch.ones(num_heads // self.tp_size))
-            
+
             # Output projection
             self.out_proj = RowParallelLinear(
                 intermediate_size,
@@ -353,47 +371,51 @@ class Phi4Mamba(MambaBase, CustomOp):
                 input_is_parallel=True,
                 quant_config=quant_config,
             )
-            
+
             # RMS Norm (using the same pattern as MambaMixer2)
-            from vllm.model_executor.layers.mamba.mamba_mixer2 import Mixer2RMSNormGated
-            self.norm = Mixer2RMSNormGated(
-                intermediate_size,
-                self.n_groups,
-                self.use_rms_norm,
-                eps=1e-5
-            )
-        
+            from vllm.model_executor.layers.mamba.mamba_mixer2 import (
+                Mixer2RMSNormGated)
+
+            self.norm = Mixer2RMSNormGated(intermediate_size,
+                                           self.n_groups,
+                                           self.use_rms_norm,
+                                           eps=1e-5)
+
         # V1 compatibility setup (following MambaMixer2)
         if envs.VLLM_USE_V1:
             compilation_config = get_current_vllm_config().compilation_config
             if prefix in compilation_config.static_forward_context:
                 raise ValueError(f"Duplicate layer name: {prefix}")
             compilation_config.static_forward_context[prefix] = self
-            
+
             # KV cache setup (following MambaMixer2 pattern)
             self.kv_cache = [(torch.tensor([]), torch.tensor([]))]
-        
+
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
 
-    def forward_native(self,
-                      hidden_states: torch.Tensor,
-                      output: torch.Tensor,
-                      mamba_cache_params: MambaCacheParams,
-                      mamba2_metadata: Mamba2Metadata,
-                      yoco_key_values=None):
+    def forward_native(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        mamba_cache_params: MambaCacheParams,
+        mamba2_metadata: Mamba2Metadata,
+        yoco_key_values=None,
+    ):
         # Native implementation for V0 or fallback
         pass
 
-    def forward(self,
-                hidden_states: torch.Tensor,
-                output: torch.Tensor,
-                mamba_cache_params: MambaCacheParams,
-                mamba2_metadata: Mamba2Metadata,
-                yoco_key_values=None):
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        mamba_cache_params: MambaCacheParams,
+        mamba2_metadata: Mamba2Metadata,
+        yoco_key_values=None,
+    ):
         """Forward pass with YoCo-specific handling"""
-        
+
         if self.yoco_cross:
             # YoCo cross-attention mode: custom implementation
             out, _ = self.in_proj(hidden_states)
@@ -404,8 +426,14 @@ class Phi4Mamba(MambaBase, CustomOp):
         else:
             # Standard Mamba mode: use V1 if available, otherwise V0
             if not envs.VLLM_USE_V1:
-                CustomOp.forward(self, hidden_states, output, mamba_cache_params,
-                               mamba2_metadata, yoco_key_values)
+                CustomOp.forward(
+                    self,
+                    hidden_states,
+                    output,
+                    mamba_cache_params,
+                    mamba2_metadata,
+                    yoco_key_values,
+                )
             else:
                 torch.ops.vllm.phi4_mamba(
                     hidden_states,
@@ -413,68 +441,77 @@ class Phi4Mamba(MambaBase, CustomOp):
                     self.prefix,
                     yoco_key_values,
                 )
-            
+
             if self.yoco_kv:
                 # YoCo key-value mode: return output as yoco_key_values
                 return output.clone()
-            
+
             return None
 
-    def forward_cuda(self,
-                    hidden_states: torch.Tensor,
-                    output: torch.Tensor,
-                    mamba_cache_params: MambaCacheParams,
-                    mamba2_metadata: Mamba2Metadata,
-                    yoco_key_values=None):
+    def forward_cuda(
+        self,
+        hidden_states: torch.Tensor,
+        output: torch.Tensor,
+        mamba_cache_params: MambaCacheParams,
+        mamba2_metadata: Mamba2Metadata,
+        yoco_key_values=None,
+    ):
         """CUDA implementation following MambaMixer2 pattern"""
-        
+
         if self.yoco_cross:
             # YoCo cross mode handled in forward()
-            return self.forward(hidden_states, output, mamba_cache_params, 
-                              mamba2_metadata, yoco_key_values)
-        
+            return self.forward(
+                hidden_states,
+                output,
+                mamba_cache_params,
+                mamba2_metadata,
+                yoco_key_values,
+            )
+
         # Follow MambaMixer2 forward_cuda pattern exactly
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
-        
+
         if envs.VLLM_USE_V1:
             if attn_metadata is not None:
                 assert isinstance(attn_metadata, dict)
                 attn_metadata = attn_metadata[self.prefix]
                 mamba2_metadata = attn_metadata
-            
+
             assert isinstance(attn_metadata, Mamba2AttentionMetadata)
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
             # Follow MambaMixer2 pattern: read from KV cache
-            conv_state = self_kv_cache[0].transpose(-1, -2)
-            ssm_state = self_kv_cache[1]
-            state_indices_tensor = attn_metadata.state_indices_tensor
+            self_kv_cache[0].transpose(-1, -2)
+            self_kv_cache[1]
             # ... rest of V1 metadata extraction
         else:
             # V0 path
-            conv_state = mamba_cache_params.conv_state
-            ssm_state = mamba_cache_params.ssm_state
-            state_indices_tensor = mamba_cache_params.state_indices_tensor
-        
-        # The rest follows MambaMixer2 implementation pattern
-        # (This would be the full Mamba computation logic)
-        # For now, we'll implement a simplified version
-        
+            pass
+
+        # Calculate num_actual_tokens following MambaMixer2 pattern
+        if envs.VLLM_USE_V1:
+            num_actual_tokens = (attn_metadata.num_decode_tokens +
+                                 attn_metadata.num_prefill_tokens)
+        else:
+            # For V0, use the full hidden_states size
+            num_actual_tokens = hidden_states.shape[0]
+
         # 1. Input projection
         projected_states, _ = self.in_proj(hidden_states)
         gate, hidden_states_B_C, dt = torch.split(
             projected_states,
-            [self.intermediate_size // self.tp_size,
-             self.conv_dim // self.tp_size,
-             self.num_heads // self.tp_size],
+            [
+                self.intermediate_size // self.tp_size,
+                self.conv_dim // self.tp_size,
+                self.num_heads // self.tp_size,
+            ],
             dim=-1,
         )
-        
+
         # 2. Apply normalization and output projection
         # (Simplified for now - full Mamba logic would go here)
         hidden_states = self.norm(hidden_states_B_C, gate)
-        output_result, _ = self.out_proj(hidden_states)
-        output[:output_result.shape[0]] = output_result
+        output[:num_actual_tokens], _ = self.out_proj(hidden_states)
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
         if self.yoco_cross:
@@ -510,12 +547,14 @@ class Phi4Mamba(MambaBase, CustomOp):
     def mamba_type(self) -> str:
         return "phi4mamba"
 
-    def get_attn_backend(self) -> Type[AttentionBackend]:
+    def get_attn_backend(self) -> type[AttentionBackend]:
         if self.yoco_cross:
             # YoCo cross mode doesn't use attention backend
             return None
         else:
-            from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionBackend
+            from vllm.v1.attention.backends.mamba2_attn import (
+                Mamba2AttentionBackend)
+
             return Mamba2AttentionBackend
 
 
@@ -534,7 +573,9 @@ class SambaYDecoderLayer(nn.Module):
         self.config = config
         self.layer_idx = layer_idx
 
-        self.mlp = SambaYMLP(config, quant_config=quant_config, prefix=f"{prefix}.mlp")
+        self.mlp = SambaYMLP(config,
+                             quant_config=quant_config,
+                             prefix=f"{prefix}.mlp")
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_eps)
 
@@ -542,24 +583,27 @@ class SambaYDecoderLayer(nn.Module):
         self.yoco_cross = False
         if layer_idx >= config.num_hidden_layers // 2:
             self.yoco_mb = True
-            self.yoco_cross = (layer_idx
-                               >= (config.num_hidden_layers // 2 + 2))
-        self.use_mamba = config.mb_per_layer > 0 and \
-            layer_idx % config.mb_per_layer == 0
+            self.yoco_cross = layer_idx >= (config.num_hidden_layers // 2 + 2)
+        self.use_mamba = (config.mb_per_layer > 0
+                          and layer_idx % config.mb_per_layer == 0)
         if self.use_mamba:
-            self.attn = Phi4Mamba(config.hidden_size,
-                                  layer_idx=layer_idx,
-                                  yoco_cross=self.yoco_cross,
-                                  yoco_kv=self.yoco_mb,
-                                  quant_config=quant_config,
-                                  prefix=f"{prefix}.attn")
+            self.attn = Phi4Mamba(
+                config.hidden_size,
+                layer_idx=layer_idx,
+                yoco_cross=self.yoco_cross,
+                yoco_kv=self.yoco_mb,
+                quant_config=quant_config,
+                prefix=f"{prefix}.attn",
+            )
         else:
-            self.attn = SambaYAttention(config,
-                                        layer_idx=layer_idx,
-                                        yoco_cross=self.yoco_cross,
-                                        cache_config=cache_config,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.self_attn")
+            self.attn = SambaYAttention(
+                config,
+                layer_idx=layer_idx,
+                yoco_cross=self.yoco_cross,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+            )
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
                                                      eps=config.layer_norm_eps)
 
@@ -578,18 +622,19 @@ class SambaYDecoderLayer(nn.Module):
 
         if self.use_mamba:
             output = torch.empty_like(hidden_states)
-            
+
             # Get layer-specific cache parameters
             layer_mamba_cache_params = None
             if mamba_cache_params:
-                layer_mamba_cache_params = mamba_cache_params.at_layer_idx(self.layer_idx)
-            
+                layer_mamba_cache_params = mamba_cache_params.at_layer_idx(
+                    self.layer_idx)
+
             ssm_output = self.attn(
                 hidden_states,
                 output,
                 mamba_cache_params=layer_mamba_cache_params,
                 mamba2_metadata=mamba2_metadata,
-                yoco_key_values=ssm_output
+                yoco_key_values=ssm_output,
             )
             attn_outputs = output
             residual = residual.to(torch.float32)
@@ -597,17 +642,21 @@ class SambaYDecoderLayer(nn.Module):
             # For attention layers, handle V1 vs V0 metadata access
             forward_context = get_forward_context()
             attn_metadata = forward_context.attn_metadata
-            
+
             if envs.VLLM_USE_V1 and isinstance(attn_metadata, dict):
                 # V1: attn_metadata is a dict, get by prefix
                 layer_attn_metadata = attn_metadata.get(self.attn.prefix)
             else:
                 # V0: attn_metadata is the object directly
                 layer_attn_metadata = attn_metadata
-            
-            attn_outputs = self.attn(hidden_states, kv_cache=kv_cache, attn_metadata=layer_attn_metadata)
+
+            attn_outputs = self.attn(
+                hidden_states,
+                kv_cache=kv_cache,
+                attn_metadata=layer_attn_metadata,
+            )
             ssm_output = ssm_output  # Pass through unchanged
-        
+
         hidden_states = residual + attn_outputs
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(
@@ -620,12 +669,14 @@ class SambaYDecoderLayer(nn.Module):
 
 class SambaYModel(nn.Module):
 
-    def __init__(self,
-                 config,
-                 cache_config=None,
-                 quant_config=None,
-                 lora_config=None,
-                 prefix: str = "") -> None:
+    def __init__(
+        self,
+        config,
+        cache_config=None,
+        quant_config=None,
+        lora_config=None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.config = config
         self.vocab_size = config.vocab_size
@@ -642,12 +693,15 @@ class SambaYModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: SambaYDecoderLayer(config,
-                                              int(prefix.split('.')[-1]),
-                                              cache_config,
-                                              quant_config=quant_config,
-                                              prefix=prefix),
-            prefix=f"{prefix}.layers")
+            lambda prefix: SambaYDecoderLayer(
+                config,
+                int(prefix.split(".")[-1]),
+                cache_config,
+                quant_config=quant_config,
+                prefix=prefix,
+            ),
+            prefix=f"{prefix}.layers",
+        )
         self.final_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_eps)
 
@@ -663,7 +717,6 @@ class SambaYModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -677,7 +730,7 @@ class SambaYModel(nn.Module):
         attn_metadata = get_forward_context().attn_metadata
         if not envs.VLLM_USE_V1:
             mamba2_metadata = prepare_mamba2_metadata(
-                chunk_size=getattr(self.config, 'mamba_chunk_size', 256),
+                chunk_size=getattr(self.config, "mamba_chunk_size", 256),
                 attn_metadata=attn_metadata,
             )
         else:
@@ -703,7 +756,7 @@ class SambaYModel(nn.Module):
                     None,
                     mamba_cache_params,
                     mamba2_metadata,
-                    ssm_output=ssm_output
+                    ssm_output=ssm_output,
                 )
             else:
                 hidden_states, ssm_output = layer(
@@ -712,7 +765,7 @@ class SambaYModel(nn.Module):
                     kv_caches[attn_layer_idx],
                     mamba_cache_params,
                     mamba2_metadata,
-                    ssm_output=ssm_output
+                    ssm_output=ssm_output,
                 )
                 attn_layer_idx += 1
 
@@ -732,13 +785,15 @@ class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid):
         super().__init__()
         self.config = config
         self.model_config = vllm_config.model_config
-        
+
         # Initialize Mamba cache for V0 compatibility
         self.mamba_cache = None
-        
-        self.model = SambaYModel(config,
-                                 cache_config=cache_config,
-                                 prefix=maybe_prefix(prefix, "model"))
+
+        self.model = SambaYModel(
+            config,
+            cache_config=cache_config,
+            prefix=maybe_prefix(prefix, "model"),
+        )
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -757,9 +812,9 @@ class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size,
                                                 logits_as_input=False)
-        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
-            ["hidden_states", "residual"], config.hidden_size
-        )
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
     @classmethod
     def get_mamba_state_shape_from_config(
@@ -768,16 +823,18 @@ class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid):
         use_v1: bool = True,
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         """Calculate shapes for Mamba's convolutional and state caches."""
-        from vllm.model_executor.layers.mamba.mamba_utils import MambaStateShapeCalculator
         from vllm.distributed import get_tensor_model_parallel_world_size
-        
+        from vllm.model_executor.layers.mamba.mamba_utils import (
+            MambaStateShapeCalculator)
+
         config = vllm_config.model_config.hf_config
-        
+
         # Calculate intermediate size and state size for Mamba layers
-        intermediate_size = int(2 * config.hidden_size)  # expand=2 in Phi4Mamba
+        intermediate_size = int(2 *
+                                config.hidden_size)  # expand=2 in Phi4Mamba
         state_size = 16  # d_state=16 in Phi4Mamba
         conv_kernel = 4  # d_conv=4 in Phi4Mamba
-        
+
         return MambaStateShapeCalculator.mamba1_state_shape(
             tp_world_size=get_tensor_model_parallel_world_size(),
             intermediate_size=intermediate_size,
@@ -796,7 +853,6 @@ class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid):
             vllm_config.cache_config.mamba_cache_dtype,
             vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
-
 
     def forward(
         self,
@@ -821,7 +877,7 @@ class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid):
                     self.vllm_config,
                     num_mamba_layers,
                     *mamba_state_shape,
-                    *mamba_state_dtype
+                    *mamba_state_dtype,
                 )
 
             # Get cache parameters for current run
@@ -834,11 +890,12 @@ class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid):
             kv_caches,
             mamba_cache_params,
             intermediate_tensors,
-            inputs_embeds
+            inputs_embeds,
         )
         return hidden_states
 
-    def copy_inputs_before_cuda_graphs(self, input_buffers: dict[str, torch.Tensor],
+    def copy_inputs_before_cuda_graphs(self, input_buffers: dict[str,
+                                                                 torch.Tensor],
                                        **kwargs) -> dict[str, torch.Tensor]:
         """Copy inputs before CUDA graph capture."""
         if self.mamba_cache is not None:
@@ -846,11 +903,13 @@ class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 input_buffers, **kwargs)
         return input_buffers
 
-    def get_seqlen_agnostic_capture_inputs(self, input_buffers: dict[str, torch.Tensor]
-                                           ) -> dict[str, torch.Tensor]:
+    def get_seqlen_agnostic_capture_inputs(
+            self,
+            input_buffers: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Get sequence length agnostic capture inputs."""
         if self.mamba_cache is not None:
-            return self.mamba_cache.get_seqlen_agnostic_capture_inputs(input_buffers)
+            return self.mamba_cache.get_seqlen_agnostic_capture_inputs(
+                input_buffers)
         return input_buffers
 
     def compute_logits(
@@ -867,7 +926,8 @@ class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid):
             hidden_states,
             sampling_metadata,
             self.embedding_bias,
-            prune_hidden_states=prune_hidden_states)
+            prune_hidden_states=prune_hidden_states,
+        )
         return processed_logits
 
     def load_weights(
@@ -898,6 +958,7 @@ class Phi4FlashForCausalLM(nn.Module, HasInnerState, IsHybrid):
         assert len(missing_keys) == 0, f"Missing keys: {missing_keys}"
         return loaded_params
 
+
 def phi4_mamba(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
@@ -906,11 +967,13 @@ def phi4_mamba(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.forward_cuda(hidden_states=hidden_states,
-                      output=output,
-                      mamba_cache_params=None,
-                      mamba2_metadata=None,
-                      yoco_key_values=yoco_key_values)
+    self.forward_cuda(
+        hidden_states=hidden_states,
+        output=output,
+        mamba_cache_params=None,
+        mamba2_metadata=None,
+        yoco_key_values=yoco_key_values,
+    )
 
 
 def phi4_mamba_fake(
