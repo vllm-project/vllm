@@ -52,6 +52,10 @@ class EAGLEConfig(PretrainedConfig):
         # EagleQwen2ForCausalLM     → EagleQwen2ForCausalLM
         # LlamaForCausalLM          → EagleLlamaForCausalLM
         # LlamaForCausalLMEagle     → EagleLlamaForCausalLM
+        # LlamaForCausalLM      ->  EagleLlamaForCausalLM
+        # Qwen2ForCausalLM      ->  EagleQwen2ForCausalLM
+        # Qwen2ForCausalLMEagle ->  EagleQwen2ForCausalLM
+        # EagleQwen2ForCausalLM ->  EagleQwen2ForCausalLM
         if method == "eagle":
             assert self.model is not None, \
                 "model should not be None when method is eagle"
@@ -69,7 +73,8 @@ class EAGLEConfig(PretrainedConfig):
             kwargs["architectures"] = [
                 normalize_eagle_arch(arch) for arch in self.model.architectures
             ]
-
+        # Eagle3 model name should follow naming convention of
+        # LlamaForCausalLM      ->  Eagle3LlamaForCausalLM
         elif method == "eagle3":
             assert self.model is not None, \
                 "model should not be None when method is eagle3"
