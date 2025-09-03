@@ -602,32 +602,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.parallel_config.microbatching_token_threshold \
             and max_num_scheduled_tokens == 1
 
-        # For pure decode we can just create ubatches by cutting the request
-        # in half
-        ubatch_slices = None
-        if should_attempt_ubatching:
-            b0_reqs_end = num_reqs // 2
-            b0_tokens_end = total_num_scheduled_tokens // 2
-            assert b0_reqs_end < num_reqs and \
-                b0_tokens_end < total_num_scheduled_tokens
-            ubatch_slices = [
-                UbatchSlice(slice(0, b0_reqs_end), slice(0, b0_tokens_end)),
-                UbatchSlice(slice(b0_reqs_end, num_reqs),
-                            slice(b0_tokens_end, total_num_scheduled_tokens)),
-            ]
-
         # Don't microbatch unless every other DP worker is also microbatching
         num_pad_tokens = 0
         num_tokens_after_padding = None
         (should_ubatch, num_pad_tokens,
-         num_tokens_after_padding) = self.get_dp_padding_ubatch(ubatch_slices)
+         num_tokens_after_padding) = self.get_dp_padding_ubatch(total_num_scheduled_tokens,
+                                                                should_attempt_ubatching)
         if not should_ubatch:
             return (None, 0, None)
-        assert ubatch_slices
 
-        # Compute ubatch padding. This currently only accounts for DP padding
-        if num_pad_tokens > 0:
-            self.pad_out_ubatch_first_stage(ubatch_slices, num_pad_tokens)
+        # This doesn't actually pad the ubatch slices. It just initialize the
+        # split point to the correct value so that padding can be applied
+        # to the second ubatch in pad_out_ubatch_slice after attention
+        # metadata creation
+        assert num_pad_tokens < total_num_scheduled_tokens, f"num_pad_tokens {num_pad_tokens} original_num_tokens {total_num_scheduled_tokens}"
+        total_num_tokens_per_ubatch = (total_num_scheduled_tokens +
+                                       num_pad_tokens) // 2
+        padded_first_ubatch_slice = slice(0, total_num_tokens_per_ubatch)
+        padded_second_ubatch_slice = slice(total_num_tokens_per_ubatch,
+                                           total_num_scheduled_tokens)
+
+        # Note there's an assumption here that there's 1 token per request
+        ubatch_slices = [
+            UbatchSlice(padded_first_ubatch_slice, padded_first_ubatch_slice),
+            UbatchSlice(padded_second_ubatch_slice, padded_second_ubatch_slice)
+        ]
 
         return (ubatch_slices, num_pad_tokens, num_tokens_after_padding)
 
@@ -1528,7 +1527,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return num_dp_pad_tokens + num_pad_tokens, num_tokens_after_padding
 
     def get_dp_padding_ubatch(
-        self, ubatch_slices: Optional[UBatchSlices]
+        self, total_num_scheduled_tokens: int, should_attempt_ubatching: bool
     ) -> tuple[bool, int, Optional[torch.Tensor]]:
         dp_size = self.vllm_config.parallel_config.data_parallel_size
 
@@ -1536,7 +1535,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Early exit.
             return False, 0, None
 
-        if ubatch_slices is None:
+        if not should_attempt_ubatching:
             (should_ubatch,
              num_tokens_across_dp) = self.should_ubatch_with_num_tokens(
                  False, 0, 0)
@@ -1544,18 +1543,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert num_tokens_across_dp is None
             return should_ubatch, 0, num_tokens_across_dp
 
-        first_ubatch_slice = ubatch_slices[0]
-        second_ubatch_slice = ubatch_slices[1]
-
-        first_ubatch_num_tokens = first_ubatch_slice.token_slice.stop - \
-             first_ubatch_slice.token_slice.start
-        second_ubatch_num_tokens = second_ubatch_slice.token_slice.stop - \
-            second_ubatch_slice.token_slice.start
-        # We don't support prefills yet so the two ubatches should only differ
-        # by at most one token
-        assert abs(first_ubatch_num_tokens - second_ubatch_num_tokens) <= 1
-
-        num_tokens_unpadded = first_ubatch_num_tokens + second_ubatch_num_tokens
+        num_tokens_unpadded = total_num_scheduled_tokens
         num_tokens_padded = round_up(num_tokens_unpadded, 2)
         if (self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
                 and num_tokens_unpadded <= self.cudagraph_batch_sizes[-1]):
@@ -1600,32 +1588,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_tokens_unpadded
         return should_ubatch, num_pad_tokens, num_tokens_after_padding
 
-    # This doesn't actually pad the ubatch slices. It just shifts the
-    # split point to the correct value so that padding can be applied
-    # to the second ubatch in pad_out_ubatch_second_stage. Should be
-    # called after ubatch slicing but before attention meta data creation
-    def pad_out_ubatch_first_stage(self, ubatch_slices: UBatchSlices,
-                                   num_pad_tokens: int):
-        original_num_tokens = ubatch_slices[1].token_slice.stop
-        assert num_pad_tokens < original_num_tokens, f"num_pad_tokens {num_pad_tokens} original_num_tokens {original_num_tokens}"
-        total_num_tokens_per_ubatch = (original_num_tokens +
-                                       num_pad_tokens) // 2
-        padded_first_ubatch_slice = slice(0, total_num_tokens_per_ubatch)
-        padded_second_ubatch_slice = slice(total_num_tokens_per_ubatch,
-                                           original_num_tokens)
-
-        ubatch_slices[0] = UbatchSlice(padded_first_ubatch_slice,
-                                       padded_first_ubatch_slice)
-        ubatch_slices[1] = UbatchSlice(padded_second_ubatch_slice,
-                                       padded_second_ubatch_slice)
-
     # This is where the second ubatch is adjusted to account for the padding.
     # Should be called after attention metadata creation. This just pads
     # the second ubatch slice out to the total number of tokens
     # (num_tokens + padding)
-    def pad_out_ubatch_second_stage(self, ubatch_slices: UBatchSlices,
+    def pad_out_ubatch_slice(self, ubatch_slices: UBatchSlices,
                                     num_total_tokens: int):
-        # TODO Add asserts to make sure stage one ran
         padded_second_ubatch_slice = slice(ubatch_slices[1].token_slice.start,
                                            num_total_tokens)
         ubatch_slices[1] = UbatchSlice(padded_second_ubatch_slice,
@@ -1712,7 +1680,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_input_tokens = num_scheduled_tokens
         if ubatch_slices and num_pad_tokens > 0:
             num_input_tokens += num_pad_tokens
-            self.pad_out_ubatch_second_stage(ubatch_slices, num_input_tokens)
+            self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
         elif ubatch_slices is None:
             num_pad, num_tokens_after_padding = self.get_padding(
                 num_input_tokens)
