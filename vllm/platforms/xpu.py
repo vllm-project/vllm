@@ -56,6 +56,7 @@ class XPUPlatform(Platform):
         logger.info("Using Flash Attention backend on V1 engine.")
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
 
+    @classmethod
     def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
                                     model_config: "ModelConfig") -> bool:
         """
