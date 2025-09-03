@@ -10,7 +10,7 @@ import requests
 # multimodal data. In this specific case this example will take a geotiff
 # image as input, process it using the multimodal data processor, and
 # perform inference.
-# Reuirements :
+# Requirements :
 # - install plugin at:
 #   https://github.com/christian-pinto/prithvi_io_processor_plugin
 # - start vllm in serving mode with the below args
@@ -33,6 +33,7 @@ def main():
         },
         "priority": 0,
         "model": "christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM",
+        "softmax": False,
     }
 
     ret = requests.post(server_endpoint, json=request_payload_url)
