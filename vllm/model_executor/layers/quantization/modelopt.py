@@ -491,6 +491,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        zero_expert_num: Optional[int] = 0,
+        zero_expert_type: Optional[str] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb:
             raise NotImplementedError(
@@ -1366,6 +1368,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        zero_expert_num: Optional[int] = 0,
+        zero_expert_type: Optional[str] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         if enable_eplb:
             raise NotImplementedError(

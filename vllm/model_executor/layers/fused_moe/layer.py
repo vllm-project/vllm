@@ -1831,7 +1831,7 @@ class FusedMoE(CustomOp):
                 shared_output,
                 final_hidden_states,
             )
-        elif self.zero_expert_num > 0:
+        elif self.zero_expert_num is not None and self.zero_expert_num > 0:
             assert isinstance(final_hidden_states, tuple)
             final_hidden_states, zero_expert_result = final_hidden_states
 
@@ -1849,7 +1849,8 @@ class FusedMoE(CustomOp):
                 reduce_output(final_hidden_states[0]),
                 reduce_output(final_hidden_states[1]),
             )
-        elif zero_expert_result is not None:
+        elif self.zero_expert_num is not None and self.zero_expert_num > 0:
+            assert isinstance(final_hidden_states, torch.Tensor)
             return reduce_output(final_hidden_states) \
                 + zero_expert_result[:final_hidden_states.size(0)]
         else:

@@ -305,6 +305,8 @@ class MoeWNA16Method(FusedMoEMethodBase):
         expert_load_view: Optional[torch.Tensor] = None,
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None,
+        zero_expert_num: Optional[int] = 0,
+        zero_expert_type: Optional[str] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         assert self.fused_experts is None
         if enable_eplb:
