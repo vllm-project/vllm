@@ -108,9 +108,9 @@ class TokenizerGroup:
             return self.lora_tokenizers[lora_request.lora_int_id]
 
 
-def init_tokenizer_from_configs(model_config: ModelConfig,
-                                scheduler_config: SchedulerConfig,
-                                lora_config: Optional[LoRAConfig]):
+def init_tokenizer_from_configs(
+        model_config: ModelConfig, scheduler_config: SchedulerConfig,
+        lora_config: Optional[LoRAConfig]) -> TokenizerGroup:
     runner_type = model_config.runner_type
     if runner_type == "generate" or runner_type == "draft":
         truncation_side = "left"
