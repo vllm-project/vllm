@@ -431,7 +431,11 @@ class Eagle2_5_VLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
             num_hidden_layers = vision_feature_layer + 1
 
         self.vision_model = SiglipVisionModel(
-            config.vision_config, num_hidden_layers_override=num_hidden_layers)
+            config.vision_config,
+            num_hidden_layers_override=num_hidden_layers,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "vision_model"),
+        )
 
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
