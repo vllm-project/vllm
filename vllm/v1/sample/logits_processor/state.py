@@ -50,6 +50,10 @@ class BatchUpdateBuilder:
         self.added = added or []
         self._is_removed_sorted = False
 
+        # Used to track changes in the pooling case
+        # where we don't populate the added list.
+        self.batch_changed = False
+
     def _ensure_removed_sorted(self) -> None:
         """Sort removed request indices in
         descending order.
@@ -80,6 +84,7 @@ class BatchUpdateBuilder:
             raise RuntimeError("Cannot register new removed request after"
                                " self.removed has been read.")
         self._removed.append(index)
+        self.batch_changed = True
 
     def has_removed(self) -> bool:
         return bool(self._removed)
@@ -98,9 +103,15 @@ class BatchUpdateBuilder:
             return self._removed.pop()
         return None
 
-    def _is_update(self) -> bool:
-        """True if there is a batch state change"""
-        return any((self._removed, self.moved, self.added))
+    def reset(self) -> bool:
+        """Returns True if there were any changes to the batch."""
+        self._is_removed_sorted = False
+        self._removed.clear()
+        self.moved.clear()
+        self.added.clear()
+        batch_changed = self.batch_changed
+        self.batch_changed = False
+        return batch_changed
 
     def get_and_reset(self, batch_size: int) -> Optional[BatchUpdate]:
         """Generate a logitsprocs batch update data structure and reset
@@ -114,7 +125,8 @@ class BatchUpdateBuilder:
         """
         # Reset removal-sorting logic
         self._is_removed_sorted = False
-        if not self._is_update():
+        self.batch_changed = False
+        if not any((self._removed, self.moved, self.added)):
             # No update; short-circuit
             return None
         # Build batch state update

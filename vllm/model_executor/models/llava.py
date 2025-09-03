@@ -22,14 +22,14 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalInputs, MultiModalKwargsItems)
 from vllm.multimodal.parse import (ImageEmbeddingItems, ImageProcessorItems,
                                    ImageSize, MultiModalDataItems)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, ProcessingCache,
-                                        PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
+                                        BaseProcessingInfo, PromptReplacement,
+                                        PromptUpdate, PromptUpdateDetails)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.jsontree import json_map_leaves
@@ -394,7 +394,7 @@ def _build_llava_or_pixtral_hf_processor(
     info: _I,
     dummy_inputs: BaseDummyInputsBuilder[_I],
     *,
-    cache: Optional[ProcessingCache] = None,
+    cache: Optional[BaseMultiModalProcessorCache] = None,
 ) -> BaseMultiModalProcessor:
     if isinstance(info, PixtralHFProcessingInfo):
         return PixtralHFMultiModalProcessor(
@@ -795,7 +795,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         mm_data: MultiModalDataDict,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Optional[Mapping[str, object]] = None,
-        return_mm_hashes: bool = False,
+        mm_hash_overrides: Optional[dict[str, list[str]]] = None,
     ) -> MultiModalInputs:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
@@ -806,8 +806,11 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             image_height=-1,
         )
 
-        result = super().apply(prompt, mm_data, hf_processor_mm_kwargs,
-                               tokenization_kwargs, return_mm_hashes)
+        result = super().apply(prompt,
+                               mm_data,
+                               hf_processor_mm_kwargs,
+                               tokenization_kwargs,
+                               mm_hash_overrides=mm_hash_overrides)
 
         mm_items = self._to_mm_items(mm_data)
         mm_item_counts = mm_items.get_all_counts()
@@ -829,26 +832,19 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
                 target=[image_token_id] * num_image_tokens,
                 replacement=get_replacement_mantis,
             )
-        ])
+        ], mm_item_counts)
 
         prompt_ids, prompt, _ = self._apply_prompt_updates(
             result["prompt_token_ids"],
             mantis_mm_repls,
-            mm_item_counts,
         )
 
-        unbound_orig_repls = self._get_prompt_updates(
+        orig_repls = self._get_mm_prompt_updates(
             mm_items,
             hf_processor_mm_kwargs,
             mm_kwargs,
         )
-        orig_repls = self._bind_and_group_updates(unbound_orig_repls)
-
-        mm_placeholders = self._find_mm_placeholders(
-            orig_repls,
-            prompt_ids,
-            mm_item_counts,
-        )
+        mm_placeholders = self._find_mm_placeholders(prompt_ids, orig_repls)
         self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
         mm_placeholder_ranges = {

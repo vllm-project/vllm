@@ -173,6 +173,37 @@ def run_deepseek_vl2(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Ernie4.5-VL
+def run_ernie45_vl(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "baidu/ERNIE-4.5-VL-28B-A3B-PT"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        limit_mm_per_prompt={modality: 1},
+        trust_remote_code=True,
+    )
+
+    if modality == "image":
+        placeholder = "Picture 1:<|IMAGE_START|><|image@placeholder|><|IMAGE_END|>"
+    elif modality == "video":
+        placeholder = "Video 1:<|VIDEO_START|><|video@placeholder|><|VIDEO_END|>"
+
+    prompts = [
+        (
+            f"<|begin_of_sentence|>User: {question}{placeholder}\n"
+            "Assistant: <think></think>"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Florence2
 def run_florence2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -283,8 +314,10 @@ def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
     )
 
     prompts = [
-        f"<|user|>\n<|begin_of_image|><|endoftext|><|end_of_image|>\
-        {question}<|assistant|>"
+        (
+            "<|user|>\n<|begin_of_image|><|endoftext|><|end_of_image|>"
+            f"{question}<|assistant|>"
+        )
         for question in questions
     ]
 
@@ -650,6 +683,37 @@ def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Keye-VL-1.5
+def run_keye_vl1_5(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "Kwai-Keye/Keye-VL-1.5-8B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        trust_remote_code=True,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+
+    prompts = [
+        (
+            f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Kimi-VL
 def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -767,15 +831,13 @@ def run_llava_next_video(questions: list[str], modality: str) -> ModelRequestDat
 def run_llava_onevision(questions: list[str], modality: str) -> ModelRequestData:
     if modality == "video":
         prompts = [
-            f"<|im_start|>user <video>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
+            f"<|im_start|>user <video>\n{question}<|im_end|><|im_start|>assistant\n"
             for question in questions
         ]
 
     elif modality == "image":
         prompts = [
-            f"<|im_start|>user <image>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
+            f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
             for question in questions
         ]
 
@@ -998,8 +1060,7 @@ def run_molmo(questions: list[str], modality: str) -> ModelRequestData:
     )
 
     prompts = [
-        f"<|im_start|>user <image>\n{question}<|im_end|> \
-        <|im_start|>assistant\n"
+        f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
         for question in questions
     ]
 
@@ -1436,6 +1497,28 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
     )
 
 
+# R-4B
+def run_r_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "YannQi/R-4B"
+
+    prompts = [
+        f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
+        for question in questions
+    ]
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=16384,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # SkyworkR1V
 def run_skyworkr1v(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1581,6 +1664,7 @@ model_example_map = {
     "chameleon": run_chameleon,
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
+    "ernie45_vl": run_ernie45_vl,
     "florence2": run_florence2,
     "fuyu": run_fuyu,
     "gemma3": run_gemma3,
@@ -1595,6 +1679,7 @@ model_example_map = {
     "interns1": run_interns1,
     "internvl_chat": run_internvl,
     "keye_vl": run_keye_vl,
+    "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
     "llama4": run_llama4,
     "llava": run_llava,
@@ -1622,6 +1707,7 @@ model_example_map = {
     "qwen2_vl": run_qwen2_vl,
     "qwen2_5_vl": run_qwen2_5_vl,
     "qwen2_5_omni": run_qwen2_5_omni,
+    "rvl": run_r_vl,
     "skywork_chat": run_skyworkr1v,
     "smolvlm": run_smolvlm,
     "step3": run_step3,
