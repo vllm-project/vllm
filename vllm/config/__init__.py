@@ -49,7 +49,8 @@ from vllm.transformers_utils.config import (
     try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
-from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS, LayerBlockType,
+from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
+                        STR_DUAL_CHUNK_FLASH_ATTN_VAL, LayerBlockType,
                         LazyLoader, common_broadcastable_dtype, random_uuid)
 
 if TYPE_CHECKING:
@@ -1303,6 +1304,10 @@ class ModelConfig:
                         self.hf_config.dual_chunk_attention_config:
                     self.hf_config.dual_chunk_attention_config[
                         "sparse_attention_enabled"] = True
+
+            if envs.VLLM_ATTENTION_BACKEND != STR_DUAL_CHUNK_FLASH_ATTN_VAL:
+                raise ValueError("please set VLLM_ATTENTION_BACKEND to "
+                                 f"{STR_DUAL_CHUNK_FLASH_ATTN_VAL}")
 
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
