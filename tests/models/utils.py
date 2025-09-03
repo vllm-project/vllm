@@ -347,6 +347,7 @@ class ModelInfo:
     dtype: str = "auto"
     hf_overrides: Optional[dict[str, Any]] = None
     default_pooling_type: str = ""
+    mteb_score: Optional[float] = None
     enable_test: bool = True
 
 
