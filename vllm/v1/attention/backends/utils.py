@@ -29,6 +29,8 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 from vllm.logger import init_logger
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm.compilation.ubatch_utils import UbatchSlice
+
 logger = init_logger(__name__)
 _KV_CACHE_LAYOUT_OVERRIDE = None
 
@@ -71,12 +73,6 @@ class CommonAttentionMetadata:
     # Needed by FastPrefillAttentionBuilder
     logits_indices_padded: Optional[torch.Tensor] = None
     num_logits_indices: Optional[int] = None
-
-
-@dataclass
-class UbatchSlice:
-    request_slice: slice
-    token_slice: slice
 
 
 def slice_query_start_locs(

@@ -13,13 +13,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
-from typing import TypeAlias
-
-@dataclass
-class UbatchSlice:
-    request_slice: slice
-    token_slice: slice
-UBatchSlices: TypeAlias = list[UbatchSlice]
+from vllm.compilation.ubatch_utils import (UbatchSlice, UBatchSlices)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata

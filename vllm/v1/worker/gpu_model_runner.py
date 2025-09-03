@@ -24,6 +24,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
 from vllm.compilation.ubatch_wrapper import UBatchWrapper
+from vllm.compilation.ubatch_utils import (UbatchSlice, UBatchSlices)
 from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config, update_config)
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -108,8 +109,6 @@ AttnMetadataDict: TypeAlias = dict[str, FlashAttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = Union[list[AttnMetadataDict],
                                         AttnMetadataDict]
-
-UBatchSlices: TypeAlias = list[UbatchSlice]
 
 
 class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):

@@ -19,7 +19,6 @@ from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)
 
-
 @dataclasses.dataclass
 class UbatchMetadata:
     context: UBatchContext
