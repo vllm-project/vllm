@@ -107,7 +107,6 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
         def pattern(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                     output_attn: torch.Tensor, output_quant: torch.Tensor,
                     scale: torch.Tensor):
-
             at1 = auto_functionalized(ATTN_OP,
                                       query=q,
                                       key=k,
@@ -116,9 +115,8 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
                                       layer_name=self.layer_name,
                                       output_scale=None,
                                       output_block_scale=None)
-            attn_out_view = RESHAPE_OP(at1[1],
-                                       [-1, self.num_heads * self.head_size])
-
+            attn_out_view = RESHAPE_OP(
+                at1[1], [q.shape[0], self.num_heads * self.head_size])
             at2 = auto_functionalized(self.QUANT_OP,
                                       result=output_quant,
                                       input=attn_out_view,
@@ -128,14 +126,17 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
         def replacement(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                         output_attn: torch.Tensor, output_quant: torch.Tensor,
                         scale: torch.Tensor):
-            view_7 = RESHAPE_OP(output_quant,
-                                [-1, self.num_heads, self.head_size])
-
+            # attn output in quant_dtype
+            output_attn = torch.ops.aten.full.default(
+                [q.shape[0], self.num_heads, self.head_size],
+                0.0,
+                dtype=self.quant_dtype,
+                device=q.device)
             at1 = auto_functionalized(ATTN_OP,
                                       query=q,
                                       key=k,
                                       value=v,
-                                      output=view_7,
+                                      output=output_attn,
                                       layer_name=self.layer_name,
                                       output_scale=scale,
                                       output_block_scale=None)
@@ -164,7 +165,7 @@ class AttentionFp8StaticQuantPattern(AttentionQuantPattern):
                             self.num_heads,
                             self.head_size,
                             dtype=self.dtype,
-                            device="cuda"),
+                            device="cuda"),  # attn_output
                 self.empty_quant(5, self.num_heads *
                                  self.head_size),  # quant_output
                 empty_fp32(1, 1)  # scale
@@ -298,6 +299,11 @@ class AttnFusionPass(VllmInductorPass):
     def __call__(self, graph: torch.fx.graph.Graph) -> None:
         self.begin()
         self.dump_graph(graph, "before_attn_fusion")
+        try:
+            with open("vllm_profile/attn_fusion_pass_before.txt", "w") as f:
+                f.write(graph.owning_module.print_readable(print_output=False))
+        except Exception as e:
+            print(f"Failed to write graph to file: {e}")
 
         count = self.patterns.apply(graph)
 
@@ -307,6 +313,7 @@ class AttnFusionPass(VllmInductorPass):
         graph.eliminate_dead_code()
 
         logger.debug("Fused quantization onto %s attention nodes", count)
+        print(f"AAAAAAAAAAAAAAAA {count}")
         self.dump_graph(graph, "after_attn_fusion")
         self.end_and_log()
 

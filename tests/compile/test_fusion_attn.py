@@ -171,6 +171,8 @@ class AttentionQuantPatternModel(torch.nn.Module):
             cache_config=vllm_config.cache_config,
             prefix="model.layers.0.self_attn.attn",
         )
+        self.attn._k_scale = self.attn._k_scale.to(device)
+        self.attn._v_scale = self.attn._v_scale.to(device)
 
         self.block_size = 16
 
@@ -188,7 +190,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
             device=self.device,
         )
 
-    def build_attn_metadata(self, batch_size: int):
+    def build_attn_metadata(self, batch_size: int, use_hnd: bool):
         """Initialize attention metadata."""
 
         # Create common attn metadata
@@ -205,10 +207,8 @@ class AttentionQuantPatternModel(torch.nn.Module):
         num_blocks = batch_size * max_blocks
 
         # Create dummy KV cache for FlashInfer TRTLLM
-        #   - NHD: [num_blocks, 2, block_size, num_kv_heads, head_size]
-        #   - HND: [num_blocks, 2, num_kv_heads, block_size, head_size]
-        # Create kv_cache in HND layout and permute to NHD layout
-        # (later will be permuted back to HND layout in forward pass)
+        #   - NHD: [num_blocks, block_size, num_kv_heads, head_size]
+        #   - HND: [num_blocks, num_kv_heads, block_size, head_size]
         kv_cache = torch.zeros(num_blocks,
                                2,
                                self.num_kv_heads,
@@ -216,7 +216,17 @@ class AttentionQuantPatternModel(torch.nn.Module):
                                self.head_size,
                                dtype=self.kv_cache_dtype,
                                device=self.device)
-        kv_cache = kv_cache.permute(0, 1, 3, 2, 4)
+        if current_platform.is_rocm():
+            # k/v as 1st dimention
+            if use_hnd:
+                kv_cache = kv_cache.permute(1, 0, 2, 3, 4)
+            else:
+                kv_cache = kv_cache.permute(1, 0, 3, 2, 4)
+        else:
+            # k/v as 2nd dimention
+            # Create kv_cache in HND layout and permute to NHD layout
+            # (later will be permuted back to HND layout in forward pass)
+            kv_cache = kv_cache.permute(0, 1, 3, 2, 4)
         self.attn.kv_cache = [kv_cache]
 
         # Build attn metadata
@@ -296,28 +306,49 @@ class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):
                                      out_dtype=attn_output.dtype)
 
 
-@pytest.mark.parametrize("num_qo_heads, num_kv_heads", [(64, 8), (40, 8)])
+CUDA_MODELS = [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
+                TestAttentionFp8StaticQuantPatternModel),
+               ("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+                TestAttentionNvfp4QuantPatternModel)]
+ROCM_MODELS = [("amd/Llama-3.1-8B-Instruct-FP8-KV",
+                TestAttentionFp8StaticQuantPatternModel)]
+
+CUDA_HEADS = [(64, 8), (40, 8)]
+ROCM_HEADS = [(32, 8), (40, 8)]
+
+
+@pytest.mark.parametrize(
+    "num_qo_heads, num_kv_heads",
+    CUDA_HEADS if current_platform.is_cuda() else ROCM_HEADS)
 @pytest.mark.parametrize("head_size", [128])
-@pytest.mark.parametrize("batch_size", [7, 256, 533])
+@pytest.mark.parametrize("batch_size",
+                         [7, 256, 533] if current_platform.is_cuda() else [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("model_name, model_class",
-                         [("nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
-                           TestAttentionFp8StaticQuantPatternModel),
-                          ("nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
-                           TestAttentionNvfp4QuantPatternModel)])
-@pytest.mark.parametrize("backend", [_Backend.FLASHINFER])
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
+@pytest.mark.parametrize(
+    "model_name, model_class",
+    CUDA_MODELS if current_platform.is_cuda() else ROCM_MODELS)
+@pytest.mark.parametrize("backend", [_Backend.FLASHINFER] if
+                         current_platform.is_cuda() else [_Backend.ROCM_FLASH])
+@pytest.mark.parametrize(
+    "split_attention",
+    [False, True] if current_platform.is_rocm() else [False])
+@pytest.mark.skipif(not current_platform.is_cuda_alike(),
+                    reason="Only test ROCm or CUDA")
 @pytest.mark.skipif(not current_platform.supports_fp8(), reason="Need FP8")
-@pytest.mark.skipif(not current_platform.is_device_capability((10, 0)),
-                    reason="Only test on SM100(Blackwell)")
+@pytest.mark.skipif(current_platform.is_cuda()
+                    and not current_platform.is_device_capability((10, 0)),
+                    reason="On CUDA only test on SM100(Blackwell)")
 def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
                                  head_size: int, batch_size: int,
                                  dtype: torch.dtype, model_name: str,
                                  model_class: type[AttentionQuantPatternModel],
-                                 backend: _Backend, monkeypatch, dist_init):
+                                 backend: _Backend, split_attention: bool,
+                                 monkeypatch, dist_init):
     """Test AttentionStaticQuantPattern fusion pass"""
 
     monkeypatch.setenv("VLLM_USE_V1", "1")
+    if split_attention:
+        monkeypatch.setenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "1")
 
     device = torch.device("cuda:0")
     torch.manual_seed(42)
@@ -326,6 +357,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         model_config=ModelConfig(
             model=model_name,
             max_model_len=2048,
+            dtype=dtype,
         ),
         scheduler_config=SchedulerConfig(max_num_seqs=1024),
         compilation_config=CompilationConfig(
@@ -368,7 +400,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
 
         forward_ctx = get_forward_context()
         forward_ctx.attn_metadata = model_unfused.build_attn_metadata(
-            batch_size)
+            batch_size, use_hnd=split_attention)
 
         # Run model directly without compilation and fusion
         result_unfused = model_unfused(q, k, v)
@@ -389,7 +421,8 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         model_fused = model_fused.to(device)
 
         forward_ctx = get_forward_context()
-        forward_ctx.attn_metadata = model_fused.build_attn_metadata(batch_size)
+        forward_ctx.attn_metadata = model_fused.build_attn_metadata(
+            batch_size, use_hnd=split_attention)
 
         # Create test backend with fusion passes enabled
         noop_pass = NoOpEliminationPass(vllm_config)
@@ -407,9 +440,11 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         # After the 1st round of the forward pass, output quant scale should be
         # loaded into the attn layer's _o_scale_float, the 2nd round should
         # reuse the loaded _o_scale_float
-        assert model_compiled.attn._o_scale_float is not None
+        assert current_platform.is_rocm(
+        ) or model_compiled.attn._o_scale_float is not None
         result_fused_2 = model_compiled(q, k, v)
-        assert model_compiled.attn._o_scale_float is not None
+        assert current_platform.is_rocm(
+        ) or model_compiled.attn._o_scale_float is not None
 
     # Check attn fusion support
     quant_key = model_class.quant_key
@@ -444,7 +479,7 @@ def test_attention_quant_pattern(num_qo_heads: int, num_kv_heads: int,
         assert attn_nodes_post[0].kwargs.get("output_block_scale") is not None, \
             "Attention should have output_block_scale after FP4 fusion"  # noqa: E501
 
-    # Check that results are closed
+    # Check that results are close
     torch.testing.assert_close(result_unfused,
                                result_fused_1,
                                atol=1e-2,

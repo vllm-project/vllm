@@ -802,6 +802,7 @@ def context_attention_fwd(q,
 
     if alibi_slopes is not None:
         assert sinks is None, "Sinks arg is not supported with alibi"
+        assert fp8_out_scale is None, "FP8 output not supported with alibi"
         # need to reduce num. blocks when using fp32
         # due to increased use of GPU shared memory
         # if q.dtype is torch.float32:
