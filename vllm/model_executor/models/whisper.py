@@ -116,12 +116,12 @@ class WhisperAudioInputs(TensorSchema):
     """
     Dimensions:
         - b: Batch size
-        - 128: Fixed feature dimension for mel bins
+        - nmb: Number of mel bins
         - t: Time frames (M)
     """
 
     input_features: Annotated[Optional[NestedTensors],
-                              TensorShape("b", 128, "t")]
+                              TensorShape("b", "nmb", "t")]
 
 
 class WhisperPositionalEmbedding(nn.Embedding):
@@ -905,10 +905,6 @@ class WhisperForConditionalGeneration(nn.Module, SupportsTranscription,
                                  f"Got type: {type(input_features)}")
             input_features = torch.cat(
                 [feat.to(self.dtype) for feat in input_features])
-
-            if input_features.size(1) == 80:
-                input_features = torch.nn.functional.pad(
-                    input_features, (0, 0, 0, 48))
 
         return WhisperAudioInputs(input_features=input_features)
 
