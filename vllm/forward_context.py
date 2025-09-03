@@ -93,27 +93,32 @@ class DPMetadata:
         return num_tokens_tensor
 
     @staticmethod
-    def should_ubatch_across_dp(should_ubatch: bool, num_tokens_per_ubatch: int, dp_size: int,
+    def should_ubatch_across_dp(should_ubatch: bool, orig_num_tokens_per_ubatch: int,
+                                padded_num_tokens_per_ubatch: int, dp_size: int,
                                 dp_rank: int) -> tuple[bool, Optional[torch.Tensor]]:
 
-        tensor = torch.zeros(3, dp_size, device="cpu", dtype=torch.int32)
-        tensor[0][dp_rank] = num_tokens_per_ubatch
-        tensor[1][dp_rank] = 1 if should_ubatch else 0
+        tensor = torch.zeros(3, dp_size, device="cuda", dtype=torch.int32)
+        tensor[0][dp_rank] = orig_num_tokens_per_ubatch
+        tensor[1][dp_rank] = padded_num_tokens_per_ubatch
+        tensor[2][dp_rank] = 1 if should_ubatch else 0
 
 
         from vllm.distributed.parallel_state import get_dp_group
-        dist.all_reduce(tensor, group=get_dp_group().cpu_group)
+        dist.all_reduce(tensor, group=get_dp_group().device_group)
 
-        result: bool = bool(torch.all(tensor[1]== 1).item())
+        result: bool = bool(torch.all(tensor[2]== 1).item())
         if not result:
             return result, None
         
-        min_num_tokens_per_ubatch = tensor[0].min().item()
-        max_num_tokens_per_ubatch = tensor[0].max().item()
-        if max_num_tokens_per_ubatch >= 2 * min_num_tokens_per_ubatch:
-            logger.debug(f"Aborting ubatching {min_num_tokens_per_ubatch} {max_num_tokens_per_ubatch}")
+        orig_num_tokens_tensor = tensor[0, :]
+        padded_num_tokens_tensor = tensor[1, :]
+
+        orig_min_num_tokens = orig_num_tokens_tensor.min().item()
+        padded_max_num_tokens = padded_num_tokens_tensor.max().item()
+        if padded_max_num_tokens >= 2 * orig_min_num_tokens:
+            logger.debug(f"Aborting ubatching {orig_min_num_tokens} {padded_max_num_tokens}")
             return False, None
-        return result, tensor[0, :]
+        return result, padded_num_tokens_tensor
 
     @staticmethod
     def make(
