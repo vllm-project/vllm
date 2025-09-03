@@ -29,8 +29,16 @@ GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
 
 
 @pytest.fixture(scope="module")
-def gptoss_server(monkeypatch: pytest.MonkeyPatch):
-    with monkeypatch.context() as m:
+def monkeypatch_module():
+    from _pytest.monkeypatch import MonkeyPatch
+    mpatch = MonkeyPatch()
+    yield mpatch
+    mpatch.undo()
+
+
+@pytest.fixture(scope="module")
+def gptoss_server(monkeypatch_module: pytest.MonkeyPatch):
+    with monkeypatch_module.context() as m:
         m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN_VLLM_V1")
         args = [
             "--enforce-eager",
@@ -101,6 +109,73 @@ async def test_gpt_oss_chat_tool_call_streaming(gptoss_client: OpenAI):
 
     assert name is not None
     assert len(args_buf) > 0
+
+
+@pytest.mark.asyncio
+async def test_gpt_oss_multi_turn_chat(gptoss_client: OpenAI):
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "get_current_weather",
+            "description": "Get the current weather in a given location",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "city": {
+                        "type": "string"
+                    },
+                    "state": {
+                        "type": "string"
+                    },
+                    "unit": {
+                        "type": "string",
+                        "enum": ["celsius", "fahrenheit"],
+                    },
+                },
+                "required": ["city", "state", "unit"],
+            },
+        },
+    }]
+
+    messages = [
+        {
+            "role": "system",
+            "content": "you are a helpful assistant"
+        },
+        {
+            "role": "user",
+            "content": "What is the weather in Dallas, TX?"
+        },
+    ]
+
+    first = await gptoss_client.chat.completions.create(
+        model=GPT_OSS_MODEL_NAME,
+        messages=messages,
+        tools=tools,
+        temperature=0.0,
+    )
+    first_msg = first.choices[0].message
+    assert first_msg.tool_calls is not None and len(first_msg.tool_calls) > 0
+    tc = first_msg.tool_calls[0]
+    assert tc.function is not None and tc.function.name == "get_current_weather"
+    args1 = tc.function.arguments
+    assert args1 is not None and len(args1) > 0
+
+    messages.append({"role": "assistant", "content": args1})
+    messages.append({
+        "role": "user",
+        "content": "Now convert to celsius and return JSON only"
+    })
+
+    second = await gptoss_client.chat.completions.create(
+        model=GPT_OSS_MODEL_NAME,
+        messages=messages,
+        tools=tools,
+        temperature=0.0,
+    )
+    second_msg = second.choices[0].message
+    assert (second_msg.content is not None and len(second_msg.content) > 0) or \
+        (second_msg.tool_calls is not None and len(second_msg.tool_calls) > 0)  # noqa: E501
 
 
 MODEL_NAME = "openai-community/gpt2"
