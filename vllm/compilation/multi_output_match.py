@@ -42,32 +42,50 @@ class MultiOutputMatch:
         print(self.graph.python_code(root_module="self").src)
         nodes = list(self.graph.nodes)
         output_nodes = self.match.output_nodes()
-        arg_nodes = self.match.args + list(self.match.kwargs.values())
+        input_nodes = self.match.args + list(self.match.kwargs.values())
+        assert len(set(input_nodes) & set(output_nodes)) == 0, \
+            f"Overlapping inputs and outputs: " \
+            f"{set(input_nodes) & set(output_nodes)}"
+
         node_indices = {
-            node: nodes.index(node)
-            for node in (output_nodes + arg_nodes)
+            n: nodes.index(n)  # works for graph inputs as well
+            for n in (output_nodes + input_nodes)
         }
+
+        def node_index(node):
+            # lazy compute other nodes as we don't need it for all nodes,
+            # but there might be inputs to inputs
+            if node not in node_indices:
+                node_indices[node] = nodes.index(node)
+            return node_indices[node]
+
         print(node_indices)
 
         first_output_node = min(output_nodes,
-                                key=lambda node: node_indices[node])
-        first_output_node_idx = node_indices[first_output_node]
+                                key=lambda node: node_index(node))
+        first_output_node_idx = node_index(first_output_node)
         print(f"first output node is {first_output_node} "
               f"at index {first_output_node_idx}")
+        insertion_point = nodes[first_output_node_idx - 1]
+        print(f"Inserting nodes at {insertion_point}")
 
-        nodes_to_process = list(arg_nodes)  # copy
+        # During this worklist process, node indices change and
+        # topological ordering can be temporarily broken.
+        nodes_to_process = list(input_nodes)  # copy
         print(f"{nodes_to_process=}")
         while nodes_to_process:
+            # breadth-first: inputs of inputs get appended later
+            # to end up higher up in the graph
             arg_node = nodes_to_process.pop()
-            print(arg_node)
+            print(f"Processing {arg_node}")
             if not isinstance(arg_node, fx.Node):
                 continue  # only nodes can have other inputs
-            if node_indices[arg_node] < first_output_node_idx:
-                continue  #
+            if node_index(arg_node) < first_output_node_idx:
+                continue  # node already before output
 
-            print(f"moving {arg_node} before {first_output_node}")
+            print(f"Moving {arg_node} before {first_output_node}")
             # arg is after the first output, move it before it.
-            first_output_node.prepend(arg_node)
+            insertion_point.append(arg_node)
             # Any inputs to arg_node should also be checked
             for arg2 in arg_node.args:
                 if not isinstance(arg2, fx.Node):
