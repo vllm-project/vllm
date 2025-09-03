@@ -549,7 +549,7 @@ class Eagle2_5_VLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         raise AssertionError("This line should be unreachable.")
 
     def _parse_and_validate_video_input(
-            self, **kwargs: object) -> Optional[Eagle2_5_VLVideoPixelInputs]:
+            self, **kwargs: object) -> Optional[Eagle2_5_VLVideoInputs]:
         pixel_values_flat_video = kwargs.pop("pixel_values_flat_video", None)
         video_num_patches = kwargs.pop("video_num_patches", None)
         video_embeds = kwargs.pop("video_embeds", None)
