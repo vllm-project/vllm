@@ -44,7 +44,8 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.interfaces import (HasInnerState, IsHybrid,
                                                    SupportsLoRA, SupportsPP,
                                                    SupportsQuant)
@@ -436,6 +437,12 @@ class NemotronHModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            if "scale" in name:
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
+
             # load stacked params
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
