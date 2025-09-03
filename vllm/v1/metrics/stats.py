@@ -3,15 +3,20 @@
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Union
 
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVTransferStatsType)
+from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
+    MultiKVTransferStats)
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    NixlKVTransferStats)
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
     from vllm.v1.engine.output_processor import RequestState
+
+# Union type for serialization/deserialization
+KVTransferStatsType = Union[NixlKVTransferStats, MultiKVTransferStats]
 
 
 @dataclass

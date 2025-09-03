@@ -18,13 +18,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVTransferStats)
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -304,10 +304,15 @@ class MultiConnector(KVConnectorBase_V1):
                              f"All connectors must use the same layout.")
         return next(iter(layouts), None)
 
-    def get_kv_transfer_stats(self) -> MultiKVTransferStats:
+    def get_kv_transfer_stats(self) -> Optional[MultiKVTransferStats]:
         # Group xfer stats by connector type.
-        xfer_stats_by_connector = MultiKVTransferStats()
+        xfer_stats_by_connector: Optional[MultiKVTransferStats] = None
         for c in self._connectors:
             xfer_stats = c.get_kv_transfer_stats()
+            if xfer_stats is None:
+                continue
+            if xfer_stats_by_connector is None:
+                # Lazy init to allow optional return value.
+                xfer_stats_by_connector = MultiKVTransferStats()
             xfer_stats_by_connector[c.__class__.__name__] = xfer_stats
         return xfer_stats_by_connector

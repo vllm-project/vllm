@@ -19,11 +19,9 @@ import torch
 from vllm import LLM
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    NixlKVTransferStats)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
     KVConnectorRole, NixlAgentMetadata, NixlConnector, NixlConnectorMetadata,
-    NixlConnectorWorker)
+    NixlConnectorWorker, NixlKVTransferStats)
 from vllm.forward_context import ForwardContext
 from vllm.sampling_params import SamplingParams
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
@@ -494,9 +492,7 @@ def test_kv_transfer_stats(dist_init):
 
     # Verify that xfer_stats starts empty
     initial_stats = connector.get_kv_transfer_stats()
-    assert isinstance(initial_stats, NixlKVTransferStats)
-    assert initial_stats.is_empty()
-    assert initial_stats.num_successful_transfers == 0
+    assert initial_stats is None
 
     # Create transfer metadata
     request_id = "test_req_for_stats"
@@ -546,9 +542,7 @@ def test_kv_transfer_stats(dist_init):
 
     # Verify stats are reset after retrieval
     stats_after_reset = connector.get_kv_transfer_stats()
-    assert isinstance(stats_after_reset, NixlKVTransferStats)
-    assert stats_after_reset.is_empty()
-    assert stats_after_reset.num_successful_transfers == 0
+    assert stats_after_reset is None
 
 
 def test_kv_transfer_stats_aggregation():
@@ -587,7 +581,6 @@ def test_kv_transfer_stats_aggregation():
             req_ids=[f"req_{i}"],
             req_id_to_index={f"req_{i}": 0},
             sampled_token_ids=[[123]],  # dummy token
-            spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[None],

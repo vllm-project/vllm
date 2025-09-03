@@ -157,10 +157,13 @@ class KVOutputAggregator:
                 # Use the first worker's kv_transfer_stats as accumulator.
                 aggregated_kv_transfer_stats = output.kv_transfer_stats
             elif kv_transfer_stats := output.kv_transfer_stats:
-                assert isinstance(aggregated_kv_transfer_stats,
-                                  type(kv_transfer_stats))
-                aggregated_kv_transfer_stats = \
-                    aggregated_kv_transfer_stats.aggregate(kv_transfer_stats)
+                if aggregated_kv_transfer_stats is None:
+                    aggregated_kv_transfer_stats = kv_transfer_stats
+                else:
+                    assert isinstance(aggregated_kv_transfer_stats,
+                                      type(kv_transfer_stats))
+                    aggregated_kv_transfer_stats = \
+                        aggregated_kv_transfer_stats.aggregate(kv_transfer_stats)
 
         # select output of the worker specified by output_rank
         output = outputs[output_rank]

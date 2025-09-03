@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import copy
 import logging
 import math
 import queue
@@ -11,7 +12,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import msgspec
 import numpy as np
@@ -24,7 +25,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp, KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    EMPTY_NIXL_KV_TRANSFER_STATS, KVTransferStats, NixlKVTransferStats)
+    KVTransferStats)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
@@ -35,7 +36,6 @@ from vllm.platforms import _Backend, current_platform
 from vllm.utils import make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -208,7 +208,7 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
-    def get_kv_transfer_stats(self) -> KVTransferStats:
+    def get_kv_transfer_stats(self) -> Optional[KVTransferStats]:
         assert self.connector_worker is not None
         return self.connector_worker.get_kv_transfer_stats()
 
@@ -383,6 +383,7 @@ class NixlConnectorScheduler:
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+        from vllm.v1.request import RequestStatus
 
         params = request.kv_transfer_params
         logger.debug(
@@ -1305,14 +1306,14 @@ class NixlConnectorWorker:
             block_len = self.block_len
         return block_len
 
-    def get_kv_transfer_stats(self) -> KVTransferStats:
+    def get_kv_transfer_stats(self) -> Optional[KVTransferStats]:
         """
         Get the KV transfer stats for the connector.
         """
         # Clear stats for next iteration
         if not self.xfer_stats.is_empty():
             return self.xfer_stats.clone_and_reset()
-        return EMPTY_NIXL_KV_TRANSFER_STATS
+        return None
 
 
 @contextlib.contextmanager
@@ -1332,3 +1333,55 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
+
+
+class NixlKVTransferStats(KVTransferStats,
+                          tag="NIXL"):  # type: ignore[call-arg]
+    """Container for transfer performance metrics"""
+    # Setup buffers
+    # We could use specialized data structures to avoid copying the data
+    # or even just maintaining order when merging. Let's keep it simple for now
+    transfer_durations: list[float] = msgspec.field(
+        default_factory=list)  # Transfer durations in seconds
+    bytes_transferred: list[int] = msgspec.field(
+        default_factory=list)  # Bytes transferred per transfer
+    num_blocks_transferred: list[int] = msgspec.field(
+        default_factory=list)  # Number of blocks per transfer
+    num_successful_transfers: int = 0
+
+    def reset(self):
+        self.transfer_durations = []
+        self.bytes_transferred = []
+        self.num_blocks_transferred = []
+        self.num_successful_transfers = 0
+
+    def record_transfer(self):
+        # TODO: record actual transfer stats when available
+        self.num_successful_transfers += 1
+
+    def clone_and_reset(self) -> "NixlKVTransferStats":
+        old = copy.copy(self)
+        self.reset()
+        return old
+
+    def is_empty(self) -> bool:
+        return self.num_successful_transfers == 0
+
+    def aggregate(self, other: "NixlKVTransferStats") -> "NixlKVTransferStats":
+        if self == EMPTY_NIXL_KV_TRANSFER_STATS:
+            # Make sure EMPTY_KV_TRANSFER_STATS is not mutated. This should also
+            # always be semantically correct, as EMPTY | other => other.
+            return other
+        if not other.is_empty():
+            self.transfer_durations.extend(other.transfer_durations)
+            self.bytes_transferred.extend(other.bytes_transferred)
+            self.num_blocks_transferred.extend(other.num_blocks_transferred)
+            self.num_successful_transfers += other.num_successful_transfers
+        return self
+
+    def reduce(self) -> dict[str, Union[int, float]]:
+        # TODO: reduce stats to a single value, calculate latency/throughput
+        return {"num_successful_transfers": self.num_successful_transfers}
+
+
+EMPTY_NIXL_KV_TRANSFER_STATS = NixlKVTransferStats()
