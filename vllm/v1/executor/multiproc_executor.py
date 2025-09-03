@@ -607,7 +607,7 @@ class WorkerProc:
         while True:
             output = self.async_output_queue.get()
             if isinstance(output, AsyncModelRunnerOutput):
-                output = output.copy_to_host()
+                output = output.get_output()
 
             if isinstance(output, Exception):
                 result = (WorkerProc.ResponseStatus.FAILURE, str(output))

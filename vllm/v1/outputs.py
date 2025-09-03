@@ -115,12 +115,17 @@ class ModelRunnerOutput:
     num_nans_in_logits: Optional[dict[str, int]] = None
 
 
-# ModelRunnerOutput wrapper for async scheduling. Contains device tensors
-# which must be copied to the host before sending to the scheduler process.
+# ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):
 
     @abstractmethod
-    def copy_to_host(self) -> ModelRunnerOutput:
+    def get_output(self) -> ModelRunnerOutput:
+        """Get the ModelRunnerOutput for this async output.
+        
+        This is a blocking call that waits until the results are ready, which
+        might involve copying device tensors to the host.
+        This method should only be called once per AsyncModelRunnerOutput.
+        """
         pass
 
 

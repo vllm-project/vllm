@@ -113,27 +113,27 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         invalid_req_indices: list[int],
         async_output_copy_stream: torch.cuda.Stream,
     ):
-        self.model_runner_output = model_runner_output
-        self.sampled_token_ids = sampled_token_ids
-        self.invalid_req_indices = invalid_req_indices
-        self.async_output_copy_stream = async_output_copy_stream
+        self._model_runner_output = model_runner_output
+        self._sampled_token_ids = sampled_token_ids
+        self._invalid_req_indices = invalid_req_indices
+        self._async_output_copy_stream = async_output_copy_stream
 
-    def copy_to_host(self) -> ModelRunnerOutput:
+    def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
         
         This function blocks until the copy is finished.
         """
         default_stream = torch.cuda.current_stream()
-        with torch.cuda.stream(self.async_output_copy_stream):
-            self.async_output_copy_stream.wait_stream(default_stream)
-            sampled_token_ids_cpu = self.sampled_token_ids.to(
+        with torch.cuda.stream(self._async_output_copy_stream):
+            self._async_output_copy_stream.wait_stream(default_stream)
+            sampled_token_ids_cpu = self._sampled_token_ids.to(
                 'cpu', non_blocking=True)
-        self.async_output_copy_stream.synchronize()
+        self._async_output_copy_stream.synchronize()
         valid_sampled_token_ids = sampled_token_ids_cpu.tolist()
-        for i in self.invalid_req_indices:
+        for i in self._invalid_req_indices:
             valid_sampled_token_ids[i].clear()
 
-        output = self.model_runner_output
+        output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
         return output
 
@@ -269,7 +269,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
-        self.async_output_copy_stream = torch.cuda.Stream()
+        self.async_output_copy_stream = torch.cuda.Stream() if \
+            self.use_async_scheduling else None
 
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         # The convention is different.
@@ -1894,15 +1895,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_nans_in_logits=num_nans_in_logits,
         )
 
-        if self.use_async_scheduling:
-            return AsyncGPUModelRunnerOutput(
-                model_runner_output=output,
-                sampled_token_ids=sampled_token_ids,
-                invalid_req_indices=invalid_req_indices,
-                async_output_copy_stream=self.async_output_copy_stream,
-            )
+        if not self.use_async_scheduling:
+            return output
 
-        return output
+        return AsyncGPUModelRunnerOutput(
+            model_runner_output=output,
+            sampled_token_ids=sampled_token_ids,
+            invalid_req_indices=invalid_req_indices,
+            async_output_copy_stream=self.async_output_copy_stream,
+        )
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         if self._draft_token_ids is None:
