@@ -1610,12 +1610,6 @@ class FusedMoE(CustomOp):
 
     def forward(self, hidden_states: torch.Tensor,
                 router_logits: torch.Tensor):
-        logger.info(
-            "[MoE Debug] *** FusedMoE.forward() ENTRY *** "
-            "layer_name='%s', hidden_states.shape=%s, router_logits.shape=%s, "
-            "quant_method=%s", self.layer_name, hidden_states.shape,
-            router_logits.shape,
-            type(self.quant_method).__name__)
 
         og_hidden_states = hidden_states.shape[-1]
         if self.hidden_size != og_hidden_states:
@@ -1626,10 +1620,8 @@ class FusedMoE(CustomOp):
         # TODO: Once the OOM issue for the TPU backend is resolved, we will
         # switch to using the moe_forward custom op.
         if current_platform.is_tpu():
-            logger.info("[MoE Debug] Using TPU forward_impl")
             return self.forward_impl(hidden_states, router_logits)
         else:
-            logger.info("[MoE Debug] Using moe_forward custom op")
             return torch.ops.vllm.moe_forward(
                 hidden_states, router_logits,
                 self.layer_name)[..., :og_hidden_states]
@@ -1713,14 +1705,6 @@ class FusedMoE(CustomOp):
 
     def forward_impl(self, hidden_states: torch.Tensor,
                      router_logits: torch.Tensor):
-        logger.info(
-            "[MoE Debug] *** FusedMoE.forward_impl() ENTRY *** "
-            "dp_size=%s, use_pplx=%s, use_deepep_ht=%s, use_deepep_ll=%s, "
-            "use_flashinfer_cutlass=%s", self.dp_size,
-            self.moe_parallel_config.use_pplx_kernels,
-            self.moe_parallel_config.use_deepep_ht_kernels,
-            self.moe_parallel_config.use_deepep_ll_kernels,
-            self.moe_config.use_flashinfer_cutlass_kernels)
 
         assert self.quant_method is not None
         # Route to the chunked forward path using the FlashInfer Cutlass kernel
@@ -1731,7 +1715,6 @@ class FusedMoE(CustomOp):
         if (self.moe_parallel_config.use_pplx_kernels
                 or self.moe_parallel_config.use_deepep_ll_kernels
                 or use_flashinfer_cutlass_kernels):
-            logger.info("[MoE Debug] Using forward_impl_chunked")
             return self.forward_impl_chunked(hidden_states, router_logits)
 
         do_naive_dispatch_combine: bool = (
@@ -1739,18 +1722,10 @@ class FusedMoE(CustomOp):
             and not self.moe_parallel_config.use_deepep_ht_kernels
             and not self.moe_config.use_flashinfer_cutlass_kernels)
         if do_naive_dispatch_combine:
-            logger.info("[MoE Debug] Using naive dispatch combine")
             hidden_states, router_logits = get_ep_group().dispatch(
                 hidden_states, router_logits)
-        else:
-            logger.info("[MoE Debug] Skipping naive dispatch combine")
 
         # Matrix multiply.
-        logger.info(
-            "[MoE Debug] *** Calling quant_method.apply() *** "
-            "method=%s, global_num_experts=%s, local_experts=%s",
-            type(self.quant_method).__name__, self.global_num_experts,
-            self.local_num_experts)
         final_hidden_states = self.quant_method.apply(
             layer=self,
             x=hidden_states,
@@ -1837,19 +1812,9 @@ class FusedMoE(CustomOp):
 
 def moe_forward(hidden_states: torch.Tensor, router_logits: torch.Tensor,
                 layer_name: str) -> torch.Tensor:
-    logger.info(
-        "[MoE Debug] *** moe_forward() CUSTOM OP ENTRY *** "
-        "layer_name='%s', hidden_states.shape=%s", layer_name,
-        hidden_states.shape)
-
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     assert self.quant_method is not None
-
-    logger.info(
-        "[MoE Debug] Calling forward_impl from moe_forward custom op, "
-        "layer quant_method=%s",
-        type(self.quant_method).__name__)
 
     return self.forward_impl(hidden_states, router_logits)
 
