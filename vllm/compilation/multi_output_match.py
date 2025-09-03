@@ -1,60 +1,88 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import abc
-import operator
-from abc import abstractmethod
-from collections.abc import Iterable
-
 from torch import fx
-from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor import pattern_matcher as pm
-from torch._ops import OpOverload
-from torch.fx import Node
-
-from vllm.compilation.fx_utils import find_auto_fn
 
 
-class MultiOutputMatch(abc.ABC):
+class MultiOutputMatch:
     """
-    This class provides utilities to process multi-output matches and
-    manually insert replacements.
+    This class provides utilities to process multi-output matches.
 
-    This is necessary because the automatic replacement for multi-output
-    matches is broken: https://github.com/pytorch/pytorch/issues/137280
+    It edits the graph to move match input nodes before match output nodes,
+    a workaround for an issue in the torch Inductor pattern matcher:
+
+    This issue is expected to be fixed in torch==2.9:
+    https://github.com/pytorch/pytorch/issues/162019
+
+    Formerly, this class was used to manually insert all multi-output
+    replacements as the capability was completely broken before torch==2.6:
+    https://github.com/pytorch/pytorch/issues/137280
     """
 
     def __init__(self, match: pm.Match):
         self.match = match
 
-    @abstractmethod
     def process(self):
         """
-        Process a multi-output match and manually insert the replacement.
-
-        This method should:
-        1. Insert the replacement nodes after the last node in the match.
-        2. Rebind the users of nodes in the match to use the new nodes.
-        3. Set meta["val"] for de-functionalization.
-
-        The result of an auto-functionalized node is a tuple of tensors.
-        The first element is the return value of the function, usually None.
-        The remaining elements are the mutated args of the function.
-
-        All auto-functionalized nodes must contain a proper meta["val"],
-        as it is used by de-functionalization. meta["val"] has to contain the
-        value of the node (tuple of tensors) that would be returned by the
-        functionalized node during tracing.
-
-        Existing nodes in the graph all have this property set, but we have
-        to set it manually for new nodes we insert.
+        Process a multi-output match and move input nodes before output nodes.
+        Returns True to allow direct use as the extra_check function in
+        PatternMatcherPass.register() and enable automatic replacement.
 
         Example:
-        # op schema: foo(a: Tensor!, b: Tensor, c: Tensor!) -> None
-        at = auto_functionalized(torch.ops._C.foo.default, a, b, c)
-        # at.meta["val"] = (None, a, c)
+        input_1 = empty()
+        output_1 = relu(input_1)
+        input_2 = empty()
+        output_2 = output_1 + input_2
+
+        Pattern matcher inserts the replacement before the first output node,
+        resulting in a use of input_2 before its definition.
         """
-        raise NotImplementedError
+
+        print(self.graph.python_code(root_module="self").src)
+        nodes = list(self.graph.nodes)
+        output_nodes = self.match.output_nodes()
+        arg_nodes = self.match.args + list(self.match.kwargs.values())
+        node_indices = {
+            node: nodes.index(node)
+            for node in (output_nodes + arg_nodes)
+        }
+        print(node_indices)
+
+        first_output_node = min(output_nodes,
+                                key=lambda node: node_indices[node])
+        first_output_node_idx = node_indices[first_output_node]
+        print(f"first output node is {first_output_node} "
+              f"at index {first_output_node_idx}")
+
+        nodes_to_process = list(arg_nodes)  # copy
+        print(f"{nodes_to_process=}")
+        while nodes_to_process:
+            arg_node = nodes_to_process.pop()
+            print(arg_node)
+            if not isinstance(arg_node, fx.Node):
+                continue  # only nodes can have other inputs
+            if node_indices[arg_node] < first_output_node_idx:
+                continue  #
+
+            print(f"moving {arg_node} before {first_output_node}")
+            # arg is after the first output, move it before it.
+            first_output_node.prepend(arg_node)
+            # Any inputs to arg_node should also be checked
+            for arg2 in arg_node.args:
+                if not isinstance(arg2, fx.Node):
+                    continue
+                if arg2 in output_nodes:
+                    raise ValueError(f"an output node {arg2} is "
+                                     f"an input to a pattern input {arg_node}")
+
+                # process arg2
+                print(f"adding {arg2} to process list")
+                nodes_to_process.append(arg2)
+
+        print(self.graph.python_code(root_module="self").src)
+        # match always succeeds
+        return True
 
     @property
     def nodes(self) -> list[fx.Node]:
@@ -63,47 +91,3 @@ class MultiOutputMatch(abc.ABC):
     @property
     def graph(self) -> fx.Graph:
         return self.match.graph
-
-    def find_auto_fn(self, op) -> fx.Node:
-        """
-        Find the first auto_functionalized node with the given op in the match.
-        """
-        return find_auto_fn(self.nodes, op)
-
-    def inserting_after_match(self):
-        """
-        Insert nodes after the last node in the match.
-        This is done to avoid use-before-definition errors after inserting
-        replacement nodes.
-        """
-
-        # match.nodes is not guaranteed to be sorted.
-        # Find the last node in the match.
-        for last_node_in_match in reversed(self.graph.nodes):
-            if last_node_in_match in self.match.nodes:
-                break
-        else:
-            raise ValueError("No nodes in graph")
-
-        return self.graph.inserting_after(last_node_in_match)
-
-    def insert_getitems(self, tuple_node: fx.Node,
-                        indices: Iterable[int]) -> tuple[fx.Node, ...]:
-        """
-        Insert operator.getitem nodes to extract elements from a tuple node.
-
-        :param tuple_node: The tuple node to extract elements from.
-        :param indices: The indices of the elements to extract.
-        :return: Tuple of the new getitem nodes, corresponding to the indices.
-        """
-        with self.graph.inserting_after(tuple_node):
-            return tuple(
-                self.graph.call_function(operator.getitem, (tuple_node, idx))
-                for idx in indices)
-
-    def insert_auto_fn(self, op: OpOverload, kwargs) -> Node:
-        """
-        Insert an auto_functionalized node with the given op and kwargs.
-        """
-        return self.graph.call_function(auto_functionalized, (op, ),
-                                        kwargs=kwargs)
