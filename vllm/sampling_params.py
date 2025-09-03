@@ -242,7 +242,8 @@ class SamplingParams(
         spaces_between_special_tokens: Optional[bool] = True,
         logits_processors: Optional[list[LogitsProcessor]] = None,
         truncate_prompt_tokens: Optional[Annotated[int,
-                                                   msgspec.Meta(ge=1)]] = None,
+                                                   msgspec.Meta(
+                                                       ge=-1)]] = None,
         output_kind: Optional[RequestOutputKind] = RequestOutputKind.
         CUMULATIVE,
         guided_decoding: Optional[GuidedDecodingParams] = None,
