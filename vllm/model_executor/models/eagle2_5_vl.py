@@ -631,7 +631,7 @@ class Eagle2_5_VLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
                 modalities["images"] = self._parse_and_validate_image_input(
                     **kwargs)
             if input_key in ("pixel_values_flat_video",
-                             ) and "videos" not in modalities:
+                             "video_embeds") and "videos" not in modalities:
                 modalities["videos"] = self._parse_and_validate_video_input(
                     **kwargs)
 
