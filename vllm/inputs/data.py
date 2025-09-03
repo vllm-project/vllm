@@ -95,6 +95,16 @@ class EmbedsPrompt(TypedDict):
     """
 
 
+class DataPrompt(TypedDict):
+    """Represents generic inputs handled by IO processor plugins."""
+
+    data: Any
+    """The input data"""
+
+    data_format: str
+    """The input data format"""
+
+
 SingletonPrompt = Union[str, TextPrompt, TokensPrompt, EmbedsPrompt]
 """
 Set of possible schemas for a single prompt:
