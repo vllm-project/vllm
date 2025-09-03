@@ -234,7 +234,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         try:
             token = self.stream.step(self.tokenizer, next_token_id)
         except Exception as e:
-            if INVALID_PREFIX_ERR_MSG not in str(e):
+            if not str(e).startswith(INVALID_PREFIX_ERR_MSG):
                 raise e
             # Recover from edge case where tokenizer can produce non-monotonic,
             # invalid UTF-8 output, which breaks the internal state of
