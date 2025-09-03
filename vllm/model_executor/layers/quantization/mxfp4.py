@@ -310,7 +310,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w13_bias = layer.w13_bias.data.to(torch.float32)
             w2_bias = layer.w2_bias.data.to(torch.float32)
 
-            # Swap w1 and w3 as the defenition of
+            # Swap w1 and w3 as the definition of
             # swiglu is different in the trtllm-gen
             def swap_every_two_rows(x, axis=-1):
                 shape = x.shape
@@ -546,6 +546,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
+        routed_scaling_factor: float = 1.0,
         e_score_correction_bias: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -569,6 +570,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 num_expert_group=num_expert_group,
                 custom_routing_function=custom_routing_function,
                 scoring_func=scoring_func,
+                routed_scaling_factor=routed_scaling_factor,
                 e_score_correction_bias=e_score_correction_bias)
 
             return torch.ops.vllm.fused_marlin_moe(

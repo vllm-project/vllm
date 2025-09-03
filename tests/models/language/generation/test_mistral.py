@@ -20,7 +20,7 @@ MISTRAL_FORMAT_MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.3",
     # uses the v3-Tekken tokenizer
     "mistralai/Ministral-8B-Instruct-2410",
-    # Mistral-Nemo is to big for CI, but passes locally
+    # Mistral-Nemo is too big for CI, but passes locally
     # "mistralai/Mistral-Nemo-Instruct-2407"
 ]
 
@@ -273,7 +273,7 @@ def test_mistral_function_calling(vllm_runner, model: str, dtype: str) -> None:
 
 
 def test_mistral_function_call_nested_json():
-    """Ensure that the function-name regex captures the entire outer-most
+    """Ensure that the function-name regex captures the entire outermost
     JSON block, including nested braces."""
 
     # Create a minimal stub tokenizer that provides the few attributes the
