@@ -696,11 +696,6 @@ def get_moe_configs(
     be picked and the associated configuration chosen to invoke the kernel.
     """
 
-    # First look up if an optimized configuration is available in the configs
-    # directory
-    block_shape = [block_n, block_k] if block_n and block_k else None
-    json_file_name = get_config_file_name(E, N, dtype, block_shape)
-
     def _check_config_file_path(path: str,
                                 extra_info: str = ""
                                 ) -> Optional[dict[int, Any]]:
@@ -714,6 +709,9 @@ def get_moe_configs(
                 return {int(key): val for key, val in json.load(f).items()}
         return None
 
+    block_shape = [block_n, block_k] if block_n and block_k else None
+    json_file_name = get_config_file_name(E, N, dtype, block_shape)
+
     # P1 User-specified configuration (highest priority)
     user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
     if user_defined_config_folder is not None:
@@ -721,6 +719,7 @@ def get_moe_configs(
             user_defined_config_folder, json_file_name)
         if val := _check_config_file_path(user_defined_config_file_path):
             return val
+
     # P2 Current Triton version configuration
     triton_version = triton.__version__
     triton_version_name = f"triton_{triton_version.replace('.', '_')}"
@@ -732,6 +731,7 @@ def get_moe_configs(
     )
     if val := _check_config_file_path(cur_triton_file_path):
         return val
+
     # P3 Legacy configuration
     default_config_file_path = os.path.join(
         os.path.dirname(os.path.realpath(__file__)),
