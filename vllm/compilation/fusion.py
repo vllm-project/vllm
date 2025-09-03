@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, NamedTuple, Optional
+from typing import NamedTuple, Optional
 
 import torch
 import torch._inductor.pattern_matcher as pm
@@ -224,8 +224,7 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
                                               symmetric=symmetric))
         super().__init__(epsilon, key)
 
-    def register(self, pm_pass: PatternMatcherPass,
-                 record_match: Callable[[MultiOutputMatch], bool]):
+    def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(result: torch.Tensor, input: torch.Tensor,
                     residual: torch.Tensor, weight: torch.Tensor,
@@ -271,36 +270,8 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
             inputs,
             pm.fwd_only,
             pm_pass,
-            extra_check=lambda m: record_match(
-                self.Match(m, self.QUANT_OP, self.FUSED_OP)))
-
-    class Match(QuantMultiOutputMatch):
-
-        def process(self):
-            # Find the nodes in the match that we need to rebind
-            rms_node = self.find_auto_fn(RMS_ADD_OP)
-            quant_node = self.find_auto_fn(self.QUANT_OP)
-
-            assert len(rms_node.users) == 2
-            assert len(quant_node.users) == 1
-
-            # First, insert a new auto_functionalized node for the fused op,
-            # as well as getitem nodes to extract the result and residual.
-            # The auto_fn node returns a tuple of (None, result, residual).
-            #
-            # The resulting graph looks like this:
-            # at = auto_functionalized(torch.ops._C.fused_add_rms_norm_static_fp8_quant.default, ...)  # noqa
-            # result_node_new = at[1]
-            # residual_node_new = at[2]
-            with self.inserting_after_match():
-                # Missing epsilon, scalars cannot be inputs to the pattern
-                kwargs = self.match.kwargs.copy()
-
-                # 0 is always None
-                fused_return_mapping = {1: (quant_node, 1), 2: (rms_node, 2)}
-                self.insert_fused_node(fused_return_mapping,
-                                       **kwargs,
-                                       epsilon=rms_node.kwargs["epsilon"])
+            extra_check=lambda m: MultiOutputMatch(m).process(),
+        )
 
 
 class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
@@ -317,8 +288,7 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
                                               symmetric=symmetric))
         super().__init__(epsilon, key)
 
-    def register(self, pm_pass: PatternMatcherPass,
-                 record_match: Callable[[MultiOutputMatch], bool]):
+    def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(result: torch.Tensor, result_rms: torch.Tensor,
                     input: torch.Tensor, weight: torch.Tensor,
@@ -366,39 +336,8 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
             inputs,
             pm.fwd_only,
             pm_pass,
-            extra_check=lambda m: record_match(
-                self.Match(m, self.QUANT_OP, self.FUSED_OP)))
-
-    class Match(QuantMultiOutputMatch):
-
-        def process(self):
-            # Find the nodes in the match that we need to rebind
-            rms_node = self.find_auto_fn(RMS_OP)
-            quant_node = self.find_auto_fn(self.QUANT_OP)
-
-            assert len(rms_node.users) == 1
-            assert len(quant_node.users) == 2
-
-            # First, insert a new auto_functionalized node for the fused op,
-            # as well as getitem nodes to extract the result and scale.
-            # The auto_fn node returns a tuple of (None, result, scale).
-            #
-            # The resulting graph looks like this:
-            # at = auto_functionalized(torch.ops._C.rms_norm_dynamic_per_token_quant.default, ...)  # noqa
-            # result_node_new = at[1]
-            # scale_node_new = at[2]
-            with self.inserting_after_match():
-                # Missing epsilon, scalars cannot be inputs to the pattern
-                kwargs = self.match.kwargs.copy()
-                del kwargs["result_rms"]  # not used in the fused op
-
-                fused_return_mapping = {1: (quant_node, 1), 2: (quant_node, 2)}
-                self.insert_fused_node(
-                    fused_return_mapping,
-                    epsilon=rms_node.kwargs["epsilon"],
-                    scale_ub=None,  # not used but required
-                    residual=None,  # not used but required
-                    **kwargs)
+            extra_check=lambda m: MultiOutputMatch(m).process(),
+        )
 
 
 class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
@@ -415,8 +354,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
                                               symmetric=symmetric))
         super().__init__(epsilon, key)
 
-    def register(self, pm_pass: PatternMatcherPass,
-                 record_match: Callable[[MultiOutputMatch], bool]):
+    def register(self, pm_pass: PatternMatcherPass):
 
         def pattern(result: torch.Tensor, input: torch.Tensor,
                     residual: torch.Tensor, weight: torch.Tensor,
@@ -464,42 +402,8 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
             inputs,
             pm.fwd_only,
             pm_pass,
-            extra_check=lambda m: record_match(
-                self.Match(m, self.QUANT_OP, self.FUSED_OP)))
-
-    class Match(QuantMultiOutputMatch):
-
-        def process(self):
-            # Find the nodes in the match that we need to rebind
-            rms_node = self.find_auto_fn(RMS_ADD_OP)
-            quant_node = self.find_auto_fn(self.QUANT_OP)
-
-            assert len(rms_node.users) == 2
-            assert len(quant_node.users) == 2
-
-            # First, insert a new auto_functionalized node for the fused op,
-            # as well as getitem nodes to extract result, scale, and residual.
-            # The auto_fn node returns a tuple (None, result, scale, residual).
-            #
-            # The resulting graph looks like this:
-            # at = auto_functionalized(torch.ops._C.rms_norm_dynamic_per_token_quant.default, ...)  # noqa
-            # result_node_new = at[1]
-            # scale_node_new = at[2]
-            # residual_node_new = at[3]
-            with self.inserting_after_match():
-                # Missing epsilon, scalars cannot be inputs to the pattern
-                kwargs = self.match.kwargs.copy()
-
-                fused_return_mapping = {
-                    1: (quant_node, 1),  # result
-                    2: (quant_node, 2),  # scale
-                    3: (rms_node, 2),  # residual
-                }
-                self.insert_fused_node(
-                    fused_return_mapping,
-                    epsilon=rms_node.kwargs["epsilon"],
-                    scale_ub=None,  # not used but required
-                    **kwargs)
+            extra_check=lambda m: MultiOutputMatch(m).process(),
+        )
 
 
 class FusionPass(VllmInductorPass):
@@ -535,7 +439,6 @@ class FusionPass(VllmInductorPass):
             "FusionPass singleton instance already exists"
         super().__init__(config)
 
-        self.matches: list[MultiOutputMatch] = []
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="fusion_pass")
 
@@ -549,40 +452,19 @@ class FusionPass(VllmInductorPass):
 
             # Fuse rms_norm + static fp8 quant
             FusedAddRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
-                self.patterns, self.record_match)
+                self.patterns)
 
             # Fuse rms_norm + dynamic per-token fp8 quant
-            RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(
-                self.patterns, self.record_match)
+            RMSNormDynamicQuantPattern(epsilon,
+                                       FP8_DTYPE).register(self.patterns)
 
             # Fuse fused_add_rms_norm + dynamic per-token fp8 quant
             FusedAddRMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(
-                self.patterns, self.record_match)
+                self.patterns)
 
             # WARNING: This is a hack to clear the pattern matcher cache
             # and allow multiple values of epsilon.
             torch._inductor.pattern_matcher._seen_patterns.clear()
-
-    def record_match(self, match: MultiOutputMatch) -> bool:
-        # Hijack the extra_check to record the match and
-        # save it for post-processing.
-        self.matches.append(match)
-
-        # Return False to prevent automatic replacement.
-        return False
-
-    def process_matches(self, graph: fx.Graph):
-        """
-        Manually process multi-output matches and replace them with fused nodes.
-        See MultiOutputMatch for more details.
-        """
-        for match in self.matches:
-            match.process()
-
-        # Finally, remove matched nodes
-        graph.eliminate_dead_code()
-        assert all(node not in graph.nodes for match in self.matches
-                   for node in match.match.nodes)
 
     def __call__(self, graph: fx.Graph):
         self.begin()
@@ -590,11 +472,5 @@ class FusionPass(VllmInductorPass):
 
         count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", count)
-        self.dump_graph(graph, "after_pattern_match")
-
-        # Manually process multi-output matches (and run DCE)
-        self.process_matches(graph)
-        logger.debug("Post-processed %s matches", len(self.matches))
         self.dump_graph(graph, "after_fusion")
-        self.matches.clear()
         self.end_and_log()
