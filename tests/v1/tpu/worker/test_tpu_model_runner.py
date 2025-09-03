@@ -85,7 +85,7 @@ def _schedule_new_request(*req_ids: str) -> SchedulerOutput:
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -164,7 +164,7 @@ def test_update_states_request_finished(model_runner):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids={req_id},
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -194,7 +194,7 @@ def test_update_states_request_resumed(model_runner):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -221,7 +221,7 @@ def test_update_states_request_resumed(model_runner):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -252,7 +252,7 @@ def test_update_states_no_changes(model_runner):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )
@@ -287,7 +287,7 @@ def test_update_states_request_unscheduled(model_runner):
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=0,
         finished_req_ids=set(),
-        free_encoder_input_ids=[],
+        free_encoder_mm_hashes=[],
         structured_output_request_ids={},
         grammar_bitmask=None,
     )

@@ -282,9 +282,11 @@ async def test_serving_chat_could_load_correct_generation_config():
     assert mock_engine.generate.call_args.args[1].repetition_penalty == 1.05
 
 
+@pytest.mark.parametrize("model_type", ["gpt_oss", "any"])
 @pytest.mark.asyncio
-async def test_serving_chat_did_set_correct_cache_salt():
+async def test_serving_chat_did_set_correct_cache_salt(model_type):
     mock_model_config = MockModelConfig()
+    mock_model_config.hf_config.model_type = model_type
 
     mock_engine = MagicMock(spec=MQLLMEngineClient)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
@@ -311,7 +313,7 @@ async def test_serving_chat_did_set_correct_cache_salt():
         }],
     )
 
-    # By default cache_salt in the engine prompt is not set
+    # By default, cache_salt in the engine prompt is not set
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
     assert "cache_salt" not in mock_engine.generate.call_args.args[0]
