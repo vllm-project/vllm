@@ -339,11 +339,10 @@ class GPT2ForSequenceClassification(nn.Module):
         config = vllm_config.model_config.hf_config
         self.transformer = GPT2Model(vllm_config=vllm_config,
                                      prefix=maybe_prefix(prefix, "gpt2"))
-        self.head_dtype = vllm_config.model_config.head_dtype
         self.score = nn.Linear(config.n_embd,
                                config.num_labels,
                                bias=False,
-                               dtype=self.head_dtype)
+                               dtype=vllm_config.model_config.head_dtype)
 
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
