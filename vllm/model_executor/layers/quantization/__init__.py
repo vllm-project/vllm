@@ -107,6 +107,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .ipex_quant import IPEXConfig
     from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
+    from .mxfp4 import Mxfp4Config
     from .neuron_quant import NeuronQuantConfig
     from .petit import PetitNvFp4Config
     from .ptpc_fp8 import PTPCFp8Config
