@@ -88,7 +88,7 @@ class UltravoxConfig(transformers.PretrainedConfig):
             wrapped_model_config = transformers.CONFIG_MAPPING[text_config.get(
                 "model_type", "llama")](**text_config)
 
-        text_config = wrapped_model_config.get_text_config()
+        wrapped_text_config = wrapped_model_config.get_text_config()
 
         if audio_model_id is not None:
             # Avoid circular import
@@ -104,13 +104,13 @@ class UltravoxConfig(transformers.PretrainedConfig):
         # the full model, but the text config is the text config of the inner
         # model.
         self.wrapped_model_config = wrapped_model_config
-        self.text_config = text_config
+        self.text_config = wrapped_text_config
         self.audio_config = audio_config
         self.text_model_lora_config = text_model_lora_config or {}
         self.audio_model_lora_config = audio_model_lora_config or {}
 
-        self.vocab_size = text_config.vocab_size
-        self.initializer_range = text_config.initializer_range
-        self.text_hidden_size = text_config.hidden_size
+        self.vocab_size = wrapped_text_config.vocab_size
+        self.initializer_range = wrapped_text_config.initializer_range
+        self.text_hidden_size = wrapped_text_config.hidden_size
 
         super().__init__(**kwargs)
