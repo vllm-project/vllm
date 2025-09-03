@@ -4,6 +4,7 @@ import asyncio
 import os
 import socket
 import time
+import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
 from typing import Any, Optional, Union
@@ -268,6 +269,12 @@ class AsyncLLM(EngineClient):
         data_parallel_rank: Optional[int] = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
+
+        warnings.warn(
+            "Processor in AsyncLLM is deprecated. "
+            "Processor has been moved to the API server layer. ",
+            DeprecationWarning,
+            stacklevel=2)
 
         if self.errored:
             raise EngineDeadError()

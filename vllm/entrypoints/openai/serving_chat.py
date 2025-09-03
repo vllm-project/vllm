@@ -48,10 +48,12 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
                                                 truncate_tool_call_ids,
                                                 validate_request_params)
 from vllm.utils import as_list
+from vllm.v1.engine.processor import Processor
 
 logger = init_logger(__name__)
 
@@ -158,6 +160,24 @@ class OpenAIServingChat(OpenAIServing):
         self.supports_code_interpreter = False
         self.python_tool = None
 
+        # Initialize processor for input processing (moved from AsyncLLM)
+        self.processor: Optional[Processor] = None
+
+    async def _initialize_processor(self) -> None:
+        """Initialize the processor with dependencies, independent of AsyncLLM.
+        """
+        if self.processor is None:
+            vllm_config = await self.engine_client.get_vllm_config()
+            if vllm_config.model_config.skip_tokenizer_init:
+                tokenizer = None
+            else:
+                tokenizer = init_tokenizer_from_configs(
+                    model_config=vllm_config.model_config,
+                    scheduler_config=vllm_config.scheduler_config,
+                    lora_config=vllm_config.lora_config)
+
+            self.processor = Processor(vllm_config, tokenizer)
+
     async def create_chat_completion(
         self,
         request: ChatCompletionRequest,
@@ -175,6 +195,9 @@ class OpenAIServingChat(OpenAIServing):
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
+
+        # Initialize processor if not already done
+        await self._initialize_processor()
 
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
