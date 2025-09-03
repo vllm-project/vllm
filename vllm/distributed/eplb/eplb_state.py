@@ -32,6 +32,7 @@ import torch
 
 from vllm.config import ParallelConfig
 from vllm.distributed.eplb.eplb_adaptor.vllm_adaptor import VllmEplbAdaptor
+from vllm.distributed.eplb.eplb_policy.abstract_policy import EplbPolicy
 from vllm.distributed.parallel_state import get_ep_group, get_node_count
 
 from vllm.logger import init_logger
@@ -48,10 +49,10 @@ logger = init_logger(__name__)
 
 class EplbState:
     def __init__(self, model):
-        self.eplb_data = None
-        self.eplb_updator = None
-        self._async_processor = None
-        self.eplb_policy = None
+        self.eplb_data = Optional[EplbData]
+        self.eplb_updator = Optional[EplbUpdator]
+        self._async_processor = Optional[EplbProcess]
+        self.eplb_policy = Optional[EplbPolicy]
         self.model = model
         self.eplb_adaptor = VllmEplbAdaptor(self.model)
         self.eplb_loader = EplbWeightLoader(self.eplb_adaptor)
@@ -269,4 +270,24 @@ class EplbState:
         self.eplb_updator.rearrange(model, is_profile, execute_shuffle, global_expert_load, rank_mapping)
 
     def recv_state(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Receives and returns the current state (e.g., expert load and capacity) from the EPLB updator.
+
+        Returns:
+            tuple[torch.Tensor, torch.Tensor]: A tuple containing two tensors representing the received state.
+        """
         return self.eplb_updator.recv_state()
+
+    def forward_before(self):
+        """
+        Executes necessary operations or updates before the model's forward pass.
+        This typically involves preparing the EPLB updator for the upcoming forward computation.
+        """
+        self.eplb_updator.step_before_forward()
+
+    def forward_end(self):
+        """
+        Executes necessary operations or updates after the model's forward pass.
+        This typically involves processing results or updating states based on the completed forward computation.
+        """
+        self.eplb_updator.step_after_forward()
