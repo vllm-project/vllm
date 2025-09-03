@@ -164,19 +164,33 @@ def set_device_control_env_var(vllm_config: VllmConfig,
     """
     world_size = vllm_config.parallel_config.world_size
     evar = current_platform.device_control_env_var
+
+    value = get_device_indices(evar, local_dp_rank, world_size)
+    with patch.dict(os.environ, values=((evar, value), )):
+        yield
+
+
+def get_device_indices(device_control_env_var: str, local_dp_rank: int,
+                       world_size: int):
+    """
+    Returns a comma-separated string of device indices for the specified
+    data parallel rank.
+
+    For example, if world_size=2 and local_dp_rank=1, and there are 4 devices,
+    this will select devices 2 and 3 for local_dp_rank=1.
+    """
     try:
         value = ",".join(
             str(current_platform.device_id_to_physical_device_id(i))
             for i in range(local_dp_rank * world_size, (local_dp_rank + 1) *
                            world_size))
     except IndexError as e:
-        raise Exception(f"Error setting {evar}: "
+        raise Exception(f"Error setting {device_control_env_var}: "
                         f"local range: [{local_dp_rank * world_size}, "
                         f"{(local_dp_rank + 1) * world_size}) "
                         "base value: "
-                        f"\"{os.getenv(evar)}\"") from e
-    with patch.dict(os.environ, values=((evar, value), )):
-        yield
+                        f"\"{os.getenv(device_control_env_var)}\"") from e
+    return value
 
 
 class CoreEngineActorManager:
@@ -254,6 +268,19 @@ class CoreEngineActorManager:
             dp_vllm_config = copy.deepcopy(vllm_config)
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
+
+            # Ray XPU known issue: dpctl initializes the GPU runtime early, so
+            # setting device env vars in Ray actor's initialization method
+            # will not affect device selection. See:
+            # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56 # noqa: E501
+            if current_platform.is_xpu():
+                device_evar = current_platform.device_control_env_var
+                device_indices = get_device_indices(device_evar, local_index,
+                                                    world_size)
+                actor_env_vars = self.env_vars_dict.copy()
+                actor_env_vars[device_evar] = device_indices
+                runtime_env = RuntimeEnv(env_vars=actor_env_vars)
+
             actor = ray.remote(DPEngineCoreActor).options(
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
