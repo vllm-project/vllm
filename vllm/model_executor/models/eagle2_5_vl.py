@@ -444,7 +444,6 @@ class Eagle2_5_VLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         self.img_context_token_id = None
         self.video_context_token_id = None
 
-        self.visual_token_mask = None
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
