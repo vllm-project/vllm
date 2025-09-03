@@ -63,7 +63,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         sparsity_ignore_list: list[str],
         kv_cache_scheme: Optional[dict[str, Any]] = None,
         config: Optional[dict[str, Any]] = None,
-        transform_config: Optional[TransformConfig] = None,
+        transform_config: Optional[dict[str, Any]] = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -75,7 +75,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.sparsity_ignore_list = sparsity_ignore_list
         self.config = config
 
-        if transform_config is not None:
+        if transform_config:
             self.transform_config = TransformConfig.model_validate(
                 transform_config)
         else:
@@ -579,7 +579,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             format = scheme_dict.get("format")
 
         # Find the sparsity scheme of the layer
-        # assume that fused layers inerhit first component's sparsity scheme
+        # assume that fused layers inherit first component's sparsity scheme
         sparsity_targets = (self.sparsity_scheme_map.keys() -
                             set(self.sparsity_ignore_list))
         sparsity_scheme: Optional[SparsityCompressionConfig] = None

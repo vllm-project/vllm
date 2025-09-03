@@ -246,7 +246,7 @@ def as_seq_cls_model(cls: _T) -> _T:
         return cls
 
     # Lazy import
-    from vllm.model_executor.layers.linear import RowParallelLinear
+    from vllm.model_executor.layers.linear import ReplicatedLinear
     from vllm.model_executor.layers.pooler import (ClassifierPooler,
                                                    DispatchPooler, Pooler,
                                                    PoolingMethod, PoolingType)
@@ -262,10 +262,9 @@ def as_seq_cls_model(cls: _T) -> _T:
             config = vllm_config.model_config.hf_config
             quant_config = vllm_config.quant_config
 
-            self.score = RowParallelLinear(
+            self.score = ReplicatedLinear(
                 config.hidden_size,
                 config.num_labels,
-                input_is_parallel=False,
                 bias=False,
                 params_dtype=vllm_config.model_config.head_dtype,
                 quant_config=quant_config,
