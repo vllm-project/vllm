@@ -208,10 +208,32 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   __syncthreads();
   const Idx_t n_tokens = s_counts[0];
 
-  auto par_id = blockIdx.y;
-  auto chunk_size = (n_tokens + NUM_PARALLEL_TOKENS - 1) / NUM_PARALLEL_TOKENS;
-  auto n_tokens_lower = par_id * chunk_size;
-  auto n_tokens_upper = min(n_tokens, (par_id + 1) * chunk_size);
+  if (!n_tokens) {
+    return;  // Exit ASAP.
+  }
+
+  Idx_t n_tokens_lower, n_tokens_upper;
+
+  if (n_tokens < NUM_PARALLEL_TOKENS && blockIdx.y < n_tokens) {
+    // Specialize this, but can be likely fused.
+    if (blockIdx.y >= NUM_PARALLEL_TOKENS) {
+      return;
+    }
+    n_tokens_lower = blockIdx.y;
+    n_tokens_upper = blockIdx.y + 1;
+  } else {
+    auto chunk_size = n_tokens / NUM_PARALLEL_TOKENS;
+    auto residual = n_tokens - chunk_size * NUM_PARALLEL_TOKENS;
+    auto calc_id = [&](Idx_t id) {
+      if (id < residual) {
+        return id * (chunk_size + 1);
+      } else {
+        return id * chunk_size + residual;
+      }
+    };
+    n_tokens_lower = calc_id(blockIdx.y);
+    n_tokens_upper = calc_id(blockIdx.y + 1);
+  }
 
   // base offsets (element-based)
   const Idx_t base_i = e * stride_i_e + NUM_WARPS * g * GROUP_SIZE * stride_i_h;

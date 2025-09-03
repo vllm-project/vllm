@@ -216,6 +216,14 @@ def benchmark(k, E, T, H, num_parallel_tokens, G=128, runs=100):
 
 def benchmark_full():
     configs = [
+        (8, 8, 7168),
+        (8, 16, 7168),
+        (8, 32, 7168),
+        (8, 64, 7168),
+        (8, 128, 7168),
+        (8, 256, 7168),
+        (8, 512, 7168),
+        (8, 1024, 7168),
         (32, 8, 7168),
         (32, 16, 7168),
         (32, 32, 7168),
@@ -224,7 +232,17 @@ def benchmark_full():
         (32, 256, 7168),
         (32, 512, 7168),
         (32, 1024, 7168),
+        (256, 8, 7168),
+        (256, 16, 7168),
+        (256, 32, 7168),
+        (256, 64, 7168),
+        (256, 128, 7168),
+        (256, 256, 7168),
+        (256, 512, 7168),
+        (256, 1024, 7168),
     ]
+
+    num_parallel_tokens = 16
 
     print(f"GPU: {torch.cuda.get_device_name()} CUDA Kernel")
     print(f"{'Config':<20} {'Time(ms)':<10} {'GFLOPS':<10} {'GB/s':<10}")
@@ -232,7 +250,7 @@ def benchmark_full():
 
     for E, T, H in configs:
         time_ms, gflops, gbps = benchmark(
-            silu_mul_fp8_quant_deep_gemm_cuda, E, T, H, 16
+            silu_mul_fp8_quant_deep_gemm_cuda, E, T, H, num_parallel_tokens
         )
         print(f"E={E:3d},T={T:4d},H={H:4d} {time_ms:8.3f} {gflops:8.1f} {gbps:8.1f}")
 
@@ -242,7 +260,7 @@ def benchmark_full():
 
     for E, T, H in configs:
         time_ms, gflops, gbps = benchmark(
-            silu_mul_fp8_quant_deep_gemm_triton, E, T, H, 16
+            silu_mul_fp8_quant_deep_gemm_triton, E, T, H, num_parallel_tokens
         )
         print(f"E={E:3d},T={T:4d},H={H:4d} {time_ms:8.3f} {gflops:8.1f} {gbps:8.1f}")
 

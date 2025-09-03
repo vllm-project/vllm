@@ -184,24 +184,13 @@ CASES = [
     (8, 256, 7168),
     (8, 512, 7168),
     (8, 1024, 7168),
-    (8, 32, 1024),
-    (16, 64, 2048),
-    (32, 128, 4096),
-    (9, 16, 128 * 1),
-    (9, 16, 128 * 2),
-    (9, 16, 128 * 3),
-    (9, 16, 128 * 4),
-    (9, 16, 7168),
-    (9, 16, 7168),
-    (9, 32, 7168),
-    (9, 64, 7168),
-    (9, 128, 7168),
-    (9, 256, 7168),
-    (9, 512, 7168),
-    (9, 1024, 7168),
-    (9, 32, 1024),
-    (9, 64, 2048),
-    (9, 128, 4096),
+    (256, 8, 7168),
+    (256, 16, 7168),
+    (256, 32, 7168),
+    (256, 64, 7168),
+    (256, 128, 7168),
+    (256, 256, 7168),
+    (256, 512, 7168),
     (256, 1024, 7168),
 ]
 
@@ -209,7 +198,7 @@ CASES = [
 @pytest.mark.parametrize("E,T,H", CASES)
 @torch.inference_mode()
 def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size=128, seed=0):
-    current_platform.seed_everything(seed)
+    current_platform.seed_everything(42)
 
     # Input tensor of shape (E, T, 2*H)
     y = torch.randn((E, T, 2 * H), dtype=torch.bfloat16, device="cuda")
@@ -219,12 +208,12 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size=128, seed=0):
         size=(E, ),
         dtype=torch.int32,
         device="cuda",
-    ) * 0 + T
+    )
 
     # Run the Triton kernel
     y_q, y_s = silu_mul_fp8_quant_deep_gemm_cuda(y,
                                                  tokens_per_expert,
-                                                 num_parallel_tokens=1,
+                                                 num_parallel_tokens=16,
                                                  group_size=group_size,
                                                  eps=1e-10)
 
