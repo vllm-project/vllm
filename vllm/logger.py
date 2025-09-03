@@ -24,6 +24,7 @@ VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
 _FORMAT = (f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
            "[%(filename)s:%(lineno)d] %(message)s")
 _DATE_FORMAT = "%m-%d %H:%M:%S"
+LOG_FILE_NAME = None
 
 DEFAULT_LOGGING_CONFIG = {
     "formatters": {
@@ -51,29 +52,6 @@ DEFAULT_LOGGING_CONFIG = {
     "version": 1,
     "disable_existing_loggers": False,
 }
-
-LOG_FILE_DIR = os.path.expanduser(
-    envs.VLLM_LOGS_DIR) if envs.VLLM_LOGS_DIR else None
-if envs.VLLM_PER_RANK_LOGS and not LOG_FILE_DIR:
-    raise ValueError(
-        "VLLM_PER_RANK_LOGS is set to true, but VLLM_LOGS_DIR is not set.")
-if envs.VLLM_PER_RANK_LOGS and envs.VLLM_LOGGING_CONFIG_PATH:
-    raise ValueError(
-        "VLLM_PER_RANK_LOGS with VLLM_LOGGING_CONFIG_PATH is not supported.")
-if LOG_FILE_DIR:
-    os.makedirs(LOG_FILE_DIR, exist_ok=True)
-
-if LOG_FILE_DIR:
-    LOG_FILE_NAME = os.path.join(LOG_FILE_DIR, "vllm.log")
-    DEFAULT_LOGGING_CONFIG["handlers"]["vllm_log_file"] = {
-        "class": "logging.FileHandler",
-        "formatter": "vllm",
-        "level": VLLM_LOGGING_LEVEL,
-        "filename": LOG_FILE_NAME,
-        "encoding": "utf-8",
-    }
-    DEFAULT_LOGGING_CONFIG["loggers"]["vllm"]["handlers"].append(
-        "vllm_log_file")
 
 
 @lru_cache
@@ -158,6 +136,23 @@ def _configure_vllm_root_logger() -> None:
             raise ValueError("Invalid logging config. Expected dict, got %s.",
                              type(custom_config).__name__)
         logging_config = custom_config
+    elif envs.VLLM_LOGS_DIR:
+        LOG_FILE_DIR = os.path.expanduser(envs.VLLM_LOGS_DIR)
+        if envs.VLLM_PER_RANK_LOGS and not LOG_FILE_DIR:
+            raise ValueError("VLLM_PER_RANK_LOGS is set to true, "
+                             "but VLLM_LOGS_DIR is not set.")
+        os.makedirs(LOG_FILE_DIR, exist_ok=True)
+
+        global LOG_FILE_NAME
+        LOG_FILE_NAME = os.path.join(LOG_FILE_DIR, "vllm.log")
+        logging_config["handlers"]["vllm_log_file"] = {
+            "class": "logging.FileHandler",
+            "formatter": "vllm",
+            "level": VLLM_LOGGING_LEVEL,
+            "filename": LOG_FILE_NAME,
+            "encoding": "utf-8",
+        }
+        logging_config["loggers"]["vllm"]["handlers"].append("vllm_log_file")
 
     for formatter in logging_config.get("formatters", {}).values():
         # This provides backwards compatibility after #10134.
