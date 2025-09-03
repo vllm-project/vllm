@@ -59,7 +59,7 @@ class RequestStateStats:
 
     num_generation_tokens: int = 0
 
-    # This is a engine frontend timestamp (wall-clock)
+    # This is an engine frontend timestamp (wall-clock)
     arrival_time: float = 0.0
 
     # These are engine core timestamps (monotonic)
@@ -96,7 +96,7 @@ class IterationStats:
         self.max_num_generation_tokens_iter: list[int] = []
         self.n_params_iter: list[int] = []
         self.time_to_first_tokens_iter: list[float] = []
-        self.time_per_output_tokens_iter: list[float] = []
+        self.inter_token_latencies_iter: list[float] = []
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
 
@@ -128,8 +128,8 @@ class IterationStats:
         if is_prefilling:
             req_stats.first_token_ts = engine_core_timestamp
         else:
-            tpot = engine_core_timestamp - req_stats.last_token_ts
-            self.time_per_output_tokens_iter.append(tpot)
+            itl = engine_core_timestamp - req_stats.last_token_ts
+            self.inter_token_latencies_iter.append(itl)
 
         req_stats.last_token_ts = engine_core_timestamp
 
