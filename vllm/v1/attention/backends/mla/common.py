@@ -586,7 +586,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         )
 
     def build_for_cudagraph_capture(
-                self, common_attn_metadata: CommonAttentionMetadata) -> M:
+            self, common_attn_metadata: CommonAttentionMetadata) -> M:
         """
         This method builds the metadata for full cudagraph capture.
         Currently, only decode is supported for full cudagraphs with MLA.
