@@ -115,7 +115,7 @@ class DeepseekV2MLP(nn.Module):
 
 class DeepseekV2MoE(nn.Module):
 
-    # Chunk x for sequence parallelism
+    # Chunk x along the num_tokens axis for sequence parallelism
     def sp_chunk(self, x):
         seq_len = x.size(0)
 
@@ -152,13 +152,14 @@ class DeepseekV2MoE(nn.Module):
         self.n_routed_experts: int = config.n_routed_experts
         self.n_shared_experts: int = config.n_shared_experts
 
-        # FIXME - only if we're using EP.
-        self.is_sequence_parallel = True
-        self.sequence_parallel = (envs.VLLM_ALL2ALL_BACKEND
-                                  in ("deepep_high_throughput",
-                                      "deepep_low_latency")
-                                  and parallel_config.enable_expert_parallel
-                                  and self.tp_size > 1)
+        # If using expert parallel, ensure the input to the experts is
+        # SP to avoid duplicate work.
+        # Not needed for pplx-kernels as it can handle duplicate input tokens.
+        self.is_sequence_parallel = (envs.VLLM_ALL2ALL_BACKEND
+                                     in ("deepep_high_throughput",
+                                         "deepep_low_latency")
+                                     and parallel_config.enable_expert_parallel
+                                     and self.tp_size > 1)
 
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
@@ -227,7 +228,10 @@ class DeepseekV2MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        # **************************************************
+        # Chunk the hidden states so they aren't replicated across TP ranks.
+        # This avoids duplicate computation in self.experts.
+        # TODO: We can replace the all_reduce at the end of attn with a
+        # reduce_scatter instead of chunking here.
         if self.is_sequence_parallel:
             hidden_states = self.sp_chunk(hidden_states)
 
@@ -264,7 +268,6 @@ class DeepseekV2MoE(nn.Module):
             final_hidden_states = (
                 self.experts.maybe_all_reduce_tensor_model_parallel(
                     final_hidden_states))
-        # **************************************************
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
