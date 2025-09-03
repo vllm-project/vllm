@@ -75,8 +75,8 @@ class TestData:
         layer.w2_weight = w2_quantized.clone()
         layer.w13_input_scale = a1_scale
         layer.w2_input_scale = a2_scale
-        layer.w13_weight_scale = w13_weight_scale
-        layer.w2_weight_scale = w2_weight_scale
+        layer.w13_weight_scale = w13_weight_scale.flatten()
+        layer.w2_weight_scale = w2_weight_scale.flatten()
 
         register_moe_scaling_factors(layer)
 
@@ -96,8 +96,8 @@ class TestData:
             w2_quantized=w2_quantized,
             a1_scale=a1_scale,
             a2_scale=a2_scale,
-            w13_weight_scale=w13_weight_scale,
-            w2_weight_scale=w2_weight_scale,
+            w13_weight_scale=layer.w13_weight_scale,
+            w2_weight_scale=layer.w2_weight_scale,
             layer=layer,
         )
 
