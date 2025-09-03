@@ -30,5 +30,4 @@ __all__ = [
     "supports_transcription",
     "SupportsV0Only",
     "supports_v0_only",
-    "SupportsMRoPE",
 ]
