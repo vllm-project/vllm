@@ -2,9 +2,11 @@
 
 This directory contains tuned configurations for different settings of the fused_moe kernel.
 For different settings of
+
 - E (number of experts)
 - N (intermediate size)
 - device_name (torch.cuda.get_device_name())
+
 the JSON file contains a mapping from M (batch size) to the chosen configuration.
 
 The example configurations provided are for the Mixtral model for TP2 on H100
