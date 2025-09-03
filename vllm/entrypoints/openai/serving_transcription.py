@@ -11,7 +11,8 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ErrorResponse, RequestResponseMetadata, TranscriptionRequest,
     TranscriptionResponse, TranscriptionResponseStreamChoice,
-    TranscriptionStreamResponse, TranslationRequest, TranslationResponse,
+    TranscriptionResponseVerbose, TranscriptionStreamResponse,
+    TranslationRequest, TranslationResponse, TranslationResponseVerbose,
     TranslationResponseStreamChoice, TranslationStreamResponse)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.speech_to_text import OpenAISpeechToText
@@ -45,7 +46,9 @@ class OpenAIServingTranscription(OpenAISpeechToText):
     async def create_transcription(
         self, audio_data: bytes, request: TranscriptionRequest,
         raw_request: Request
-    ) -> Union[TranscriptionResponse, AsyncGenerator[str, None],
+    ) -> Union[TranscriptionResponse,
+               TranscriptionResponseVerbose,
+               AsyncGenerator[str, None],
                ErrorResponse]:
         """Transcription API similar to OpenAI's API.
 
@@ -56,7 +59,10 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             audio_data=audio_data,
             request=request,
             raw_request=raw_request,
-            response_class=TranscriptionResponse,
+            response_class=(
+                TranscriptionResponseVerbose 
+                if request.response_format == "verbose_json" else
+                TranscriptionResponse),
             stream_generator_method=self.transcription_stream_generator,
         )
 
@@ -113,7 +119,11 @@ class OpenAIServingTranslation(OpenAISpeechToText):
             audio_data=audio_data,
             request=request,
             raw_request=raw_request,
-            response_class=TranslationResponse,
+            response_class=(
+                TranslationResponse
+                if request.response_format == "verbose_json" else
+                TranslationResponseVerbose
+            ),
             stream_generator_method=self.translation_stream_generator,
         )
 
