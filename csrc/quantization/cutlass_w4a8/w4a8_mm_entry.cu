@@ -181,7 +181,7 @@ struct W4A8GemmKernel {
     auto A_ptr = static_cast<MmaType const*>(A.const_data_ptr());
     auto B_ptr = static_cast<QuantType const*>(B.const_data_ptr());
     auto D_ptr = static_cast<ElementD*>(D.data_ptr());
-    // can we avoid harcode the 8 here
+    // can we avoid hardcode the 8 here
     auto S_ptr =
         static_cast<cutlass::Array<ElementScale, ScalePackSize> const*>(
             group_scales.const_data_ptr());
