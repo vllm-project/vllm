@@ -551,8 +551,9 @@ class OpenAIServingResponses(OpenAIServing):
                 raise e
 
             reasoning_content, reasoning_content_tokens, content = (
-                reasoning_parser.extract_reasoning_content(final_output.text, final_output.token_ids,
-                                                           request=request))
+                reasoning_parser.extract_reasoning_content(
+                    final_output.text, final_output.token_ids,
+                    request=request))
         else:
             reasoning_content = None
             content = final_output.text

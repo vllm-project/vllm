@@ -132,8 +132,10 @@ class ModelList(OpenAIBaseModel):
 class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: Optional[int] = None
 
+
 class CompletionTokenUsageInfo(OpenAIBaseModel):
     reasoning_tokens: Optional[int] = None
+
 
 class UsageInfo(OpenAIBaseModel):
     prompt_tokens: int = 0

@@ -91,9 +91,8 @@ class HunyuanA13BReasoningParser(ReasoningParser):
         return []
 
     def extract_reasoning_content(
-            self, model_output: str, 
-            model_output_tokens: Sequence[int],
-            request: ChatCompletionRequest
+        self, model_output: str, model_output_tokens: Sequence[int],
+        request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[list[int]], Optional[str]]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates

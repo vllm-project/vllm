@@ -138,9 +138,8 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 return DeltaMessage(reasoning_content=delta_text)
 
     def extract_reasoning_content(
-            self, model_output: str,
-            model_output_tokens: Sequence[int],
-            request: ChatCompletionRequest
+        self, model_output: str, model_output_tokens: Sequence[int],
+        request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[list[int]], Optional[str]]:
         """
         Extract reasoning content from the model output.
@@ -170,14 +169,14 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                 try:
                     start_idx = model_output_tokens.index(self.start_token_id)
                     end_idx = model_output_tokens.index(self.end_token_id)
-                    
+
                     # Check if both start and end tokens are found
                     if start_idx != -1 and end_idx != -1:
                         reasoning_content_tokens = \
                             model_output_tokens[start_idx+1:end_idx]
                 except ValueError:
                     pass
-                
+
             reasoning_content, _, content = model_output.partition(
                 self.end_token)
             # If the end token is not found, return the model output as is.

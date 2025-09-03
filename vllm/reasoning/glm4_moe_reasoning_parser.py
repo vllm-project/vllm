@@ -116,9 +116,8 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
             return DeltaMessage(content=delta_text)
 
     def extract_reasoning_content(
-            self, model_output: str, 
-            model_output_tokens: Sequence[int],
-            request: ChatCompletionRequest
+        self, model_output: str, model_output_tokens: Sequence[int],
+        request: ChatCompletionRequest
     ) -> tuple[Optional[str], Optional[list[int]], Optional[str]]:
         """
         Extract reasoning content from the model output.
@@ -148,9 +147,10 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         reasoning_content_tokens = None
         if model_output_tokens:
             try:
-                start_idx = model_output_tokens.index(self.think_start_token_id)
+                start_idx = model_output_tokens.index(
+                    self.think_start_token_id)
                 end_idx = model_output_tokens.index(self.think_end_token_id)
-                
+
                 # Check if both start and end tokens are found
                 if start_idx != -1 and end_idx != -1:
                     reasoning_content_tokens = \

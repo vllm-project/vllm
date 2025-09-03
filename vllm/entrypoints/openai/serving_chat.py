@@ -31,9 +31,9 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProbsContent, ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
-    ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, FunctionDefinition,
-    PromptTokenUsageInfo, CompletionTokenUsageInfo, 
+    ChatCompletionStreamResponse, ChatMessage, CompletionTokenUsageInfo,
+    DeltaFunctionCall, DeltaMessage, DeltaToolCall, ErrorResponse,
+    FunctionCall, FunctionDefinition, PromptTokenUsageInfo,
     RequestResponseMetadata, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
@@ -891,11 +891,12 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         delta_message = DeltaMessage(content=delta_text)
 
-                    if (delta_message is not None  
-                        and (delta_message.reasoning_content 
-                             or (self.use_harmony 
-                                 and harmony_parsers[i].current_channel != "final"))):
-                        num_reasoning_tokens_per_choice[i] += len(output.token_ids)
+                    if (delta_message is not None and
+                        (delta_message.reasoning_content or
+                         (self.use_harmony
+                          and harmony_parsers[i].current_channel != "final"))):
+                        num_reasoning_tokens_per_choice[i] += len(
+                            output.token_ids)
 
                     # update the previous values for the next iteration
                     if ((tool_choice_auto or self.reasoning_parser)
@@ -1051,9 +1052,10 @@ class OpenAIServingChat(OpenAIServing):
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens)
                 if any(num_reasoning_tokens_per_choice):
-                    valid_reasoning_tokens = [tokens for tokens in 
-                                              num_reasoning_tokens_per_choice 
-                                              if tokens is not None]
+                    valid_reasoning_tokens = [
+                        tokens for tokens in num_reasoning_tokens_per_choice
+                        if tokens is not None
+                    ]
                     final_usage.completion_tokens_details = \
                         CompletionTokenUsageInfo(
                             reasoning_tokens=sum(valid_reasoning_tokens))
@@ -1160,7 +1162,7 @@ class OpenAIServingChat(OpenAIServing):
                 if not request.include_reasoning:
                     reasoning_content = None
                     num_reasoning_tokens_per_choice[i] = 0
-                
+
                 if is_tool_call:
                     # TODO(woosuk): Implement tool call for gpt-oss.
                     # For now, only Responses API supports tool call for
@@ -1367,9 +1369,10 @@ class OpenAIServingChat(OpenAIServing):
                 cached_tokens=final_res.num_cached_tokens)
         if any(num_reasoning_tokens_per_choice):
             usage.completion_tokens_details = CompletionTokenUsageInfo(
-                reasoning_tokens=sum(
-                    [tokens for tokens in num_reasoning_tokens_per_choice
-                     if tokens is not None]))
+                reasoning_tokens=sum([
+                    tokens for tokens in num_reasoning_tokens_per_choice
+                    if tokens is not None
+                ]))
 
         request_metadata.final_usage_info = usage
 
