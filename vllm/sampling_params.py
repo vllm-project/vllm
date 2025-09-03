@@ -191,7 +191,7 @@ class SamplingParams(
 
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
-    output_text_buffer_length: int = 0
+    _output_text_buffer_length: int = 0
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
 
     # Fields used to construct logits processors
@@ -342,7 +342,8 @@ class SamplingParams(
         # Number of characters to hold back for stop string evaluation
         # until sequence is finished.
         if self.stop and not self.include_stop_str_in_output:
-            self.output_text_buffer_length = max(len(s) for s in self.stop) - 1
+            self._output_text_buffer_length = max(len(s)
+                                                  for s in self.stop) - 1
 
         self._verify_args()
 
@@ -519,6 +520,10 @@ class SamplingParams(
     def bad_words_token_ids(self) -> Optional[list[list[int]]]:
         # For internal use only. Backward compatibility not guaranteed
         return self._bad_words_token_ids
+
+    @property
+    def output_text_buffer_length(self) -> int:
+        return self._output_text_buffer_length
 
     def clone(self) -> "SamplingParams":
         """Deep copy, but maybe not the LogitsProcessor objects.

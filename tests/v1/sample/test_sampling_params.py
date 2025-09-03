@@ -21,3 +21,9 @@ def test_from_optional():
     for name, param in signature.parameters.items():
         assert _is_param_optional(
             param), f"{name} is not optional. Got {param}"
+    # Ensure every public field is supported by from_optional
+    func_args = set(signature.parameters.keys())
+    public_fields = set(field for field in SamplingParams.__struct_fields__
+                        if not field.startswith("_"))
+    assert func_args == public_fields, \
+        f"Missing fields: {public_fields - func_args}"
