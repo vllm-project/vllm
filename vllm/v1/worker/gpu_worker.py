@@ -5,7 +5,7 @@ import copy
 import gc
 import os
 from contextlib import AbstractContextManager, nullcontext
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Callable
 
 import torch
 import torch.distributed
@@ -21,6 +21,7 @@ from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -39,6 +40,18 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
+
+
+def rebuild_ipc(handle: tuple[Callable, tuple],
+                device_id: Optional[int] = None) -> torch.Tensor:
+    func, args = handle
+    list_args = list(args)
+    if device_id is not None:
+        # the key is to change device id to the current device id
+        # in case two processes have different CUDA_VISIBLE_DEVICES
+        list_args[6] = device_id
+    buffer = func(*list_args)
+    return buffer
 
 
 class Worker(WorkerBase):
@@ -186,6 +199,8 @@ class Worker(WorkerBase):
                     f"{GiB(self.requested_memory)} GiB). Decrease GPU memory "
                     f"utilization or reduce GPU memory used by other processes."
                 )
+            self.device_uuid = current_platform.get_device_uuid(
+                self.device.index)
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -217,6 +232,54 @@ class Worker(WorkerBase):
 
     def reload_weights(self) -> None:
         self.model_runner.reload_weights()
+
+    def update_weights_from_ipc(
+        self,
+        named_tensors: list[tuple[str, torch.dtype, torch.Size]],
+        handles: dict[str, tuple[Callable, tuple]] | None,
+        offset: int,
+        end: bool,
+    ):
+        """
+        Args:
+            named_tensors: a list of tuple to specify tensor metadata the info in tuple is [name, dtype, shape]
+            handles: dict key is device_uuid, could get my own from `current_platform.get_device_uuid(self.device.index)` in vLLM
+                dict value is a serialized ipc `handle`, vLLM can use `func, args = handle` and `func(*args)` to rebuild GPU tensor
+                if `ipc_handles` is not None, means this is the first request in current update flow
+                vLLM should rebuild and save this GPU tensor as a shared buffer
+            offset: specify the start offset of named_tensors in ipc_buffer tensor
+            end: specify whether this request is the last request in current update flow
+        """
+        device_id = self.device.index
+        BUF_ATTR_NAME = '_shared_ipc_buffer'
+        buffer: torch.Tensor
+        if handles is not None:
+            buffer = rebuild_ipc(handles[self.device_uuid], device_id)
+            assert buffer.dtype == torch.uint8
+            setattr(self, BUF_ATTR_NAME, buffer)
+        else:
+            assert hasattr(self, BUF_ATTR_NAME)
+            buffer = getattr(self, BUF_ATTR_NAME)
+            assert buffer is not None
+        weights = []
+        for name, dtype, shape in named_tensors:
+            if isinstance(shape, (list, tuple)):
+                shape = torch.Size(shape)
+            assert isinstance(shape, torch.Size)
+            size = dtype.itemsize * shape.numel()
+            tensor = buffer[offset:offset +
+                            size].view(dtype=dtype).view(shape)
+            weights.append((name, tensor))
+            offset += size
+        self.model_runner.model.load_weights(weights=weights)
+        del weights
+        if end:
+            process_weights_after_loading(self.model_runner.model,
+                                          self.model_config, self.device)
+            if hasattr(self, BUF_ATTR_NAME):
+                delattr(self, BUF_ATTR_NAME)
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
 
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
