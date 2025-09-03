@@ -78,7 +78,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         (
             token_data, expert_topk_ids, expert_topk_weights,
-            expert_num_tokens_per_expert_list, handle, event
+            expert_num_tokens_per_expert_list, self.handle, event
         ) = self.buffer.dispatch(
             x=token_data,
             handle=None,
@@ -95,9 +95,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             previous_event=None,
             async_finish=False,
             allocate_on_comm_stream=False)
-
-        # record the handle for this ubatch
-        self.handle = handle
 
         if has_scales:
             expert_x, expert_x_scale = token_data
@@ -203,6 +200,8 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
+
+        assert self.handle is not None
 
         # fused_expert_output can have 0 tokens - This happens when none of the
         # tokens from the all2all reach this EP rank.
