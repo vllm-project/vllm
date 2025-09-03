@@ -47,7 +47,7 @@ async def generate(
                                      temperature=0,
                                      prompt_logprobs=prompt_logprobs)
     async for out in engine.generate(request_id=request_id,
-                                     prompt=prompt,
+                                     request=prompt,
                                      sampling_params=sampling_params,
                                      data_parallel_rank=data_parallel_rank):
 

@@ -45,7 +45,7 @@ async def main():
     prompt = "Who won the 2004 World Series?"
     final_output: Optional[RequestOutput] = None
     async for output in engine_client.generate(
-        prompt=prompt,
+        request=prompt,
         sampling_params=sampling_params,
         request_id="abcdef",
         data_parallel_rank=1,

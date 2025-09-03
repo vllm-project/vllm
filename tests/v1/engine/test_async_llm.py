@@ -71,7 +71,7 @@ async def generate(
         prompt_logprobs=prompt_logprobs,
     )
     async for out in engine.generate(request_id=request_id,
-                                     prompt=prompt,
+                                     request=prompt,
                                      sampling_params=sampling_params):
 
         num_tokens = sum(len(output.token_ids) for output in out.outputs)
@@ -315,7 +315,7 @@ async def test_finished_flag(
         outputs = [
             out
             async for out in engine.generate(request_id="request-33",
-                                             prompt=prompt,
+                                             request=prompt,
                                              sampling_params=sampling_params)
         ]
 
@@ -431,7 +431,7 @@ async def test_dp_rank_argument(monkeypatch: pytest.MonkeyPatch):
 
         # Test with valid DP rank.
         async for _ in engine.generate(request_id="request-34",
-                                       prompt=TEXT_PROMPT,
+                                       request=TEXT_PROMPT,
                                        sampling_params=sampling_params,
                                        data_parallel_rank=0):
             pass
@@ -439,7 +439,7 @@ async def test_dp_rank_argument(monkeypatch: pytest.MonkeyPatch):
         # Test with out-of-range DP rank.
         with pytest.raises(ValueError):
             async for _ in engine.generate(request_id="request-35",
-                                           prompt=TEXT_PROMPT,
+                                           request=TEXT_PROMPT,
                                            sampling_params=sampling_params,
                                            data_parallel_rank=1):
                 pass
@@ -555,7 +555,7 @@ async def collect_outputs(
     """Helper to collect outputs and return the final one."""
     final_output: Optional[RequestOutput] = None
     async for output in engine.generate(request_id=request_id,
-                                        prompt=prompt,
+                                        request=prompt,
                                         sampling_params=sampling_params):
         if not output.finished:
             outputs_list.append(output)
