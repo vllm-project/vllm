@@ -4,6 +4,10 @@
 from torch import fx
 from torch._inductor import pattern_matcher as pm
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 class MultiOutputMatch:
     """
@@ -39,7 +43,6 @@ class MultiOutputMatch:
         resulting in a use of input_2 before its definition.
         """
 
-        print(self.graph.python_code(root_module="self").src)
         nodes = list(self.graph.nodes)
         output_nodes = self.match.output_nodes()
         input_nodes = self.match.args + list(self.match.kwargs.values())
@@ -59,31 +62,25 @@ class MultiOutputMatch:
                 node_indices[node] = nodes.index(node)
             return node_indices[node]
 
-        print(node_indices)
-
         first_output_node = min(output_nodes,
                                 key=lambda node: node_index(node))
         first_output_node_idx = node_index(first_output_node)
-        print(f"first output node is {first_output_node} "
-              f"at index {first_output_node_idx}")
         insertion_point = nodes[first_output_node_idx - 1]
-        print(f"Inserting nodes at {insertion_point}")
 
         # During this worklist process, node indices change and
         # topological ordering can be temporarily broken.
         nodes_to_process = list(input_nodes)  # copy
-        print(f"{nodes_to_process=}")
         while nodes_to_process:
             # breadth-first: inputs of inputs get appended later
             # to end up higher up in the graph
             arg_node = nodes_to_process.pop()
-            print(f"Processing {arg_node}")
             if not isinstance(arg_node, fx.Node):
                 continue  # only nodes can have other inputs
             if node_index(arg_node) < first_output_node_idx:
                 continue  # node already before output
 
-            print(f"Moving {arg_node} before {first_output_node}")
+            logger.debug("Moving %s before %s (inserting after %s)", arg_node,
+                         first_output_node, insertion_point)
             # arg is after the first output, move it before it.
             insertion_point.append(arg_node)
             # Any inputs to arg_node should also be checked
@@ -94,11 +91,8 @@ class MultiOutputMatch:
                     raise ValueError(f"an output node {arg2} is "
                                      f"an input to a pattern input {arg_node}")
 
-                # process arg2
-                print(f"adding {arg2} to process list")
                 nodes_to_process.append(arg2)
 
-        print(self.graph.python_code(root_module="self").src)
         # match always succeeds
         return True
 
