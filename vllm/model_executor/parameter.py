@@ -109,7 +109,7 @@ class BasevLLMParameter(Parameter):
         assert isinstance(shard_id, str)
         assert shard_id in qkv_idxs
         return qkv_idxs[shard_id]
-    
+
     @classmethod
     def __torch_function__(cls, func, types, args=(), kwargs=None):
         if kwargs is None:
