@@ -423,7 +423,6 @@ class Eagle2_5_VLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
         self.ps_version = "v2"
 
         self.llm_arch_name = config.text_config.architectures[0]
-        self.is_mono = False
         vision_feature_layer = config.select_layer
         if vision_feature_layer < 0:
             num_hidden_layers = config.vision_config.num_hidden_layers \
