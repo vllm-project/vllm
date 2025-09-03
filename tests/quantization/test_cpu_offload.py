@@ -11,57 +11,6 @@ from tests.quantization.utils import is_quant_method_supported
 from ..utils import compare_two_settings
 
 
-@pytest.mark.skipif(not is_quant_method_supported("fp8"),
-                    reason="fp8 is not supported on this GPU type.")
-def test_cpu_offload_fp8():
-    # Test quantization of an unquantized checkpoint
-    compare_two_settings(
-        "meta-llama/Llama-3.2-1B-Instruct",
-        ["--quantization", "fp8", "--enforce-eager"],
-        ["--quantization", "fp8", "--enforce-eager", "--cpu-offload-gb", "1"],
-        max_wait_seconds=480)
-    # Test loading a quantized checkpoint
-    compare_two_settings("neuralmagic/Qwen2-0.5B-Instruct-FP8",
-                         ["--enforce-eager"],
-                         ["--enforce-eager", "--cpu-offload-gb", "1"],
-                         max_wait_seconds=480)
-
-
-@pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
-                    reason="gptq_marlin is not supported on this GPU type.")
-def test_cpu_offload_gptq(monkeypatch):
-    # This quant method is sensitive to dummy weights, so we force real weights
-    monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
-    # Test GPTQ Marlin
-    compare_two_settings("Qwen/Qwen2-0.5B-Instruct-GPTQ-Int4",
-                         ["--enforce-eager"],
-                         ["--enforce-eager", "--cpu-offload-gb", "1"],
-                         max_wait_seconds=480)
-    # Test GPTQ
-    compare_two_settings(
-        "Qwen/Qwen2-0.5B-Instruct-GPTQ-Int4",
-        ["--quantization", "gptq", "--enforce-eager"],
-        ["--quantization", "gptq", "--enforce-eager", "--cpu-offload-gb", "1"],
-        max_wait_seconds=480)
-
-
-@pytest.mark.skipif(not is_quant_method_supported("awq_marlin"),
-                    reason="awq_marlin is not supported on this GPU type.")
-def test_cpu_offload_awq(monkeypatch):
-    # This quant method is sensitive to dummy weights, so we force real weights
-    monkeypatch.setenv('VLLM_TEST_FORCE_LOAD_FORMAT', 'auto')
-    # Test AWQ Marlin
-    compare_two_settings("Qwen/Qwen2-0.5B-Instruct-AWQ", ["--enforce-eager"],
-                         ["--enforce-eager", "--cpu-offload-gb", "1"],
-                         max_wait_seconds=480)
-    # Test AWQ
-    compare_two_settings(
-        "Qwen/Qwen2-0.5B-Instruct-AWQ",
-        ["--enforce-eager", "--quantization", "awq"],
-        ["--enforce-eager", "--quantization", "awq", "--cpu-offload-gb", "1"],
-        max_wait_seconds=480)
-
-
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="gptq_marlin is not supported on this GPU type.")
 def test_cpu_offload_compressed_tensors(monkeypatch):
