@@ -358,7 +358,7 @@ class TritonAttentionImpl(AttentionImpl):
             num_tokens, num_heads, head_size = query.shape
             assert layer._q_scale == 1.0, \
                 "A non 1.0 q_scale is not currently supported."
-            if not current_platform.is_rocm():
+            if not (current_platform.is_rocm() or current_platform.is_xpu()):
                 # Skip Q quantization on ROCm, since dequantizing back to
                 # f32 in the attention kernel is not supported.
                 query, _ = ops.scaled_fp8_quant(
