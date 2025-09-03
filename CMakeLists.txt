@@ -784,12 +784,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 
   # Hadacore kernels
-  set(SRCS "csrc/quantization/hadamard/hadacore/hadamard_transform_cuda.cu")
-  set_gencode_flags_for_srcs(
-    SRCS "${SRCS}"
-    CUDA_ARCHS "${CUDA_ARCHS}")
-  list(APPEND VLLM_EXT_SRC "${SRCS}")
-  message(STATUS "Building hadacore")
+  cuda_archs_loose_intersection(HADACORE_ARCHS "8.0" "${CUDA_ARCHS}")
+  if(HADACORE_ARCHS)
+    set(SRCS "csrc/quantization/hadamard/hadacore/hadamard_transform_cuda.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${CUDA_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    message(STATUS "Building hadacore")
+  endif()
 
 # if CUDA endif
 endif()
