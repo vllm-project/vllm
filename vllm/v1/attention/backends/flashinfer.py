@@ -88,7 +88,7 @@ def trtllm_prefill_attn_kvfp8_dequant(
     block_tables_prefill: torch.Tensor,
     k_scale: torch.Tensor,
     v_scale: torch.Tensor,
-) -> Tuple(torch.Tensor, torch.Tensor):    
+) -> Tuple[torch.Tensor, torch.Tensor]:
     batch_size, num_of_page_per_token = block_tables_prefill.shape
     s = kv_cache.shape
     assert s[1] == 2
