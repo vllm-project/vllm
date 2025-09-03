@@ -32,10 +32,10 @@ import torch
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+import vllm.envs as envs
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
-                         get_current_vllm_config)
+from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -136,9 +136,9 @@ class DeepseekV2MoE(nn.Module):
     def __init__(
         self,
         config: Union[DeepseekV2Config, DeepseekV3Config],
+        parallel_config: ParallelConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        enable_eplb: bool = False,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -154,6 +154,11 @@ class DeepseekV2MoE(nn.Module):
 
         # FIXME - only if we're using EP.
         self.is_sequence_parallel = True
+        self.sequence_parallel = (envs.VLLM_ALL2ALL_BACKEND
+                                  in ("deepep_high_throughput",
+                                      "deepep_low_latency")
+                                  and parallel_config.enable_expert_parallel
+                                  and self.tp_size > 1)
 
         if config.hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
@@ -171,9 +176,8 @@ class DeepseekV2MoE(nn.Module):
             self.gate.e_score_correction_bias = None
 
         # Load balancing settings.
-        vllm_config = get_current_vllm_config()
-        eplb_config = vllm_config.parallel_config.eplb_config
-        self.enable_eplb = enable_eplb
+        eplb_config = parallel_config.eplb_config
+        self.enable_eplb = parallel_config.enable_eplb
 
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_logical_experts = self.n_routed_experts
@@ -227,20 +231,39 @@ class DeepseekV2MoE(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = self.sp_chunk(hidden_states)
 
-        shared_output = self.shared_experts(hidden_states)
+        if self.n_shared_experts is not None:
+            shared_output = self.shared_experts(hidden_states)
 
+        # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits) * self.routed_scaling_factor
+        if hidden_states.dtype != torch.float16:
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits) * self.routed_scaling_factor
+        else:
+            # Fix FP16 overflow
+            # See DeepseekV2DecoderLayer for more details.
+            final_hidden_states = self.experts(hidden_states=hidden_states,
+                                               router_logits=router_logits)
 
-        final_hidden_states = final_hidden_states + shared_output
+        if shared_output is not None:
+            if hidden_states.dtype != torch.float16:
+                final_hidden_states = final_hidden_states + shared_output
+            else:
+                # Fix FP16 overflow
+                # See DeepseekV2DecoderLayer for more details.
+                final_hidden_states = final_hidden_states + shared_output \
+                    * (1. / self.routed_scaling_factor)
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0).contiguous()
             final_hidden_states = final_hidden_states[:num_tokens]
+        elif self.tp_size > 1:
+            final_hidden_states = (
+                self.experts.maybe_all_reduce_tensor_model_parallel(
+                    final_hidden_states))
         # **************************************************
 
         return final_hidden_states.view(num_tokens, hidden_dim)
@@ -576,10 +599,10 @@ class DeepseekV2DecoderLayer(nn.Module):
         self,
         config: Union[DeepseekV2Config, DeepseekV3Config],
         prefix: str,
+        parallel_config: ParallelConfig,
         model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        enable_eplb: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -618,9 +641,9 @@ class DeepseekV2DecoderLayer(nn.Module):
                 and layer_idx % config.moe_layer_freq == 0):
             self.mlp = DeepseekV2MoE(
                 config=config,
+                parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
-                enable_eplb=enable_eplb,
             )
         else:
             self.mlp = DeepseekV2MLP(
@@ -693,7 +716,7 @@ class DeepseekV2Model(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        enable_eplb = vllm_config.parallel_config.enable_eplb
+        parallel_config = vllm_config.parallel_config
         self.config = config
 
         self.vocab_size = config.vocab_size
@@ -712,10 +735,10 @@ class DeepseekV2Model(nn.Module):
             lambda prefix: DeepseekV2DecoderLayer(
                 config,
                 prefix,
+                parallel_config=parallel_config,
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
-                enable_eplb=enable_eplb,
             ),
             prefix=f"{prefix}.layers")
 
