@@ -249,10 +249,8 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        self.a2a.combine(
-            out_tokens=output,
-            indices=topk_ids.view(dtype=torch.uint32),
-            weights=topk_weights,
-            expert_y=fused_expert_output,
-            bound_m=bound_m,
-        )
+        self.a2a.combine(out_tokens=output,
+                         indices=topk_ids.view(dtype=torch.uint32),
+                         weights=topk_weights,
+                         expert_y=fused_expert_output,
+                         bound_m=bound_m)
