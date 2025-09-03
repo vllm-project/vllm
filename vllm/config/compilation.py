@@ -87,8 +87,14 @@ class PassConfig:
     """Whether to enable async TP."""
     enable_fi_allreduce_fusion: bool = False
     """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_token_num: int = 16384
-    """Max number of tokens to used in flashinfer allreduce fusion."""
+    fi_allreduce_fusion_max_size_mb: dict[int,
+                                          float] = field(default_factory=dict)
+    """The thresholds of the communicated tensor sizes under which
+    vllm should use flashinfer fused allreduce. Specified as a
+    dictionary mapping each world size to the threshold in MB
+        { <world size>: <max size in mb> }
+    Unspecified world sizes will fallback to
+        { 2: 32, 4: 32, 8: 2 }"""
 
     # TODO(luka) better pass enabling system.
 
@@ -137,6 +143,8 @@ class CompilationConfig:
     - Inductor compilation:
         - [`use_inductor`][vllm.config.CompilationConfig.use_inductor]
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
+        - [`compile_ranges_split_points`]
+            [vllm.config.CompilationConfig.compile_ranges_split_points]
         - [`inductor_compile_config`]
         [vllm.config.CompilationConfig.inductor_compile_config]
         - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
@@ -212,6 +220,14 @@ class CompilationConfig:
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
+    compile_ranges_split_points: Optional[list[int]] = None
+    """Split points that represent compile ranges for inductor.
+    The compile ranges are 
+    [1, split_points[0]], 
+    [split_points[0], split_points[1]], ..., 
+    [split_points[-1], max_num_batched_tokens].
+    """
+
     inductor_compile_config: dict = field(default_factory=dict)
     """Additional configurations for inductor.
     - None: use default configurations."""

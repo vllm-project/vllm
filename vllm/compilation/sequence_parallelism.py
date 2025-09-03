@@ -471,9 +471,12 @@ class SequenceParallelismPass(VllmInductorPass):
             # and allow multiple values of epsilon.
             torch._inductor.pattern_matcher._seen_patterns.clear()
 
-    def is_applicable_for_shape(self, shape: Optional[int]) -> bool:
+    def is_applicable_for_range(
+            self, compile_range: Optional[tuple[int, int]]) -> bool:
         tp_size = get_tensor_model_parallel_world_size()
-        return shape is not None and shape % tp_size == 0
+        return compile_range is not None and (
+            compile_range[0]
+            == compile_range[1]) and (compile_range[1] % tp_size == 0)
 
     def __call__(self, graph: fx.Graph):
         self.begin()

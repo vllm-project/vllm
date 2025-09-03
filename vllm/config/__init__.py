@@ -49,8 +49,8 @@ from vllm.transformers_utils.config import (
     try_get_tokenizer_config, uses_mrope)
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
-from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS, LayerBlockType,
-                        LazyLoader, common_broadcastable_dtype, random_uuid)
+from vllm.utils import (LayerBlockType, LazyLoader, common_broadcastable_dtype,
+                        flashinfer_max_size, random_uuid)
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -3643,6 +3643,7 @@ class VllmConfig:
             self._set_cudagraph_sizes()
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        self._set_compile_ranges()
 
         if self.cache_config.cpu_offload_gb > 0 and \
             self.compilation_config.level != CompilationLevel.NO_COMPILATION \
@@ -3859,6 +3860,45 @@ class VllmConfig:
 
         self.compilation_config.init_with_cudagraph_sizes(
             batch_size_capture_list)
+
+    def _set_compile_ranges(self):
+        """
+        Set the compile ranges for the compilation config.
+        """
+        compilation_config = self.compilation_config
+        computed_compile_ranges_split_points = []
+
+        # The upper bound of the compile ranges is the max_num_batched_tokens
+        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+        if max_num_batched_tokens is not None:
+            # We add 1 because the bounds checks in the compiler are exclusive
+            # and we want to include the max_num_batched_tokens
+            # in the compile range
+            computed_compile_ranges_split_points.append(
+                max_num_batched_tokens + 1)
+
+        # Add the compile ranges for flashinfer
+        if compilation_config.pass_config.enable_fi_allreduce_fusion:
+            tp_size = self.parallel_config.tensor_parallel_size
+            max_size = flashinfer_max_size(tp_size, self)
+            if max_size is not None:
+                max_token_num = max_size // (
+                    self.model_config.get_hidden_size() *
+                    self.model_config.dtype.itemsize)
+                # We add 1 because the bounds checks in the compiler are
+                # exclusive and we want to include the max_token_num in the
+                # compile range
+                computed_compile_ranges_split_points.append(max_token_num + 1)
+
+        if compilation_config.compile_ranges_split_points is not None:
+            for x in compilation_config.compile_ranges_split_points:
+                assert isinstance(x, int)
+                assert x > 0, f"Invalid compile range split point: {x}"
+                if (max_num_batched_tokens is not None
+                        and x < max_num_batched_tokens and x > 1):
+                    computed_compile_ranges_split_points.append(x)
+        compilation_config.compile_ranges_split_points = sorted(
+            computed_compile_ranges_split_points)  # type: ignore
 
     def recalculate_max_model_len(self, max_model_len: int):
         # Can only be called in try_verify_and_update_config
