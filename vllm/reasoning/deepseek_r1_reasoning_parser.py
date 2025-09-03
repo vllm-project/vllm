@@ -173,9 +173,9 @@ class DeepSeekR1ReasoningParser(ReasoningParser):
                     
                     # Check if both start and end tokens are found
                     if start_idx != -1 and end_idx != -1:
-                        reasoning_content_tokens = model_output_tokens[start_idx+1:end_idx]
+                        reasoning_content_tokens = \
+                            model_output_tokens[start_idx+1:end_idx]
                 except ValueError:
-                    # Handle the case where start_token_id or end_token_id is not found
                     pass
                 
             reasoning_content, _, content = model_output.partition(

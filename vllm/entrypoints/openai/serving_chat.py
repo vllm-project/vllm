@@ -890,13 +890,12 @@ class OpenAIServingChat(OpenAIServing):
                     else:
                         delta_message = DeltaMessage(content=delta_text)
 
-                    if delta_message is not None:
-                        if delta_message.reasoning_content:
-                            num_reasoning_tokens_per_choice[i] += len(output.token_ids)
-                        elif self.use_harmony and not harmony_parsers[i].current_channel == "final":
-                            num_reasoning_tokens_per_choice[i] += len(output.token_ids)
-                            
-                    
+                    if delta_message is not None 
+                    and (delta_message.reasoning_content 
+                         or (self.use_harmony and 
+                             not harmony_parsers[i].current_channel == "final")):
+                        num_reasoning_tokens_per_choice[i] += len(output.token_ids)
+
                     # update the previous values for the next iteration
                     if ((tool_choice_auto or self.reasoning_parser)
                             and not self.use_harmony):
@@ -1031,8 +1030,10 @@ class OpenAIServingChat(OpenAIServing):
                             total_tokens=num_prompt_tokens + completion_tokens,
                         )
                         if num_reasoning_tokens_per_choice[i] > 0:
-                            chunk.usage.completion_tokens_details = CompletionTokenUsageInfo(
-                                reasoning_tokens=num_reasoning_tokens_per_choice[i])
+                            chunk.usage.completion_tokens_details = \
+                                CompletionTokenUsageInfo(
+                                    reasoning_tokens= \
+                                        num_reasoning_tokens_per_choice[i])
 
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
@@ -1049,8 +1050,12 @@ class OpenAIServingChat(OpenAIServing):
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens)
                 if any(num_reasoning_tokens_per_choice):
-                    final_usage.completion_tokens_details = CompletionTokenUsageInfo(
-                        reasoning_tokens=sum([tokens for tokens in num_reasoning_tokens_per_choice if tokens is not None]))
+                    valid_reasoning_tokens = [tokens for tokens in 
+                                              num_reasoning_tokens_per_choice 
+                                              if tokens is not None]
+                    final_usage.completion_tokens_details = \
+                        CompletionTokenUsageInfo(
+                            reasoning_tokens=sum(valid_reasoning_tokens))
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
