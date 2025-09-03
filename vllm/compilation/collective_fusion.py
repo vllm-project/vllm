@@ -19,8 +19,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape)
 from vllm.platforms import current_platform
-from vllm.utils import (_FI_ALLREDUCE_ONE_SHOT_MAX_SIZES,
-                        direct_register_custom_op, flashinfer_max_size)
+from vllm.utils import direct_register_custom_op
 
 from .inductor_pass import enable_fake_mode
 from .vllm_inductor_pass import VllmInductorPass
@@ -398,6 +397,22 @@ class AsyncTPPass(VllmInductorPass):
 if flashinfer_comm is not None:
     _FI_WORKSPACE_TENSOR = None
 
+    MiB = 1024 * 1024
+    # Max size of the input tensor per world size per device capability
+    # to use flashinfer one shot fused allreduce
+    _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES = {
+        "9.0": {
+            2: 32 * MiB,  # 32MB
+            4: 2 * MiB,  # 2MB
+            8: 1 * MiB,  # 1MB
+        },
+        "10.0": {
+            2: 32 * MiB,  # 32MB
+            4: 4 * MiB,  # 4MB
+            8: 1 * MiB,  # 1MB
+        },
+    }
+
     def call_trtllm_fused_allreduce_norm(
         allreduce_in: torch.Tensor,
         residual: torch.Tensor,
@@ -425,9 +440,11 @@ if flashinfer_comm is not None:
             f"element size {element_size}"
         device_capability = current_platform.get_device_capability(
         ).as_version_str()
-        max_sizes = _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES.get(device_capability, {})
         # Get one shot input size limit for the current world size
-        max_one_shot_size = max_sizes.get(world_size, None)
+        # for the current device capability
+        max_one_shot_size = _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES. \
+                        get(device_capability, {}). \
+                        get(world_size, None)
         # Use one shot if no max size is specified
         use_oneshot = max_one_shot_size is None or \
             current_tensor_size <= max_one_shot_size
@@ -1449,7 +1466,8 @@ class AllReduceFusionPass(VllmInductorPass):
                 "Flashinfer is not installed or comm module not found, "
                 "skipping allreduce fusion pass")
             return
-        max_size = flashinfer_max_size(self.tp_size, config)
+        max_size = config.compilation_config.\
+            pass_config.flashinfer_max_size(self.tp_size)
         if max_size is None:
             # Flashinfer doesn't support current world size
             logger.warning(

@@ -555,6 +555,8 @@ def set_inductor_config(config, compile_range):
     if isinstance(compile_range, tuple):
         # for a specific range of batchsizes, tuning triton kernel parameters
         # can be beneficial
+        #TODO(luka): max autotune only present with -O3,
+        # and this should live in config: https://github.com/vllm-project/vllm/issues/20283
         config["max_autotune"] = True
         config["coordinate_descent_tuning"] = True
 

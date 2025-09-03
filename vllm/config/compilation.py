@@ -94,9 +94,58 @@ class PassConfig:
     dictionary mapping each world size to the threshold in MB
         { <world size>: <max size in mb> }
     Unspecified world sizes will fallback to
-        { 2: 32, 4: 32, 8: 2 }"""
+        _FI_ALLREDUCE_MAX_INPUT_SIZES = {
+            "9.0": {
+                2: 64 * MiB,  # 64MB
+                4: 2 * MiB,  # 2MB
+                8: 1 * MiB,  # 1MB
+            },
+            "10.0": {
+                2: 64 * MiB,  # 64MB
+                4: 32 * MiB,  # 32MB
+                8: 1 * MiB,  # 1MB
+            },
+        }, where key is the device capability"""
 
     # TODO(luka) better pass enabling system.
+
+    def flashinfer_max_size(self, world_size: int) -> Optional[int]:
+        """
+        Returns the max communication size in bytes for flashinfer
+        allreduce fusion for the given world size. Falls back to
+        conservative defaults if the world size is not specified in config.
+        """
+
+        # import here to avoid circular dependencies
+        from vllm.platforms import current_platform
+        MiB = 1024 * 1024
+
+        # Max size of the input tensor per world size per device capability
+        # to use flashinfer fused allreduce
+        _FI_ALLREDUCE_MAX_INPUT_SIZES = {
+            "9.0": {
+                2: 64 * MiB,  # 64MB
+                4: 2 * MiB,  # 2MB
+                8: 1 * MiB,  # 1MB
+            },
+            "10.0": {
+                2: 64 * MiB,  # 64MB
+                4: 32 * MiB,  # 32MB
+                8: 1 * MiB,  # 1MB
+            },
+        }
+
+        device_capability = current_platform.get_device_capability(
+        ).as_version_str()
+        max_sizes = _FI_ALLREDUCE_MAX_INPUT_SIZES.get(device_capability, {})
+        max_sizes.update({
+            k: int(v * MiB)
+            for k, v in self.fi_allreduce_fusion_max_size_mb.items()
+        })
+        if world_size not in max_sizes:
+            # FlashInfer doesn't support other world sizes
+            return None
+        return max_sizes[world_size]
 
     def uuid(self):
         """
@@ -223,9 +272,11 @@ class CompilationConfig:
     compile_ranges_split_points: Optional[list[int]] = None
     """Split points that represent compile ranges for inductor.
     The compile ranges are 
-    [1, split_points[0]], 
-    [split_points[0], split_points[1]], ..., 
-    [split_points[-1], max_num_batched_tokens].
+    [1, split_points[0]), 
+    [split_points[0], split_points[1]), ..., 
+    [split_points[-1], max_num_batched_tokens + 1).
+    Compile sizes are also used single element ranges:
+    [compile_sizes[i], compile_sizes[i] + 1).
     """
 
     inductor_compile_config: dict = field(default_factory=dict)
@@ -579,3 +630,22 @@ class CompilationConfig:
     def splitting_ops_contain_attention(self) -> bool:
         return self.splitting_ops is not None and all(
             op in self.splitting_ops for op in self._attention_ops)
+
+    def get_compile_ranges(self) -> list[tuple[int, int]]:
+        """Get the compile ranges for the compilation config."""
+        compile_ranges_split_points = self.compile_ranges_split_points
+        compile_ranges = []
+        # max_num_batched_tokens + 1
+        max_split_point = max(compile_ranges_split_points)
+        split_points = sorted(
+            set(self.compile_sizes).union(set(
+                self.compile_ranges_split_points)))
+        split_points = split_points.filter(lambda x: x <= max_split_point)
+        for i, s in enumerate(split_points):
+            if i == 0:
+                self.compile_ranges.append((1, s))
+            else:
+                self.compile_ranges.append((split_points[i - 1], s))
+            if s in self.compile_sizes and s != 1:
+                self.compile_ranges.append((s, s))
+        return sorted(compile_ranges)

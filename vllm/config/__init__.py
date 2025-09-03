@@ -50,7 +50,7 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.s3_utils import S3Model
 from vllm.transformers_utils.utils import is_s3, maybe_model_redirect
 from vllm.utils import (LayerBlockType, LazyLoader, common_broadcastable_dtype,
-                        flashinfer_max_size, random_uuid)
+                        random_uuid)
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -3877,7 +3877,8 @@ class VllmConfig:
         # Add the compile ranges for flashinfer
         if compilation_config.pass_config.enable_fi_allreduce_fusion:
             tp_size = self.parallel_config.tensor_parallel_size
-            max_size = flashinfer_max_size(tp_size, self)
+            max_size = compilation_config.pass_config.flashinfer_max_size(
+                tp_size)
             if max_size is not None:
                 max_token_num = max_size // (
                     self.model_config.get_hidden_size() *

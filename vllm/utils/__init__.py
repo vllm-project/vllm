@@ -87,64 +87,6 @@ DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
-# Max communication size for flashinfer fused allreduce
-MiB = 1024 * 1024
-
-# Max size of the input tensor per world size per device capability
-# to use flashinfer fused allreduce
-_FI_ALLREDUCE_MAX_INPUT_SIZES = {
-    "9.0": {
-        2: 64 * MiB,  # 64MB
-        4: 2 * MiB,  # 2MB
-        8: 1 * MiB,  # 1MB
-    },
-    "10.0": {
-        2: 64 * MiB,  # 64MB
-        4: 32 * MiB,  # 32MB
-        8: 1 * MiB,  # 1MB
-    },
-}
-
-# Max size of the input tensor per world size per device capability
-# to use flashinfer one shot fused allreduce
-_FI_ALLREDUCE_ONE_SHOT_MAX_SIZES = {
-    "9.0": {
-        2: 32 * MiB,  # 32MB
-        4: 2 * MiB,  # 2MB
-        8: 1 * MiB,  # 1MB
-    },
-    "10.0": {
-        2: 32 * MiB,  # 32MB
-        4: 4 * MiB,  # 4MB
-        8: 1 * MiB,  # 1MB
-    },
-}
-
-
-def flashinfer_max_size(world_size: int, config: VllmConfig) -> Optional[int]:
-    """
-    Returns the max communication size in bytes for flashinfer
-    allreduce fusion for the given world size. Falls back to
-    conservative defaults if the world size is not specified in config.
-    """
-
-    # import here to avoid circular dependencies
-    from vllm.platforms import current_platform
-
-    device_capability = current_platform.get_device_capability(
-    ).as_version_str()
-    max_sizes = _FI_ALLREDUCE_MAX_INPUT_SIZES.get(device_capability, {})
-    max_sizes.update({
-        k: int(v * MiB)
-        for k, v in config.compilation_config.pass_config.
-        fi_allreduce_fusion_max_size_mb.items()
-    })
-    if world_size not in max_sizes:
-        # FlashInfer doesn't support other world sizes
-        return None
-    return max_sizes[world_size]
-
-
 # Exception strings for non-implemented encoder/decoder scenarios
 
 # Reminder: Please update docs/features/compatibility_matrix.md

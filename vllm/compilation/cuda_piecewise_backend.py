@@ -50,22 +50,7 @@ class PiecewiseBackend:
 
         self.is_full_graph = total_piecewise_compiles == 1
 
-        self.compile_sizes: set[int] = set(
-            self.compilation_config.compile_sizes)
-        self.compile_ranges_split_points: list[
-            int] = self.compilation_config.compile_ranges_split_points
-        self.compile_ranges = []
-        split_points = sorted(
-            set(self.compile_sizes).union(set(
-                self.compile_ranges_split_points)))
-        for i, s in enumerate(split_points):
-            if i == 0:
-                self.compile_ranges.append((1, s))
-            else:
-                self.compile_ranges.append((split_points[i - 1], s))
-            if s in self.compile_sizes:
-                self.compile_ranges.append((s, s))
-        self.compile_ranges = sorted(self.compile_ranges)
+        self.compile_ranges = self.compilation_config.get_compile_ranges()
         log_string = f"PiecewiseBackend: compile_ranges: {self.compile_ranges}"
         logger.debug_once(log_string)
 
