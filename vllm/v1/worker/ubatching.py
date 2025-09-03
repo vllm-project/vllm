@@ -27,7 +27,6 @@ class UBatchContext:
                  cpu_signal_event: threading.Event,
                  gpu_comm_done_event: torch.cuda.Event,
                  gpu_compute_done_event: torch.cuda.Event,
-                 enable_async_comms: bool,
                  schedule: str = "default"):
         self.id = id
         self.comm_stream = comm_stream
@@ -39,7 +38,6 @@ class UBatchContext:
         self.current_stream = compute_stream
         self.gpu_comm_done_event = gpu_comm_done_event
         self.gpu_compute_done_event = gpu_compute_done_event
-        self.enable_async_comms = enable_async_comms
         self.schedule = schedule
         self.recv_hook = None
 
@@ -175,7 +173,6 @@ def make_ubatch_contexts(
     forward_contexts: list[ForwardContext],
     ready_barrier: threading.Barrier,
     device: Optional[torch.device] = None,
-    enable_async_comms: bool = False,
     schedule: str = "default",
 ) -> list[UBatchContext]:
     assert num_micro_batches == 2, "only been tested with 2 micro-batches"
@@ -206,7 +203,6 @@ def make_ubatch_contexts(
                                                         num_micro_batches],
                             gpu_comm_done_event=gpu_comm_done_events[i],
                             gpu_compute_done_event=gpu_compute_done_events[i],
-                            enable_async_comms=enable_async_comms,
                             schedule=schedule)
         ctxs.append(ctx)
 

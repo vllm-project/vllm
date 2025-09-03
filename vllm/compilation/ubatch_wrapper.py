@@ -209,9 +209,7 @@ class UBatchWrapper:
             compute_stream=compute_stream,
             forward_contexts=forward_contexts,
             ready_barrier=self.ready_barrier,
-            device=self.device,
-            enable_async_comms=self.vllm_config.parallel_config.
-            enable_async_comms)
+            device=self.device)
 
         ubatch_metadata: list[UbatchMetadata] = []
         for i, ubatch_slice in enumerate(ubatch_slices):
