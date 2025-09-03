@@ -16,7 +16,6 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate, TopKWeightAndReduceNoOP)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
-                                                        _fp8_perm,
                                                         _resize_cache)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
@@ -156,12 +155,18 @@ def run_cutlass_moe_fp8(
                                      dtype=torch.int32,
                                      device=device)
 
-        a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
-        c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
-        expert_offsets2 = torch.empty((global_num_experts + 1), dtype=torch.int32, device=device)
+        a_map = torch.empty((topk_ids.numel()),
+                            dtype=torch.int32,
+                            device=device)
+        c_map = torch.empty((topk_ids.numel()),
+                            dtype=torch.int32,
+                            device=device)
+        expert_offsets2 = torch.empty((global_num_experts + 1),
+                                      dtype=torch.int32,
+                                      device=device)
         ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets2, problem_sizes1,
-                                problem_sizes2, a_map, c_map,
-                                global_num_experts, N, K)
+                                    problem_sizes2, a_map, c_map,
+                                    global_num_experts, N, K)
 
         num_expert = global_num_experts if expert_map is None \
                      else expert_map.size(0)
@@ -991,8 +996,9 @@ def run_block_scaled_cutlass_moe_fp8(
 
     num_expert = global_num_experts if expert_map is None \
                      else expert_map.size(0)
-    a1q_perm = torch.empty((M * topk, K), dtype=torch.float8_e4m3fn,
-                        device=a1q.device)
+    a1q_perm = torch.empty((M * topk, K),
+                           dtype=torch.float8_e4m3fn,
+                           device=a1q.device)
     # a1q, a1q_scale, expert_offsets, inv_perm, _ = moe_permute(
     #         a1q,
     #         a1q_scale,
@@ -1006,7 +1012,7 @@ def run_block_scaled_cutlass_moe_fp8(
     c2 = _resize_cache(workspace2, (M * topk, N))
     c3 = _resize_cache(workspace13, (M * topk, K))
     expert_offsets_truncated = expert_offsets.to(torch.int32)[:-1]
-    
+
     # c1_copy = torch.zeros((M * topk, N * 2), device=c1.device, dtype=c1.dtype)
     # c2_copy = torch.zeros((M * topk, N), device=c2.device, dtype=c2.dtype)
     # c3_copy = torch.zeros((M * topk, K), device=c3.device, dtype=c3.dtype)
@@ -1024,7 +1030,6 @@ def run_block_scaled_cutlass_moe_fp8(
             a1q_scale = a1q_scale.repeat(a1q.shape[1] // 128, a1q.shape[0])
     elif not per_act_block:
         a1q_scale = a1q_scale.repeat(a1q.shape[0], a1q.shape[1] // 128)
-
 
     if expert_map is not None:
         c1.fill_(0)
@@ -1079,12 +1084,12 @@ def run_block_scaled_cutlass_moe_fp8(
 
     # ground = ((c3_copy[c_map].view(M, topk, K) * topk_weights.reshape(
     #     M, topk, 1)).sum(dim=1))
-    
+
     output.fill_(999)
     moe_unpermute(out=output,
-                    permuted_hidden_states=c3,
-                    topk_weights=topk_weights,
-                    inv_permuted_idx=inv_perm)
+                  permuted_hidden_states=c3,
+                  topk_weights=topk_weights,
+                  inv_permuted_idx=inv_perm)
     # output.copy_(ground, non_blocking=True)
 
 
@@ -1251,7 +1256,7 @@ def block_scaled_cutlass_moe_fp8(
     out_dtype = a.dtype
 
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(),#(skip_quant=True),
+        MoEPrepareAndFinalizeNoEP(),  #(skip_quant=True),
         CutlassExpertsBlockedFp8(
             max_experts_per_worker=global_num_experts,
             out_dtype=out_dtype,

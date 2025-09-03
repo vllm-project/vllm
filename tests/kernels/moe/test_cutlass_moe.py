@@ -616,11 +616,7 @@ def test_run_cutlass_moe_fp8(
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("per_act_block", [True])
-# @pytest.mark.parametrize("m,n,k", [(2, 1024, 1024)])
-# @pytest.mark.parametrize("e", [40])
-# @pytest.mark.parametrize("topk", [6])
-# @pytest.mark.parametrize("per_act_block", [False])
+@pytest.mark.parametrize("per_act_block", [True, False])
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_blockwise_group_gemm_supported(
         x.to_int()))(current_platform.get_device_capability()),
@@ -676,27 +672,27 @@ def test_blocked_cutlass_moe_8_bit(
                                    rtol=1e-2)
 
 
-# @pytest.mark.parametrize("m", [64])
-# @pytest.mark.parametrize("n", [1024])
-# @pytest.mark.parametrize("k", [4096])
-# @pytest.mark.parametrize("e", [16])
-# @pytest.mark.parametrize("topk", [1, 8])
-# @pytest.mark.parametrize("per_act_block", [True])
-# @pytest.mark.parametrize("ep_size", [2, 4, 8, 16])
-# @pytest.mark.skipif(
-#     (lambda x: x is None or not ops.cutlass_blockwise_group_gemm_supported(
-#         x.to_int()))(current_platform.get_device_capability()),
-#     reason="Blockwise grouped gemm is not supported on this GPU type or not "
-#     "compiled.")
-# def test_blocked_cutlass_moe_8_bit_EP(
-#     m: int,
-#     n: int,
-#     k: int,
-#     e: int,
-#     topk: int,
-#     per_act_block: bool,
-#     ep_size: int,
-#     monkeypatch,
-# ):
-#     test_blocked_cutlass_moe_8_bit(m, n, k, e, topk, per_act_block,
-#                                    monkeypatch, ep_size)
+@pytest.mark.parametrize("m", [64])
+@pytest.mark.parametrize("n", [1024])
+@pytest.mark.parametrize("k", [4096])
+@pytest.mark.parametrize("e", [16])
+@pytest.mark.parametrize("topk", [1, 8])
+@pytest.mark.parametrize("per_act_block", [True])
+@pytest.mark.parametrize("ep_size", [2, 4, 8, 16])
+@pytest.mark.skipif(
+    (lambda x: x is None or not ops.cutlass_blockwise_group_gemm_supported(
+        x.to_int()))(current_platform.get_device_capability()),
+    reason="Blockwise grouped gemm is not supported on this GPU type or not "
+    "compiled.")
+def test_blocked_cutlass_moe_8_bit_EP(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    per_act_block: bool,
+    ep_size: int,
+    monkeypatch,
+):
+    test_blocked_cutlass_moe_8_bit(m, n, k, e, topk, per_act_block,
+                                   monkeypatch, ep_size)
