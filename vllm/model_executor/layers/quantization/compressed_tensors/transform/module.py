@@ -104,12 +104,16 @@ class HadamardTransform(torch.nn.Module):
                 part_id].args.inverse else weight.T  # linear := x(W.T)
             scale = self.scales[part_id]
 
-            value = value.unflatten(-1, (-1, weight.size(0)))
-            value = dispatch_unquantized_gemm()(self, value.to(
-                weight.dtype), weight, None).to(value.dtype) * scale
-            value = value.flatten(-2, -1)
+            if self.transforms[part_id].scheme.head_dim is not None:
+                value = value.unflatten(-1, (-1, weight.size(0)))
+                value = dispatch_unquantized_gemm()(self, value.to(
+                    weight.dtype), weight, None).to(value.dtype) * scale
+                value = value.flatten(-2, -1)
 
-            return value
+                return value
+
+            return dispatch_unquantized_gemm()(self, value.to(
+                weight.dtype), weight, None).to(value.dtype) * scale
 
     def _get_data_key(self, scheme: TransformScheme,
                       weight_size: int) -> Hashable:
