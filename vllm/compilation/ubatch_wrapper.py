@@ -185,7 +185,7 @@ class UBatchWrapper:
 
     def _make_ubatch_metadata(self, ubatch_slices, attn_metadata, input_ids,
                               positions, inputs_embeds, intermediate_tensors,
-                              compute_stream, num_tokens_across_dp,
+                              compute_stream, dp_metadata,
                               batch_descriptor,
                               cudagraph_runtime_mode) -> list[UbatchMetadata]:
 
@@ -198,8 +198,7 @@ class UBatchWrapper:
                 create_forward_context(
                     attn_metadata[i] if attn_metadata is not None else None,
                     self.vllm_config,
-                    num_tokens=num_tokens,
-                    num_tokens_across_dp=num_tokens_across_dp,
+                    dp_metadata=dp_metadata,
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode))
 
@@ -270,8 +269,9 @@ class UBatchWrapper:
         compute_stream = torch.cuda.current_stream()
 
         dp_metadata = forward_context.dp_metadata
+
+        # We shouldn't be here unless we are running with multiple DP ranks
         assert dp_metadata is not None
-        num_tokens_across_dp = dp_metadata._num_tokens_across_dp
 
         if num_tokens not in self.cudagraphs \
             and cudagraph_runtime_mode is CUDAGraphMode.FULL:
@@ -283,7 +283,7 @@ class UBatchWrapper:
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
                 compute_stream=compute_stream,
-                num_tokens_across_dp=num_tokens_across_dp,
+                dp_metadata=dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE)
 
@@ -301,7 +301,7 @@ class UBatchWrapper:
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
                 compute_stream=compute_stream,
-                num_tokens_across_dp=num_tokens_across_dp,
+                dp_metadata=dp_metadata,
                 batch_descriptor=batch_descriptor,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE)
             return self._run_ubatches(ubatch_metadata, self.model)

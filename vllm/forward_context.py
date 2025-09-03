@@ -237,18 +237,10 @@ def get_forward_context() -> ForwardContext:
 def create_forward_context(attn_metadata: Any,
                            vllm_config: VllmConfig,
                            virtual_engine: int = 0,
-                           num_tokens: Optional[int] = None,
-                           num_tokens_across_dp: Optional[torch.Tensor] = None,
+                           dp_metadata: Optional[DPMetadata] = None,
                            cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
                            batch_descriptor: Optional[BatchDescriptor] = None,
                            ubatch_slices: Optional[UBatchSlices] = None):
-    dp_metadata: Optional[DPMetadata] = None
-    if vllm_config.parallel_config.data_parallel_size > 1 and (
-            attn_metadata is not None or num_tokens is not None):
-        dp_metadata = DPMetadata.make(vllm_config.parallel_config,
-                                      attn_metadata, num_tokens or 0,
-                                      num_tokens_across_dp)
-
     return ForwardContext(no_compile_layers=vllm_config.compilation_config.
                           static_forward_context,
                           virtual_engine=virtual_engine,
@@ -293,9 +285,15 @@ def set_forward_context(
     if need_to_track_batchsize:
         forward_start_time = time.perf_counter()
 
+    dp_metadata: Optional[DPMetadata] = None
+    if vllm_config.parallel_config.data_parallel_size > 1 and (
+            attn_metadata is not None or num_tokens is not None):
+        dp_metadata = DPMetadata.make(vllm_config.parallel_config,
+                                      attn_metadata, num_tokens or 0,
+                                      num_tokens_across_dp)
+
     forward_context = create_forward_context(attn_metadata, vllm_config,
-                                             virtual_engine, num_tokens,
-                                             num_tokens_across_dp,
+                                             virtual_engine, dp_metadata,
                                              cudagraph_runtime_mode, batch_descriptor,
                                              ubatch_slices)
 

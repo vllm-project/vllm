@@ -1686,13 +1686,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_input_tokens)
             num_input_tokens += num_pad
 
-        uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
-            num_scheduled_tokens == self.input_batch.num_reqs * max_query_len)
-        batch_descriptor = BatchDescriptor(num_tokens=num_input_tokens,
-                                           uniform_decode=uniform_decode)
-        cudagraph_runtime_mode, batch_descriptor = \
-            self.cudagraph_dispatcher.dispatch(batch_descriptor)
-
         if self.supports_mm_inputs:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
@@ -1747,6 +1740,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                                            uniform_decode=uniform_decode)
         cudagraph_runtime_mode, batch_descriptor = \
             self.cudagraph_dispatcher.dispatch(batch_descriptor)
+        
+        logger.info(f"NUM TOKENS: {num_input_tokens} cudagraph_runtime_mode {cudagraph_runtime_mode} UBATCHING {ubatch_slices is not None}")
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
@@ -3138,6 +3133,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Trigger cudagraph dispatching keys initialization here (after
         # initializing attn backends).
+        logger.info(f"INITIALIZING KEYS FOR MODE: {self.compilation_config.cudagraph_mode}")
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             self.compilation_config.cudagraph_mode,
             self.uniform_decode_query_len)
