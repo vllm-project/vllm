@@ -633,13 +633,6 @@ class Eagle2_5_VLChatModel(nn.Module, SupportsMultiModal, SupportsPP,
 
         return modalities
 
-    def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
-        if self.is_mono:
-            assert self.img_context_token_id is not None
-            self.visual_token_mask = (
-                input_ids == self.img_context_token_id).reshape(-1, 1)
-        else:
-            self.visual_token_mask = None
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
