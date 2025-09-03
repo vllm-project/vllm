@@ -7,7 +7,7 @@ from vllm import SamplingParams
 
 
 def _is_param_optional(param: inspect.Parameter) -> bool:
-    return (hasattr(param.annotation, '__origin__')
+    return (hasattr(param.annotation, "__origin__")
             and (param.annotation.__origin__ is Optional or
                  (param.annotation.__origin__ is Union
                   and type(None) in param.annotation.__args__)))
