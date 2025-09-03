@@ -313,7 +313,7 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
         }],
     )
 
-    # By default cache_salt in the engine prompt is not set
+    # By default, cache_salt in the engine prompt is not set
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
     assert "cache_salt" not in mock_engine.generate.call_args.args[0]

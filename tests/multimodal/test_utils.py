@@ -458,7 +458,7 @@ def run_dp_sharded_vision_model_vs_direct(local_rank: int, world_size: int,
     with torch.inference_mode():
         sharded_output = run_dp_sharded_vision_model(image_input, vision_model)
 
-    # Check that the world size is setup correctly
+    # Check that the world size is set up correctly
     assert get_tensor_model_parallel_world_size() == world_size
 
     # Check that the outputs have the same shape
@@ -642,7 +642,7 @@ def run_dp_sharded_mrope_vision_model_vs_direct(local_rank: int,
                                                            rope_type="rope_3d")
         sharded_output = torch.cat(sharded_output, dim=0)
 
-    # Check that the world size is setup correctly
+    # Check that the world size is set up correctly
     assert get_tensor_model_parallel_world_size() == world_size
 
     # Compare outputs (only on rank 0)

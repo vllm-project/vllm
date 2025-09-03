@@ -641,7 +641,7 @@ def test_schedule_decode_blocks_to_copy_update():
     # Nothing is preempted.
     assert output.blocks_to_swap_out == []
     # Since append_slot returns the source -> dist mapping, it should
-    # applied.
+    # be applied.
     assert output.blocks_to_copy == [(2, 3)]
 
 
