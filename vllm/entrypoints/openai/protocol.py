@@ -54,6 +54,8 @@ from vllm.utils.serial_utils import (
     Endianness,
 )
 
+from vllm.multimodal.inputs import MultiModalFeatureSpec
+
 # Backward compatibility for OpenAI client versions
 try:  # For older openai versions (< 1.100.0)
     from openai.types.responses import ResponseTextConfig
@@ -3017,3 +3019,73 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 
     words: list[TranslationWord] | None = None
     """Extracted words and their corresponding timestamps."""
+
+
+####### Tokens IN <> Tokens OUT #######
+class GenerateRequest:
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."),
+    )
+    token_ids: list[int]
+    """The token ids to generate text from."""
+
+    features: MultiModalFeatureSpec
+    """The processed MM inputs for the model."""
+
+    sampling_params: SamplingParams
+    """The sampling parameters for the model."""
+
+    model: Optional[str] = None
+
+    stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None
+    cache_salt: Optional[str] = Field(
+        default=None,
+        description=(
+        "If specified, the prefix cache will be salted with the provided "
+        "string to prevent an attacker to guess prompts in multi-user "
+        "environments. The salt should be random, protected from "
+        "access by 3rd parties, and long enough to be "
+        "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+        "to 256 bit)."))
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."),
+    )
+    kv_transfer_params: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.")
+
+class GenerateResponseChoice(OpenAIBaseModel):
+    index: int
+    # logprobs: Optional[ChatCompletionLogProbs] = None
+    logprobs: Optional[ChatCompletionLogProbs] = None
+    # per OpenAI spec this is the default
+    finish_reason: Optional[str] = "stop"
+    token_ids: list[int] = None
+
+class GenerateResponse:
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."),
+    )
+    # For when n>1
+    choices: list[GenerateResponseChoice]
+
+    prompt_logprobs: Optional[list[Optional[dict[int, Logprob]]]] = None
+
+    kv_transfer_params: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.")
+
+

@@ -37,6 +37,7 @@ from starlette.routing import Mount
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from typing_extensions import assert_never
 
+from vllm.entrypoints.openai.serving_tokens import OpenAIServingTokens
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -348,6 +349,9 @@ def translation(request: Request) -> OpenAIServingTranslation:
 
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
+
+def generate_tokens(request: Request) -> Optional[OpenAIServingTokens]:
+    return request.app.state.openai_serving_tokens
 
 
 @router.get("/health", response_class=Response)
@@ -1201,6 +1205,49 @@ async def invocations(raw_request: Request):
     return JSONResponse(content=res.model_dump(), status_code=res.error.code)
 
 
+@router.post("/generate",
+             dependencies=[Depends(validate_json_request)],
+             responses={
+                 HTTPStatus.OK.value: {
+                     "content": {
+                         "text/event-stream": {}
+                     }
+                 },
+                 HTTPStatus.BAD_REQUEST.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.NOT_FOUND.value: {
+                     "model": ErrorResponse
+                 },
+                 HTTPStatus.INTERNAL_SERVER_ERROR.value: {
+                     "model": ErrorResponse
+                 }
+             })
+@with_cancellation
+@load_aware_call
+async def generate(request: ChatCompletionRequest,
+                                 raw_request: Request):
+    handler = generate_tokens(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support generate tokens API")
+    try:
+        generator = await handler.serve_tokens(request, raw_request)
+    except Exception as e:
+        raise HTTPException(status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+                            detail=str(e)) from e
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.error.code)
+
+    elif isinstance(generator, GenerateResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    # return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+
+
 if envs.VLLM_TORCH_PROFILER_DIR:
     logger.warning(
         "Torch Profiler is enabled in the API server. This should ONLY be "
@@ -1820,6 +1867,31 @@ async def init_app_state(
         if "transcription" in supported_tasks
         else None
     )
+    # TODO remove oai prefix
+    state.openai_serving_transcription = OpenAIServingTranscription(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+        log_error_stack=args.log_error_stack,
+    ) if "transcription" in supported_tasks else None
+    state.openai_serving_translation = OpenAIServingTranslation(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+        log_error_stack=args.log_error_stack,
+    ) if "transcription" in supported_tasks else None
+    state.openai_serving_tokens = OpenAIServingTokens(
+        engine_client,
+        model_config,
+        state.openai_serving_models,
+        request_logger=request_logger,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        log_error_stack=args.log_error_stack,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+        enable_log_outputs=args.enable_log_outputs,
+    ) if "generate" in supported_tasks else None
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
