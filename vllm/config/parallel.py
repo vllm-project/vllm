@@ -75,6 +75,8 @@ class ParallelConfig:
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
     enable_eplb: bool = False
     """Enable expert parallelism load balancing for MoE layers."""
+    enable_eplb_async: bool = False
+    """Enable expert parallelism load balancing for MoE layers with asynchronous process"""
     num_redundant_experts: int = 0
     """Number of redundant experts to use for expert parallelism."""
     eplb_window_size: int = 1000

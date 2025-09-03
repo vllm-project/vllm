@@ -13,6 +13,14 @@ from vllm.distributed.eplb.eplb_utils.eplb_utils import idx_local_to_global, get
 
 class EplbWeightLoader(BaseLoader):
 
+    def __init__(self):
+        self.recv_expert_list = None
+        self.eplb_adaptor = None
+        self.comm_op_list = None
+        self.layer_id = None
+        self.updated_expert_map = None
+        self.updated_log2phy_map = None
+
     def shuffle_layer(self,
                       num_local_experts: int,
                       ep_rank: int,
@@ -216,3 +224,48 @@ class EplbWeightLoader(BaseLoader):
         self.layer_id = layer_id
         self.comm_op_list = []
         self.prepare_send(expert_send_info, layer_id)
+
+
+
+    def asyn_expert_weight_transfer(self, reqs):
+
+        # set asynchronous stream for d2d expert weight transfer
+        if self.comm_op_list:
+            ret_list = dist.batch_isend_irecv(self.comm_op_list)
+            reqs.extend(ret_list)
+
+    def update_expert_map_and_weight(self, reqs):
+
+        # Waiting for send/recv tasks finish
+        for req in reqs:
+            req.wait()
+
+        if self.comm_op_list is not None:
+            self.comm_op_list = None
+
+        # update expert_map
+        #解耦adaptor与loader
+        self.eplb_adaptor.do_update_expert_map(self.layer_id,
+                                               self.updated_expert_map)
+
+        # update log2phy_map
+        self.eplb_adaptor.do_update_log2phy_map(self.layer_id,
+                                                self.updated_log2phy_map)
+
+        # update expert weight
+        buffer_tensor_id = 0
+        for recv_expert_info in self.recv_expert_list:
+            local_expert_to_replace, buffer_tensor_id = recv_expert_info
+            self.eplb_adaptor.do_update_expert_weight(self.layer_id,
+                                                      local_expert_to_replace,
+                                                      buffer_tensor_id)
+
+
+        self.recv_expert_list = []
+        self.updated_expert_map = None
+        self.layer_id = -1
+
+    def set_log2phy_map(self, log2phy_map_this_rank):
+        self.updated_log2phy_map = log2phy_map_this_rank
+
+
