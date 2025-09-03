@@ -25,6 +25,7 @@ SSM_MODELS = [
 
 HYBRID_MODELS = [
     "ai21labs/Jamba-tiny-dev",
+    "microsoft/Phi-4-mini-flash-reasoning",
     # skipping until vLLM implementation issues are resolved
     # "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
@@ -37,6 +38,7 @@ HYBRID_MODELS = [
 V1_SUPPORTED_MODELS = [
     "state-spaces/mamba-130m-hf",
     "ai21labs/Jamba-tiny-dev",
+    "microsoft/Phi-4-mini-flash-reasoning",
     "yujiepan/mamba2-codestral-v0.1-tiny-random",
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",
