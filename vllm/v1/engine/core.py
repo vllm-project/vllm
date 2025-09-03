@@ -138,7 +138,8 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
-        self.batch_queue: Optional[deque[tuple[Future[ModelRunnerOutput],
+        self.batch_queue: Optional[deque[Union[tuple[Future[ModelRunnerOutput],
+                                                     SchedulerOutput],
                                                SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d",
@@ -361,6 +362,7 @@ class EngineCore:
         """Make asynchronous schedule in single process."""
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
+        assert self.batch_queue is not None
         if not self.scheduler.has_requests():
             return {}, False
         engine_core_outputs = {}

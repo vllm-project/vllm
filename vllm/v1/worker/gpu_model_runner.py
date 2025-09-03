@@ -1762,6 +1762,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         output.req_ids = deepcopy(self.input_batch.req_ids)
         output.req_id_to_index = deepcopy(self.input_batch.req_id_to_index)
         self.output_queue.put(output)
+        return output
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
         if self._draft_token_ids is None:
