@@ -463,10 +463,10 @@ class Scheduler(SchedulerInterface):
                     # NOTE(Kuntai): the current implementation of
                     # `allocate_slots` cannot allocate for the request
                     # with very long prefix cache cached in connector.
-                    # This is because it will allocate for all tokens 
+                    # This is because it will allocate for all tokens
                     # in the prefix cache for all layers, which wastes
                     # a lot of memory for sliding window or Mamba.
-                    # So we have a new function 
+                    # So we have a new function
                     # `allocate_slots_for_connector` to handle this case.
                     manager = self.kv_cache_manager
                     new_blocks = manager.allocate_slots_for_connector(

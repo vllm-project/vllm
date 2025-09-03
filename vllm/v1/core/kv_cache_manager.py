@@ -179,7 +179,6 @@ class KVCacheManager:
 
         return KVCacheBlocks(computed_blocks), num_new_computed_tokens
 
-
     def _can_allocate(
         self,
         request: Request,
@@ -200,7 +199,6 @@ class KVCacheManager:
 
         return num_blocks <= self.block_pool.get_num_free_blocks()
 
-    
     def allocate_slots(
         self,
         request: Request,
@@ -253,23 +251,19 @@ class KVCacheManager:
         else:
             new_computed_block_list = tuple(
                 [] for _ in range(len(self.kv_cache_config.kv_cache_groups)))
-
-
         """
             Check if we can allocate for this request.
         """
 
         if not self._can_allocate(
-            request,
-            num_new_tokens,
-            new_computed_block_list,
-            num_extra_tokens_from_connector,
-            num_lookahead_tokens,
-            num_encoder_tokens,
+                request,
+                num_new_tokens,
+                new_computed_block_list,
+                num_extra_tokens_from_connector,
+                num_lookahead_tokens,
+                num_encoder_tokens,
         ):
             return None
-
-
         """
             Start block allocation.
 
@@ -299,49 +293,45 @@ class KVCacheManager:
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
 
-
         # Handle prefix tokens from vLLM and from KV cache connector.
         # NOTE(Kuntai): After this function, we make sure that:
         # only the prefix tokens that are necessary
-        # (e.g. inside sliding window) will be kept. All other prefix 
+        # (e.g. inside sliding window) will be kept. All other prefix
         # tokens will have `null_block` instead.
         new_blocks_prefix = KVCacheBlocks(
             self.coordinator.remove_skipped_and_allocate_necessary(
-            request.request_id,
-            # These tokens that are locally cached by vLLM,
-            # including request.num_computed_tokens and 
-            # num_new_computed_tokens.
-            # They both have  ref_cnt increased for this request
-            # So:
-            # When they are outside sliding window:
-            # - Substitute them with `null_block`
-            # - Free them
-            request.num_computed_tokens + num_new_computed_tokens,
-            # These tokens are cached by the connector.
-            # They are not allocated yet.
-            # So:
-            # When they are outside sliding window:
-            # - Pad with `null_block`
-            # When they are inside sliding window:
-            # - Allocate them.
-            num_extra_tokens_from_connector,
-        ))
-        
+                request.request_id,
+                # These tokens that are locally cached by vLLM,
+                # including request.num_computed_tokens and
+                # num_new_computed_tokens.
+                # They both have  ref_cnt increased for this request
+                # So:
+                # When they are outside sliding window:
+                # - Substitute them with `null_block`
+                # - Free them
+                request.num_computed_tokens + num_new_computed_tokens,
+                # These tokens are cached by the connector.
+                # They are not allocated yet.
+                # So:
+                # When they are outside sliding window:
+                # - Pad with `null_block`
+                # When they are inside sliding window:
+                # - Allocate them.
+                num_extra_tokens_from_connector,
+            ))
+
         # For new blocks to be computed, we just allocate them normally.
         new_blocks_to_be_computed = KVCacheBlocks(
             self.coordinator.allocate_new_blocks(
-            request.request_id,
-            # `allocate_new_blocks` requires specifying the TOTAL number
-            # of tokens for this request.
-            sum([
-                request.num_computed_tokens,
-                num_new_computed_tokens,
-                num_extra_tokens_from_connector,
-                num_new_tokens,
-                num_lookahead_tokens
-            ]),
-            num_encoder_tokens
-        ))
+                request.request_id,
+                # `allocate_new_blocks` requires specifying the TOTAL number
+                # of tokens for this request.
+                sum([
+                    request.num_computed_tokens, num_new_computed_tokens,
+                    num_extra_tokens_from_connector, num_new_tokens,
+                    num_lookahead_tokens
+                ]),
+                num_encoder_tokens))
 
         # P/D: don't cache blocks when the blocks are still being
         # asynchronously received from the connector.
@@ -360,13 +350,10 @@ class KVCacheManager:
                 num_extra_tokens_from_connector,
                 num_new_tokens,
             ]),
-            request.num_tokens
-        )
+            request.num_tokens)
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
         return new_blocks_prefix + new_blocks_to_be_computed
-
-
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
