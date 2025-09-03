@@ -15,11 +15,11 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from abc import abstractmethod
+from abc import ABC, abstractmethod
 from typing import Any
 
 
-class BaseAdaptor:
+class BaseAdaptor(ABC):
 
     def __init__(self, **args):
         pass
