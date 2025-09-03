@@ -646,13 +646,6 @@ class StatLoggerManager:
         if enable_default_loggers and logger.isEnabledFor(logging.INFO):
             factories.append(LoggingStatLogger)
 
-        # For Prometheus, need to share the metrics between EngineCores.
-        # Each EngineCore's metrics are expressed as a unique label.
-        self.dp_shared_loggers = []
-        if enable_default_loggers:
-            self.dp_shared_loggers.append(
-                PrometheusStatLogger(vllm_config, engine_idxs))
-
         # engine_idx: StatLogger
         self.per_engine_logger_dict: dict[int, list[StatLoggerBase]] = {}
         prometheus_factory = PrometheusStatLogger
