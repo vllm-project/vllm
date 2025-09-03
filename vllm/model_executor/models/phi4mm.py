@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Literal, Optional, TypedDict, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 import numpy as np
 import torch
@@ -21,16 +21,17 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargs, NestedTensors)
+                                    MultiModalKwargsItems, NestedTensors)
 from vllm.multimodal.parse import (AudioProcessorItems, ImageEmbeddingItems,
                                    ImageProcessorItems, ImageSize,
                                    MultiModalDataItems, MultiModalDataParser)
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate)
+                                        PromptUpdate, ResolvedPromptUpdate)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal
@@ -262,9 +263,9 @@ class Phi4MMImageEncoder(nn.Module):
             img_features.shape[1]))
         assert base_feat_height == base_feat_height_target \
             and base_feat_width == base_feat_height_target, \
-                f'base_feat_height: {base_feat_height},"\
-                f" base_feat_width: {base_feat_width}, "\
-                f"expect {base_feat_height_target} features for hd transform'
+                (f"base_feat_height: {base_feat_height}, "
+                 f"base_feat_width: {base_feat_width}, "
+                 f"expect {base_feat_height_target} features for hd transform")
 
         # bs x max_num_crops x (24x24) x C
         img_features = img_features.view(bs, -1,
@@ -391,41 +392,71 @@ class Phi4MMImageEncoder(nn.Module):
         return img_set_tensor
 
 
-class Phi4MMImagePixelInputs(TypedDict):
+class Phi4MMImagePixelInputs(TensorSchema):
+    """
+    Dimensions:
+        - bn: Batch size * number of images
+        - p: Number of patches (1 + num_patches)
+        - c: Number of channels (3)
+        - h: Height of each image patch
+        - w: Width of each image patch
+        - nc: Number of crops
+        - H_mask: Height of attention mask
+        - W_mask: Width of attention mask
+    """
+
     type: Literal["pixel_values"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
+
+    data: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "p", 3, "h", "w", dynamic_dims={"p"}
+                    ),  # may be different per batch and image
+    ]
+
+    image_sizes: Annotated[
+        torch.Tensor,
+        TensorShape("bn", 2),  # (height, width)
+    ]
+
+    num_img_tokens: Annotated[
+        list[int],
+        TensorShape("bn"),
+    ]
+
+    image_attention_mask: Annotated[
+        torch.Tensor,
+        TensorShape("bn", "nc", 32, 32),  # H_mask, W_mask
+    ]
+
+
+class Phi4MMAudioFeatureInputs(TensorSchema):
     """
-    Shape:
-    `(batch_size * num_images, 1 + num_patches, num_channels, height, width)`
-
-    Note that `num_patches` may be different per batch and image,
-    in which case the data is passed as a list instead of a batched tensor.
+    Dimensions:
+        - bn: Batch size * number of audios
+        - t: Time frames (M)
     """
 
-    image_sizes: torch.Tensor
-    """
-    Shape: `(batch_size * num_images, 2)`
-
-    This should be in `(height, width)` format.
-    """
-
-    num_img_tokens: list[int]
-    """Shape: `(batch_size * num_images)`"""
-
-    image_attention_mask: torch.Tensor
-    """Shape: `(batch_size * num_images, H_mask, W_mask)`"""
-
-
-class Phi4MMAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
-    data: Union[torch.Tensor, list[torch.Tensor]]
-    """Shape: `(batch_size * num_audios, 80, M)"""
+
+    data: Annotated[
+        Union[torch.Tensor, list[torch.Tensor]],
+        TensorShape("bn", "t", 80, dynamic_dims={"t"}),
+    ]
 
 
-class Phi4MMAudioEmbeddingInputs(TypedDict):
+class Phi4MMAudioEmbeddingInputs(TensorSchema):
+    """
+    Dimensions:
+        - b: Batch size
+        - n: Number of audios
+        - f: Audio feature size
+        - h: Hidden size (must match language model backbone)
+    """
     type: Literal["audio_embeds"]
-    data: NestedTensors
-    """Shape: `(batch_size, num_audios, audio_feature_size, hidden_size)"""
+    data: Annotated[
+        NestedTensors,
+        TensorShape("b", "n", "f", "h"),
+    ]
 
 
 Phi4MMAudioInputs = Union[Phi4MMAudioFeatureInputs, Phi4MMAudioEmbeddingInputs]
@@ -802,7 +833,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         self,
         mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, Any],
-        out_mm_kwargs: MultiModalKwargs,
+        out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         image_tokens: list[str] = self.info.image_tokens  # type: ignore
         audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
@@ -824,9 +855,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
                     processor=hf_processor,
                 )
 
-            image_tokens = [_IMAGE_PLACEHOLDER_TOKEN_ID] * num_image_tokens
-
-            return image_tokens
+            return [_IMAGE_PLACEHOLDER_TOKEN_ID] * num_image_tokens
 
         def get_audio_replacement_phi4mm(item_idx: int):
             audios = mm_items.get_items("audio", AudioProcessorItems)
@@ -837,28 +866,39 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
             audio_embed_size = self.info._compute_audio_embed_size(
                 audio_frames)
 
-            audio_tokens = [_AUDIO_PLACEHOLDER_TOKEN_ID] * audio_embed_size
+            return [_AUDIO_PLACEHOLDER_TOKEN_ID] * audio_embed_size
 
-            return audio_tokens
-
-        num_images = mm_items.get_count("image", strict=False)
-        num_audios = mm_items.get_count("audio", strict=False)
-
-        image_repl = [
+        return [
             PromptReplacement(
                 modality="image",
-                target=image_token,
+                target=image_tokens.__getitem__,
                 replacement=get_image_replacement_phi4mm,
-            ) for image_token in image_tokens[:num_images]
-        ]
-        audio_repl = [
+            ),
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=audio_tokens.__getitem__,
                 replacement=get_audio_replacement_phi4mm,
-            ) for audio_token in audio_tokens[:num_audios]
+            ),
         ]
-        return image_repl + audio_repl
+
+    def _recompute_cached_prompt_update(
+        self,
+        cached_update: ResolvedPromptUpdate,
+        new_item_idx: int,
+    ) -> ResolvedPromptUpdate:
+        new_update = super()._recompute_cached_prompt_update(
+            cached_update,
+            new_item_idx,
+        )
+
+        if cached_update.modality == "image":
+            image_tokens: list[str] = self.info.image_tokens  # type: ignore
+            new_update = new_update.with_target(image_tokens[new_item_idx])
+        elif cached_update.modality == "audio":
+            audio_tokens: list[str] = self.info.audio_tokens  # type: ignore
+            new_update = new_update.with_target(audio_tokens[new_item_idx])
+
+        return new_update
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -976,18 +1016,10 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             return None
 
         if audio_features is not None:
-            if not isinstance(audio_features, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of audio features. "
-                                 f"Got type: {type(audio_features)}")
-
             return Phi4MMAudioFeatureInputs(type="audio_features",
                                             data=flatten_bn(audio_features))
 
         if audio_embeds is not None:
-            if not isinstance(audio_embeds, (torch.Tensor, list)):
-                raise ValueError("Incorrect type of audio embeds. "
-                                 f"Got type: {type(audio_embeds)}")
-
             return Phi4MMAudioEmbeddingInputs(type="audio_embeds",
                                               data=audio_embeds)
 
@@ -1022,8 +1054,8 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         ]
         return audio_embeds
 
-    def _parse_and_validate_image_input(self,
-                                        **kwargs: object) -> Optional[dict]:
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[Phi4MMImagePixelInputs]:
         input_image_embeds: NestedTensors = kwargs.get("input_image_embeds")
         if input_image_embeds is None:
             return None
@@ -1065,7 +1097,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         elif isinstance(image_sizes, torch.Tensor):
             image_sizes = image_sizes.flatten(0, 1)
         else:
-            raise ValueError("Incorrect image_attention_mask inputs")
+            raise ValueError("Incorrect image_sizes inputs")
 
         if isinstance(num_img_tokens, list):
             num_img_tokens = [
@@ -1075,7 +1107,7 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         elif isinstance(num_img_tokens, torch.Tensor):
             num_img_tokens = num_img_tokens.flatten(0, 1).tolist()
         else:
-            raise ValueError("Incorrect image_attention_mask inputs")
+            raise ValueError("Incorrect num_img_tokens inputs")
 
         return Phi4MMImagePixelInputs(
             type="pixel_values",

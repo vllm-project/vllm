@@ -516,8 +516,8 @@ def random_uuid() -> str:
 class AsyncMicrobatchTokenizer:
     """Asynchronous tokenizer with micro-batching.
 
-    Pulls pending encode/decode requests from a queue and batches them 
-    up to reduce overhead. A single-thread ThreadPoolExecutor is used 
+    Pulls pending encode/decode requests from a queue and batches them
+    up to reduce overhead. A single-thread ThreadPoolExecutor is used
     so the event loop stays responsive.
     """
 
@@ -664,18 +664,18 @@ class AsyncMicrobatchTokenizer:
     def _queue_key(self, op: str, kwargs: dict) -> tuple:
         """
         Return a normalized key describing operation + kwargs.
-        
+
         - `add_special_tokens`: {True/False}
         - `truncation`: {True/False}
-          - If `truncation` is False (`max_length` is None), 
+          - If `truncation` is False (`max_length` is None),
             returns a key for a can_batch queue.
           - If `truncation` is True and `max_length` is None or equals
             `tokenizer.model_max_length`, returns a key for a can_batch queue.
           - Otherwise, returns a key for a cannot_batch queue.
-        
+
         Examples:
           - Decode: ("decode",)
-          - Encode typical: 
+          - Encode typical:
             ("encode", add_special_tokens, bool_truncation, max_length_label)
           - Fallback: ("encode", "other")
         """
@@ -938,6 +938,14 @@ def get_open_port() -> int:
             if candidate_port not in reserved_port_range:
                 return candidate_port
     return _get_open_port()
+
+
+def get_open_ports_list(count: int = 5) -> list[int]:
+    """Get a list of open ports."""
+    ports = set()
+    while len(ports) < count:
+        ports.add(get_open_port())
+    return list(ports)
 
 
 def _get_open_port() -> int:
@@ -1320,6 +1328,12 @@ def as_list(maybe_list: Iterable[T]) -> list[T]:
     return maybe_list if isinstance(maybe_list, list) else list(maybe_list)
 
 
+def as_iter(obj: Union[T, Iterable[T]]) -> Iterable[T]:
+    if isinstance(obj, str) or not isinstance(obj, Iterable):
+        obj = [obj]
+    return obj
+
+
 # `collections` helpers
 def is_list_of(
     value: object,
@@ -1432,6 +1446,12 @@ def _patched_set_stream(stream: torch.cuda.Stream) -> None:
 torch.cuda.set_stream = _patched_set_stream
 
 
+class _StreamPlaceholder:
+
+    def __init__(self):
+        self.synchronize = lambda: None
+
+
 def current_stream() -> torch.cuda.Stream:
     """
     replace `torch.cuda.current_stream()` with `vllm.utils.current_stream()`.
@@ -1451,8 +1471,18 @@ def current_stream() -> torch.cuda.Stream:
         # On ROCm using the default 0 stream in combination with RCCL
         # is hurting performance. Therefore creating a dedicated stream
         # per process
-        _current_stream_tls.value = torch.cuda.Stream(
-        ) if current_platform.is_rocm() else torch.cuda.current_stream()
+        if current_platform.is_rocm():
+            _current_stream_tls.value = torch.cuda.Stream()
+        elif current_platform.is_cpu():
+            _current_stream_tls.value = _StreamPlaceholder()
+        else:
+            current_stream = current_platform.current_stream
+            if current_stream is not None:
+                _current_stream_tls.value = current_stream()
+            else:
+                raise ValueError(
+                    "Fail to set current stream, current platform "
+                    "may not support current_stream with torch API")
     return _current_stream_tls.value
 
 
@@ -1950,15 +1980,18 @@ class FlexibleArgumentParser(ArgumentParser):
 
         file_path = args[index + 1]
 
-        config_args = self._load_config_file(file_path)
+        config_args = self.load_config_file(file_path)
 
-        # 0th index is for {serve,chat,complete}
+        # 0th index might be the sub command {serve,chat,complete,...}
         # optionally followed by model_tag (only for serve)
         # followed by config args
         # followed by rest of cli args.
         # maintaining this order will enforce the precedence
         # of cli > config > defaults
-        if args[0] == "serve":
+        if args[0].startswith('-'):
+            # No sub command (e.g., api_server entry point)
+            args = config_args + args[0:index] + args[index + 2:]
+        elif args[0] == "serve":
             model_in_cli = len(args) > 1 and not args[1].startswith('-')
             model_in_config = any(arg == '--model' for arg in config_args)
 
@@ -1981,7 +2014,7 @@ class FlexibleArgumentParser(ArgumentParser):
 
         return args
 
-    def _load_config_file(self, file_path: str) -> list[str]:
+    def load_config_file(self, file_path: str) -> list[str]:
         """Loads a yaml file and returns the key value pairs as a
         flattened list with argparse like pattern
         ```yaml
@@ -2022,6 +2055,11 @@ class FlexibleArgumentParser(ArgumentParser):
             if isinstance(value, bool) and key not in store_boolean_arguments:
                 if value:
                     processed_args.append('--' + key)
+            elif isinstance(value, list):
+                if value:
+                    processed_args.append('--' + key)
+                    for item in value:
+                        processed_args.append(str(item))
             else:
                 processed_args.append('--' + key)
                 processed_args.append(str(value))
@@ -2458,7 +2496,7 @@ class PlaceholderModule(_PlaceholderBase):
     A placeholder object to use when a module does not exist.
 
     This enables more informative errors when trying to access attributes
-    of a module that does not exists.
+    of a module that does not exist.
     """
 
     def __init__(self, name: str) -> None:
@@ -3085,7 +3123,7 @@ class LazyLoader(types.ModuleType):
     """
     LazyLoader module borrowed from Tensorflow
     https://github.com/tensorflow/tensorflow/blob/main/tensorflow/python/util/lazy_loader.py
-    with a addition of "module caching".
+    with an addition of "module caching".
 
     Lazily import a module, mainly to avoid pulling in large dependencies.
     Modules such as `xgrammar` might do additional side effects, so we
@@ -3252,7 +3290,7 @@ def sha256_cbor_64bit(input) -> int:
     return full_hash & ((1 << 64) - 1)
 
 
-def get_hash_fn_by_name(hash_fn_name: str) -> Callable:
+def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], int]:
     """Get a hash function by name, or raise an error if
     the function is not found.
     Args:

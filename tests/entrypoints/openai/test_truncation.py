@@ -65,6 +65,28 @@ async def test_smaller_truncation_size(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
+async def test_zero_truncation_size(client: openai.AsyncOpenAI):
+    truncation_size = 0
+    kwargs: dict[str, Any] = {
+        "model": MODEL_NAME,
+        "input": input,
+        "truncate_prompt_tokens": truncation_size
+    }
+
+    with pytest.raises(openai.BadRequestError) as err:
+        await client.post(path="embeddings", cast_to=object, body={**kwargs})
+
+    assert err.value.status_code == 400
+    error_details = err.value.response.json()["error"]
+
+    assert error_details["type"] == "BadRequestError"
+    assert "This model's maximum context length is" in error_details["message"]
+    assert "tokens in the input for embedding generation" in error_details[
+        "message"]
+    assert "Please reduce the length of the input" in error_details["message"]
+
+
+@pytest.mark.asyncio
 async def test_bigger_truncation_size(client: openai.AsyncOpenAI):
     truncation_size = max_model_len + 1
     kwargs: dict[str, Any] = {
@@ -74,18 +96,15 @@ async def test_bigger_truncation_size(client: openai.AsyncOpenAI):
     }
 
     with pytest.raises(openai.BadRequestError) as err:
-        err = await client.post(path="embeddings",
-                                cast_to=object,
-                                body={**kwargs})
+        await client.post(path="embeddings", cast_to=object, body={**kwargs})
 
-        assert str(err) == f"""openai.BadRequestError: 
-                    Error code: 400 - {{'object': 'error', 
-                    'message': 'truncate_prompt_tokens value 
-                    ({truncation_size}) 
-                    is greater than max_model_len ({max_model_len}). 
-                    Please, select a smaller truncation size.', 
-                    'type': 'BadRequestError', 
-                    'param': None, 'code': 400}}"""
+    assert err.value.status_code == 400
+    error_details = err.value.response.json()["error"]
+    assert error_details["type"] == "BadRequestError"
+    expected_message = ("truncate_prompt_tokens value is "
+                        "greater than max_model_len."
+                        " Please, select a smaller truncation size.")
+    assert error_details["message"] == expected_message
 
 
 @pytest.mark.asyncio
