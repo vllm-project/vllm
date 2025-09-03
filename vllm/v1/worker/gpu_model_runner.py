@@ -2587,8 +2587,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             ubatch_slices, common_attn_metadata)
                         for ubid, common_attn_metadata in enumerate(
                                 common_attn_metadata_list):
-                            # Force query len to be 1 here.
-                            common_attn_metadata.max_query_len = 1
                             attn_metadata_i = (attn_group\
                                                .get_metadata_builder(ubatch_id=ubid)\
                                                .build_for_cudagraph_capture(common_attn_metadata))

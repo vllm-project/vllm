@@ -125,6 +125,11 @@ def _make_metadata_with_slice(
         torch.max(torch.abs(query_start_loc_cpu[1:] -
                             query_start_loc_cpu[:-1])).item())
 
+    # This is to account for the case where we are in a dummy 
+    # run and query_start_loc_cpu is full of 0s
+    if max_query_len == 0:
+        max_query_len = attn_metadata.max_query_len
+
     block_table_tensor = attn_metadata.block_table_tensor[request_slice]
     slot_mapping = attn_metadata.slot_mapping[token_slice]
 
