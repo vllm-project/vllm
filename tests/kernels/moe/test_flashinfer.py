@@ -70,6 +70,10 @@ class TestData:
          (_, w2_quantized, w2_weight_scale,
           _)) = make_test_weights(e, n, k, quant_dtype=torch.float8_e4m3fn)
 
+        assert w13_weight_scale is not None, \
+            "w13_weight_scale must be not None"
+        assert w2_weight_scale is not None, "w2_weight_scale must be not None"
+
         layer = torch.nn.Module()
         layer.w13_weight = w13_quantized.clone()
         layer.w2_weight = w2_quantized.clone()
