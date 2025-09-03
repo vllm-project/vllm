@@ -9,6 +9,9 @@ if [ -d "/vllm-workspace" ]; then
     cd /vllm-workspace
     # restore the original files
     mv src/vllm ./vllm
+
+    export MAX_JOBS=12
+    export NVCC_THREADS=8
 fi
 
 pip uninstall -y vllm
