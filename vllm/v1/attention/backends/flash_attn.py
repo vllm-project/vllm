@@ -167,7 +167,7 @@ class FlashAttentionMetadataBuilder(
     # work for mixed prefill-decode and uniform-decode. But for non-spec decodes
     # the graphs would not work for mixed prefill-decode; sorta the inverse
     # of UNIFORM_SINGLE_TOKEN_DECODE.
-    # Theres probably a better way to describe this using `AttentionCGSupport`
+    # There's probably a better way to describe this using `AttentionCGSupport`
     # but for now just set it to `UNIFORM_BATCH` to get use to drop down
     # to FULL_AND_PIECEWISE.
     # TODO(luka, lucas): audit FA2 as part of:
