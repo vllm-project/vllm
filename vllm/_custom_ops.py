@@ -2012,8 +2012,14 @@ def onednn_scaled_mm(
     return output
 
 
-# hadamard transforms
 def hadacore_transform(value: torch.Tensor) -> torch.Tensor:
-    # note that weight is not required, as this is a deterministic hadamard
+    """
+    Perform Hadamard transforms using [Hadacore](https://arxiv.org/abs/2412.08832)
+    kernels. Note that these kernels exploit the recursive properties of
+    Sylvester Hadamards, and therefore do not require transform weight data
+    
+    :param value: value to be transformed inplace
+    :return: value after transformation
+    """
     torch.ops._C.hadacore_transform(value)
     return value
