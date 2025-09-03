@@ -267,6 +267,7 @@ def rocm_aiter_grouped_topk(
     num_expert_group: int = 0,
     topk_group: int = 0,
     scoring_func: str = "softmax",
+    routed_scaling_factor: float = 1.0,
     e_score_correction_bias: Optional[torch.Tensor] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     token = hidden_states.shape[0]
@@ -279,7 +280,7 @@ def rocm_aiter_grouped_topk(
     if e_score_correction_bias is not None:
         torch.ops.vllm.rocm_aiter_biased_grouped_topk(
             gating_output,
-            e_score_correction_bias,
+            e_score_correction_bias.to(gating_output.dtype),
             topk_weights,
             topk_ids,
             num_expert_group,
@@ -298,6 +299,8 @@ def rocm_aiter_grouped_topk(
             scoring_func,
         )
 
+    if routed_scaling_factor != 1.0:
+        topk_weights = topk_weights * routed_scaling_factor
     return topk_weights, topk_ids
 
 
@@ -409,15 +412,15 @@ def shuffle_weights(
     *tensors: torch.Tensor, layout: tuple[int, int] = (16, 16)
 ) -> tuple[torch.Tensor, ...]:
     """
-    Applies shuffle_weight function from AITER to each 
+    Applies shuffle_weight function from AITER to each
     input tensor and returns them.
-    
+
     Rearranges (shuffles) the input tensor/s
     into a specified block layout for optimized computation.
 
     Args:
         *tensors: Variable number of torch.Tensor objects.
-        layout: A pair of integers specifying the 
+        layout: A pair of integers specifying the
         block sizes used to divide the tensors during shuffling.
         Default is (16, 16).
 

@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 from .fx_utils import find_getitem_maybe
+from .inductor_pass import enable_fake_mode
 from .multi_output_match import MultiOutputMatch
 from .vllm_inductor_pass import VllmInductorPass
 
@@ -47,8 +48,10 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
     torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
     kFp8DynamicTokenSym:
     torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
-    kNvfp4Quant: torch.ops._C.scaled_fp4_quant.default,  # noqa: E501
 }
+if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
+    QUANT_OPS[
+        kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
 
 
 class FusedRMSQuantKey(NamedTuple):
@@ -526,6 +529,7 @@ class FusionPass(VllmInductorPass):
             cls._instance.pass_config = config.compilation_config.pass_config
         return cls._instance
 
+    @enable_fake_mode
     def __init__(self, config: VllmConfig):
         assert self.__class__._instance is None, \
             "FusionPass singleton instance already exists"

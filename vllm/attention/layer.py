@@ -18,6 +18,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           is_v1_kv_transfer_group)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -54,7 +55,7 @@ def check_xformers_availability():
     return USE_XFORMERS_OPS
 
 
-class Attention(nn.Module):
+class Attention(nn.Module, AttentionLayerBase):
     """Attention layer.
 
     This class takes query, key, and value tensors as input. The input tensors
@@ -189,8 +190,7 @@ class Attention(nn.Module):
         # torch.compile works by registering the attention as one giant
         # opaque custom op. For other platforms, we directly call them
         # and let torch.compile handle them.
-        self.use_direct_call = not current_platform.is_cuda_alike(
-        ) and not current_platform.is_cpu()
+        self.use_direct_call = not current_platform.opaque_attention_op()
 
         self.use_output = self.attn_backend.accept_output_buffer
         compilation_config = get_current_vllm_config().compilation_config
