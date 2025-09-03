@@ -72,7 +72,15 @@ def _listen_for_register(poller, router_socket):
                 return
 
             if node is None:
-                print(f"🔵Add [HTTP:{data['http_address']}, ZMQ:{data['zmq_address']}]")
+                print(
+                    f"🔵Add [{data['type']}] "
+                    f"[HTTP:{data['http_address']}, ZMQ:{data['zmq_address']}]"
+                )
+            else:
+                print(
+                    f"🟡Renew [{data['type']}] "
+                    f"[HTTP:{data['http_address']}, ZMQ:{data['zmq_address']}]"
+                )
 
 
 def start_service_discovery(hostname, port):
@@ -137,6 +145,10 @@ async def handle_request():
         global prefill_cv
         with prefill_cv:
             prefill_list = list(prefill_instances.items())
+            if not prefill_list:
+                err_msg = "No prefiller instances available"
+                print(err_msg)
+                return {"error": err_msg}, 503
             prefill_addr, prefill_zmq_addr = prefill_list[count % len(prefill_list)]
             prefill_zmq_addr = prefill_zmq_addr[0]
 
@@ -144,6 +156,10 @@ async def handle_request():
         global decode_cv
         with decode_cv:
             decode_list = list(decode_instances.items())
+            if not decode_list:
+                err_msg = "No decoder instances available"
+                print(err_msg)
+                return {"error": err_msg}, 503
             decode_addr, decode_zmq_addr = decode_list[count % len(decode_list)]
             decode_zmq_addr = decode_zmq_addr[0]
 
