@@ -139,8 +139,7 @@ def onednn_gemm_test_helper(primitive_cache_size: int,
         primitive_cache_size,
     )
 
-    out = torch.zeros((m, handler.n), dtype=dtype)
-    ops.onednn_mm(handler, a, out, bias)
+    out = ops.onednn_mm(handler, a, bias)
     baseline = torch.nn.functional.linear(a.float(), b.float(),
                                           bias_f32).to(dtype=a.dtype)
 
@@ -148,8 +147,7 @@ def onednn_gemm_test_helper(primitive_cache_size: int,
 
     if use_bias:
         # To test runtime bias setting
-        out = torch.zeros((m, handler.n), dtype=dtype)
-        ops.onednn_mm(handler, a, out, None)
+        out = ops.onednn_mm(handler, a, None)
         baseline = torch.nn.functional.linear(a.float(), b.float(),
                                               None).to(dtype=a.dtype)
 

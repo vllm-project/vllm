@@ -1948,10 +1948,11 @@ def create_onednn_mm(
 def onednn_mm(
     dnnl_handler: CPUDNNLGEMMHandler,
     x: torch.Tensor,
-    output: torch.Tensor,
     bias: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    torch.ops._C.onednn_mm(output, x, bias, dnnl_handler.handler)
+    output = torch.empty((*x.shape[0:-1], dnnl_handler.n), dtype=x.dtype)
+    torch.ops._C.onednn_mm(output, x.reshape(-1, dnnl_handler.k), bias,
+                           dnnl_handler.handler)
 
     return output
 

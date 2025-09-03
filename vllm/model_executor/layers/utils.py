@@ -172,8 +172,7 @@ def dispatch_cpu_unquantized_gemm(
             layer.weight = None
         handler = ops.create_onednn_mm(origin_weight.t(), 32)
         layer.cpu_linear = lambda x, weight, bias: ops.onednn_mm(
-            handler, x, torch.empty(
-                (x.size(0), handler.n), dtype=x.dtype), bias)
+            handler, x, bias)
     else:
         layer.cpu_linear = lambda x, weight, bias: torch.nn.functional.linear(
             x, weight, bias)
