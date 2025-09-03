@@ -602,21 +602,18 @@ class WorkerProc:
         SUCCESS = auto()
         FAILURE = auto()
 
-    def enqueue_worker_output(self, output: Any) -> None:
-        if isinstance(output, Exception):
-            self.worker_response_mq.enqueue(
-                (WorkerProc.ResponseStatus.FAILURE, str(output)))
-            return
-        elif isinstance(output, AsyncModelRunnerOutput):
-            output = output.copy_to_host()
-        self.worker_response_mq.enqueue(
-            (WorkerProc.ResponseStatus.SUCCESS, output))
-
     def async_output_busy_loop(self):
         """Entrypoint for the thread which handles outputs asynchronously."""
         while True:
             output = self.async_output_queue.get()
-            self.enqueue_worker_output(output)
+            if isinstance(output, AsyncModelRunnerOutput):
+                output = output.copy_to_host()
+
+            if isinstance(output, Exception):
+                result = (WorkerProc.ResponseStatus.FAILURE, str(output))
+            else:
+                result = (WorkerProc.ResponseStatus.SUCCESS, output)
+            self.worker_response_mq.enqueue(result)
 
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
