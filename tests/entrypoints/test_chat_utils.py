@@ -289,6 +289,44 @@ def test_parse_chat_messages_single_image_with_uuid(
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[image_uuid])
 
 
+def test_parse_chat_messages_single_image_with_bad_uuid_format(
+    phi3v_model_config,
+    phi3v_tokenizer,
+    image_url,
+):
+    image_uuid = str(hash(image_url))
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [{
+            "role":
+            "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url,
+                        "uuid": image_uuid,
+                    },
+                    "bad_uuid_key": image_uuid,
+                },
+                {
+                    "type": "text",
+                    "text": "What's in the image?"
+                },
+            ],
+        }],
+        phi3v_model_config,
+        phi3v_tokenizer,
+        content_format="string",
+    )
+
+    assert conversation == [{
+        "role": "user",
+        "content": "<|image_1|>\nWhat's in the image?"
+    }]
+    _assert_mm_data_is_image_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
+
+
 def test_parse_chat_messages_multiple_images_with_uuids(
     phi3v_model_config,
     phi3v_tokenizer,
