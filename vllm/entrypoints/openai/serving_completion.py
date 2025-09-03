@@ -220,14 +220,40 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                     )
                 else:
-                    generator = self.engine_client.generate(
-                        engine_prompt,
-                        sampling_params,
-                        request_id_item,
-                        lora_request=lora_request,
-                        trace_headers=trace_headers,
-                        priority=request.priority,
-                    )
+                    # TODO: remove AsyncLLM check and update EngineClient
+                    # once we fully deprecate V0
+                    from vllm.v1.engine.async_llm import AsyncLLM
+                    if isinstance(self.engine_client, AsyncLLM):
+                        await self._initialize_processor()
+                        prompt_str, engine_request, tokenization_kwargs = (
+                            self._process_inputs(
+                                request_id_item,
+                                engine_prompt,
+                                sampling_params,
+                                lora_request=lora_request,
+                                trace_headers=trace_headers,
+                                priority=request.priority,
+                            ))
+
+                        generator = self.engine_client.generate(
+                            engine_request,
+                            sampling_params,
+                            request_id_item,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            priority=request.priority,
+                            prompt_str=prompt_str,
+                            tokenization_kwargs=tokenization_kwargs,
+                        )
+                    else:
+                        generator = self.engine_client.generate(
+                            engine_prompt,
+                            sampling_params,
+                            request_id_item,
+                            lora_request=lora_request,
+                            trace_headers=trace_headers,
+                            priority=request.priority,
+                        )
 
                 generators.append(generator)
         except ValueError as e:
