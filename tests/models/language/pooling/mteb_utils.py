@@ -18,7 +18,7 @@ from tests.models.utils import EmbedModelInfo, RerankModelInfo
 # - Different model results in differences more than 1e-3
 # 1e-4 is a good tolerance threshold
 MTEB_EMBED_TASKS = ["STS12"]
-MTEB_EMBED_TOL = 0.02
+MTEB_EMBED_TOL = 1e-4
 
 # See #19344
 MTEB_RERANK_TASKS = ["NFCorpus"]
@@ -192,22 +192,28 @@ def mteb_test_embed_models(hf_runner,
                                               MTEB_EMBED_TASKS)
         vllm_dtype = vllm_model.llm.llm_engine.model_config.dtype
 
-    with hf_runner(model_info.name,
-                   is_sentence_transformer=True,
-                   dtype="float32") as hf_model:
+    if model_info.mteb_score is None:
+        with hf_runner(model_info.name,
+                       is_sentence_transformer=True,
+                       dtype="float32") as hf_model:
 
-        if hf_model_callback is not None:
-            hf_model_callback(hf_model)
+            if hf_model_callback is not None:
+                hf_model_callback(hf_model)
 
-        st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
-        st_dtype = next(hf_model.model.parameters()).dtype
+            st_main_score = run_mteb_embed_task(hf_model, MTEB_EMBED_TASKS)
+            st_dtype = next(hf_model.model.parameters()).dtype
+    else:
+        st_main_score = model_info.mteb_score
+        st_dtype = "Constant"
 
     print("Model:", model_info.name)
     print("VLLM:", vllm_dtype, vllm_main_score)
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
-    assert st_main_score == pytest.approx(vllm_main_score, abs=atol)
+    # We are not concerned that the vllm mteb results are better
+    # than SentenceTransformers, so we only perform one-sided testing.
+    assert st_main_score - vllm_main_score < atol
 
 
 def run_mteb_rerank(cross_encoder, tasks, languages):
@@ -310,12 +316,18 @@ def mteb_test_rerank_models(hf_runner,
                                           languages=MTEB_RERANK_LANGS)
         vllm_dtype = model_config.dtype
 
-    st_main_score, st_dtype = mteb_test_rerank_models_hf(
-        hf_runner, model_info.name, hf_model_callback)
+    if model_info.mteb_score is None:
+        st_main_score, st_dtype = mteb_test_rerank_models_hf(
+            hf_runner, model_info.name, hf_model_callback)
+    else:
+        st_main_score = model_info.mteb_score
+        st_dtype = "Constant"
 
     print("Model:", model_info.name)
     print("VLLM:", vllm_dtype, vllm_main_score)
     print("SentenceTransformers:", st_dtype, st_main_score)
     print("Difference:", st_main_score - vllm_main_score)
 
-    assert st_main_score == pytest.approx(vllm_main_score, abs=atol)
+    # We are not concerned that the vllm mteb results are better
+    # than SentenceTransformers, so we only perform one-sided testing.
+    assert st_main_score - vllm_main_score < atol

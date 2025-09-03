@@ -10,6 +10,7 @@ MODELS = [
     ########## BertModel
     CLSPoolingEmbedModelInfo("intfloat/e5-small",
                              architecture="BertModel",
+                             mteb_score=0.742285423,
                              enable_test=True),
     CLSPoolingEmbedModelInfo("intfloat/e5-base",
                              architecture="BertModel",
@@ -23,6 +24,7 @@ MODELS = [
     ########## XLMRobertaModel
     CLSPoolingEmbedModelInfo("intfloat/multilingual-e5-base",
                              architecture="XLMRobertaModel",
+                             mteb_score=0.779325955,
                              enable_test=True),
     CLSPoolingEmbedModelInfo("intfloat/multilingual-e5-large",
                              architecture="XLMRobertaModel",
@@ -36,7 +38,7 @@ MODELS = [
 @pytest.mark.parametrize("model_info", MODELS)
 def test_embed_models_mteb(hf_runner, vllm_runner,
                            model_info: EmbedModelInfo) -> None:
-    mteb_test_embed_models(hf_runner, vllm_runner, model_info, atol=0.02)
+    mteb_test_embed_models(hf_runner, vllm_runner, model_info)
 
 
 @pytest.mark.parametrize("model_info", MODELS)
