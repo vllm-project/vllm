@@ -1456,7 +1456,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         attn_metadata: dict[str, Any],
         num_input_tokens: int,
-        num_tokens_across_dp: int,
+        num_tokens_across_dp: Optional[Any],
         cudagraph_runtime_mode: CUDAGraphMode,
         batch_descriptor: BatchDescriptor,
         scheduler_output: "SchedulerOutput",
@@ -1465,7 +1465,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         intermediate_tensors: IntermediateTensors,
         inputs_embeds: list[torch.Tensor],
         model_kwargs: dict[str, Any],
-    ) -> Tuple[torch.Tensor, Optional[KVConnectorOutput]]:
+    ) -> tuple[torch.Tensor, Optional[KVConnectorOutput]]:
         with set_forward_context(
             attn_metadata,
             self.vllm_config,
