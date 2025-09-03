@@ -205,6 +205,43 @@ def supports_score_template(
 
 
 @runtime_checkable
+class SupportsMRoPE(Protocol):
+    """The interface required for all models that support M-RoPE"""
+
+    supports_mrope: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports M-RoPE inputs.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+    @classmethod
+    def get_mrope_input_positions(cls) -> Tensor:
+        """
+        Return rotary position indices
+        """
+        ...
+
+
+@overload
+def supports_mrope(model: type[object]) -> TypeIs[type[SupportsMRoPE]]:
+    ...
+
+
+@overload
+def supports_mrope(model: object) -> TypeIs[SupportsMRoPE]:
+    ...
+
+
+def supports_mrope(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsMRoPE]], TypeIs[SupportsMRoPE]]:
+    return getattr(model, "supports_mrope", False)
+
+
+@runtime_checkable
 class SupportsLoRA(Protocol):
     """The interface required for all models that support LoRA."""
 
