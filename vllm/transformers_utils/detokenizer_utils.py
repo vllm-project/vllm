@@ -190,7 +190,7 @@ def detokenize_incrementally(
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
         )
-    
+
     for _ in range(len(new_tokens)):
         prev_tokens.pop()
 
