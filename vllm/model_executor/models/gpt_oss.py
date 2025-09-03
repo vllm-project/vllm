@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 from torch import nn
 from transformers import GptOssConfig
+from typing import Union
 
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
@@ -691,15 +692,8 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
 
     def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
         num_layers = len(self.model.layers)
-<<<<<<< HEAD
-<<<<<<< HEAD
         return (2, num_layers // 2, num_layers - 3)
-=======
-        return (1, num_layers // 2 - 1, num_layers - 4)
->>>>>>> 6e09cc3ba (update work)
-=======
-        return (2, num_layers // 2, num_layers - 3)
->>>>>>> 4e42f8e68 (fix format)
+
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
