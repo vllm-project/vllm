@@ -1850,6 +1850,7 @@ class ResponseUsage(OpenAIBaseModel):
     output_tokens: int
     output_tokens_details: OutputTokensDetails
     total_tokens: int
+    tool_output_tokens: int
 
 
 class ResponsesResponse(OpenAIBaseModel):
