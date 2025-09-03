@@ -115,24 +115,6 @@ class DeepseekV2MLP(nn.Module):
 
 class DeepseekV2MoE(nn.Module):
 
-    # Chunk x along the num_tokens axis for sequence parallelism
-    def sp_chunk(self, x):
-        seq_len = x.size(0)
-
-        # all_gather needs the sequence length to be divisible by tp_size
-        remainder = seq_len % self.tp_size
-        if remainder != 0:
-            pad_len = self.tp_size - remainder
-            pad_shape = list(x.shape)
-            pad_shape[0] = pad_len
-            pad = x.new_zeros(pad_shape)
-            x = torch.cat([x, pad], dim=0)
-            seq_len = x.size(0)
-
-        chunk = seq_len // self.tp_size
-        start = self.tp_rank * chunk
-        return x.narrow(0, start, chunk).contiguous()
-
     def __init__(
         self,
         config: Union[DeepseekV2Config, DeepseekV3Config],
@@ -224,6 +206,24 @@ class DeepseekV2MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
+    # Chunk x along the num_tokens axis for sequence parallelism
+    def sequence_parallel_chunk(self, x: torch.Tensor):
+        seq_len = x.size(0)
+
+        # all_gather needs the sequence length to be divisible by tp_size
+        remainder = seq_len % self.tp_size
+        if remainder != 0:
+            pad_len = self.tp_size - remainder
+            pad_shape = list(x.shape)
+            pad_shape[0] = pad_len
+            pad = x.new_zeros(pad_shape)
+            x = torch.cat([x, pad], dim=0)
+            seq_len = x.size(0)
+
+        chunk = seq_len // self.tp_size
+        start = self.tp_rank * chunk
+        return x.narrow(0, start, chunk).contiguous()
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -233,7 +233,7 @@ class DeepseekV2MoE(nn.Module):
         # TODO: We can replace the all_reduce at the end of attn with a
         # reduce_scatter instead of chunking here.
         if self.is_sequence_parallel:
-            hidden_states = self.sp_chunk(hidden_states)
+            hidden_states = self.sequence_parallel_chunk(hidden_states)
 
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
