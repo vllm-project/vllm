@@ -37,8 +37,6 @@ class XPUPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool) -> str:
-        if selected_backend is not None and selected_backend != _Backend.IPEX:
-            logger.info("Cannot use %s backend on XPU.", selected_backend)
         use_v1 = envs.VLLM_USE_V1
         if not use_v1:
             raise ValueError("XPU backend only supports V1.")
@@ -58,7 +56,8 @@ class XPUPlatform(Platform):
         logger.info("Using Flash Attention backend on V1 engine.")
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
 
-    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str) -> bool:
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
         """
         Check if the kv_cache_dtype is supported.
         XPU only support fp8 kv cache with triton backend.

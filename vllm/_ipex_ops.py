@@ -242,10 +242,9 @@ class ipex_ops:
         k_scale_float: float = 1.0,
         v_scale_float: float = 1.0,
     ) -> None:
-        assert kv_cache_dtype == "auto"
-        # TODO: support FP8 kv cache.
         ipex.llm.modules.PagedAttention.reshape_and_cache_flash(
-            key, value, key_cache, value_cache, slot_mapping)
+            key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
+            k_scale_float, v_scale_float)
 
     @staticmethod
     def flash_attn_varlen_func(
@@ -365,10 +364,9 @@ class ipex_ops:
         
         This function is designed for both static and dynamic quantization:
         If you provide the scale, it will use static scaling and if you omit
-        it, the scale will be determined dynamically. Currently, XPU platform
-        only supports dynamic quantization. The function also allows optional
-        padding of the output tensors for downstream kernels that will benefit
-        from padding.
+        it, the scale will be determined dynamically. The function also allows
+        optional padding of the output tensors for downstream kernels that 
+        will benefit from padding.
 
         Args:
             input: The input tensor to be quantized to FP8
@@ -396,10 +394,14 @@ class ipex_ops:
             assert num_token_padding is None, \
                 "padding not supported if output passed in"
             assert output.dtype == out_dtype
-        assert scale is None, "only dynamic fp8 quantization supported on XPU"
         assert not use_per_token_if_dynamic, (
             "per token dynamic fp8 quantization not supported on XPU")
-        scale = torch.zeros(1, device=input.device, dtype=torch.float32)
-        torch.ops.torch_ipex.dynamic_scaled_fp8_quant(output, input, scale)
+
+        if scale is None:
+            scale = torch.zeros(1, device=input.device, dtype=torch.float32)
+            torch.ops.torch_ipex.dynamic_scaled_fp8_quant(output, input, scale)
+        else:
+            assert scale.numel() == 1, f"{scale.shape}"
+            torch.ops.torch_ipex.static_scaled_fp8_quant(output, input, scale)
 
         return output, scale
