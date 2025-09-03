@@ -45,8 +45,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargsItems)
-from vllm.multimodal.parse import (AudioProcessorItems, MultiModalDataItems,
-                                   MultiModalDataParser)
+from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
 from vllm.multimodal.processing import (BaseMultiModalProcessor,
                                         BaseProcessingInfo, PromptReplacement,
                                         PromptUpdate, PromptUpdateDetails)
@@ -574,19 +573,13 @@ class MiDashengLMMultiModalProcessor(
             audio_length_np = audio_length.cpu().numpy() if isinstance(
                 audio_length, torch.Tensor) else audio_length
             audio_output_lengths = [
-                calculate_mel_frames_dasheng(int(length))
+                max(1, calculate_mel_frames_dasheng(
+                    int(length)))  # at least one frame
                 for length in audio_length_np
             ]
 
         def get_replacement_midashenglm(item_idx: int):
             num_features = audio_output_lengths[item_idx]
-            if num_features == 0:
-                audios = mm_items.get_items("audio", AudioProcessorItems)
-                audio_len = audios.get_audio_length(item_idx)
-
-                raise ValueError(f"The audio (len={audio_len}) is too short "
-                                 "to be represented inside the model")
-
             audio_tokens = [audio_token_id] * num_features
 
             return PromptUpdateDetails.select_token_id(
@@ -695,7 +688,8 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
         audio_length_np = audio_length.cpu().numpy() if isinstance(
             audio_length, torch.Tensor) else audio_length
         audio_output_lengths = [
-            calculate_mel_frames_dasheng(int(length))
+            max(1, calculate_mel_frames_dasheng(
+                int(length)))  # at least one frame
             for length in audio_length_np
         ]
         audio_output_lengths = torch.tensor(audio_output_lengths).to(
