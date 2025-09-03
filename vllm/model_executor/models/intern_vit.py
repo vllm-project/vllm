@@ -275,8 +275,7 @@ class InternSdpaAttention(nn.Module):
             k = self.k_norm(k.flatten(-2, -1)).view(B_, N_, H_, D_)
         
         # Use unified MultiHeadAttention with automatic backend selection
-        x = self.attn(q, k, v)
-        x = x.reshape(B, N, -1)
+        x = self.attn(q, k, v) 
 
         x = self.proj(x)
         return x

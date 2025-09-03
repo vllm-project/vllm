@@ -35,6 +35,7 @@ from transformers.models.mllama.processing_mllama import (
 
 import vllm.distributed.parallel_state as ps
 from vllm.attention import Attention, AttentionMetadata, AttentionType
+from vllm.attention.layer import MultiHeadAttention
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.attention.selector import _Backend
 from vllm.config import VllmConfig
@@ -53,7 +54,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalEncDecInputs,
@@ -71,7 +71,6 @@ from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal, SupportsV0Only
 from .llama import LlamaDecoderLayer, LlamaMLP
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
-from vllm.attention.layer import MultiHeadAttention
 
 logger = init_logger(__name__)
 
@@ -518,10 +517,10 @@ class MllamaVisionSdpaAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        
+
         # Use unified MultiHeadAttention with automatic backend selection
-        self.attn = MultiHeadAttention(
-            self.num_local_heads, self.head_dim, 1.0 / math.sqrt(self.head_dim))
+        self.attn = MultiHeadAttention(self.num_local_heads, self.head_dim,
+                                       1.0 / math.sqrt(self.head_dim))
 
     def forward(
         self,
@@ -530,11 +529,10 @@ class MllamaVisionSdpaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_state)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        
+
         # Use unified MultiHeadAttention with automatic backend selection
         attn_output = self.attn(q, k, v)
 
-        attn_output = attn_output.contiguous()
         attn_output = attn_output.reshape(attn_output.shape[0],
                                           attn_output.shape[1], -1)
         output, _ = self.o_proj(attn_output)

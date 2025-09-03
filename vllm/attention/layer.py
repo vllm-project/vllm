@@ -361,9 +361,11 @@ class MultiHeadAttention(nn.Module):
             self.attn_backend = _Backend.TORCH_SDPA
         else:
             self.attn_backend = backend if backend in {
-                _Backend.TORCH_SDPA, _Backend.XFORMERS, _Backend.PALLAS_VLLM_V1,
-                _Backend.ROCM_AITER_FA, _Backend.FLEX_ATTENTION
-            } else _Backend.TORCH_SDPA
+                _Backend.TORCH_SDPA,
+                _Backend.XFORMERS,
+                _Backend.PALLAS_VLLM_V1,
+                _Backend.ROCM_AITER_FA,
+            } else current_platform.get_vit_attn_backend()
 
         if (self.attn_backend == _Backend.XFORMERS
                 and not check_xformers_availability()):
@@ -410,30 +412,30 @@ class MultiHeadAttention(nn.Module):
             from torch_xla.experimental.custom_kernel import flash_attention
             out = flash_attention(query, key, value, sm_scale=self.scale)
             out = out.transpose(1, 2)
-        elif self.attn_backend in (_Backend.FLASH_ATTN, 
-                                  _Backend.FLASH_ATTN_VLLM_V1):
-            # Use real Flash Attention implementation
-            from flash_attn import flash_attn_func
+        elif self.attn_backend in (_Backend.FLASH_ATTN,
+                                   _Backend.FLASH_ATTN_VLLM_V1):
+            # Use vLLM's Flash Attention implementation
+            from vllm.vllm_flash_attn import flash_attn_func
+
             # Flash Attention expects (batch, seq, heads, head_dim)
             out = flash_attn_func(query, key, value, softmax_scale=self.scale)
             out = out.reshape(bsz, q_len, -1)
         elif self.attn_backend == _Backend.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
+
             # ROCm Flash Attention expects (batch, seq, heads, head_dim)
-            out = flash_attn_varlen_func(query, key, value, softmax_scale=self.scale)
-            out = out.reshape(bsz, q_len, -1)
-        elif self.attn_backend == _Backend.FLEX_ATTENTION:
-            # FlexAttention requires specific tensor format
-            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
-            # Use a simple fallback to torch SDPA for now
-            out = F.scaled_dot_product_attention(
-                query, key, value, scale=self.scale)
-            out = out.transpose(1, 2)
+            out = flash_attn_varlen_func(query,
+                                         key,
+                                         value,
+                                         softmax_scale=self.scale)
         else:
             # Fallback to torch SDPA for unsupported backends
-            query, key, value = (x.transpose(1, 2) for x in (query, key, value))
-            out = F.scaled_dot_product_attention(
-                query, key, value, scale=self.scale)
+            query, key, value = (x.transpose(1, 2)
+                                 for x in (query, key, value))
+            out = F.scaled_dot_product_attention(query,
+                                                 key,
+                                                 value,
+                                                 scale=self.scale)
             out = out.transpose(1, 2)
 
         return out.reshape(bsz, q_len, -1)

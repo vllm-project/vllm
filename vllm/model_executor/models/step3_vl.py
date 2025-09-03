@@ -16,6 +16,7 @@ from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 from transformers import BatchFeature, PretrainedConfig, TensorType
 
+from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -25,7 +26,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
-from vllm.attention.layer import MultiHeadAttention
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
@@ -697,10 +697,10 @@ class Step3VisionAttention(nn.Module):
                                               bias=True,
                                               quant_config=quant_config,
                                               prefix=prefix)
-        
+
         # Use unified MultiHeadAttention with automatic backend selection
-        self.attn = MultiHeadAttention(
-            self.num_heads, self.head_dim, self.scale)
+        self.attn = MultiHeadAttention(self.num_heads, self.head_dim,
+                                       self.scale)
 
     def forward(
         self,
@@ -712,7 +712,7 @@ class Step3VisionAttention(nn.Module):
         # get query proj
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
-        
+
         # Use unified MultiHeadAttention with automatic backend selection
         attn_output = self.attn(q, k, v)
 

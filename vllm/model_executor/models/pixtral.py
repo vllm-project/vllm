@@ -23,6 +23,7 @@ from transformers.models.pixtral.modeling_pixtral import (
     PixtralRotaryEmbedding, apply_rotary_pos_emb, position_ids_in_meshgrid)
 from transformers.tokenization_utils_base import TextInput
 
+from vllm.attention.layer import MultiHeadAttention
 from vllm.config import VllmConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
@@ -32,9 +33,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.attention.layer import MultiHeadAttention
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     NestedTensors)
@@ -1081,10 +1080,10 @@ class PixtralHFAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        
+
         # Use unified MultiHeadAttention with automatic backend selection
-        self.attn = MultiHeadAttention(
-            self.n_heads, self.head_dim, 1.0 / math.sqrt(self.head_dim))
+        self.attn = MultiHeadAttention(self.n_heads, self.head_dim,
+                                       1.0 / math.sqrt(self.head_dim))
 
     def forward(
         self,
@@ -1108,11 +1107,10 @@ class PixtralHFAttention(nn.Module):
         q_reshaped = q.transpose(1, 2).contiguous().view(batch, patches, -1)
         k_reshaped = k.transpose(1, 2).contiguous().view(batch, patches, -1)
         v_reshaped = v.transpose(1, 2).contiguous().view(batch, patches, -1)
-        
+
         # Use unified MultiHeadAttention with automatic backend selection
         out = self.attn(q_reshaped, k_reshaped, v_reshaped)
 
-        out = out.view(batch, patches, self.n_heads * self.head_dim)
         attn_output, _ = self.o_proj(out)
 
         return attn_output, None
