@@ -13,7 +13,7 @@ from vllm.utils import set_env_var
 
 if current_platform.is_cuda_alike():
     from .activation_quant_fusion import ActivationQuantFusionPass
-    from .fusion import FusionPass
+    from .fusion import RMSNormQuantFusionPass
     from .fusion_attn import AttnFusionPass
 
 if current_platform.is_cuda():
@@ -23,7 +23,6 @@ from .fix_functionalization import FixFunctionalizationPass
 from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
 from .noop_elimination import NoOpEliminationPass
 from .sequence_parallelism import SequenceParallelismPass
-from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 
@@ -44,7 +43,7 @@ class PostGradPassManager(CustomGraphPass):
     """
 
     def __init__(self):
-        self.passes: list[VllmInductorPass] = []
+        self.passes: list[InductorPass] = []
 
     def __call__(self, graph: fx.Graph):
         with ExitStack() as stack:
@@ -73,7 +72,7 @@ class PostGradPassManager(CustomGraphPass):
                 self.passes += [AsyncTPPass(config)]
 
         if self.pass_config.enable_fusion:
-            self.passes += [FusionPass.instance(config)]
+            self.passes += [RMSNormQuantFusionPass(config)]
             self.passes += [ActivationQuantFusionPass(config)]
 
         if self.pass_config.enable_attn_fusion:

@@ -6,10 +6,11 @@ import torch
 
 import vllm.envs as envs
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
-from vllm.compilation.fusion import FusionPass
+from vllm.compilation.fusion import RMSNormQuantFusionPass
 from vllm.compilation.fx_utils import find_auto_fn, find_auto_fn_maybe, is_func
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.sequence_parallelism import SequenceParallelismPass
+from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import (CompilationConfig, DeviceConfig, ModelConfig,
                          PassConfig, VllmConfig)
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -257,10 +258,11 @@ def sequence_parallelism_pass_on_test_model(
     noop_pass = NoOpEliminationPass(vllm_config)
     func_pass = FixFunctionalizationPass(vllm_config)
 
-    passes_for_backend = [noop_pass, sequence_parallelism_pass]
+    passes_for_backend: list[VllmInductorPass] = \
+        [noop_pass, sequence_parallelism_pass]
 
     if enable_fusion:
-        fusion_pass = FusionPass.instance(vllm_config)
+        fusion_pass = RMSNormQuantFusionPass(vllm_config)
         passes_for_backend.append(fusion_pass)
 
     backend_no_func = TestBackend(*passes_for_backend)
