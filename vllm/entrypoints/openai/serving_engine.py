@@ -95,8 +95,13 @@ CompletionLikeRequest = Union[
 ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
                         TokenizeChatRequest]
 SpeechToTextRequest = Union[TranscriptionRequest, TranslationRequest]
-AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest, SpeechToTextRequest,
-                   ResponsesRequest, IOProcessorRequest]
+AnyRequest = Union[
+    CompletionLikeRequest,
+    ChatLikeRequest,
+    SpeechToTextRequest,
+    ResponsesRequest,
+    IOProcessorRequest,
+]
 
 AnyResponse = Union[
     CompletionResponse,
@@ -309,8 +314,8 @@ class OpenAIServing:
         truncate_prompt_tokens = getattr(ctx.request, "truncate_prompt_tokens",
                                          None)
 
-        if truncate_prompt_tokens is not None and \
-            truncate_prompt_tokens > self.max_model_len:
+        if (truncate_prompt_tokens is not None
+                and truncate_prompt_tokens > self.max_model_len):
             return self.create_error_response(
                 "truncate_prompt_tokens value is "
                 "greater than max_model_len."
@@ -423,10 +428,11 @@ class OpenAIServing:
             return self.create_error_response(str(e))
 
     def create_error_response(
-            self,
-            message: str,
-            err_type: str = "BadRequestError",
-            status_code: HTTPStatus = HTTPStatus.BAD_REQUEST) -> ErrorResponse:
+        self,
+        message: str,
+        err_type: str = "BadRequestError",
+        status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
+    ) -> ErrorResponse:
         if self.log_error_stack:
             exc_type, _, _ = sys.exc_info()
             if exc_type is not None:
@@ -769,13 +775,14 @@ class OpenAIServing:
         tasks = []
         for prompt_input in batch_inputs:
             if prompt_input["is_tokens"] is False:
-                assert tokenizer is not None, \
-                    "Tokenizer is required for text prompts"
+                assert tokenizer is not None, (
+                    "Tokenizer is required for text prompts")
                 task = self._normalize_prompt_text_to_input(
                     request,
                     prompt_input["content"],
                     tokenizer=tokenizer,
-                    add_special_tokens=add_special_tokens)
+                    add_special_tokens=add_special_tokens,
+                )
             else:
                 task = self._normalize_prompt_tokens_to_input(
                     request, prompt_input["content"], tokenizer=tokenizer)
@@ -790,9 +797,14 @@ class OpenAIServing:
     @overload
     async def _preprocess_completion(
         self,
-        request: Union[DetokenizeRequest, EmbeddingCompletionRequest,
-                       RerankRequest, ClassificationRequest, ScoreRequest,
-                       TokenizeCompletionRequest],
+        request: Union[
+            DetokenizeRequest,
+            EmbeddingCompletionRequest,
+            RerankRequest,
+            ClassificationRequest,
+            ScoreRequest,
+            TokenizeCompletionRequest,
+        ],
         tokenizer: Optional[AnyTokenizer],
         input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
         add_special_tokens: bool = ...,
@@ -834,13 +846,15 @@ class OpenAIServing:
                 "Prompt embeds with non-completion requests is not"
                 " currently supported.")
 
-        (request_prompts_text, request_prompts_embeds
-         ) = await self._tokenize_prompt_input_or_inputs_async(
-             request,
-             tokenizer,
-             input_or_inputs,
-             add_special_tokens=add_special_tokens,
-         )
+        (
+            request_prompts_text,
+            request_prompts_embeds,
+        ) = await self._tokenize_prompt_input_or_inputs_async(
+            request,
+            tokenizer,
+            input_or_inputs,
+            add_special_tokens=add_special_tokens,
+        )
 
         engine_prompts_text = [
             EngineTokensPrompt(
