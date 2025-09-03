@@ -253,7 +253,7 @@ class UBatchWrapper:
 
         # If there's no ubatching, just run the runnable object
         if ubatch_slices is None:
-            if cudagraph_runtime_mode is CUDAGraphMode.NONE:
+            if cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
                 return self.runnable(*args, **kwargs)
             else:
                 assert self.cudagraph_wrapper is not None
