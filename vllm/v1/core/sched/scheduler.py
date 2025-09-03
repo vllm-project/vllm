@@ -361,7 +361,7 @@ class Scheduler(SchedulerInterface):
                     skipped_waiting_requests.prepend_request(request)
                     continue
 
-                num_external_computed_tokens = 0
+                num_connector_cached_tokens = 0
                 load_kv_async = False
 
                 # Get already-cached tokens.
@@ -373,13 +373,13 @@ class Scheduler(SchedulerInterface):
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
-                        num_external_computed_tokens, load_kv_async = (
+                        num_connector_cached_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens))
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = (num_new_local_computed_tokens +
-                                           num_external_computed_tokens)
+                                           num_connector_cached_tokens)
                 # KVTransfer: WAITING reqs have num_computed_tokens > 0
                 # after async KV recvs are completed.
                 else:
@@ -393,7 +393,7 @@ class Scheduler(SchedulerInterface):
 
                 # KVTransfer: loading remote KV, do not allocate for new work.
                 if load_kv_async:
-                    assert num_external_computed_tokens > 0
+                    assert num_connector_cached_tokens > 0
                     num_new_tokens = 0
                 # Number of tokens to be scheduled.
                 else:
@@ -453,79 +453,50 @@ class Scheduler(SchedulerInterface):
                 else:
                     num_encoder_tokens = 0
 
-                # NOTE(Kuntai): Since the number of cache hit tokens from
-                # connector (`num_external_computed_tokens`) can be very
-                # large, we want to only allocate tokens inside the sliding
-                # window when  This is done by
-                # `allocate_slots_and_remove_unnecessary_blocks`.
                 if all([
                         self.connector is not None,
-                        # NOTE(Kuntai): the current implementation of
-                        # `allocate_slots_and_remove_unnecessary_blocks` is not
-                        # tested with encoder-decoder models.
-                        # So we fall back to default code path when
-                        # `num_encoder_tokens > 0`.
-                        num_external_computed_tokens > 0,
+                        num_connector_cached_tokens > 0,
+                        # Fall back to normal allocation on multi-modal
+                        # models as it is not tested yet.
                         num_encoder_tokens == 0,
                 ]):
-                    # Allocate for prefix-cached tokens (and remove tokens
-                    # outside the sliding window)
+                    # NOTE(Kuntai): the current implementation of
+                    # `allocate_slots` cannot allocate for the request
+                    # with very long prefix cache cached in connector.
+                    # This is because it will allocate for all tokens 
+                    # in the prefix cache for all layers, which wastes
+                    # a lot of memory for sliding window or Mamba.
+                    # So we have a new function 
+                    # `allocate_slots_for_connector` to handle this case.
                     manager = self.kv_cache_manager
-                    ret = (
-                        manager.allocate_slots_and_remove_unnecessary_blocks(
-                            request,
-                            num_external_computed_tokens,
-                            num_new_local_computed_tokens,
-                            new_computed_blocks,
-                            delay_cache_blocks=load_kv_async,
-                            # see the docstring of
-                            # `allocate_slots_and_remove_unnecessary_blocks`
-                            # for the meaning of `chunk_size`.
-                            chunk_size=self.max_num_scheduled_tokens,
-                        ))
-
-                    # FIXME(Kuntai): need to handle rollback when allocation
-                    # fails.
-                    if ret is None:
-                        # The request cannot be scheduled.
-                        break
-
-                    # Then allocate for new tokens.
-                    # NOTE(Kuntai): in this allocation, we cannot remove
-                    # tokens outside the sliding window, because the generation
-                    # of new tokens depends on these tokens,
-                    # so we need to use the old `allocate_slots` api.
-                    ret = self.kv_cache_manager.allocate_slots(
+                    new_blocks = manager.allocate_slots_for_connector(
                         request,
-                        # NOTE(Kuntai): `allocate_slots(request, x)` means
-                        # that we allocate x more tokens besides the
-                        # already-computed tokens.
-                        # As a result, even if we already allocated for
-                        # num_external_computed_tokens and we only want to
-                        # allocate for num_new_tokens, we still have to
-                        # pass `num_new_tokens + num_external_computed_tokens`
-                        # to `allocate_slots` since
-                        # `num_external_computed_tokens` is not treated as
-                        # computed tokens yet.
-                        num_new_tokens + num_external_computed_tokens,
-                        num_lookahead_tokens=effective_lookahead_tokens,
-                        delay_cache_blocks=load_kv_async,
-                    )
-                    if ret is None:
-                        # The request cannot be scheduled.
-                        break
-
-                else:
-                    ret = self.kv_cache_manager.allocate_slots(
-                        request,
-                        num_new_tokens + num_external_computed_tokens,
+                        num_new_tokens,
+                        num_connector_cached_tokens,
                         num_new_local_computed_tokens,
                         new_computed_blocks,
                         num_lookahead_tokens=effective_lookahead_tokens,
                         delay_cache_blocks=load_kv_async,
                         num_encoder_tokens=num_encoder_tokens,
                     )
-                    if ret is None:
+
+                    # FIXME(Kuntai): need to handle rollback when allocation
+                    # fails.
+                    if new_blocks is None:
+                        # The request cannot be scheduled.
+                        break
+
+                else:
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens + num_connector_cached_tokens,
+                        num_new_local_computed_tokens,
+                        new_computed_blocks,
+                        num_lookahead_tokens=effective_lookahead_tokens,
+                        delay_cache_blocks=load_kv_async,
+                        num_encoder_tokens=num_encoder_tokens,
+                    )
+                    if new_blocks is None:
                         # The request cannot be scheduled.
                         break
 
@@ -537,7 +508,7 @@ class Scheduler(SchedulerInterface):
                     self.connector.update_state_after_alloc(
                         request,
                         self.kv_cache_manager.get_blocks(request.request_id),
-                        num_external_computed_tokens,
+                        num_connector_cached_tokens,
                     )
 
                 # Request was already popped from self.waiting

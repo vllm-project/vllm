@@ -179,12 +179,35 @@ class KVCacheManager:
 
         return KVCacheBlocks(computed_blocks), num_new_computed_tokens
 
+
+    def _can_allocate(
+        self,
+        request: Request,
+        num_new_tokens: int,
+        new_computed_blocks: list[KVCacheBlock],
+        num_extra_tokens_from_connector: int = 0,
+        num_lookahead_tokens: int = 0,
+        num_encoder_tokens: int = 0,
+    ) -> bool:
+
+        num_blocks = self.coordinator.get_num_blocks_to_allocate(
+            request.request_id,
+            num_new_tokens + num_lookahead_tokens,
+            new_computed_blocks,
+            num_extra_tokens_from_connector,
+            num_encoder_tokens,
+        )
+
+        return num_blocks <= self.block_pool.get_num_free_blocks()
+
+    
     def allocate_slots(
         self,
         request: Request,
         num_new_tokens: int,
         num_new_computed_tokens: int = 0,
         new_computed_blocks: Optional[KVCacheBlocks] = None,
+        num_extra_tokens_from_connector: int = 0,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
         num_encoder_tokens: int = 0,
@@ -193,9 +216,7 @@ class KVCacheManager:
 
         Args:
             request: The request to allocate slots.
-            num_new_tokens: The number of tokens to allocate, including external
-                tokens. Note that this does not include tokens that have
-                already been computed locally (i.e. new_computed_blocks).
+            num_new_tokens: The number of tokens to be computed.
             num_new_computed_tokens: The number of new computed tokens just
                 hitting the prefix caching, excluding external tokens.
             new_computed_blocks: The cached blocks for the above new computed 
@@ -233,164 +254,119 @@ class KVCacheManager:
             new_computed_block_list = tuple(
                 [] for _ in range(len(self.kv_cache_config.kv_cache_groups)))
 
-        # Free the blocks that are skipped during the attention computation
-        # (e.g., tokens outside the sliding window).
-        # We can do this even if we cannot schedule this request due to
-        # insufficient free blocks.
-        # Should call this function before allocating new blocks to reduce
-        # the number of evicted blocks.
-        self.coordinator.remove_skipped_blocks(request.request_id,
-                                               request.num_computed_tokens)
 
-        # The number of computed tokens is the number of computed tokens plus
-        # the new prefix caching hits
-        num_computed_tokens = (request.num_computed_tokens +
-                               num_new_computed_tokens)
-        num_tokens_need_slot = min(
-            num_computed_tokens + num_new_tokens + num_lookahead_tokens,
-            self.max_model_len)
+        """
+            Check if we can allocate for this request.
+        """
 
-        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
-            request_id=request.request_id,
-            num_tokens=num_tokens_need_slot,
-            new_computed_blocks=new_computed_block_list,
-            num_encoder_tokens=num_encoder_tokens,
-        )
-
-        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
-            # Cannot allocate new blocks
+        if not self._can_allocate(
+            request,
+            num_new_tokens,
+            new_computed_block_list,
+            num_extra_tokens_from_connector,
+            num_lookahead_tokens,
+            num_encoder_tokens,
+        ):
             return None
 
-        # Touch the computed blocks to make sure they won't be evicted.
+
+        """
+            Start block allocation.
+
+            For prefix-cached tokens (either from vLLM or from 
+            external KV connector), we want to only keep tokens
+            necessary for computation (e.g. inside sliding window)
+
+            For new tokens to be computed, we always allocate them
+            even for sliding window case. This is because we want 
+            to save the KV cache of all new tokens to be computed
+            for prefix caching purpose.
+        """
+
+        # Append new computed blocks to the request and increase their
+        # `ref_cnt` since they are now referenced by this request.
+        # This will also increase the `ref_cnt` for blocks outside the
+        # sliding window, but this is temporary --- it will be freed
+        # in the next `remove_skipped_and_allocate_necessary` call.
         if self.enable_caching:
             self.block_pool.touch(new_computed_block_list)
+            self.coordinator.save_new_computed_blocks(
+                request.request_id,
+                new_computed_block_list,
+            )
         else:
             assert not any(new_computed_block_list), (
                 "Computed blocks should be empty when "
                 "prefix caching is disabled")
 
-        # Append the new computed blocks to the request blocks until now to
-        # avoid the case where the new blocks cannot be allocated.
-        self.coordinator.save_new_computed_blocks(request.request_id,
-                                                  new_computed_block_list)
 
-        new_blocks = self.coordinator.allocate_new_blocks(
-            request.request_id, num_tokens_need_slot, num_encoder_tokens)
+        # Handle prefix tokens from vLLM and from KV cache connector.
+        # NOTE(Kuntai): After this function, we make sure that:
+        # only the prefix tokens that are necessary
+        # (e.g. inside sliding window) will be kept. All other prefix 
+        # tokens will have `null_block` instead.
+        new_blocks_prefix = KVCacheBlocks(
+            self.coordinator.remove_skipped_and_allocate_necessary(
+            request.request_id,
+            # These tokens that are locally cached by vLLM,
+            # including request.num_computed_tokens and 
+            # num_new_computed_tokens.
+            # They both have  ref_cnt increased for this request
+            # So:
+            # When they are outside sliding window:
+            # - Substitute them with `null_block`
+            # - Free them
+            request.num_computed_tokens + num_new_computed_tokens,
+            # These tokens are cached by the connector.
+            # They are not allocated yet.
+            # So:
+            # When they are outside sliding window:
+            # - Pad with `null_block`
+            # When they are inside sliding window:
+            # - Allocate them.
+            num_extra_tokens_from_connector,
+        ))
+        
+        # For new blocks to be computed, we just allocate them normally.
+        new_blocks_to_be_computed = KVCacheBlocks(
+            self.coordinator.allocate_new_blocks(
+            request.request_id,
+            # `allocate_new_blocks` requires specifying the TOTAL number
+            # of tokens for this request.
+            sum([
+                request.num_computed_tokens,
+                num_new_computed_tokens,
+                num_extra_tokens_from_connector,
+                num_new_tokens,
+                num_lookahead_tokens
+            ]),
+            num_encoder_tokens
+        ))
 
-        # P/D: delay caching blocks if we have to recv from
-        # remote. Update state for locally cached blocks.
+        # P/D: don't cache blocks when the blocks are still being
+        # asynchronously received from the connector.
         if not self.enable_caching or delay_cache_blocks:
-            return KVCacheBlocks(new_blocks)
+            return new_blocks_prefix + new_blocks_to_be_computed
 
         # NOTE(woosuk): We want to commit (cache) up to num_computed_tokens +
         # num_new_tokens, but must exclude "non-committable" tokens (e.g.,
         # draft tokens that could be rejected). Therefore, we cap the number
         # at `request.num_tokens`, ensuring only "finalized" tokens are cached.
-        num_tokens_to_cache = min(num_computed_tokens + num_new_tokens,
-                                  request.num_tokens)
+        num_tokens_to_cache = min(
+            sum([
+                request.num_computed_tokens,
+                num_new_computed_tokens,
+                # Tokens from the connector are cacheable
+                num_extra_tokens_from_connector,
+                num_new_tokens,
+            ]),
+            request.num_tokens
+        )
         self.coordinator.cache_blocks(request, num_tokens_to_cache)
 
-        return KVCacheBlocks(new_blocks)
+        return new_blocks_prefix + new_blocks_to_be_computed
 
-    def allocate_slots_and_remove_unnecessary_blocks(
-        self,
-        request: "Request",
-        num_new_tokens: int,
-        num_new_computed_tokens: int = 0,
-        new_computed_blocks: Optional["KVCacheBlocks"] = None,
-        delay_cache_blocks: bool = False,
-        chunk_size: int = 1024,
-    ) -> Optional["KVCacheBlocks"]:
-        """
-        Allocate slots, and then remove unnecessary blocks immediately.
 
-        Why we need this function:
-
-        `allocate_slots` will NOT immediately evict allocated blocks,
-        it will evict them in future allocations.
-
-        As a result, if we have a long external prefix cache hit, using 
-        `allocate_slots` will require us to allocate all prefix tokens
-        for all layers (including sliding window layer).
-
-        This makes vLLM unable to allocate for long request, even when
-        they can fit into the GPU memory after evicting tokens outside
-        the sliding window.
-        
-        This function provides a workaround:
-        It allocates the blocks chunk-by-chunk, and then after each 
-        chunk, it will remove unnecessary blocks immediately.
-        In this way, the number of tokens allocated for this request but
-        outside the sliding window is always less than `chunk_size`.
-
-        NOTE(Kuntai):
-        - `num_new_computed_tokens` and `new_computed_blocks` are applied 
-          only to the first chunk.
-        - Returns None if any chunked allocation fails.
-
-        FIXME(Kuntai):
-        - Need to include a rollback logic when only part of the chunks
-          are successfully allocated.
-
-        Args:
-            request: The request to allocate slots for.
-            num_new_tokens: Total number of new tokens to allocate 
-                (will be chunked).
-            num_new_computed_tokens: Forwarded once on the first chunk only.
-            new_computed_blocks: Forwarded once on the first chunk only.
-            delay_cache_blocks: Forwarded to each chunk call.
-            chunk_size: Size of each chunk (must be > 0).
-
-        Returns:
-            KVCacheBlocks containing concatenation of all chunk 
-            allocations, or None if any chunked allocation fails.
-        """
-        if num_new_tokens <= 0:
-            raise ValueError("num_new_tokens must be greater than 0")
-        if chunk_size <= 0:
-            raise ValueError("chunk_size must be greater than 0")
-
-        tokens_remaining = num_new_tokens
-        tokens_allocating = 0
-        is_first_chunk = True
-        accumulated: Optional[KVCacheBlocks] = None
-        cached_tokens_in_vllm = request.num_computed_tokens \
-            + num_new_computed_tokens
-
-        while tokens_remaining > 0:
-            this_chunk = min(chunk_size, tokens_remaining)
-            tokens_remaining -= this_chunk
-            tokens_allocating += this_chunk
-
-            # Apply computed blocks-only once, on the first chunk
-            if is_first_chunk:
-                this_new_computed_tokens = num_new_computed_tokens
-                this_new_computed_blocks = new_computed_blocks
-                is_first_chunk = False
-            else:
-                this_new_computed_tokens = 0
-                this_new_computed_blocks = None
-
-            chunk_blocks = self.allocate_slots(
-                request=request,
-                num_new_tokens=tokens_allocating,
-                num_new_computed_tokens=this_new_computed_tokens,
-                new_computed_blocks=this_new_computed_blocks,
-                delay_cache_blocks=delay_cache_blocks,
-            )
-
-            # remove unnecessary blocks by
-            self.coordinator.remove_skipped_blocks(
-                request.request_id, cached_tokens_in_vllm + tokens_allocating)
-
-            if chunk_blocks is None:
-                # TODO: add a rollback logic to remove the allocated blocks.
-                return None
-
-            accumulated = chunk_blocks if accumulated is None else (
-                accumulated + chunk_blocks)
-
-        return accumulated
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.

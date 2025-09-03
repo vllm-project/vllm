@@ -10,6 +10,9 @@ from vllm.v1.core.single_type_kv_cache_manager import (
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.request import Request
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 class KVCacheCoordinator(ABC):
@@ -74,10 +77,12 @@ class KVCacheCoordinator(ABC):
         return num_blocks_to_allocate
 
     def get_num_blocks_to_allocate_for_connector(
-            self, request_id: str, num_tokens: int,
-            num_connector_prefix_tokens: int,
-            new_computed_blocks: tuple[list[KVCacheBlock],
-                                       ...], num_encoder_tokens: int) -> int:
+            self, 
+            request_id: str, 
+            num_tokens: int,
+            num_connector_cached_tokens: int,
+            new_computed_blocks: tuple[list[KVCacheBlock],...],
+            num_encoder_tokens: int) -> int:
         """
         Get the # of blocks to allocate for request when using connector.
 
@@ -85,7 +90,7 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
             num_tokens: The total number of tokens that need a slot (including 
                 tokens that are already allocated).
-            num_connector_prefix_tokens: The number of tokens that hits 
+            num_connector_cached_tokens: The number of tokens that hits 
                 the prefix cache inside connector.
             new_computed_blocks: The new computed blocks just hitting the
                 prefix caching.
@@ -97,19 +102,12 @@ class KVCacheCoordinator(ABC):
         """
         num_blocks_to_allocate = 0
         for i, manager in enumerate(self.single_type_managers):
-            if isinstance(manager, CrossAttentionManager):
-                # Cross-attention does not support prefix cache
-                # from connector yet.
-                num_blocks_to_allocate += \
-                    manager.get_num_blocks_to_allocate_for_connector(
-                    request_id, num_encoder_tokens, 0, [])
-            else:
-                num_blocks_to_allocate += \
-                    manager.get_num_blocks_to_allocate_for_connector(
-                    request_id,
-                    num_tokens,
-                    num_connector_prefix_tokens,
-                    new_computed_blocks[i])
+            num_blocks_to_allocate += \
+                manager.get_num_blocks_to_allocate_for_connector(
+                request_id,
+                num_tokens,
+                num_connector_cached_tokens,
+                new_computed_blocks[i])
         return num_blocks_to_allocate
 
     def save_new_computed_blocks(
@@ -150,6 +148,22 @@ class KVCacheCoordinator(ABC):
             manager.allocate_new_blocks(
                 request_id, num_encoder_tokens if isinstance(
                     manager, CrossAttentionManager) else num_tokens)
+            for manager in self.single_type_managers)
+
+
+    def allocate_new_blocks_for_connector(
+        self,
+        request_id: str,
+        num_connector_prefix_tokens: int,
+        num_new_tokens: int,
+        num_encoder_tokens: int = 0,
+    ) -> tuple[list[KVCacheBlock], ...]:
+        return tuple(
+            manager.allocate_new_blocks_for_connector(
+                request_id, 
+                num_connector_prefix_tokens,
+                num_encoder_tokens if isinstance(
+                    manager, CrossAttentionManager) else num_new_tokens)
             for manager in self.single_type_managers)
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
@@ -196,8 +210,13 @@ class KVCacheCoordinator(ABC):
         ]
         return num_blocks_per_group
 
-    def remove_skipped_blocks(self, request_id: str,
-                              num_computed_tokens: int) -> None:
+    def remove_skipped_and_allocate_necessary(
+        self,
+        request_id: str,
+        num_computed_tokens: int,
+        num_extra_tokens_from_connector: int,
+        num_encoder_tokens: int,
+    ) -> tuple[list[KVCacheBlock], ...]:
         """
         Remove the blocks that are no longer needed from `blocks` and replace 
         the removed blocks with null_block.
@@ -206,8 +225,15 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
             num_computed_tokens: The number of tokens that have been computed.
         """
-        for manager in self.single_type_managers:
-            manager.remove_skipped_blocks(request_id, num_computed_tokens)
+        return tuple(
+            manager.remove_skipped_and_allocate_necessary(
+                request_id,
+                num_encoder_tokens if isinstance(
+                    manager, CrossAttentionManager) else num_computed_tokens,
+                num_extra_tokens_from_connector,
+            )
+            for manager in self.single_type_managers
+        )
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """
