@@ -4,7 +4,8 @@
 import json
 
 import pytest
-from openai_harmony import (HarmonyEncodingName, Message, Role,
+from openai_harmony import (Conversation, DeveloperContent,
+                            HarmonyEncodingName, Message, Role, SystemContent,
                             load_harmony_encoding)
 
 from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
@@ -45,25 +46,45 @@ def assert_tool_calls(
 
 
 def test_extract_tool_calls_no_tools(openai_tool_parser, harmony_encoding):
-    msg = Message.from_role_and_content(Role.ASSISTANT,
-                                        "This is a test").with_channel("final")
-    stop_token = harmony_encoding.token_from_string("<|return|>")
-    token_ids = harmony_encoding.render_message(msg) + [stop_token]
-
-    extracted_info = openai_tool_parser.extract_tool_calls("",
-                                                           request=None,
-                                                           token_ids=token_ids)
+    convo = Conversation.from_messages([
+        Message.from_role_and_content(
+            Role.SYSTEM,
+            SystemContent.new(),
+        ),
+        Message.from_role_and_content(
+            Role.DEVELOPER,
+            DeveloperContent.new().with_instructions("Talk like a pirate!")),
+        Message.from_role_and_content(Role.USER, "Arrr, how be you?"),
+        Message.from_role_and_content(Role.ASSISTANT,
+                                      "This is a test").with_channel("final")
+    ])
+    token_ids = harmony_encoding.render_conversation_for_completion(
+        convo, Role.ASSISTANT)
+    extracted_info = openai_tool_parser.extract_tool_calls(
+        "",
+        request=None,
+        token_ids=token_ids,
+    )
     assert not extracted_info.tools_called
     assert extracted_info.tool_calls == []
     assert extracted_info.content == "This is a test"
 
 
 def test_extract_tool_calls_single_tool(openai_tool_parser, harmony_encoding):
-    msg = Message.from_role_and_content(
-        Role.ASSISTANT, '{"city": "Dallas"}').with_channel("commentary"). \
-        with_recipient("functions.get_current_weather").with_content_type("json")
-    stop_token = harmony_encoding.token_from_string("<|call|>")
-    token_ids = harmony_encoding.render_message(msg) + [stop_token]
+    convo = Conversation.from_messages([
+        Message.from_role_and_content(Role.USER,
+                                      "What is the weather in Tokyo?"),
+        Message.from_role_and_content(
+            Role.ASSISTANT,
+            'User asks: "What is the weather in Tokyo?" We need to use get_current_weather tool.',  #  noqa: E501
+        ).with_channel("analysis"),
+        Message.from_role_and_content(
+            Role.ASSISTANT,
+            '{"location": "Tokyo"}').with_channel("commentary").with_recipient(
+                "functions.get_current_weather").with_content_type("json"),
+    ])
+    token_ids = harmony_encoding.render_conversation_for_completion(
+        convo, Role.ASSISTANT)
 
     extracted_info = openai_tool_parser.extract_tool_calls(
         "",
@@ -74,25 +95,37 @@ def test_extract_tool_calls_single_tool(openai_tool_parser, harmony_encoding):
     expected_tool_calls = [
         ToolCall(function=FunctionCall(
             name="get_current_weather",
-            arguments=json.dumps({"city": "Dallas"}),
+            arguments=json.dumps({"location": "Tokyo"}),
         ))
     ]
     assert_tool_calls(extracted_info.tool_calls, expected_tool_calls)
     assert extracted_info.content is None
 
 
-def test_extract_tool_calls_multiple_tools(openai_tool_parser,
-                                           harmony_encoding):
-    msg1 = Message.from_role_and_content(
+def test_extract_tool_calls_multiple_tools(
+    openai_tool_parser,
+    harmony_encoding,
+):
+    convo = Conversation.from_messages([
+        Message.from_role_and_content(
+            Role.USER, "What is the weather in Tokyo based on where I'm at?"),
+        Message.from_role_and_content(
+            Role.ASSISTANT,
+            'User asks: "What is the weather in Tokyo?" based on their location. We need to use get_current_weather tool and get_user_location tool.',  #  noqa: E501
+        ).with_channel("analysis"),
+        Message.from_role_and_content(
+            Role.ASSISTANT,
+            '{"location": "Tokyo"}').with_channel("commentary").with_recipient(
+                "functions.get_current_weather").with_content_type("json"),
+        Message.from_role_and_content(
+            Role.ASSISTANT,
+            '{"location": "Tokyo"}').with_channel("commentary").with_recipient(
+                "functions.get_user_location").with_content_type("json"),
+    ])
+    token_ids = harmony_encoding.render_conversation_for_completion(
+        convo,
         Role.ASSISTANT,
-        '{"city": "Dallas"}').with_channel("commentary").with_recipient(
-            "functions.get_current_weather").with_content_type("json")
-    msg2 = Message.from_role_and_content(
-        Role.ASSISTANT, '{}').with_channel("commentary").with_recipient(
-            "functions.get_user_location").with_content_type("json")
-    stop_token = harmony_encoding.token_from_string("<|call|>")
-    token_ids = harmony_encoding.render_message(msg1) \
-        + harmony_encoding.render_message(msg2) + [stop_token]
+    )
 
     extracted_info = openai_tool_parser.extract_tool_calls(
         "",
@@ -103,11 +136,11 @@ def test_extract_tool_calls_multiple_tools(openai_tool_parser,
     expected_tool_calls = [
         ToolCall(function=FunctionCall(
             name="get_current_weather",
-            arguments=json.dumps({"city": "Dallas"}),
+            arguments=json.dumps({"location": "Tokyo"}),
         )),
         ToolCall(function=FunctionCall(
             name="get_user_location",
-            arguments=json.dumps({}),
+            arguments=json.dumps({"location": "Tokyo"}),
         ))
     ]
     assert_tool_calls(extracted_info.tool_calls, expected_tool_calls)
@@ -118,18 +151,22 @@ def test_extract_tool_calls_with_reasoning(
     openai_tool_parser,
     harmony_encoding,
 ):
-    msg1 = Message.from_role_and_content(
-        Role.ASSISTANT, "Thinking about the weather.").with_channel("analysis")
-    msg2 = Message.from_role_and_content(
-        Role.ASSISTANT, '{"city": "Dallas"}').with_channel("commentary"). \
-        with_recipient("functions.get_current_weather").with_content_type("json")
-    msg3 = Message.from_role_and_content(
-        Role.ASSISTANT, "The weather is nice.").with_channel("final")
-
-    stop_token = harmony_encoding.token_from_string("<|return|>")
-    token_ids = harmony_encoding.render_message(
-        msg1) + harmony_encoding.render_message(
-            msg2) + harmony_encoding.render_message(msg3) + [stop_token]
+    convo = Conversation.from_messages([
+        Message.from_role_and_content(Role.USER,
+                                      "What is the weather in Tokyo?"),
+        Message.from_role_and_content(
+            Role.ASSISTANT,
+            'User asks: "What is the weather in Tokyo?" We need to use get_current_weather tool.',  #  noqa: E501
+        ).with_channel("analysis"),
+        Message.from_role_and_content(
+            Role.ASSISTANT,
+            '{"location": "Tokyo"}').with_channel("commentary").with_recipient(
+                "functions.get_current_weather").with_content_type("json"),
+    ])
+    token_ids = harmony_encoding.render_conversation_for_completion(  #  noqa: E501
+        convo,
+        Role.ASSISTANT,
+    )
 
     extracted_info = openai_tool_parser.extract_tool_calls(
         "",

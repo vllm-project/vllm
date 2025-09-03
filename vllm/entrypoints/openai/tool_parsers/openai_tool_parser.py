@@ -36,17 +36,10 @@ class OpenAIToolParser(ToolParser):
 
         parser = parse_output_into_messages(token_ids)
         tool_calls = []
-        reasoning_content = None
         final_content = None
 
         if len(parser.messages) > 0:
-            if parser.messages[0].channel == "analysis":
-                reasoning_content = parser.messages[0].content[0].text
-            elif parser.messages[0].channel == "final":
-                final_content = parser.messages[0].content[0].text
-
-        if len(parser.messages) > 1:
-            for msg in parser.messages[1:]:
+            for msg in parser.messages:
                 if msg.recipient and msg.recipient.startswith("functions."):
                     tool_calls.append(
                         ToolCall(
@@ -63,7 +56,6 @@ class OpenAIToolParser(ToolParser):
             tools_called=len(tool_calls) > 0,
             tool_calls=tool_calls,
             content=final_content,
-            reasoning_content=reasoning_content,
         )
 
     def extract_tool_calls_streaming(
