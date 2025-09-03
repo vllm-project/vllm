@@ -184,6 +184,8 @@ class Glm4MoE(nn.Module):
 
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
+        else:
+            shared_output = None
         router_logits = self.gate(hidden_states.to(dtype=torch.float32))
         final_hidden_states = self.experts(
             hidden_states=hidden_states,

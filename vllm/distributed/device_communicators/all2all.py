@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 import torch.distributed as dist
@@ -12,11 +12,6 @@ from vllm.utils import has_deep_ep, has_pplx
 from .base_device_communicator import All2AllManagerBase, Cache
 
 logger = init_logger(__name__)
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-else:
-    FusedMoE = None
 
 
 class NaiveAll2AllManager(All2AllManagerBase):
