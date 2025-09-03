@@ -785,13 +785,6 @@ def _eagle2_5_vl_generate(
         inputs_embeds=input_embeds,
         attention_mask=attention_mask,
     )
-    if getattr(self, "use_visual_token_mask", False):
-        visual_token_mask = selected.reshape(B, N, 1).to(input_embeds.dtype)
-        forward_kwargs["visual_token_mask"] = visual_token_mask
-
-    # e.g. InternVL2-2B
-    if not isinstance(self.language_model, GenerationMixin):
-        pytest.skip("HF impl is not compatible with current transformers")
 
     outputs = self.language_model.generate(
         **forward_kwargs,
