@@ -217,7 +217,7 @@ class FreeKVCacheBlockQueue:
         # Create a fake head and a tail block for the doubly linked list to
         # reduce branching in the code
         #
-        # The implementation garenteed that the fake head and tail
+        # The implementation guaranteed that the fake head and tail
         # are NEVER got popped, so we could safely assume each real blocks
         # in the queue has prev and next blocks.
         self.fake_free_list_head = KVCacheBlock(block_id=-1)

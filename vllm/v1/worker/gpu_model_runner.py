@@ -2776,7 +2776,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.attn_groups.append(
                 create_attn_groups(attn_backends, kv_cache_spec))
 
-        # Calculate reorder batch threshold (if neeeded)
+        # Calculate reorder batch threshold (if needed)
         self.calculate_reorder_batch_threshold()
 
     def initialize_cudagraph_capture(self) -> None:

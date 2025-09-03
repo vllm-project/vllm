@@ -362,7 +362,7 @@ class ReLUSquaredActivation(CustomOp):
         return torch.square(F.relu(x))
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        #TODO : implement cuda kenrels
+        #TODO : implement cuda kernels
         return self.forward_native(x)
 
 
