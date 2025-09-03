@@ -636,17 +636,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             resumed_from_preemption = req_data.resumed_from_preemption[i]
 
             # Update the cached states.
-            if (num_computed_tokens <= req_state.num_computed_tokens <
-                    req_state.num_prompt_tokens):
+            if (num_computed_tokens <= req_state.num_computed_tokens):
                 # The request was rescheduled after a KV load failure. Clear
-                # any cached sampled tokens
-                req_state.output_token_ids.clear()
+                # the last sampled tokens and rewind the generator state
+                len_output_token_ids = len(req_state.output_token_ids)
+                del req_state.output_token_ids[req_state.
+                                               len_last_output_token_ids:]
+                if req_state.generator:
+                    req_state.generator.set_offset(
+                        req_state.last_generator_offset)
                 req_index = self.input_batch.req_id_to_index.get(req_id)
                 if req_index is not None:
-                    self.input_batch.num_tokens[req_index] = (
-                        req_state.num_tokens)
-                    self.input_batch.num_tokens_no_spec[req_index] = (
-                        req_state.num_tokens)
+                    len_last_sampled = (len_output_token_ids -
+                                        req_state.len_last_output_token_ids)
+                    end_idx = self.input_batch.num_tokens_no_spec[
+                        req_index] - len_last_sampled
+                    self.input_batch.num_tokens[req_index] = end_idx
+                    self.input_batch.num_tokens_no_spec[req_index] = end_idx
 
             req_state.num_computed_tokens = num_computed_tokens
 
@@ -665,6 +671,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 elif num_new_tokens > 0:
                     req_state.output_token_ids.extend(
                         new_token_ids[-num_new_tokens:])
+
+            req_state.len_last_output_token_ids = len(
+                req_state.output_token_ids)
+            if req_state.generator:
+                req_state.last_generator_offset = (
+                    req_state.generator.get_offset())
 
             # Update the block IDs.
             if not resumed_from_preemption:
@@ -686,6 +698,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # scheduled in the previous step and needs to be added again.
                 reqs_to_add.append(req_state)
                 continue
+
+            if req_state.generator:
+                assert (req_state.last_generator_offset is not None)
+                self.input_batch.generators_last_offset[
+                    req_index] = req_state.last_generator_offset
 
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
@@ -2168,7 +2185,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for i in discard_sampled_tokens_req_indices:
             gen = self.input_batch.generators.get(int(i))
             if gen is not None:
-                gen.set_offset(gen.get_offset() - 4)
+                offset = self.input_batch.generators_last_offset.get(int(i))
+                gen.set_offset(offset)
 
         # Copy some objects so they don't get modified after returning.
         # This is important when using async scheduling.
