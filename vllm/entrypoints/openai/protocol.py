@@ -43,10 +43,10 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
 from vllm.entrypoints.score_utils import (ScoreContentPartParam,
                                           ScoreMultiModalParam)
 from vllm.logger import init_logger
+from vllm.logprobs import Logprob
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
-from vllm.sequence import Logprob
 from vllm.utils import random_uuid, resolve_obj_by_qualname
 
 logger = init_logger(__name__)
@@ -1342,6 +1342,14 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     truncate_prompt_tokens: Optional[Annotated[int, Field(ge=-1)]] = None
 
     # --8<-- [start:chat-embedding-extra-params]
+    add_generation_prompt: bool = Field(
+        default=False,
+        description=
+        ("If true, the generation prompt will be added to the chat template. "
+         "This is a parameter used by chat template in tokenizer config of the "
+         "model."),
+    )
+
     add_special_tokens: bool = Field(
         default=False,
         description=(
