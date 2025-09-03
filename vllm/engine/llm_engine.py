@@ -539,11 +539,11 @@ class LLMEngine:
             )
             return None
 
-        self._validate_model_inputs(processed_inputs, lora_request)
+        self._validate_model_inputs(processed_inputs)
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
-        eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
+        eos_token_id = self.input_preprocessor.get_eos_token_id()
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
 
@@ -1703,8 +1703,7 @@ class LLMEngine:
                     SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_EXECUTE,
                     metrics.model_execute_time)
 
-    def _validate_model_inputs(self, inputs: ProcessorInputs,
-                               lora_request: Optional[LoRARequest]):
+    def _validate_model_inputs(self, inputs: ProcessorInputs):
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(inputs)
 
         if encoder_inputs is not None:
