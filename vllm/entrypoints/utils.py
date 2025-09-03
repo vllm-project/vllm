@@ -313,12 +313,14 @@ def log_non_default_args(args: Union[argparse.Namespace, EngineArgs]):
 
     # Handle EngineArgs instance
     elif isinstance(args, EngineArgs):
-        default_args = EngineArgs()  # Create default instance
+        default_args = EngineArgs(model=args.model)  # Create default instance
         for field in dataclasses.fields(args):
             current_val = getattr(args, field.name)
             default_val = getattr(default_args, field.name)
             if current_val != default_val:
                 non_default_args[field.name] = current_val
+        if default_args.model != EngineArgs.model:
+            non_default_args["model"] = default_args.model
     else:
         raise TypeError("Unsupported argument type. " \
         "Must be argparse.Namespace or EngineArgs instance.")

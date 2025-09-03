@@ -58,6 +58,7 @@ class Scheduler(SchedulerInterface):
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
         self.structured_output_manager = structured_output_manager
+        self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
 
         # include_finished_set controls whether a separate set of finished
         # request ids should be included in the EngineCoreOutputs returned
@@ -82,6 +83,9 @@ class Scheduler(SchedulerInterface):
         if self.vllm_config.kv_transfer_config is not None:
             assert len(self.kv_cache_config.kv_cache_groups) == 1, (
                 "Multiple KV cache groups are not currently supported "
+                "with KV connectors")
+            assert not self.is_encoder_decoder, (
+                "Encoder-decoder models are not currently supported "
                 "with KV connectors")
             self.connector = KVConnectorFactory.create_connector(
                 config=self.vllm_config, role=KVConnectorRole.SCHEDULER)
@@ -249,6 +253,8 @@ class Scheduler(SchedulerInterface):
                             key=lambda r: (r.priority, r.arrival_time),
                         )
                         self.running.remove(preempted_req)
+                        if preempted_req in scheduled_running_reqs:
+                            scheduled_running_reqs.remove(preempted_req)
                     else:
                         preempted_req = self.running.pop()
 
@@ -431,6 +437,22 @@ class Scheduler(SchedulerInterface):
                                               == 0 else
                                               self.num_lookahead_tokens)
 
+                # Determine if we need to allocate cross-attention blocks.
+                if self.is_encoder_decoder and request.has_encoder_inputs:
+                    # TODO(russellb): For Whisper, we know that the input is
+                    # always padded to the maximum length. If we support other
+                    # encoder-decoder models, this will need to be updated if we
+                    # want to only allocate what is needed.
+                    assert ("whisper"
+                            in self.vllm_config.model_config.model.lower()), (
+                                "Whisper is the only supported "
+                                "encoder-decoder model.")
+                    num_encoder_tokens = MULTIMODAL_REGISTRY.\
+                        get_encdec_max_encoder_len(
+                        self.vllm_config.model_config)
+                else:
+                    num_encoder_tokens = 0
+
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_computed_tokens,
@@ -438,6 +460,7 @@ class Scheduler(SchedulerInterface):
                     new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
                     delay_cache_blocks=load_kv_async,
+                    num_encoder_tokens=num_encoder_tokens,
                 )
 
                 if new_blocks is None:
@@ -566,7 +589,19 @@ class Scheduler(SchedulerInterface):
             meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
+        # collect KV cache events from KV cache manager
         events = self.kv_cache_manager.take_events()
+
+        # collect KV cache events from connector
+        if self.connector is not None:
+            connector_events = self.connector.take_events()
+            if connector_events:
+                if events is None:
+                    events = list(connector_events)
+                else:
+                    events.extend(connector_events)
+
+        # publish collected KV cache events
         if events:
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
@@ -703,7 +738,21 @@ class Scheduler(SchedulerInterface):
                 # The encoder input is not needed in this step.
                 break
 
-            if start_pos + num_encoder_tokens <= num_computed_tokens:
+            if self.is_encoder_decoder and num_computed_tokens > 0:
+                assert start_pos == 0, (
+                    "Encoder input should be processed at the beginning of "
+                    "the sequence when encoder-decoder models are used.")
+                # Encoder input has already been computed
+                # The calculation here is a bit different. We don't turn encoder
+                # output into tokens that get processed by the decoder and
+                # reflected in num_computed_tokens. Instead, start_pos reflects
+                # the position where we need to ensure we calculate encoder
+                # inputs. This should always be 0 to ensure we calculate encoder
+                # inputs before running the decoder.  Once we've calculated some
+                # decoder tokens (num_computed_tokens > 0), then we know we
+                # already calculated encoder inputs and can skip here.
+                continue
+            elif start_pos + num_encoder_tokens <= num_computed_tokens:
                 # The encoder input is already computed and stored
                 # in the decoder's KV cache.
                 continue
@@ -766,7 +815,7 @@ class Scheduler(SchedulerInterface):
         # NOTE: structured_output_request_ids maps
         # a request's (request that uses structured output)
         # request_id to its index in the batch.
-        # This will helps us determine to slice the grammar bitmask
+        # This will help us determine to slice the grammar bitmask
         # and only applies valid mask for requests that
         # uses structured decoding.
         structured_output_request_ids: dict[str, int] = {}
@@ -824,19 +873,19 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id))
             if scheduled_spec_token_ids:
+                num_draft_tokens = len(scheduled_spec_token_ids)
+                num_accepted = len(generated_token_ids) - 1
+                num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
                 # tokens and rejections. If some tokens are rejected,
                 # num_computed_tokens is decreased by the number of rejected
-                # tokens, where is given by:
-                # len(scheduled_spec_token_ids) + 1 - len(generated_token_ids).
-                num_tokens_rejected = (len(scheduled_spec_token_ids) + 1 -
-                                       len(generated_token_ids))
-                request.num_computed_tokens -= num_tokens_rejected
+                # tokens.
+                request.num_computed_tokens -= num_rejected
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
-                    num_draft_tokens=len(scheduled_spec_token_ids),
-                    num_accepted_tokens=len(generated_token_ids) - 1)
+                    num_draft_tokens=num_draft_tokens,
+                    num_accepted_tokens=num_accepted)
 
             stopped = False
             new_logprobs = None
@@ -874,7 +923,7 @@ class Scheduler(SchedulerInterface):
                     request):
                 # NOTE: structured_output_request
                 # should not be None if use_structured_output, we have
-                # check above, so safe to ignore type warning
+                # checked above, so safe to ignore type warning
                 request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids)
 
@@ -1170,7 +1219,7 @@ class Scheduler(SchedulerInterface):
         # Now that the blocks are ready, actually cache them.
         (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
         num_computed_tokens = len(block_ids) * self.block_size
-        # Handle the case where num request tokens less then one block.
+        # Handle the case where num request tokens less than one block.
         num_computed_tokens = min(num_computed_tokens, request.num_tokens)
         if num_computed_tokens == request.num_tokens:
             num_computed_tokens -= 1
@@ -1193,7 +1242,7 @@ class Scheduler(SchedulerInterface):
         finished_sending reqs to the output.
         * if finished_sending: free the blocks
         # if finished_recving: add to state so we can
-            scheduler the request during the next step.
+            schedule the request during the next step.
         """
 
         if self.connector is not None:

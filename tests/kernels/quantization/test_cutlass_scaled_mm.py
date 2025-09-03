@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for cutlass kernels
 
-Run `pytest tests/kernels/test_cutlass.py`.
+Run `pytest tests/kernels/quantization/test_cutlass_scaled_mm.py`.
 """
 import random
 
