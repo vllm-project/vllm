@@ -513,7 +513,7 @@ if flashinfer_comm is not None:
                         torch.ops._C.static_scaled_fp8_quant(
                             quant_out, norm_out, scale_factor)
             if scale_factor is None or norm_out is not None:
-                # we need to return allreduce outpput
+                # we need to return allreduce output
                 # in cases of non quant fused AR + RMS norm
                 # and fused AR + RMS norm + quant without fused add
                 allreduce_in.copy_(allreduce_out)

@@ -998,7 +998,7 @@ def create_argument_parser():
         "--percentile-metrics",
         type=str,
         default="ttft,tpot,itl",
-        help="Comma-separated list of selected metrics to report percentils. "
+        help="Comma-separated list of selected metrics to report percentiles. "
         "This argument specifies the metrics to report percentiles. "
         'Allowed metric names are "ttft", "tpot", "itl", "e2el". '
         'Default value is "ttft,tpot,itl".',

@@ -719,7 +719,7 @@ def create_argument_parser():
         "[length * (1 - range_ratio), length * (1 + range_ratio)].",
     )
 
-    # hf dtaset
+    # hf dataset
     parser.add_argument(
         "--hf-subset", type=str, default=None, help="Subset of the HF dataset."
     )
