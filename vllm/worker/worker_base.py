@@ -523,7 +523,6 @@ class WorkerWrapperBase:
                 from vllm.utils import init_cached_hf_modules
                 init_cached_hf_modules()
 
-
     def shutdown(self) -> None:
         if self.worker is not None:
             self.worker.shutdown()
