@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate, TopKWeightAndReduceNoOP)
 from vllm.model_executor.layers.fused_moe.utils import (_fp8_quantize,
+                                                        _fp8_perm,
                                                         _resize_cache)
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
@@ -98,6 +99,7 @@ def run_cutlass_moe_fp8(
 
     if expert_map is not None:
         "Translate info from expert_map to topk_ids"
+        # TODO can this be local_topk_ids = expert_map[topk_ids]?
         local_topk_ids = torch.where(expert_map[topk_ids] != -1,
                                      expert_map[topk_ids], -1)
     else:
@@ -154,6 +156,13 @@ def run_cutlass_moe_fp8(
                                      dtype=torch.int32,
                                      device=device)
 
+        a_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+        c_map = torch.empty((topk_ids.numel()), dtype=torch.int32, device=device)
+        expert_offsets2 = torch.empty((global_num_experts + 1), dtype=torch.int32, device=device)
+        ops.get_cutlass_moe_mm_data(topk_ids, expert_offsets2, problem_sizes1,
+                                problem_sizes2, a_map, c_map,
+                                global_num_experts, N, K)
+
         num_expert = global_num_experts if expert_map is None \
                      else expert_map.size(0)
         # permuted a1q reuses workspace2
@@ -167,9 +176,13 @@ def run_cutlass_moe_fp8(
             permuted_hidden_states=a1q_perm)
         expert_offsets = expert_offsets[:-1]
 
-        ops.get_cutlass_moe_mm_problem_sizes(local_topk_ids, problem_sizes1,
-                                             problem_sizes2,
-                                             global_num_experts, N, K)
+        print("c_map:   ", c_map, c_map.shape)
+        print("inv_perm:", inv_perm, inv_perm.shape)
+        print("*")
+
+        # ops.get_cutlass_moe_mm_problem_sizes(local_topk_ids, problem_sizes1,
+        #                                      problem_sizes2,
+        #                                      global_num_experts, N, K)
 
     if not per_act_token and (expert_map is not None or use_batched_format):
         # this is necessary to avoid imprecise scale calculation caused by
@@ -860,6 +873,7 @@ def run_block_scaled_cutlass_moe_fp8(
     workspace2: torch.Tensor,
     out_dtype: torch.dtype,
     per_act_block: bool,
+    topk_weights: torch.Tensor,
 ) -> torch.Tensor:
     """
     This function computes a a8w8-blockwise quantized Mixture of Experts (MoE)
@@ -960,50 +974,93 @@ def run_block_scaled_cutlass_moe_fp8(
             A_scale=None,
             per_act_token=False,
             block_shape=[128, 128] if per_act_block else None,
-            expert_offsets=expert_offsets if per_act_block else None,
-            problem_sizes=problem_sizes1 if per_act_block else None,
-            idx_map=c_map if per_act_block else None)
+        )
     else:
-        a1q_scale = a1q_scale[a_map] if per_act_block else a1q_scale
+        pass
+        # a1q_scale = a1q_scale[a_map] if per_act_block else a1q_scale
+
+    # a1q_copy = a1q.clone()
+    # a1q_scale_copy = a1q_scale.clone()
+    # a1q_copy = _fp8_perm(a1q_copy, a_map)
+    # a1q_scale_copy = a1q_scale_copy[a_map]
 
     # TODO bring this back when cutlass perf commit is reapplied
     # a1q = ops.shuffle_rows(a1q, a_map)
     # a1q_scale = (ops.shuffle_rows(a1q_scale, a_map)
     #              if per_act_block else a1q_scale)
 
+    num_expert = global_num_experts if expert_map is None \
+                     else expert_map.size(0)
+    a1q_perm = torch.empty((M * topk, K), dtype=torch.float8_e4m3fn,
+                        device=a1q.device)
+    # a1q, a1q_scale, expert_offsets, inv_perm, _ = moe_permute(
+    #         a1q,
+    #         a1q_scale,
+    #         topk_ids,
+    #         num_expert,
+    #         global_num_experts,
+    #         expert_map,
+    #         permuted_hidden_states=a1q_perm)
+
     c1 = _resize_cache(workspace13, (M * topk, N * 2))
     c2 = _resize_cache(workspace2, (M * topk, N))
     c3 = _resize_cache(workspace13, (M * topk, K))
-    expert_offsets_truncated = expert_offsets[:-1]
+    expert_offsets_truncated = expert_offsets.to(torch.int32)[:-1]
+    
+    # c1_copy = torch.zeros((M * topk, N * 2), device=c1.device, dtype=c1.dtype)
+    # c2_copy = torch.zeros((M * topk, N), device=c2.device, dtype=c2.dtype)
+    # c3_copy = torch.zeros((M * topk, K), device=c3.device, dtype=c3.dtype)
+    # c1 = torch.zeros_like(c1)
+    # c2 = torch.zeros_like(c2)
+    # c3 = torch.zeros_like(c3)
 
     if cuda_arch == 90:
         if per_act_block:
-            pass
+            a1q_scale = ops.transpose_cutlass_moe_a_scales(
+                a1q_scale, expert_offsets_truncated, problem_sizes1)
+            # a1q_scale_copy = ops.transpose_cutlass_moe_a_scales(
+            #     a1q_scale_copy, expert_offsets_truncated, problem_sizes1)
         else:
             a1q_scale = a1q_scale.repeat(a1q.shape[1] // 128, a1q.shape[0])
     elif not per_act_block:
         a1q_scale = a1q_scale.repeat(a1q.shape[0], a1q.shape[1] // 128)
 
+
     if expert_map is not None:
         c1.fill_(0)
+        # c1_copy.fill_(0)
+
+    # blockwise_mm_kernel(c1_copy, a1q_copy, w1, a1q_scale_copy, w1_scale,
+    #                     expert_offsets_truncated, problem_sizes1, ab_strides1,
+    #                     ab_strides1, c_strides1, per_act_block)
 
     blockwise_mm_kernel(c1, a1q, w1, a1q_scale, w1_scale,
                         expert_offsets_truncated, problem_sizes1, ab_strides1,
                         ab_strides1, c_strides1, per_act_block)
 
     activation_callable(c2, c1)
+    # activation_callable(c2_copy, c1_copy)
 
     a2q, a2q_scale = _fp8_quantize(
         c2,
         A_scale=None,
         per_act_token=False,
         block_shape=[128, 128] if per_act_block else None,
-        expert_offsets=expert_offsets if per_act_block else None,
-        problem_sizes=problem_sizes2 if per_act_block else None)
+    )
+
+    # a2q_copy, a2q_scale_copy = _fp8_quantize(
+    #     c2_copy,
+    #     A_scale=None,
+    #     per_act_token=False,
+    #     block_shape=[128, 128] if per_act_block else None,
+    # )
 
     if cuda_arch == 90:
         if per_act_block:
-            pass
+            a2q_scale = ops.transpose_cutlass_moe_a_scales(
+                a2q_scale, expert_offsets_truncated, problem_sizes2)
+            # a2q_scale_copy = ops.transpose_cutlass_moe_a_scales(
+            #     a2q_scale_copy, expert_offsets_truncated, problem_sizes2)
         else:
             a2q_scale = a2q_scale.repeat(a2q.shape[1] // 128, a2q.shape[0])
     elif not per_act_block:
@@ -1016,10 +1073,19 @@ def run_block_scaled_cutlass_moe_fp8(
                         expert_offsets_truncated, problem_sizes2, ab_strides2,
                         ab_strides2, c_strides2, per_act_block)
 
-    # TODO bring this back when cutlass perf commit is reapplied
-    # output.copy_(ops.shuffle_rows(c3, c_map).view(M * topk, K),
-    #              non_blocking=True)
-    output.copy_(c3[c_map].view(M * topk, K), non_blocking=True)
+    # blockwise_mm_kernel(c3_copy, a2q_copy, w2, a2q_scale_copy, w2_scale,
+    #                     expert_offsets_truncated, problem_sizes2, ab_strides2,
+    #                     ab_strides2, c_strides2, per_act_block)
+
+    # ground = ((c3_copy[c_map].view(M, topk, K) * topk_weights.reshape(
+    #     M, topk, 1)).sum(dim=1))
+    
+    output.fill_(999)
+    moe_unpermute(out=output,
+                    permuted_hidden_states=c3,
+                    topk_weights=topk_weights,
+                    inv_permuted_idx=inv_perm)
+    # output.copy_(ground, non_blocking=True)
 
 
 class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
@@ -1067,7 +1133,10 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
-        return TopKWeightAndReduceDelegate()
+        # return TopKWeightAndReduceDelegate()
+
+        # topk weights and reduction are fused in moe_unpermute cuda kernel
+        return TopKWeightAndReduceNoOP()
 
     def workspace_shapes(
         self,
@@ -1083,7 +1152,10 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...], torch.dtype]:
         workspace1 = (M * topk, max(N, K))
         workspace2 = (M * topk, N // 2)
-        output = (M * topk, K)
+        print("workspace1:", workspace1)
+        print("workspace2:", workspace2)
+        # output = (M * topk, K)
+        output = (M, K)
         return (workspace1, workspace2, output,
                 self.out_dtype if self.out_dtype is not None else a.dtype)
 
@@ -1108,7 +1180,7 @@ class CutlassExpertsBlockedFp8(mk.FusedMoEPermuteExpertsUnpermute):
             global_num_experts, expert_map, w1_scale, w2_scale, a1q_scale,
             a2_scale, self.ab_strides1, self.ab_strides2, self.c_strides1,
             self.c_strides2, workspace13, workspace2, self.out_dtype,
-            self.per_act_block)
+            self.per_act_block, topk_weights)
 
 
 def block_scaled_cutlass_moe_fp8(
@@ -1179,7 +1251,7 @@ def block_scaled_cutlass_moe_fp8(
     out_dtype = a.dtype
 
     fn = mk.FusedMoEModularKernel(
-        MoEPrepareAndFinalizeNoEP(skip_quant=True),
+        MoEPrepareAndFinalizeNoEP(),#(skip_quant=True),
         CutlassExpertsBlockedFp8(
             max_experts_per_worker=global_num_experts,
             out_dtype=out_dtype,
