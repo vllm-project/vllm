@@ -83,7 +83,7 @@ class HadamardTransform(torch.nn.Module):
             # do not fold into weight in order to utilize FWHT
             self.scales[part_id] = 1 / math.sqrt(data.size(0))
 
-            # FUTURE: avoid runtime tranpose by processing weights
+            # FUTURE: avoid runtime transpose by processing weights
             # prior to apply
 
     def forward(self, value: Tensor, part_id: int = 0) -> Tensor:

@@ -234,7 +234,7 @@ class CompilationConfig:
     - FULL_AND_PIECEWISE.
 
     PIECEWISE mode build piecewise cudagraph only, keeping the cudagraph
-    incompatiable ops (i.e. some attention ops) outside the cudagraph
+    incompatible ops (i.e. some attention ops) outside the cudagraph
     for general flexibility.
     This is the default mode.
 

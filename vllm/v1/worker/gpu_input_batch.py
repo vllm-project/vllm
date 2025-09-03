@@ -584,7 +584,7 @@ class InputBatch:
 
             if self.is_pooling_model:
                 last_req_index -= 1
-                # Samping state not used by pooling models.
+                # Sampling state not used by pooling models.
                 continue
 
             # Autoregressive models require detailed tracking of condense

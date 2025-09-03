@@ -224,7 +224,7 @@ def tg_mxfp4_moe(
     assert (w2_bias.dim() == 2 and w2_bias.shape[0] == num_experts
             and w2_bias.shape[1] == hidden_size)
 
-    # Swap w1 and w3 as the defenition of
+    # Swap w1 and w3 as the definition of
     # swiglu is different in the trtllm-gen
     w13_weight_scale_ = w13_weight_scale.clone()
     w13_weight_ = w13_weight.clone()

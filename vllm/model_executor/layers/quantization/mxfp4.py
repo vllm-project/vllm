@@ -310,7 +310,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w13_bias = layer.w13_bias.data.to(torch.float32)
             w2_bias = layer.w2_bias.data.to(torch.float32)
 
-            # Swap w1 and w3 as the defenition of
+            # Swap w1 and w3 as the definition of
             # swiglu is different in the trtllm-gen
             def swap_every_two_rows(x, axis=-1):
                 shape = x.shape

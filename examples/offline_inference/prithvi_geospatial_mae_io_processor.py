@@ -12,7 +12,7 @@ from vllm.pooling_params import PoolingParams
 # multimodal data. In this specific case this example will take a geotiff
 # image as input, process it using the multimodal data processor, and
 # perform inference.
-# Reuirement - install plugin at:
+# Requirement - install plugin at:
 #   https://github.com/christian-pinto/prithvi_io_processor_plugin
 
 

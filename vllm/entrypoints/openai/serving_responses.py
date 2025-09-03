@@ -717,7 +717,7 @@ class OpenAIServingResponses(OpenAIServing):
                             prev_msgs.append(msg)
             messages.extend(prev_msgs)
         # Append the new input.
-        # Reponses API supports simple text inputs without chat format.
+        # Responses API supports simple text inputs without chat format.
         if isinstance(request.input, str):
             messages.append(get_user_message(request.input))
         else:
