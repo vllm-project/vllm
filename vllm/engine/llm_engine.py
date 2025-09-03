@@ -1718,7 +1718,7 @@ class LLMEngine:
         prompt_type: Literal["encoder", "decoder"],
     ):
         model_config = self.model_config
-        tokenizer = self.get_tokenizer()
+        tokenizer = self.tokenizer
 
         prompt_ids = prompt_inputs.get("prompt_token_ids", [])
         if not prompt_ids:
