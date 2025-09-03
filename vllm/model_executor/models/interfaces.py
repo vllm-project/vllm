@@ -859,7 +859,7 @@ def supports_eagle3(
 class SupportsMRoPE(Protocol):
     """The interface required for all models that support M-RoPE."""
 
-    supports_mrope: bool = True
+    supports_mrope: ClassVar[Literal[True]] = True
     """
     A flag that indicates this model supports M-RoPE.
     
