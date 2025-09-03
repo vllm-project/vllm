@@ -35,7 +35,7 @@ from transformers import DeepseekV2Config, DeepseekV3Config
 import vllm.envs as envs
 from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
+from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (get_ep_group, get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -612,16 +612,15 @@ class DeepseekV2MLAAttention(nn.Module):
 
 class DeepseekV2DecoderLayer(nn.Module):
 
-    def __init__(
-        self,
-        config: Union[DeepseekV2Config, DeepseekV3Config],
-        prefix: str,
-        parallel_config: ParallelConfig,
-        model_config: ModelConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        parallel_config = vllm_config.parallel_config
+
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
@@ -730,10 +729,7 @@ class DeepseekV2Model(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        parallel_config = vllm_config.parallel_config
         self.config = config
 
         self.vocab_size = config.vocab_size
@@ -749,14 +745,7 @@ class DeepseekV2Model(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: DeepseekV2DecoderLayer(
-                config,
-                prefix,
-                parallel_config=parallel_config,
-                model_config=model_config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-            ),
+            lambda prefix: DeepseekV2DecoderLayer(vllm_config, prefix),
             prefix=f"{prefix}.layers")
 
         if get_pp_group().is_last_rank:
