@@ -543,8 +543,8 @@ __global__ void group_idx_and_topk_idx_kernel(
         value = kNegInfinity;
       }
       pre_count_equal_to_top_value = count_equal_to_top_value;
-      count_equal_to_top_value =
-          __popc(__ballot_sync(FULL_WARP_MASK, (value == kNegInfinity)));
+      count_equal_to_top_value = __popc(__ballot_sync(
+          FULL_WARP_MASK, (value == cuda_cast<T, float>(kNegInfinity))));
     }
     num_equalto_topkth_group = target_num_min - pre_count_equal_to_top_value;
   }
@@ -555,7 +555,8 @@ __global__ void group_idx_and_topk_idx_kernel(
       queue((int32_t)topk, -INFINITY);
 
   int count_equalto_topkth_group = 0;
-  bool if_proceed_next_topk = (topk_group_value != kNegInfinity);
+  bool if_proceed_next_topk =
+      (topk_group_value != cuda_cast<T, float>(kNegInfinity));
   if (case_id < num_tokens && if_proceed_next_topk) {
     for (int i_group = 0; i_group < n_group; i_group++) {
       if ((group_scores[i_group] > topk_group_value) ||
