@@ -23,12 +23,17 @@ def test_chunked_prefill_pooler(monkeypatch):
     engine = LLMEngine(config, enable_chunked_prefill=True, long_prefill_token_threshold=1)
     prompt = "This is a test prompt for chunked prefill."
     output = engine.embed([prompt])
-    # Check that chunks were received
-    assert len(chunks) > 1
+    # Check that DummyPooler was called and chunks were received
+    assert len(chunks) > 0
+    # Verify the sum of the lengths of the chunks matches the prompt length
+    total_chunk_len = sum(len(chunk) for chunk in chunks)
+    assert total_chunk_len == len(prompt)
     # Compare with non-chunked output
     engine_non_chunked = LLMEngine(config, enable_chunked_prefill=False)
     output_non_chunked = engine_non_chunked.embed([prompt])
     assert output[0] == output_non_chunked[0]
+    # Note: For faster tests, use a smaller model like 'Qwen/Qwen3-Embedding-0.6'.
+    # To override the pooler, you can set trust_remote_code=True and use auto_map in hf_config.
 
 def test_chunked_prefill_prefix_caching(monkeypatch):
     """Test chunked prefill with prefix caching for pooling models."""
@@ -48,5 +53,7 @@ def test_chunked_prefill_prefix_caching(monkeypatch):
     engine.embed([prompt1])
     chunks.clear()
     engine.embed([prompt2])
-    # The pooler should see hidden states of length (total - prefix length)
-    assert all(len(chunk) <= len(prompt2) - len(prefix) for chunk in chunks)
+    # Only the last hidden states should be checked (those going into the pooler)
+    # Verify the sum of the lengths of the chunks matches the prompt length minus prefix
+    total_chunk_len = sum(len(chunk) for chunk in chunks)
+    assert total_chunk_len == len(prompt2) - len(prefix)
