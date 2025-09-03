@@ -49,7 +49,6 @@ class DeepseekV2Model(nn.Module):
 
         self.layers = nn.ModuleList([
             DeepseekV2DecoderLayer(
-                self.config,
                 vllm_config,
                 prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
             ) for i in range(self.config.num_hidden_layers)
