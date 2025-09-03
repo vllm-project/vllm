@@ -113,17 +113,6 @@ class CompletionRenderer(BaseRenderer):
             if truncate_prompt_tokens == 0:
                 return []
 
-        # Enforce uniform input types - all text or all tokens, no mixing
-        # Mixed types would require preserving original ordering during async
-        # tokenization, which isn't currently supported
-        if isinstance(prompt_or_prompts, list) and len(prompt_or_prompts) > 0:
-            first_type = type(prompt_or_prompts[0])
-            if not all(
-                    isinstance(elem, first_type)
-                    for elem in prompt_or_prompts):
-                raise TypeError(
-                    "All inputs must be either text strings or token ids.")
-
         # Parse and batch the input prompts
         batch_inputs = parse_and_batch_prompt(prompt_or_prompts)
 
