@@ -19,11 +19,12 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.llama import (LlamaDecoderLayer,
                                               LlamaForCausalLM)
 from vllm.v1.sample.metadata import SamplingMetadata
 
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix, merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
@@ -99,7 +100,14 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         return hidden_states, residual
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        # positions is of shape (3, seq_len) if mrope is enabled for qwen2-vl,
+        # otherwise (seq_len, ).
+        "positions": -1,
+        "inputs_embeds": 0,
+    })
 class LlamaModel(nn.Module):
 
     def __init__(
@@ -139,13 +147,21 @@ class LlamaModel(nn.Module):
             eps=self.config.rms_norm_eps,
         )
 
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
+        input_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        input_embeds = self.embed_tokens(input_ids)
+        if input_embeds is None:
+            input_embeds = self.get_input_embeddings(input_ids)
         assert hidden_states.shape[-1] == input_embeds.shape[-1]
 
         residual = None
@@ -224,11 +240,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         hidden_states: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if inputs_embeds is not None:
-            raise NotImplementedError(
-                f"{type(self).__name__} does not support multimodal inputs yet."
-            )
-        return self.model(input_ids, positions, hidden_states)
+        return self.model(input_ids, positions, hidden_states, inputs_embeds)
 
     def compute_logits(
         self,
@@ -286,3 +298,16 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             skip_substrs=skip_substrs,
         )
         loader.load_weights(model_weights.items())
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.model.get_input_embeddings(input_ids)
+        if multimodal_embeddings is not None \
+            and len(multimodal_embeddings) != 0:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, multimodal_embeddings,
+                self.config.image_token_index)
+        return inputs_embeds
