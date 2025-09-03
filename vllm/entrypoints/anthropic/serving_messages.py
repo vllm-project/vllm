@@ -217,9 +217,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             request: AnthropicMessagesRequest,
             raw_request: Optional[Request] = None,
     ) -> Union[
-            AsyncGenerator[str, None],
-            AnthropicMessagesResponse,
-            ErrorResponse
+        AsyncGenerator[str, None],
+        AnthropicMessagesResponse,
+        ErrorResponse
     ]:
         """
         Messages API similar to Anthropic's API.
@@ -227,7 +227,9 @@ class AnthropicServingMessages(OpenAIServingChat):
         See https://docs.anthropic.com/en/api/messages
         for the API specification. This API mimics the Anthropic messages API.
         """
+        logger.debug(f"Received messages request {request.model_dump_json()}")
         chat_req = self._convert_anthropic_to_openai_request(request)
+        logger.debug(f"Convert to OpenAI request {chat_req.model_dump_json()}")
         generator = await self.create_chat_completion(chat_req, raw_request)
 
         if isinstance(generator, ErrorResponse):
@@ -262,6 +264,7 @@ class AnthropicServingMessages(OpenAIServingChat):
             AnthropicContentBlock(
                 type="text",
                 text=generator.choices[0].message.content
+                if generator.choices[0].message.content else "",
             )
         ]
 
@@ -333,12 +336,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 delta=AnthropicDelta(
                                     stop_reason=self.stop_reason_map.get(
                                         finish_reason, "end_turn"),
-                                    usage=AnthropicUsage(
-                                        input_tokens=origin_chunk.usage.
-                                                     prompt_tokens or 0,
-                                        output_tokens=origin_chunk.usage.
-                                                     completion_tokens or 0
-                                    )
+                                ),
+                                usage=AnthropicUsage(
+                                    input_tokens=origin_chunk.usage.
+                                                 prompt_tokens or 0,
+                                    output_tokens=origin_chunk.usage.
+                                                 completion_tokens or 0
                                 )
                             )
                             data = chunk.model_dump_json(exclude_unset=True)

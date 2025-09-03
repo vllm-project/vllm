@@ -106,7 +106,7 @@ async def create_messages(request: AnthropicMessagesRequest,
     handler = messages(raw_request)
     if handler is None:
         return messages(raw_request).create_error_response(
-            message="The model does not support Chat Completions API")
+            message="The model does not support Messages API")
 
     generator = await handler.create_messages(request, raw_request)
 
@@ -114,6 +114,7 @@ async def create_messages(request: AnthropicMessagesRequest,
         return JSONResponse(content=generator.model_dump())
 
     elif isinstance(generator, AnthropicMessagesResponse):
+        logger.debug(f"Anthropic Messages Response: {generator.model_dump(exclude_none=True)}")
         return JSONResponse(content=generator.model_dump(exclude_none=True))
 
     return StreamingResponse(content=generator, media_type="text/event-stream")

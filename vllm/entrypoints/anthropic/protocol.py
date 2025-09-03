@@ -113,7 +113,6 @@ class AnthropicDelta(BaseModel):
         Literal["end_turn", "max_tokens", "stop_sequence",
                 "tool_use", "pause_turn", "refusal"]] = None
     stop_sequence: Optional[str] = None
-    usage: AnthropicUsage = None
 
 
 class AnthropicStreamEvent(BaseModel):
@@ -128,6 +127,7 @@ class AnthropicStreamEvent(BaseModel):
     content_block: Optional[AnthropicContentBlock] = None
     index: Optional[int] = None
     error: Optional[AnthropicError] = None
+    usage: AnthropicUsage = None
 
 
 class AnthropicMessagesResponse(BaseModel):

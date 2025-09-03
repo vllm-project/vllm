@@ -150,7 +150,7 @@ def _apply_logits_processors(
     for seq_group in sampling_metadata.seq_groups:
         seq_ids = seq_group.seq_ids
         sampling_params = seq_group.sampling_params
-        logits_processors = sampling_params.xlogits_processors
+        logits_processors = sampling_params.logits_processors
         if logits_processors:
             found_logits_processors = True
 
