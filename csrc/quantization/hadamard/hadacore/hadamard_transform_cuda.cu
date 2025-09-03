@@ -689,7 +689,7 @@ void __forceinline__ run_kernel(b16* a_mat, b16* out, int num_chunks, cudaStream
     dim3 block_size = 32 * warps_per_block;
 
     #define CHECK_SHARED_LIM() {                                                                              \
-        if (shared_size > 48 * 1024) {                                                                        \    
+        if (shared_size > 48 * 1024) {                                                                        \
             C10_CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 65536)); \
         }                                                                                                     \
     }                                                                                                         \
@@ -773,50 +773,34 @@ template void run_fht<torch::ScalarType::BFloat16>(void* a_mat_ptr, void* out_pt
 constexpr bool is_power_of_two(uint32_t x) { return x && !(x & (x - 1)); }
 
 void hadacore_transform(torch::Tensor& x) {
-  auto dtype = x.scalar_type();
-  TORCH_CHECK(
-      dtype == torch::ScalarType::Half || dtype == torch::ScalarType::BFloat16,
-      "Only fp16 and bf16 supported currently");
-  // TODO: fix for size <= (4x4, 256)
+    const int had_size = x.size(-1);
+    TORCH_CHECK(is_power_of_two(had_size) && (had_size <= (1U << 15)) && (had_size >= (1U << 8)),
+              "Only power of two Hadamard sizes between 2^8 and 2^15 are supported, got ", had_size);
 
-  const int had_size = x.size(-1);
-  TORCH_CHECK(is_power_of_two(had_size) && (had_size <= (1U << 15)),
-              "Only power of two Hadamard sizes up to 2^15 are supported, got ",
-              had_size);
+    const auto res_shape = x.sizes();
+    x = x.reshape({-1, had_size});
 
-  const auto res_shape = x.sizes();
-  x = x.reshape({-1, had_size});
+    if (x.stride(-1) != 1) {
+        x = x.contiguous();
+    }
 
-  // TODO: consider erroring here
-  auto numel = x.numel();
-  if (numel % 256 != 0) {
-    x = torch::nn::functional::pad(
-        x, torch::nn::functional::PadFuncOptions(
-               {0, 0, 0, (256 - numel % 256) / had_size}));
-  }
+    at::cuda::CUDAGuard device_guard{(char)x.get_device()};
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
 
-  if (x.stride(-1) != 1) {
-    x = x.contiguous();
-  }
-
-  at::cuda::CUDAGuard device_guard{(char)x.get_device()};
-  auto stream = at::cuda::getCurrentCUDAStream().stream();
-
-  if (dtype == torch::ScalarType::Half) {
-    hadacore::run_fht<torch::ScalarType::Half>(x.data_ptr(), x.data_ptr(),
-                                               x.numel(), had_size, stream);
-  } else {
-    hadacore::run_fht<torch::ScalarType::BFloat16>(x.data_ptr(), x.data_ptr(),
+    auto dtype = x.scalar_type();
+    if (dtype == torch::ScalarType::Half) {
+        hadacore::run_fht<torch::ScalarType::Half>(x.data_ptr(), x.data_ptr(),
                                                    x.numel(), had_size, stream);
-  }
+    } else if (dtype == torch::ScalarType::BFloat16) {
+        hadacore::run_fht<torch::ScalarType::BFloat16>(x.data_ptr(), x.data_ptr(),
+                                                       x.numel(), had_size, stream);
+    } else {
+        TORCH_CHECK(false, "Only fp16 and bf16 supported currently");
+    }
 
-  if (numel % 256 != 0) {
-    x = x.index({torch::indexing::Slice(0, numel / had_size)});
-  }
-
-  x = x.reshape(res_shape);
+    x = x.reshape(res_shape);
 }
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("hadacore_transform", &hadacore_transform);
+    m.impl("hadacore_transform", &hadacore_transform);
 }

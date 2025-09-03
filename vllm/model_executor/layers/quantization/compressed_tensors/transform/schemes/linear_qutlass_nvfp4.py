@@ -43,21 +43,4 @@ class QutlassNvFP4LinearMethod(CompressedTensorsLinearTransformMethod):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        assert bias is None
-
         raise NotImplementedError()
-
-        # x_e2m1, x_e8m0, clip_mask = fusedQuantizeNv(
-        #     x, self.input_transform.weight[0], method='quest')
-        # x_scale_block = to_blocked(x_e8m0)
-        # out = matmul_nvf4_bf16_tn(x_e2m1, layer.weight_scale, x_scale_block,
-        #                           layer.weight)
-
-        # In most cases, input transforms are preferred over output transforms
-        # (@ksayers): confirm that this is done concurrently
-        # if self.output_transform is not None:
-        #     for part_id, (start, length) in enumerate(self.partition_ranges):
-        #         x[:, start:start + length] = self.output_transform(
-        #             x[:, start:start + length].contiguous(), part_id=part_id)
-
-        return x
