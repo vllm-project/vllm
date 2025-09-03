@@ -49,7 +49,7 @@ class MQLLMEngine:
 
     This class is used to wrap the
     [`LLMEngine`][vllm.engine.llm_engine.LLMEngine] class to enable use
-    in concurrnet manner. It runs a background loop and uses zeromq to
+    in concurrent manner. It runs a background loop and uses zeromq to
     receive new requests and stream outputs incrementally via ipc.
 
     The [`LLMEngine`][vllm.engine.llm_engine.LLMEngine] generate or encode
