@@ -112,17 +112,11 @@ class QuarkConfig(QuantizationConfig):
                                  "configuration.")
 
             q_configs = [
-                cast(dict[str, Any], layer_quant_config.get(name))
-                for name in kv_cache_group
+                quant_cfg for name, quant_cfg in layer_quant_config.items()
+                if any(
+                    fnmatch.fnmatchcase(name, pattern)
+                    for pattern in kv_cache_group)
             ]
-            if None in q_configs:
-                while None in q_configs:
-                    q_configs.remove(None)
-                for name, quant_cfg in layer_quant_config.items():
-                    if any(
-                            fnmatch.fnmatchcase(name, kv_pattern)
-                            for kv_pattern in kv_cache_group):
-                        q_configs.append(quant_cfg)
 
             if not all(
                     deep_compare(q_config["output_tensors"], q_configs[0]
