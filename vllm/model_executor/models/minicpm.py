@@ -594,14 +594,14 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         model_output = self.model(input_ids, positions, intermediate_tensors,
                                   inputs_embeds)
         
-        # 检查是否返回了 aux hidden states（与 LLaMA 保持一致的处理方式）
+        # Check if aux hidden states are returned (consistent with LLaMA's handling approach)
         if isinstance(model_output, tuple) and len(model_output) == 2:
-            # 有 aux hidden states
+            # Aux hidden states are present.
             hidden_states, aux_hidden_states = model_output
             hidden_states = hidden_states / self.scale_width
             return hidden_states, aux_hidden_states
         else:
-            # 只有 hidden states 或 IntermediateTensors
+            # Only hidden states or IntermediateTensors
             if isinstance(model_output, IntermediateTensors):
                 return model_output
             else:
