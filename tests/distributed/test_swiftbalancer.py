@@ -1,6 +1,8 @@
 import torch
 
-from vllm.distributed.eplb.eplb_policy.swift_balancer_policy import SwiftBalancer
+from vllm.distributed.eplb.eplb_policy.swift_balancer_policy import (
+    SwiftBalancer
+)
 
 def test_rebalance():
     """Test rebalancing functionality"""

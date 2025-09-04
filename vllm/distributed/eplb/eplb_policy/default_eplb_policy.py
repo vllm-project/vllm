@@ -14,7 +14,7 @@ on how the EPLB algorithm works.
 
 import torch
 from typing import Optional
-from .policy_abstract import EplbPolicy
+from .abstract_policy import EplbPolicy
 
 
 class DefaultEplb(EplbPolicy):
