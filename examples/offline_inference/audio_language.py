@@ -146,6 +146,36 @@ def run_granite_speech(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# MiDashengLM
+def run_midashenglm(question: str, audio_count: int):
+    model_name = "mispeech/midashenglm-7b"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    audio_in_prompt = "".join(
+        ["<|audio_bos|><|AUDIO|><|audio_eos|>" for idx in range(audio_count)]
+    )
+
+    default_system = "You are a helpful language and speech assistant."
+
+    prompt = (
+        f"<|im_start|>system\n{default_system}<|im_end|>\n"
+        "<|im_start|>user\n"
+        f"{audio_in_prompt}{question}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 # MiniCPM-O
 def run_minicpmo(question: str, audio_count: int) -> ModelRequestData:
     model_name = "openbmb/MiniCPM-o-2_6"
@@ -352,6 +382,7 @@ model_example_map = {
     "voxtral": run_voxtral,
     "gemma3n": run_gemma3n,
     "granite_speech": run_granite_speech,
+    "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
     "phi4_multimodal": run_phi4_multimodal,
