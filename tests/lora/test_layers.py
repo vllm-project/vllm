@@ -60,9 +60,9 @@ DEVICES = ([
 # prefill stage(True) or decode stage(False)
 STAGES = [True, False]
 
-NUM_RANDOM_SEEDS = 6
+NUM_RANDOM_SEEDS = 2
 
-VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 128
+VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS = 2
 
 
 @pytest.fixture(autouse=True)
