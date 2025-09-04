@@ -50,6 +50,18 @@ class RequestFuncOutput:
     error: str = ""
 
 
+async def iter_lines(response, encoding="utf-8"):
+    buffer = ""
+    async for chunk in response.content.iter_any():
+        text = chunk.decode(encoding, errors="ignore")
+        buffer += text
+        while "\n" in buffer:
+            line, buffer = buffer.split("\n", 1)
+            yield line
+    if buffer:
+        yield buffer
+
+
 async def async_request_tgi(
     request_func_input: RequestFuncInput,
     pbar: Optional[tqdm] = None,
@@ -90,11 +102,10 @@ async def async_request_tgi(
                 url=api_url, json=payload, headers=headers
             ) as response:
                 if response.status == 200:
-                    async for chunk_bytes in response.content:
+                    async for chunk_bytes in iter_lines(response):
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
-                        chunk_bytes = chunk_bytes.decode("utf-8")
 
                         # NOTE: Sometimes TGI returns a ping response without
                         # any data, we should skip it.
@@ -165,12 +176,12 @@ async def async_request_trt_llm(
                 url=api_url, json=payload, headers=headers
             ) as response:
                 if response.status == 200:
-                    async for chunk_bytes in response.content:
+                    async for chunk_bytes in iter_lines(response.content):
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
 
-                        chunk = chunk_bytes.decode("utf-8").removeprefix("data:")
+                        chunk = chunk_bytes.removeprefix("data:")
 
                         data = json.loads(chunk)
                         output.generated_text += data["text_output"]
@@ -311,12 +322,12 @@ async def async_request_openai_completions(
             ) as response:
                 if response.status == 200:
                     first_chunk_received = False
-                    async for chunk_bytes in response.content:
+                    async for chunk_bytes in iter_lines(response):
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
 
-                        chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
+                        chunk = chunk_bytes.removeprefix("data: ")
                         if chunk != "[DONE]":
                             data = json.loads(chunk)
 
@@ -425,11 +436,10 @@ async def async_request_openai_chat_completions(
                 url=api_url, json=payload, headers=headers
             ) as response:
                 if response.status == 200:
-                    async for chunk_bytes in response.content:
+                    async for chunk_bytes in iter_lines(response.content):
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
                             continue
-                        chunk_bytes = chunk_bytes.decode("utf-8")
                         # NOTE: SSE comments (often used as pings) start with a colon.
                         # These are not JSON data payload and should be skipped.
                         if chunk_bytes.startswith(":"):
@@ -539,12 +549,12 @@ async def async_request_openai_audio(
                     url=api_url, data=form, headers=headers
                 ) as response:
                     if response.status == 200:
-                        async for chunk_bytes in response.content:
+                        async for chunk_bytes in iter_lines(response):
                             chunk_bytes = chunk_bytes.strip()
                             if not chunk_bytes:
                                 continue
 
-                            chunk = chunk_bytes.decode("utf-8").removeprefix("data: ")
+                            chunk = chunk_bytes.removeprefix("data: ")
                             if chunk != "[DONE]":
                                 timestamp = time.perf_counter()
                                 data = json.loads(chunk)
