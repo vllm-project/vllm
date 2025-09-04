@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import contextlib
 import os
+import queue
+from concurrent.futures import Future, InvalidStateError
+from functools import cached_property
+from threading import Thread
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -13,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.utils import (get_distributed_init_method, get_ip, get_open_port,
                         run_method)
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
+from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -44,19 +49,72 @@ class UniProcExecutor(ExecutorBase):
             distributed_init_method=distributed_init_method,
             is_driver_worker=is_driver_worker,
         )
+
+        self.async_output_queue: Optional[queue.Queue[tuple[
+            AsyncModelRunnerOutput, Future]]] = None
+        self.async_output_thread: Optional[Thread] = None
+
+        if self.max_concurrent_batches > 1:
+            self.async_output_queue = queue.Queue[tuple[AsyncModelRunnerOutput,
+                                                        Future]]()
+            self.async_output_thread = Thread(
+                target=self.async_output_busy_loop,
+                args=(self.async_output_queue, ),
+                daemon=True,
+                name="WorkerAsyncOutput")
+            self.async_output_thread.start()
+
         self.collective_rpc("init_worker", args=([kwargs], ))
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
+
+    @cached_property
+    def max_concurrent_batches(self) -> int:
+        return 2 if self.scheduler_config.async_scheduling else 1
+
+    @staticmethod
+    def async_output_busy_loop(
+        async_output_queue: queue.Queue[tuple[AsyncModelRunnerOutput,
+                                              Future]]):
+        """Entrypoint for the thread which handles outputs asynchronously."""
+        while True:
+            output, future = async_output_queue.get()
+            try:
+                output = output.get_output()
+                with contextlib.suppress(InvalidStateError):
+                    future.set_result(output)
+            except Exception as e:
+                if not future.done():
+                    future.set_exception(e)
+                else:
+                    logger.exception("Error obtaining ModelRunnerOutput")
 
     def collective_rpc(self,
                        method: Union[str, Callable],
                        timeout: Optional[float] = None,
                        args: Tuple = (),
-                       kwargs: Optional[Dict] = None) -> List[Any]:
+                       kwargs: Optional[Dict] = None,
+                       non_block: bool = False) -> List[Any]:
         if kwargs is None:
             kwargs = {}
-        answer = run_method(self.driver_worker, method, args, kwargs)
-        return [answer]
+
+        if not non_block:
+            return [run_method(self.driver_worker, method, args, kwargs)]
+
+        future = Future[Any]()
+        try:
+            result = run_method(self.driver_worker, method, args, kwargs)
+            if isinstance(result, AsyncModelRunnerOutput):
+                if self.async_output_queue is not None:
+                    self.async_output_queue.put((result, future))
+                else:
+                    result = result.get_output()
+                    future.set_result(result)
+            else:
+                future.set_result(result)
+        except Exception as e:
+            future.set_exception(e)
+        return [future]
 
     def check_health(self) -> None:
         # UniProcExecutor will always be healthy as long as
