@@ -1309,6 +1309,9 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.
             disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            context_parallel_size=self.context_parallel_size,
+            tensor_parallel_size=self.tensor_parallel_size,
+            enable_sequence_parallel=self.enable_sequence_parallel,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
