@@ -134,7 +134,9 @@ def sequence_parallel_chunk(x: torch.Tensor) -> torch.Tensor:
     remainder = seq_len % tp_size
     if remainder != 0:
         pad_len = tp_size - remainder
-        x = nn.functional.pad(x, (0, 0, 0, pad_len))
+        #x = nn.functional.pad(x, (0, 0, 0, pad_len))
+        pad = torch.randn(pad_len, x.size(1), dtype=x.dtype, device=x.device)
+        x = torch.cat([x, pad], dim=0)
 
     chunk = x.shape[0] // tp_size
     start = tp_rank * chunk

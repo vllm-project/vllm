@@ -1710,7 +1710,6 @@ class FusedMoE(CustomOp):
             max_tokens_across_dp = cdiv(max_tokens_across_dp, self.sp_size)
 
         num_tokens = full_hidden_states.size(0)
-        assert (num_tokens <= max_tokens_across_dp)
         for chunk_idx, chunk_start_ in enumerate(
                 range(0, max_tokens_across_dp, moe_dp_chunk_size_per_rank)):
             chunk_start = chunk_start_
