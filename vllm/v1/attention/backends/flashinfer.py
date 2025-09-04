@@ -317,7 +317,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens =\
-            split_decodes_and_prefills(common_attn_metadata)
+            split_decodes_and_prefills(common_attn_metadata,
+                                       decode_threshold=self.reorder_batch_threshold)
 
         page_size = self.page_size
         max_q_len = common_attn_metadata.max_query_len
