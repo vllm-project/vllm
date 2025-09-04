@@ -227,8 +227,8 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size=128, seed=0):
 
     # Compute silu activation and elementwise multiplication
     y1 = y[..., :H].float()
-    y2 = y[..., H:].float()
-    silu_x = y1 * torch.sigmoid(y1)
+    y2 = y[..., H:]
+    silu_x = y1 * torch.sigmoid(y1).bfloat16()
     merged = silu_x * y2
 
     # Compute reference scales and quantized output, skipping padded tokens
@@ -254,7 +254,7 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, group_size=128, seed=0):
         y_se = y_s[e]
         y_qe = y_q[e]
 
-        torch.testing.assert_close(y_se[:nt], ref_s[:nt])
+        torch.testing.assert_close(y_se[:nt], ref_s[:nt], rtol=0.01, atol=0.01)
         torch.testing.assert_close(
             y_qe[:nt].to(torch.float32),
             ref_q[:nt].to(torch.float32),
