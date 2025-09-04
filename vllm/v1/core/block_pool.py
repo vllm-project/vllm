@@ -133,9 +133,10 @@ class BlockPool:
                 # case, the newly-allocated blocks might be null blocks
                 # (e.g. for those tokens that are 1. prefix cache hit
                 # from the connector but 2. outside sliding window).
-                # If we don't skip these blocks, they will be assigned
-                # some block hash and next time when we reuse null blocks
-                # for other purposes it will trigger an assertion error.
+                # If we don't skip these null blocks, the block hash of
+                # null blocks will be changed, and trigger assertion error
+                # when it see the next null block (recall that null blocks
+                # are shared).
                 continue
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
