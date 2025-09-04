@@ -492,8 +492,8 @@ class OpenAIServingResponses(OpenAIServing):
             input_tokens_details=InputTokensDetails(
                 cached_tokens=num_cached_tokens),
             output_tokens_details=OutputTokensDetails(
-                reasoning_tokens=num_reasoning_tokens),
-            tool_output_tokens=num_tool_output_tokens,
+                reasoning_tokens=num_reasoning_tokens,
+                tool_output_tokens=num_tool_output_tokens),
         )
         response = ResponsesResponse.from_request(
             request,
