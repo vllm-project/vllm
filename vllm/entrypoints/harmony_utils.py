@@ -278,7 +278,19 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                 )
                 output_items.append(reasoning_item)
         else:
-            raise ValueError(f"Unknown recipient: {recipient}")
+            # For other recipients in commentary channel, treat as reasoning
+            for content in message.content:
+                reasoning_item = ResponseReasoningItem(
+                    id=f"rs_{random_uuid()}",
+                    summary=[],
+                    type="reasoning",
+                    content=[
+                        ResponseReasoningTextContent(text=content.text,
+                                                     type="reasoning_text")
+                    ],
+                    status=None,
+                )
+                output_items.append(reasoning_item)
     elif message.channel == "final":
         contents = []
         for content in message.content:
