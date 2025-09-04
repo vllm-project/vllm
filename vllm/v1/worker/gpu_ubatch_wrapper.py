@@ -15,7 +15,7 @@ from vllm.forward_context import (create_forward_context, get_forward_context,
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
+from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts, Schedule
 
 logger = init_logger(__name__)
 
@@ -40,13 +40,15 @@ class CUDAGraphMetaData:
 class UBatchWrapper:
 
     def __init__(self, runnable: Callable, vllm_config: VllmConfig,
-                 runtime_mode: CUDAGraphMode, device: torch.cuda.device):
+                 runtime_mode: CUDAGraphMode, device: torch.cuda.device,
+                 delayed_start: bool = False):
+
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.comm_stream = torch.cuda.Stream(device=device)
         self.ready_barrier = threading.Barrier(3)
-
+        self.delayed_start = delayed_start
         self.cudagraphs: dict[int, CUDAGraphMetaData] = {}
 
         self.cudagraph_wrapper = None
@@ -185,7 +187,8 @@ class UBatchWrapper:
     def _make_ubatch_metadata(self, ubatch_slices, attn_metadata, input_ids,
                               positions, inputs_embeds, intermediate_tensors,
                               compute_stream, dp_metadata, batch_descriptor,
-                              cudagraph_runtime_mode) -> list[UbatchMetadata]:
+                              cudagraph_runtime_mode,
+                              delayed_start: bool = False) -> list[UbatchMetadata]:
 
         # Create one forward context per ubatch
         forward_contexts = []
@@ -198,12 +201,20 @@ class UBatchWrapper:
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode))
 
+        # Map CLI/config schedule string to Schedule enum
+        schedule_str = self.vllm_config.parallel_config.microbatch_schedule
+        schedule = Schedule.MLP_OVERLAP
+        if schedule_str == Schedule.ATTN_SHARED_OVERLAP.value:
+            schedule = Schedule.ATTN_SHARED_OVERLAP
+
         ubatch_ctxs = make_ubatch_contexts(
             num_micro_batches=len(ubatch_slices),
             comm_stream=self.comm_stream,
             compute_stream=compute_stream,
             forward_contexts=forward_contexts,
-            ready_barrier=self.ready_barrier)
+            ready_barrier=self.ready_barrier,
+            delayed_start=delayed_start)
+
 
         ubatch_metadata: list[UbatchMetadata] = []
         for i, ubatch_slice in enumerate(ubatch_slices):

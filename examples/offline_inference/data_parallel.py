@@ -90,7 +90,13 @@ def parse_args():
     parser.add_argument(
         "--enable-microbatching",
         action="store_true",
-        help=("Enable microbatched execution"),
+        help=("Enable microbatched execution")
+    )
+    parser.add_argument(
+        "--compilation-config",
+        type=int,
+        default=0,
+        help=("Compilation optimization (O) level 0-3."),
     )
     parser.add_argument(
         "--compilation-config",

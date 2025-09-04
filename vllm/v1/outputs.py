@@ -114,6 +114,34 @@ class ModelRunnerOutput:
     num_nans_in_logits: Optional[dict[str, int]] = None
 
 
+# ModelRunnerOutput wrapper for async scheduling.
+# Contains GPU tensors which must be serialized before sending
+# to the scheduler process.
+@dataclass
+class AsyncModelRunnerOutput:
+    model_runner_output: ModelRunnerOutput
+
+    # [num_reqs, max_num_generated_tokens]
+    sampled_token_ids: torch.Tensor
+
+    invalid_req_indices: list[int]
+
+    def serialize(self, copy_stream: torch.cuda.Stream) -> ModelRunnerOutput:
+        default_stream = torch.cuda.current_stream()
+        with torch.cuda.stream(copy_stream):
+            copy_stream.wait_stream(default_stream)
+            sampled_token_ids_cpu = self.sampled_token_ids.to(
+                'cpu', non_blocking=True)
+        copy_stream.synchronize()
+        valid_sampled_token_ids = sampled_token_ids_cpu.tolist()
+        for i in self.invalid_req_indices:
+            valid_sampled_token_ids[i].clear()
+
+        output = self.model_runner_output
+        output.sampled_token_ids = valid_sampled_token_ids
+        return output
+
+
 @dataclass
 class DraftTokenIds:
 

@@ -135,6 +135,13 @@ class ParallelConfig:
     request is greater than this threshold, microbatching will be used.
     Otherwise, the request will be processed in a single batch."""
 
+    microbatch_schedule: Literal["mlp_overlap", "ATTN_SHARED_OVERLAP"] = "mlp_overlap"
+    """Schedule policy for microbatch overlap coordination.
+
+    - "mlp_overlap": overlap MLP compute and communication across ubatches
+    - "ATTN_SHARED_OVERLAP": overlap MLA attention and communication across ubatches
+    """
+
     ray_workers_use_nsight: bool = False
     """Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler."""
 

@@ -317,6 +317,7 @@ class EngineArgs:
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_microbatching: bool = ParallelConfig.enable_microbatching
     microbatching_token_threshold: int = ParallelConfig.microbatching_token_threshold
+    microbatch_schedule: str = ParallelConfig.microbatch_schedule
     eplb_config: EPLBConfig = get_field(ParallelConfig, "eplb_config")
     enable_eplb: bool = ParallelConfig.enable_eplb
     num_redundant_experts: int = EPLBConfig.num_redundant_experts
@@ -682,6 +683,12 @@ class EngineArgs:
                                     **parallel_kwargs["enable_microbatching"])
         parallel_group.add_argument("--microbatching-token-threshold",
                                     **parallel_kwargs["microbatching_token_threshold"])
+        parallel_group.add_argument(
+            "--microbatch-schedule",
+            dest="microbatch_schedule",
+            **parallel_kwargs["microbatch_schedule"])
+        parallel_group.add_argument("--enable-async-comms",
+                                    **parallel_kwargs["enable_async_comms"])
         parallel_group.add_argument("--enable-eplb",
                                     **parallel_kwargs["enable_eplb"])
         parallel_group.add_argument("--eplb-config",
@@ -1304,6 +1311,7 @@ class EngineArgs:
             enable_expert_parallel=self.enable_expert_parallel,
             enable_microbatching=self.enable_microbatching,
             microbatching_token_threshold=self.microbatching_token_threshold,
+            microbatch_schedule=self.microbatch_schedule,
             enable_eplb=self.enable_eplb,
             eplb_config=self.eplb_config,
             max_parallel_loading_workers=self.max_parallel_loading_workers,

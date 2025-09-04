@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
 from math import prod
-from typing import Callable, Optional, Union, final
+from typing import Callable, Optional, Union, final, Generator
 
 import torch
 
@@ -13,10 +13,9 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (  # yapf: disable
     _resize_cache, count_expert_num_tokens)
 from vllm.utils import cdiv
-from vllm.v1.worker.ubatching import (dbo_enabled,
-                                      dbo_yield,
-                                      dbo_maybe_run_recv_hook,
-                                      dbo_register_recv_hook)
+from vllm.v1.worker.ubatching import (Schedule, dbo_maybe_run_recv_hook,
+                                      dbo_register_recv_hook, dbo_yield,
+                                      dbo_current_schedule)
 
 #
 # This file defines a set of base classes used to make MoE kernels more modular.
@@ -165,8 +164,121 @@ PrepareResultType = tuple[
     Optional[torch.Tensor],
 ]
 
-ReceiverType = Callable[[any], PrepareResultType]
+ReceiverType = Callable[[], PrepareResultType]
 
+
+#
+# Prepare and Finalize Op Chains
+#
+# The prepare and finalize functions are broken down into a chain of sequential
+# operations/steps. This 
+
+class _PhasedGen[R]:
+    """
+    Enforce an exact number of yields (phases), then a final return.
+
+    Contract:
+      - The generator must yield exactly `expected_yields` times.
+      - The next advance must StopIteration with a return value (may be None).
+      - Early StopIteration or extra yields raise RuntimeError.
+      - Duplicate step/finish after completion raises RuntimeError.
+    """
+    __slots__ = ("_gen", "_expected", "_steps", "_done", "_ret")
+
+    def __init__(self, gen: Generator[None, None, R], expected_yields: int):
+        self._gen = gen
+        self._expected = expected_yields
+        self._steps = 0
+        self._done = False
+        self._ret: Optional[R] = None
+
+    def step(self, label: str) -> None:
+        if self._done:
+            raise RuntimeError(f"Generator already finished; unexpected '{label}'.")
+        if self._steps >= self._expected:
+            raise RuntimeError(
+                f"Too many steps: called '{label}' after {self._expected} phases; "
+                "expected to finish instead."
+            )
+        try:
+            next(self._gen)
+        except StopIteration:
+            raise RuntimeError(
+                f"Generator ended early during '{label}' "
+                f"(completed {self._steps}/{self._expected} phases)."
+            )
+        self._steps += 1
+
+    def finish(self, label: str) -> R:
+        if self._done:
+            raise RuntimeError(f"Generator already finished; duplicate '{label}'.")
+        if self._steps != self._expected:
+            raise RuntimeError(
+                f"Cannot finish at '{label}': only {self._steps}/"
+                f"{self._expected} phases completed."
+            )
+        try:
+            next(self._gen)
+        except StopIteration as e:
+            self._done = True
+            self._ret = e.value  # may be None
+            return self._ret  # type: ignore[return-value]
+        else:
+            raise RuntimeError(
+                f"Generator yielded more than expected ({self._expected}); "
+                f"should have finished at '{label}'."
+            )
+
+@dataclass
+class AsyncOps[R]:
+    """
+    3-phase async:
+      1) prepare()
+      2) send()
+      3) recv()
+      4) finish() -> R
+    """
+    prepare: Callable[[], None]
+    send: Callable[[], None]
+    recv: Callable[[], None]
+    finish: Callable[[], R]
+
+    @classmethod
+    def from_generator(cls, gen: Generator[None, None, R]) -> 'AsyncOps[R]':
+        ph = _PhasedGen[R](gen, expected_yields=3)
+        return cls(
+            prepare=lambda: ph.step("prepare"),
+            send=lambda: ph.step("send"),
+            recv=lambda: ph.step("recv"),
+            finish=lambda: ph.finish("finish"),
+        )
+
+
+@dataclass
+class SyncOps[R]:
+    """
+    2-phase sync:
+      1) prepare()
+      2) send_recv()
+      3) finish() -> R
+    """
+    prepare: Callable[[], None]
+    send_recv: Callable[[], None]
+    finish: Callable[[], R]
+
+    @classmethod
+    def from_generator(cls, gen: Generator[None, None, R]) -> 'SyncOps[R]':
+        ph = _PhasedGen[R](gen, expected_yields=2)
+        return cls(
+            prepare=lambda: ph.step("prepare"),
+            send_recv=lambda: ph.step("send_recv"),
+            finish=lambda: ph.finish("finish"),
+        )
+        
+AsyncPrepareOps = AsyncOps[PrepareResultType]
+SyncPrepareOps = SyncOps[PrepareResultType]
+AsyncFinalizeOps = AsyncOps[None]
+SyncFinalizeOps = SyncOps[None]
 
 # TODO: pass FusedMoEParallelConfig in as ctor parameter?
 class FusedMoEPrepareAndFinalize(ABC):
@@ -176,7 +288,7 @@ class FusedMoEPrepareAndFinalize(ABC):
     """
 
     @abstractmethod
-    def prepare(
+    def create_prepare_ops(
         self,
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
@@ -187,7 +299,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> PrepareResultType:
+    ) -> Union[SyncPrepareOps, AsyncPrepareOps]:
         """
         Perform any quantization (and/or) dispatching needed for this kernel.
         - a1: The (unquantized) input to the MoE layer.
@@ -259,7 +371,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def finalize(
+    def create_finalize_ops(
         self,
         output: torch.Tensor,
         fused_expert_output: torch.Tensor,
@@ -267,7 +379,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: TopKWeightAndReduce,
-    ) -> None:
+    ) -> Union[SyncFinalizeOps, AsyncFinalizeOps]:
         """
         Perform any combine plus apply weights and perform a reduction on the
         fused experts output.
@@ -501,12 +613,14 @@ def _chunk_scales(scales: Optional[torch.Tensor], start: int,
 
 
 class SharedResizableBuffer:
+
     def __init__(self):
         self.buffer = None
-  
+
     # NOTE: Assumes the first call to get() is the largest shape,
     #  this is usually true due to the profile run.
-    def get(self, shape: tuple[int, ...], device: torch.device, dtype: torch.dtype):
+    def get(self, shape: tuple[int, ...], device: torch.device,
+            dtype: torch.dtype):
         shape_numel = prod(shape)
         if self.buffer is None or self.buffer.numel() < shape_numel:
             self.buffer = torch.empty(shape_numel, device=device, dtype=dtype)
@@ -583,14 +697,12 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
-        workspace13 = self.workspace13_buffer.get(
-          workspace13_shape,
-          device=a1.device,
-          dtype=workspace_dtype)
-        workspace2 = self.workspace2_buffer.get(
-          workspace2_shape,
-          device=a1.device,
-          dtype=workspace_dtype)
+        workspace13 = self.workspace13_buffer.get(workspace13_shape,
+                                                  device=a1.device,
+                                                  dtype=workspace_dtype)
+        workspace2 = self.workspace2_buffer.get(workspace2_shape,
+                                                device=a1.device,
+                                                dtype=workspace_dtype)
 
         assert fused_out is None or fused_out.shape == fused_out_shape, (
             f"fused_out {fused_out.shape} but expected {fused_out_shape}")
@@ -682,10 +794,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         (_, _, fused_out_shape, _) = self.fused_experts.workspace_shapes(
             a1, a1q, M, N, K, top_k, global_num_experts, local_num_experts,
             expert_tokens_meta)
-        fused_out = self.fused_out_buffer.get(
-          fused_out_shape,
-          device=a1q.device,
-          dtype=a1.dtype)
+        fused_out = self.fused_out_buffer.get(fused_out_shape,
+                                              device=a1q.device,
+                                              dtype=a1.dtype)
 
         def slice_input_tensors(
             chunk_idx: int
@@ -827,56 +938,52 @@ class FusedMoEModularKernel(torch.nn.Module):
             global_num_experts = local_num_experts
 
         shared_output: torch.Tensor
+        
+        prepare_ops = self.prepare_finalize.create_prepare_ops(
+            a1,
+            a1_scale,
+            a2_scale,
+            topk_weights,
+            topk_ids,
+            global_num_experts,
+            expert_map,
+            apply_router_weight_on_input,
+            self.fused_experts.quant_config,
+        )
 
-        if not self.prepare_finalize.supports_async():
-            # We shouldn't be running an a2a kernel that doesn't
-            # support async prepare/finalize
-            assert not dbo_enabled()
+        prepare_ops.prepare()
 
+        if isinstance(prepare_ops, SyncOps):
             # Run shared experts serially with dispatch.
             if self.shared_experts is not None:
                 shared_output = self.shared_experts(a1)
-
-            (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
-             _expert_topk_weights) = self.prepare_finalize.prepare(
-                 a1,
-                 a1_scale,
-                 a2_scale,
-                 topk_weights,
-                 topk_ids,
-                 global_num_experts,
-                 expert_map,
-                 apply_router_weight_on_input,
-                 self.fused_experts.quant_config,
-             )
+            prepare_ops.send_recv()
         else:
+            assert isinstance(prepare_ops, AsyncOps)
+            
             # Overlap shared expert compute with all2all dispatch.
             dbo_maybe_run_recv_hook()
-            hook, receiver = self.prepare_finalize.prepare_async(
-                a1,
-                a1_scale,
-                a2_scale,
-                topk_weights,
-                topk_ids,
-                global_num_experts,
-                expert_map,
-                apply_router_weight_on_input,
-                self.fused_experts.quant_config,
-            )
+            prepare_ops.send()
 
-            if self.shared_experts is not None:
+            recv_done = dbo_register_recv_hook(
+                lambda: prepare_ops.recv(), 
+                schedules=(Schedule.MLP_OVERLAP, Schedule.MLP_SHARED_OVERLAP))
+            dbo_yield(schedules=(Schedule.MLP_OVERLAP, ))
+
+            # If we are using the MLP_SHARED_OVERLAP schedule, we overlap with 
+            # the combine instead of the dispatch.
+            # TODO(lucas): refactor this scheduling logic
+            if self.shared_experts is not None \
+                and dbo_current_schedule() != Schedule.MLP_SHARED_OVERLAP:
                 shared_output = self.shared_experts(a1)
 
-            # If DBO is being used, register the hook with the ubatch context
-            # and call it in dbo_maybe_run_recv_hook instead of passing it to
-            # the receiver.
-            dbo_register_recv_hook(hook)
-            dbo_yield()
-            if dbo_enabled():
-                hook = None
+            dbo_yield(schedules=(Schedule.ATTN_SHARED_OVERLAP, Schedule.MLP_SHARED_OVERLAP))
 
-            (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
-             _expert_topk_weights) = receiver(hook)
+            if not recv_done:
+                prepare_ops.recv()
+
+        (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
+            _expert_topk_weights) = prepare_ops.finish()
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
@@ -915,7 +1022,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
 
-        self.prepare_finalize.finalize(
+        finalize_ops = self.prepare_finalize.create_finalize_ops(
             output,
             fused_out,
             topk_weights,
@@ -923,6 +1030,28 @@ class FusedMoEModularKernel(torch.nn.Module):
             apply_router_weight_on_input,
             self.fused_experts.finalize_weight_and_reduce_impl(),
         )
+        
+        if isinstance(finalize_ops, SyncOps):
+            finalize_ops.prepare()
+            finalize_ops.send_recv()
+            finalize_ops.finish()
+        else:
+            assert isinstance(finalize_ops, AsyncOps)
+            finalize_ops.prepare()
+            dbo_maybe_run_recv_hook()
+            finalize_ops.send()
+
+            # If we didn't overlap with the dispatch overlap with the combine
+            # TODO(lucas): refactor this scheduling logic
+            if self.shared_experts is not None and shared_output is None:
+                shared_output = self.shared_experts(a1)
+
+            if dbo_register_recv_hook(
+                lambda: finalize_ops.recv(), all_schedules=True):
+                dbo_yield(all_schedules=True)
+            else:
+                finalize_ops.recv()
+            finalize_ops.finish()
 
         if self.shared_experts is None:
             return output

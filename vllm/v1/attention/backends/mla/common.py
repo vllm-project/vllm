@@ -218,6 +218,7 @@ from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               infer_global_hyperparameters,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.ubatching import Schedule, dbo_yield
 
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -1274,11 +1275,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         if fp8_attention:
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
-        if has_prefill:
-            output[num_decode_tokens:] = self._forward_prefill(
-                prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
-                attn_metadata, layer._k_scale)
-
         if has_decode:
             assert attn_metadata.decode is not None
             decode_q_nope, decode_q_pe = decode_q.split(
@@ -1313,6 +1309,14 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     layer._q_scale)
                 decode_q_pe = decode_q_pe.reshape(q_pe_shape)
 
+        dbo_yield(schedules=(Schedule.ATTN_SHARED_OVERLAP,))
+
+        if has_prefill:
+            output[num_decode_tokens:] = self._forward_prefill(
+                prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
+                attn_metadata, layer._k_scale)
+
+        if has_decode:
             output[:num_decode_tokens] = self._forward_decode(
                 decode_ql_nope, decode_q_pe, kv_cache, attn_metadata, layer)
 

@@ -3,6 +3,7 @@
 import multiprocessing
 import os
 import pickle
+import queue
 import signal
 import threading
 import time
@@ -18,6 +19,7 @@ from threading import Thread
 from typing import Any, Callable, Optional, Union, cast
 
 import cloudpickle
+import torch
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -33,7 +35,8 @@ from vllm.utils import (decorate_logs, get_distributed_init_method,
                         get_loopback_ip, get_mp_context, get_open_port,
                         set_process_title)
 from vllm.v1.executor.abstract import Executor, FailureCallback
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import (AsyncModelRunnerOutput, DraftTokenIds,
+                             ModelRunnerOutput)
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -412,6 +415,14 @@ class WorkerProc:
         # Initializes a message queue for sending the model output
         self.worker_response_mq = MessageQueue(1, 1)
 
+        self.async_output_queue: queue.Queue = queue.Queue()
+        self.async_output_copy_stream = torch.cuda.Stream()
+        self.async_output_copy_thread = Thread(
+            target=self.async_output_busy_loop,
+            daemon=True,
+            name="WorkerAsyncOutputCopy")
+        self.async_output_copy_thread.start()
+
         # Initialize device and loads weights
         self.worker.init_device()
         self.worker.load_model()
@@ -593,6 +604,18 @@ class WorkerProc:
         SUCCESS = auto()
         FAILURE = auto()
 
+    def enqueue_worker_output(self, output: Any) -> None:
+        if isinstance(output, AsyncModelRunnerOutput):
+            output = output.serialize(self.async_output_copy_stream)
+        self.worker_response_mq.enqueue(
+            (WorkerProc.ResponseStatus.SUCCESS, output))
+
+    def async_output_busy_loop(self):
+        """Entrypoint for the thread which handles outputs asynchronously."""
+        while True:
+            output = self.async_output_queue.get()
+            self.enqueue_worker_output(output)
+
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
         while True:
@@ -617,5 +640,4 @@ class WorkerProc:
                 continue
 
             if output_rank is None or self.rank == output_rank:
-                self.worker_response_mq.enqueue(
-                    (WorkerProc.ResponseStatus.SUCCESS, output))
+                self.async_output_queue.put(output)
