@@ -45,7 +45,7 @@ def _fwd_kernel(Q,
                 sm_scale,
                 k_scale,
                 v_scale,
-                out_scale,
+                out_scale_inv,
                 B_Start_Loc,
                 B_Seqlen,
                 x: tl.constexpr,
@@ -152,7 +152,7 @@ def _fwd_kernel(Q,
         start_n = tl.multiple_of(start_n, BLOCK_SIZE)
         # -- compute qk ----
         bn = tl.load(B_Loc + cur_batch * stride_b_loc_b +
-                     (start_n // BLOCK_SIZE) * stride_b_loc_s)
+                     (start_n // BLOCK_SIZE) * stride_b_loc_s).to(tl.int64)
         # [D,BLOCK_SIZE]
         off_k = (
             bn[None, :] * stride_k_cache_bs + cur_kv_head * stride_k_cache_h +
@@ -291,7 +291,7 @@ def _fwd_kernel(Q,
              cur_head * stride_oh + offs_d[None, :] * stride_od)
     out_ptrs = Out + off_o
     if USE_FP8:
-        acc = acc / tl.load(out_scale)
+        acc = acc * tl.load(out_scale_inv)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
     tl.store(out_ptrs,
              acc,
@@ -376,7 +376,7 @@ def _fwd_kernel_flash_attn_v2(
         bn = tl.load(B_Loc + cur_batch * stride_b_loc_b +
                      ((start_n + offs_n) // block_size) * stride_b_loc_s,
                      mask=(start_n + offs_n) < cur_batch_ctx_len,
-                     other=0)
+                     other=0).to(tl.int64)
         off_k = (
             bn[None, :] * stride_k_cache_bs + cur_kv_head * stride_k_cache_h +
             (offs_d[:, None] // x) * stride_k_cache_d +
@@ -584,7 +584,7 @@ def _fwd_kernel_alibi(
         bn = tl.load(B_Loc + cur_batch * stride_b_loc_b +
                      ((start_n + offs_n) // block_size) * stride_b_loc_s,
                      mask=(start_n + offs_n) < cur_batch_ctx_len,
-                     other=0)
+                     other=0).to(tl.int64)
         off_k = (
             bn[None, :] * stride_k_cache_bs + cur_kv_head * stride_k_cache_h +
             (offs_d[:, None] // x) * stride_k_cache_d +
@@ -883,7 +883,7 @@ def context_attention_fwd(q,
         sm_scale,
         k_scale,
         v_scale,
-        fp8_out_scale,
+        1.0 / fp8_out_scale if fp8_out_scale is not None else 1.0,
         b_start_loc,
         b_seq_len,
         k_cache.shape[4],

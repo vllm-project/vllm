@@ -130,7 +130,8 @@ def test_fused_rms_norm_quant(
         out_unfused = torch.empty_like(x_unfused)
         torch.ops._C.fused_add_rms_norm(out_unfused, x_unfused, residual_out,
                                         residual, weight, 1e-6)
-        torch.ops._C.static_scaled_fp8_quant(out_quant, out_unfused.contiguous(),
+        torch.ops._C.static_scaled_fp8_quant(out_quant,
+                                             out_unfused.contiguous(),
                                              quant_scale_t)
 
         torch.cuda.synchronize()

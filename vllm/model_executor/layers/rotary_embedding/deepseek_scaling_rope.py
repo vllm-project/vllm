@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from typing import Optional
 
 import torch
@@ -9,7 +10,13 @@ from vllm.platforms import current_platform
 
 from .base import RotaryEmbedding
 from .common import (rotate_gptj, rotate_neox, yarn_find_correction_range,
-                     yarn_get_mscale, yarn_linear_ramp_mask)
+                     yarn_linear_ramp_mask)
+
+
+def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
+    if scale <= 1:
+        return 1.0
+    return 0.1 * mscale * math.log(scale) + 1.0
 
 
 class DeepseekScalingRotaryEmbedding(RotaryEmbedding):

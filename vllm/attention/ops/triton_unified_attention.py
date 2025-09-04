@@ -289,7 +289,7 @@ def kernel_unified_attention_2d(
     # epilogue
     acc = acc / L[:, None]
     if USE_FP8:
-        acc = acc / tl.load(out_scale)
+        acc = acc * tl.load(out_scale)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
 
     output_offset = (query_offset_0[:, None] * output_stride_0 +
@@ -570,7 +570,7 @@ def reduce_segments(
     seq_lens_ptr,  # [num_seqs]
     num_seqs,  # int
     num_query_heads: tl.constexpr,  # int
-    out_scale,  # float32
+    out_scale_inv,  # float32
     output_stride_0: tl.int64,  # int
     output_stride_1: tl.int64,  # int, should be equal to head_size
     block_table_stride: tl.int64,  # int
@@ -639,7 +639,7 @@ def reduce_segments(
     acc = tl.where(overall_expsum == 0.0, 0.0, acc_sum / overall_expsum)
 
     if USE_FP8:
-        acc = acc / tl.load(out_scale)
+        acc = acc * tl.load(out_scale_inv)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
 
     # write result
@@ -725,7 +725,7 @@ def unified_attention(
             scale=softmax_scale,
             k_scale=k_descale,
             v_scale=v_descale,
-            out_scale=output_scale,
+            out_scale=1 / output_scale if output_scale is not None else 1.0,
             softcap=softcap,
             num_query_heads=num_query_heads,
             num_queries_per_kv=num_queries_per_kv,
@@ -839,7 +839,8 @@ def unified_attention(
             seq_lens_ptr=seqused_k,
             num_seqs=num_seqs,
             num_query_heads=num_query_heads,
-            out_scale=output_scale,
+            out_scale_inv=1 /
+            output_scale if output_scale is not None else 1.0,
             output_stride_0=out.stride(0),
             output_stride_1=out.stride(1),
             block_table_stride=block_table.stride(0),

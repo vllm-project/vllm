@@ -38,21 +38,21 @@ def test_profiling(model_id: str, max_model_len: int):
 
     hf_config = ctx.get_hf_config(Llama4Config)
 
-    mm_kwargs = processor.apply(
+    mm_data = processor.apply(
         prompt=dummy_mm_data.prompt,
         mm_data=dummy_mm_data.mm_data,
         hf_processor_mm_kwargs=dict(),
-    )["mm_kwargs"]
+    )["mm_kwargs"].get_data()
 
     image_size = hf_config.vision_config.image_size
     patch_size = hf_config.vision_config.patch_size
     downsample_ratio = int(
         round(1.0 / (hf_config.vision_config.pixel_shuffle_ratio**2)))
     tokens_per_patch = ((image_size // patch_size)**2) // downsample_ratio
-    chunks_per_image = prod(mm_kwargs["patches_per_image"])
+    chunks_per_image = prod(mm_data["patches_per_image"])
     total_num_patches = chunks_per_image * tokens_per_patch
-    num_tiles = mm_kwargs["aspect_ratios"][0][0] * mm_kwargs["aspect_ratios"][
-        0][1]  # x-y seperator tokens
+    num_tiles = mm_data["aspect_ratios"][0][0] * mm_data["aspect_ratios"][0][
+        1]  # x-y seperator tokens
     total_tokens = total_num_patches.item() + num_tiles.item(
     ) + 3  # image start, image, image end
 

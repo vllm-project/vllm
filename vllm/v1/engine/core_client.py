@@ -574,13 +574,22 @@ class MPClient(EngineCoreClient):
 
 def _process_utility_output(output: UtilityOutput,
                             utility_results: dict[int, AnyFuture]):
-    """Set the result from a utility method in the waiting future"""
+    """Set the result from a utility method in the waiting future."""
     future = utility_results.pop(output.call_id)
-    if output.failure_message is not None:
-        future.set_exception(Exception(output.failure_message))
-    else:
-        assert output.result is not None
-        future.set_result(output.result.result)
+    failure_message = output.failure_message
+    try:
+        if failure_message is not None:
+            future.set_exception(Exception(failure_message))
+        else:
+            assert output.result is not None
+            future.set_result(output.result.result)
+    except asyncio.InvalidStateError:
+        # This can happen if the future is cancelled due to the
+        # original calling task being cancelled.
+        if failure_message is not None:
+            logger.error(
+                "Cancelled call to utility method failed "
+                "with error: %s", failure_message)
 
 
 class SyncMPClient(MPClient):
@@ -965,7 +974,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
         # List of [waiting, running] pair per engine.
         # Used only by DPLBAsyncMPClient subclass.
-        self.lb_engines: list[list[int]] = []
+        self.lb_engines: list[list[int]] = [[0, 0] for _ in self.core_engines]
 
         self.first_req_sock_addr = get_open_zmq_inproc_path()
         self.first_req_send_socket = self.resources.first_req_send_socket = (
@@ -1121,10 +1130,8 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     def get_core_engine_for_request(
             self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
-        current_counts = self.lb_engines
         if (eng_index := request.data_parallel_rank) is None:
-            if not current_counts:
-                return self.core_engine
+            current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
             min_score = sys.maxsize
@@ -1183,21 +1190,6 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         await self._send_input(EngineCoreRequestType.ABORT, request_ids,
                                engine)
 
-    async def _send_reconfig_message(
-            self, reconfig_request: ReconfigureDistributedRequest,
-            engine: EngineIdentity) -> asyncio.Future:
-        """Send reconfiguration message and return the result future without
-        waiting for completion."""
-        call_id = uuid.uuid1().int >> 64
-        future = asyncio.get_running_loop().create_future()
-        self.utility_results[call_id] = future
-        message = (EngineCoreRequestType.UTILITY.value, *self.encoder.encode(
-            (self.client_index, call_id, "reinitialize_distributed",
-             (reconfig_request, ))))
-        await self._send_input_message(message, engine, reconfig_request)
-        self._ensure_output_queue_task()
-        return future
-
     async def scale_elastic_ep(self, new_data_parallel_size: int) -> None:
         """Scale elastic EP data parallel size"""
         cur_data_parallel_size = len(self.core_engines)
@@ -1207,7 +1199,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             f"different from cur_data_parallel_size {cur_data_parallel_size}")
 
         assert self.vllm_config.parallel_config.data_parallel_backend == \
-            "ray", ("Only ray DP backend supports scaling elastic EP")
+            "ray", "Only ray DP backend supports scaling elastic EP"
 
         scale_up = new_data_parallel_size > cur_data_parallel_size
 
@@ -1239,9 +1231,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 data_parallel_master_ip,
                 new_data_parallel_master_port=self.vllm_config.parallel_config.
                 data_parallel_master_port)
-            future = await self._send_reconfig_message(reconfig_request,
-                                                       engine)
-            reconfig_futures.append(future)
+            coro = self._call_utility_async("reinitialize_distributed",
+                                            reconfig_request,
+                                            engine=engine)
+            reconfig_futures.append(asyncio.create_task(coro))
 
         logger.info("All reconfigure messages sent, starting engine creation")
 
@@ -1311,9 +1304,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             if cur_dp_rank >= new_data_parallel_size:
                 reconfig_request.new_data_parallel_rank = \
                 ReconfigureRankType.SHUTDOWN_CURRENT_RANK
-            future = await self._send_reconfig_message(reconfig_request,
-                                                       engine)
-            reconfig_futures.append(future)
+            coro = self._call_utility_async("reinitialize_distributed",
+                                            reconfig_request,
+                                            engine=engine)
+            reconfig_futures.append(asyncio.create_task(coro))
 
         for _ in range(new_data_parallel_size, cur_data_parallel_size):
             self.core_engines.pop()

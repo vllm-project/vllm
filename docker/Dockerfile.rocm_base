@@ -35,7 +35,14 @@ RUN apt-get update -y \
         add-apt-repository -y ppa:deadsnakes/ppa && break || \
         { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
     done \
-    && apt-get update -y
+    && apt-get update -y \
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+       python${PYTHON_VERSION}-lib2to3 python-is-python3  \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && python3 --version && python3 -m pip --version
 
 RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
 
@@ -67,11 +74,15 @@ ARG TRITON_BRANCH
 ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
 RUN cd triton \
-    && git checkout ${TRITON_BRANCH}
-#    && python3 setup.py bdist_wheel --dist-dir=python/dist
-RUN pip install build && cd triton/python/triton_kernels \
-    && python3 -m build --wheel && cp dist/triton*.whl /app/triton/python/dist
-RUN mkdir -p /app/install && cp /app/triton/python/dist/triton*.whl /app/install
+    && git checkout ${TRITON_BRANCH} \
+    && if [ ! -f setup.py ]; then cd python; fi \
+    && python3 setup.py bdist_wheel --dist-dir=triton/dist \
+    && mkdir -p /app/install && cp triton/dist/triton*.whl /app/install
+RUN if [ -d triton/python/triton_kernels ]; then \
+    pip install build \
+    && cd triton/python/triton_kernels \
+    && python3 -m build --wheel --dist-dir=triton/dist \
+    && cp triton/dist/triton*.whl /app/install; fi
 
 FROM base AS build_amdsmi
 RUN cd /opt/rocm/share/amd_smi \
@@ -123,8 +134,8 @@ FROM base AS debs
 RUN mkdir /app/debs
 # RUN --mount=type=bind,from=build_hipblaslt,src=/app/install/,target=/install \
 #     cp /install/*.deb /app/debs
-#RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-#    cp /install/*.whl /app/debs
+RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+   cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     cp /install/*.whl /app/debs
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
@@ -135,11 +146,14 @@ RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \
 FROM base AS final
 # RUN --mount=type=bind,from=build_hipblaslt,src=/app/install/,target=/install \
 #     dpkg -i /install/*deb \
-#     && perl -p -i -e 's/, hipblas-common-dev \([^)]*?\), /, /g' /var/lib/dpkg/status \
-#     && perl -p -i -e 's/, hipblaslt-dev \([^)]*?\), /, /g' /var/lib/dpkg/status \
-#     && perl -p -i -e 's/, hipblaslt \([^)]*?\), /, /g' /var/lib/dpkg/status
-#RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
-#    pip install /install/*.whl
+#     && sed -i 's/, hipblaslt-dev \(.*\), hipcub-dev/, hipcub-dev/g' /var/lib/dpkg/status \
+#     && sed -i 's/, hipblaslt \(.*\), hipfft/, hipfft/g' /var/lib/dpkg/status
+# RUN --mount=type=bind,from=build_rccl,src=/app/install/,target=/install \
+#     dpkg -i /install/*deb \
+#     && sed -i 's/, rccl-dev \(.*\), rocalution/, rocalution/g' /var/lib/dpkg/status \
+#     && sed -i 's/, rccl \(.*\), rocalution/, rocalution/g' /var/lib/dpkg/status
+RUN --mount=type=bind,from=build_triton,src=/app/install/,target=/install \
+    pip install /install/*.whl
 RUN --mount=type=bind,from=build_amdsmi,src=/app/install/,target=/install \
     pip install /install/*.whl
 RUN --mount=type=bind,from=build_pytorch,src=/app/install/,target=/install \

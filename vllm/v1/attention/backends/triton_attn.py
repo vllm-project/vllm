@@ -16,6 +16,8 @@ from vllm.attention.ops.chunked_prefill_paged_decode import (
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey, kFp8StaticTensorSym)
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.utils import (AttentionCGSupport,
@@ -58,8 +60,7 @@ class TritonAttentionMetadata:
 
 class TritonAttentionMetadataBuilder(
         AttentionMetadataBuilder[TritonAttentionMetadata]):
-    attn_cudagraph_support: ClassVar[AttentionCGSupport] = \
-        AttentionCGSupport.ALWAYS
+    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
     def __init__(self, kv_cache_spec: AttentionSpec, layer_names: list[str],
                  vllm_config: VllmConfig, device: torch.device):
@@ -91,7 +92,7 @@ class TritonAttentionMetadataBuilder(
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         max_query_len = common_attn_metadata.max_query_len
 
-        max_seq_len = int(common_attn_metadata.seq_lens_cpu.max())
+        max_seq_len = common_attn_metadata.max_seq_len
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
@@ -131,11 +132,6 @@ class TritonAttentionMetadataBuilder(
             prefix_scheduler_metadata=prefix_scheduler_metadata,
         )
         return attn_metadata
-
-    def can_run_in_cudagraph(
-            self, common_attn_metadata: CommonAttentionMetadata) -> bool:
-        # Full CUDA Graph always supported
-        return True
 
 
 class TritonAttentionBackend(AttentionBackend):
@@ -204,10 +200,8 @@ def use_aiter_unified_attention() -> bool:
 
 class TritonAttentionImpl(AttentionImpl):
 
-    def fused_output_quant_supported(self, dtype: torch.dtype, static: bool,
-                                     group_shape: tuple[int, int]):
-        return dtype == current_platform.fp8_dtype(
-        ) and static and group_shape == (-1, -1)  # per-tensor
+    def fused_output_quant_supported(self, quant_key: QuantKey):
+        return quant_key == kFp8StaticTensorSym
 
     def __init__(
         self,
@@ -288,6 +282,7 @@ class TritonAttentionImpl(AttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
+        output_block_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -295,12 +290,18 @@ class TritonAttentionImpl(AttentionImpl):
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+            kv_cache: shape =
+                [2, num_blocks, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
         assert output is not None, "Output tensor must be provided."
+
+        if output_block_scale is not None:
+            raise NotImplementedError(
+                "fused block_scale output quantization is not yet supported"
+                " for TritonAttentionImpl")
 
         if attn_metadata is None:
             # Profiling run.

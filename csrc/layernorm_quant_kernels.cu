@@ -210,8 +210,8 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
                                                                width, fp8_t> \
                   <<<grid, block, 0, stream>>>(                              \
                       out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),     \
-                      input_stride, residual_out.data_ptr<scalar_t>(),                     \
-                      residual.data_ptr<scalar_t>(),           \
+                      input_stride, residual_out.data_ptr<scalar_t>(),       \
+                      residual.data_ptr<scalar_t>(),                         \
                       weight.data_ptr<scalar_t>(), scale.data_ptr<float>(),  \
                       epsilon, num_tokens, hidden_size);                     \
             });                                                              \

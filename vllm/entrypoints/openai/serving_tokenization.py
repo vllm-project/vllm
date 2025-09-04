@@ -39,11 +39,13 @@ class OpenAIServingTokenization(OpenAIServing):
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
         chat_template_content_format: ChatTemplateContentFormatOption,
+        log_error_stack: bool = False,
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          models=models,
-                         request_logger=request_logger)
+                         request_logger=request_logger,
+                         log_error_stack=log_error_stack)
 
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
