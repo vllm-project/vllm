@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Optional, Callable
 import torch
 import torch.distributed
 import torch.nn as nn
+import zmq
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -76,6 +77,7 @@ class Worker(WorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
+        self._ctx = zmq.Context()
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
@@ -233,18 +235,32 @@ class Worker(WorkerBase):
     def reload_weights(self) -> None:
         self.model_runner.reload_weights()
 
-    def update_weights_from_ipc(
+    def update_weights_from_ipc(self, zmq_handles: dict[str, str] | None, end: bool):
+        update_weights_socket_attr = "_update_weights_socket"
+        if zmq_handles is not None:
+            socket = self._ctx.socket(zmq.PULL)
+            socket.connect(zmq_handles[self.device_uuid])
+            setattr(self, update_weights_socket_attr, socket)
+            return
+        assert hasattr(self, update_weights_socket_attr)
+        socket = getattr(self, update_weights_socket_attr)
+        kwargs = socket.recv_pyobj()
+        if end:
+            socket.close()
+            delattr(self, update_weights_socket_attr)
+        self._update_weights_from_ipc(**kwargs, end=end)
+
+    def _update_weights_from_ipc(
         self,
         named_tensors: list[tuple[str, torch.dtype, torch.Size]],
-        handles: dict[str, tuple[Callable, tuple]] | None,
+        ipc_handle: tuple[Callable, tuple] | None,
         offset: int,
         end: bool,
     ):
         """
         Args:
             named_tensors: a list of tuple to specify tensor metadata the info in tuple is [name, dtype, shape]
-            handles: dict key is device_uuid, could get my own from `current_platform.get_device_uuid(self.device.index)` in vLLM
-                dict value is a serialized ipc `handle`, vLLM can use `func, args = handle` and `func(*args)` to rebuild GPU tensor
+            ipc_handle: a serialized `ipc_handle`, vLLM can use `func, args = handle` and `func(*args)` to rebuild GPU tensor
                 if `ipc_handles` is not None, means this is the first request in current update flow
                 vLLM should rebuild and save this GPU tensor as a shared buffer
             offset: specify the start offset of named_tensors in ipc_buffer tensor
@@ -253,8 +269,8 @@ class Worker(WorkerBase):
         device_id = self.device.index
         BUF_ATTR_NAME = '_shared_ipc_buffer'
         buffer: torch.Tensor
-        if handles is not None:
-            buffer = rebuild_ipc(handles[self.device_uuid], device_id)
+        if ipc_handle is not None:
+            buffer = rebuild_ipc(ipc_handle, device_id)
             assert buffer.dtype == torch.uint8
             setattr(self, BUF_ATTR_NAME, buffer)
         else:
