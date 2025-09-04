@@ -3609,8 +3609,7 @@ class VllmConfig:
         if self.compilation_config.pass_config.enable_async_tp:
             self.compilation_config.pass_config.enable_sequence_parallelism = \
                 True
-        if "+rms_norm" not in self.compilation_config.custom_ops and \
-           "-rms_norm" not in self.compilation_config.custom_ops:
+        if self.compilation_config.pass_config.enable_sequence_parallelism:
             self.compilation_config.custom_ops.append("+rms_norm")
 
         if current_platform.is_cuda_alike() or current_platform.is_xpu():
