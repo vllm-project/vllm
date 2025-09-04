@@ -21,6 +21,7 @@ def test_basic_lifecycle():
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
     request = create_request(request_id=1,
+                             block_size=BLOCK_SIZE,
                              max_tokens=1,
                              num_tokens=NUM_TOKENS,
                              do_remote_decode=True)
@@ -41,7 +42,7 @@ def test_basic_lifecycle():
     engine_core_outputs = scheduler.update_from_output(scheduler_output,
                                                        model_runner_output)
 
-    # Ensure the request is finished after 1 tokens.
+    # Ensure the request is finished after 1 token.
     assert request.is_finished()
     assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
     output = engine_core_outputs[0].outputs[0]
@@ -103,8 +104,10 @@ def test_short_prompt_lifecycle():
     scheduler = create_scheduler(vllm_config)
 
     # Not enough tokens for full block.
-    NUM_TOKENS = vllm_config.cache_config.block_size // 2
+    BLOCK_SIZE = vllm_config.cache_config.block_size
+    NUM_TOKENS = BLOCK_SIZE // 2
     request = create_request(request_id=1,
+                             block_size=BLOCK_SIZE,
                              max_tokens=1,
                              num_tokens=NUM_TOKENS,
                              do_remote_decode=True)
@@ -130,14 +133,15 @@ def test_short_prompt_lifecycle():
     # Confirm we do not have any memory leaks after req lifecycle.
     # We need to mark sending finish to clear data for persistent batch.
     scheduler_output = scheduler.schedule()
-    model_runner_output = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
-    model_runner_output.finished_sending = [request.request_id]
+    # Use create_model_runner_output to pass kv_connector_output along
+    model_runner_output = create_model_runner_output(
+        reqs=[request], finished_sending=[request.request_id])
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert_scheduler_empty(scheduler)
 
 
 def test_prefix_cache_lifecycle():
-    """Test that remote decode params still works with a prefix cache hit."""
+    """Test that remote decode params still work with a prefix cache hit."""
 
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
@@ -147,7 +151,9 @@ def test_prefix_cache_lifecycle():
     NUM_EXTERNAL_FULL_BLOCKS = 3
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
-    request_normal = create_request(request_id=1, num_tokens=NUM_TOKENS)
+    request_normal = create_request(request_id=1,
+                                    block_size=BLOCK_SIZE,
+                                    num_tokens=NUM_TOKENS)
 
     scheduler.add_request(request_normal)
     scheduler_output = scheduler.schedule()
@@ -165,6 +171,7 @@ def test_prefix_cache_lifecycle():
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
     request_remote = create_request(request_id=1,
+                                    block_size=BLOCK_SIZE,
                                     num_tokens=NUM_TOKENS,
                                     do_remote_decode=True)
 
