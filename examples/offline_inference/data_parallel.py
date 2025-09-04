@@ -93,6 +93,11 @@ def parse_args():
         help=("Enable microbatched execution"),
     )
     parser.add_argument(
+        "--compilation-config",
+        type=int,
+        help=("Compilation optimization (O) level 0-3."),
+    )
+    parser.add_argument(
         "--quantization",
         type=str,
     )
@@ -111,6 +116,7 @@ def main(
     trust_remote_code,
     max_num_seqs,
     max_model_len,
+    compilation_config,
     gpu_memory_utilization,
     enable_microbatching,
     quantization,
@@ -169,6 +175,7 @@ def main(
         gpu_memory_utilization=gpu_memory_utilization,
         enable_microbatching=enable_microbatching,
         quantization=quantization,
+        compilation_config=compilation_config,
     )
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
@@ -225,6 +232,7 @@ if __name__ == "__main__":
                 args.trust_remote_code,
                 args.max_num_seqs,
                 args.max_model_len,
+                args.compilation_config,
                 args.gpu_memory_utilization,
                 args.enable_microbatching,
                 args.quantization,

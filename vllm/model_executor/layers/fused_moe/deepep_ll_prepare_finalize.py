@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import deep_ep
 import torch
@@ -80,7 +80,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self,
         x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
         a1_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
         a1_dtype: torch.dtype,
         quant_dtype: Union[torch.dtype, str, None],
         per_act_token_quant: bool,
@@ -115,7 +114,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         return x, x_scales
 
-    def prepare(
+    def supports_async(self) -> bool:
+        return True
+
+    def prepare_async(
         self,
         a1: torch.Tensor,
         a1_scale: Optional[torch.Tensor],
@@ -126,13 +128,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: Optional[torch.Tensor],
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor],
-               Optional[mk.ExpertTokensMetadata], Optional[torch.Tensor],
-               Optional[torch.Tensor]]:
+    ) -> tuple[Callable, mk.ReceiverType]:
 
         hidden_size = a1.size(1)
         a2a_idx = dbo_current_ubatch_id()
-        do_recv_hook = dbo_enabled()
 
         if self.use_fp8_dispatch:
             assert hidden_size % 128 == 0, \
@@ -152,28 +151,57 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * topk_weights.to(a1.dtype)
 
         # Dispatch
-        dbo_maybe_run_recv_hook()
-        expert_x, expert_num_tokens, handle, _, recv_hook= \
+        expert_x, expert_num_tokens, handle, _, hook= \
                 self.buffer.low_latency_dispatch(a1,
                                                 topk_ids,
                                                 self.max_tokens_per_rank,
                                                 num_experts,
                                                 use_fp8=self.use_fp8_dispatch,
                                                 async_finish=False,
-                                                return_recv_hook=do_recv_hook)
+                                                return_recv_hook=True)
         self.handles[a2a_idx] = handle
-        if recv_hook is not None:
-            dbo_register_recv_hook(recv_hook)            
-        dbo_yield()
+
+        return (hook, lambda hook: self._receiver(hook, expert_x, expert_num_tokens,
+                                      a1_scale, a1.dtype, quant_config))
+
+    def _receiver(
+        self,
+        hook: Optional[Callable],
+        expert_x: Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]],
+        expert_num_tokens: torch.Tensor,
+        a1_scale,
+        a1_dtype,
+        quant_config: FusedMoEQuantConfig,
+    ) -> mk.PrepareResultType:
+        if hook is not None:
+            hook()
 
         expert_x, expert_x_scale = self._do_quant(
-            expert_x, a1_scale, a2_scale, a1.dtype, quant_config.quant_dtype,
+            expert_x, a1_scale, a1_dtype, quant_config.quant_dtype,
             quant_config.per_act_token_quant, quant_config.block_shape)
 
         expert_tokens_meta = mk.ExpertTokensMetadata(
             expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None)
 
-        return (expert_x, expert_x_scale, expert_tokens_meta, None, None)
+        return expert_x, expert_x_scale, expert_tokens_meta, None, None
+
+    def prepare(
+        self,
+        a1: torch.Tensor,
+        a1_scale: Optional[torch.Tensor],
+        a2_scale: Optional[torch.Tensor],
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        num_experts: int,
+        expert_map: Optional[torch.Tensor],
+        apply_router_weight_on_input: bool,
+        quant_config: FusedMoEQuantConfig,
+    ) -> mk.PrepareResultType:
+        receiver = self.prepare_async(a1, a1_scale, a2_scale, topk_weights,
+                                      topk_ids, num_experts, expert_map,
+                                      apply_router_weight_on_input,
+                                      quant_config)
+        return receiver()
 
     def finalize(
         self,
