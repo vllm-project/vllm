@@ -213,7 +213,7 @@ run_benchmark() {
 
     pkill -if vllm
     sleep 10
-    printf '=%.0s' $(seq 1 20)
+    echo "===================="
     return 0
 }
 
