@@ -10,10 +10,10 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8)
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8, per_token_quant_int8)
-from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
-    quant_dequant_mxfp4, quant_dequant_mxfp6)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_quantize)
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    quant_dequant_mxfp4, quant_dequant_mxfp6)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils import cdiv
@@ -199,12 +199,11 @@ def _mxfp6_quantize(
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, None]:
     assert block_shape is None
-    if not current_platform.supports_mx():
-        A = quant_dequant_mxfp6(A, quant_dtype=quant_dtype)
-    else:
-        # TODO: native mxfp6 is currently not integrated in vllm,
-        # so simulating even on devices supporting this data type natively.
-        A = quant_dequant_mxfp6(A, quant_dtype=quant_dtype)
+
+    # TODO: native mxfp6 is currently not integrated in vllm,
+    # so simulating even on devices supporting this data type natively.
+    # Eventually, there should be a check based on `current_platform.supports_mx()` here.
+    A = quant_dequant_mxfp6(A, quant_dtype=quant_dtype)
 
     return A, None
 

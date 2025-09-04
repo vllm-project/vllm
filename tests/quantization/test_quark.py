@@ -21,10 +21,6 @@ from packaging import version
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
-# from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
-#     QuarkLinearMethod, QuarkW8A8Fp8, QuarkW8A8Int8)
-# from vllm.platforms import current_platform
-
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
     "quark") is not None and version.parse(
         importlib.metadata.version("amd-quark")) >= version.parse('0.8.99')
