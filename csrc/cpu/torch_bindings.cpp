@@ -21,6 +21,12 @@ void onednn_scaled_mm(torch::Tensor& c, const torch::Tensor& a,
                       const std::optional<torch::Tensor>& bias,
                       int64_t handler);
 
+int64_t create_onednn_mm_handler(const torch::Tensor& b,
+                                 int64_t primitive_cache_size);
+
+void onednn_mm(torch::Tensor& c, const torch::Tensor& a,
+               const std::optional<torch::Tensor>& bias, int64_t handler);
+
 void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
                         torch::Tensor& kv_cache, double scale,
                         torch::Tensor& block_tables, torch::Tensor& seq_lens);
@@ -152,6 +158,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Helper function to release oneDNN handlers
   ops.def("release_dnnl_matmul_handler(int handler) -> ()",
           &release_dnnl_matmul_handler);
+
+  // Create oneDNN GEMM handler
+  ops.def(
+      "create_onednn_mm_handler(Tensor b, int "
+      "primitive_cache_size) -> int",
+      &create_onednn_mm_handler);
+
+  // oneDNN GEMM
+  ops.def(
+      "onednn_mm(Tensor! c, Tensor a, Tensor? bias, "
+      "int handler) -> ()");
+  ops.impl("onednn_mm", torch::kCPU, &onednn_mm);
 
   // Create oneDNN W8A8 handler
   ops.def(
