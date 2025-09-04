@@ -164,19 +164,33 @@ def set_device_control_env_var(vllm_config: VllmConfig,
     """
     world_size = vllm_config.parallel_config.world_size
     evar = current_platform.device_control_env_var
+
+    value = get_device_indices(evar, local_dp_rank, world_size)
+    with patch.dict(os.environ, values=((evar, value), )):
+        yield
+
+
+def get_device_indices(device_control_env_var: str, local_dp_rank: int,
+                       world_size: int):
+    """
+    Returns a comma-separated string of device indices for the specified
+    data parallel rank.
+
+    For example, if world_size=2 and local_dp_rank=1, and there are 4 devices,
+    this will select devices 2 and 3 for local_dp_rank=1.
+    """
     try:
         value = ",".join(
             str(current_platform.device_id_to_physical_device_id(i))
             for i in range(local_dp_rank * world_size, (local_dp_rank + 1) *
                            world_size))
     except IndexError as e:
-        raise Exception(f"Error setting {evar}: "
+        raise Exception(f"Error setting {device_control_env_var}: "
                         f"local range: [{local_dp_rank * world_size}, "
                         f"{(local_dp_rank + 1) * world_size}) "
                         "base value: "
-                        f"\"{os.getenv(evar)}\"") from e
-    with patch.dict(os.environ, values=((evar, value), )):
-        yield
+                        f"\"{os.getenv(device_control_env_var)}\"") from e
+    return value
 
 
 class CoreEngineActorManager:
@@ -254,6 +268,19 @@ class CoreEngineActorManager:
             dp_vllm_config = copy.deepcopy(vllm_config)
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
+
+            # Ray XPU known issue: dpctl initializes the GPU runtime early, so
+            # setting device env vars in Ray actor's initialization method
+            # will not affect device selection. See:
+            # https://github.com/ray-project/ray/blob/master/python/ray/_private/accelerators/intel_gpu.py#L56 # noqa: E501
+            if current_platform.is_xpu():
+                device_evar = current_platform.device_control_env_var
+                device_indices = get_device_indices(device_evar, local_index,
+                                                    world_size)
+                actor_env_vars = self.env_vars_dict.copy()
+                actor_env_vars[device_evar] = device_indices
+                runtime_env = RuntimeEnv(env_vars=actor_env_vars)
+
             actor = ray.remote(DPEngineCoreActor).options(
                 scheduling_strategy=PlacementGroupSchedulingStrategy(
                     placement_group=pg,
@@ -288,7 +315,6 @@ class CoreEngineActorManager:
 
         import ray
         from ray._private.state import available_resources_per_node
-        from ray.util.state import list_nodes
 
         logger.info("Creating placement groups for data parallel")
         dp_master_ip = \
@@ -297,31 +323,28 @@ class CoreEngineActorManager:
         local_engine_count = \
             vllm_config.parallel_config.data_parallel_size_local
 
-        nodes = sorted(list_nodes(filters=[("state", "=", "ALIVE")]),
-                       key=lambda node: node.node_ip != dp_master_ip)
-        assert nodes[0].node_ip == dp_master_ip, (
-            "The head node is missing or dead")
-        assert len(nodes) == 1 or nodes[1].node_ip != dp_master_ip, (
-            "There can only be one head node")
-
         available_resources = available_resources_per_node()
         world_size = vllm_config.parallel_config.world_size
         placement_groups: list[PlacementGroup] = []
         local_dp_ranks: list[int] = []
-
-        for node in nodes:
-            node_ip = node.node_ip
-            node_resources = available_resources[node.node_id]
+        dp_master_ip_key = f'node:{dp_master_ip}'
+        nodes = sorted(available_resources.values(),
+                       key=lambda x: dp_master_ip_key not in x)
+        assert len(nodes) > 0, (
+            "No nodes with resources found in Ray cluster.")
+        assert dp_master_ip_key in nodes[0], (
+            "The DP master node (ip: %s) is missing or dead", dp_master_ip)
+        for node_resources in nodes:
             if "GPU" not in node_resources:
                 continue
             # For now, each DP rank can only be assigned to one node
             # TODO(rui): support allocating a single DP rank
             # to multiple nodes
             available_engine_count = int(node_resources["GPU"]) // world_size
-            if node_ip == dp_master_ip:
+            if dp_master_ip_key in node_resources:
                 assert available_engine_count >= local_engine_count, (
                     "Not enough resources to allocate DP ranks "
-                    f"on DP master node {node_ip}")
+                    f"on DP master node {dp_master_ip}")
                 for i in range(local_engine_count):
                     bundles = [{
                         "GPU": 1.0,

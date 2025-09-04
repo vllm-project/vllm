@@ -4,13 +4,15 @@ import json
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Union
+from contextlib import AsyncExitStack
+from typing import TYPE_CHECKING, Optional, Union
 
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm.entrypoints.harmony_utils import (
     get_encoding, get_streamable_parser_for_assistant, render_for_completion)
 from vllm.entrypoints.tool import Tool
+from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
 
 if TYPE_CHECKING:
@@ -37,14 +39,29 @@ class ConversationContext(ABC):
     def render_for_completion(self) -> list[int]:
         pass
 
+    @abstractmethod
+    async def init_tool_sessions(self, tool_server: Optional[ToolServer],
+                                 exit_stack: AsyncExitStack) -> None:
+        pass
+
 
 class SimpleContext(ConversationContext):
 
     def __init__(self):
         self.last_output = None
+        self.num_prompt_tokens = 0
+        self.num_output_tokens = 0
+        self.num_cached_tokens = 0
+        # todo num_reasoning_tokens is not implemented yet.
+        self.num_reasoning_tokens = 0
 
     def append_output(self, output) -> None:
         self.last_output = output
+        if not isinstance(output, RequestOutput):
+            raise ValueError("SimpleContext only supports RequestOutput.")
+        self.num_prompt_tokens = len(output.prompt_token_ids or [])
+        self.num_cached_tokens = output.num_cached_tokens or 0
+        self.num_output_tokens += len(output.outputs[0].token_ids or [])
 
     def need_builtin_tool_call(self) -> bool:
         return False
@@ -55,16 +72,21 @@ class SimpleContext(ConversationContext):
     def render_for_completion(self) -> list[int]:
         raise NotImplementedError("Should not be called.")
 
+    async def init_tool_sessions(self, tool_server: Optional[ToolServer],
+                                 exit_stack: AsyncExitStack) -> None:
+        pass
+
 
 class HarmonyContext(ConversationContext):
 
     def __init__(
         self,
         messages: list,
-        tool_sessions: dict[str, Tool],
+        available_tools: list[str],
     ):
         self._messages = messages
-        self.tool_sessions = tool_sessions
+        self.available_tools = available_tools
+        self._tool_sessions: dict[str, Union[ClientSession, Tool]] = {}
 
         self.parser = get_streamable_parser_for_assistant()
         self.num_init_messages = len(messages)
@@ -81,17 +103,35 @@ class HarmonyContext(ConversationContext):
             # as new prompt each time. Hence the sum.
             self.num_prompt_tokens += len(output.prompt_token_ids)
 
+    def _update_num_cached_tokens(self, output: RequestOutput):
+        if output.num_cached_tokens is not None:
+            #Similar to num_prompt_tokens
+            self.num_cached_tokens += output.num_cached_tokens
+
     def _update_num_output_tokens(self, token_ids: Sequence[int]):
         self.num_output_tokens += len(token_ids)
+
+    def _update_num_reasoning_tokens(self, token_ids: Sequence[int]):
+        # Count tokens that are part of reasoning content (analysis channel
+        # or tool-directed messages like python/browser calls)
+        is_analysis = self.parser.current_channel == "analysis"
+        is_tool_call = (self.parser.current_recipient is not None and
+                        (self.parser.current_recipient.startswith("python") or
+                         self.parser.current_recipient.startswith("browser.")))
+        if is_analysis or is_tool_call:
+            self.num_reasoning_tokens += len(token_ids)
 
     def append_output(self, output) -> None:
         if isinstance(output, RequestOutput):
             self._update_num_prompt_tokens(output)
+            self._update_num_cached_tokens(output)
             output_token_ids = output.outputs[0].token_ids
             self._update_num_output_tokens(output_token_ids)
             self.parser = get_streamable_parser_for_assistant()
             for token_id in output_token_ids:
                 self.parser.process(token_id)
+                # Check if the current token is part of reasoning content
+                self._update_num_reasoning_tokens([token_id])
             output_msgs = self.parser.messages
         else:
             # Tool output.
@@ -116,10 +156,10 @@ class HarmonyContext(ConversationContext):
         if recipient is not None:
             if recipient.startswith("browser."):
                 return await self.call_search_tool(
-                    self.tool_sessions["browser"], last_msg)
+                    self._tool_sessions["browser"], last_msg)
             elif recipient.startswith("python"):
                 return await self.call_python_tool(
-                    self.tool_sessions["python"], last_msg)
+                    self._tool_sessions["python"], last_msg)
         raise ValueError("No tool call found")
 
     def render_for_completion(self) -> list[int]:
@@ -161,6 +201,15 @@ class HarmonyContext(ConversationContext):
                     recipient=Role.ASSISTANT)
         ]
 
+    async def init_tool_sessions(self, tool_server: Optional[ToolServer],
+                                 exit_stack: AsyncExitStack) -> None:
+        if tool_server:
+            for tool_name in self.available_tools:
+                if tool_name not in self._tool_sessions:
+                    self._tool_sessions[
+                        tool_name] = await exit_stack.enter_async_context(
+                            tool_server.new_session(tool_name))
+
 
 class StreamingHarmonyContext(HarmonyContext):
 
@@ -183,6 +232,7 @@ class StreamingHarmonyContext(HarmonyContext):
             # so we only want to add the prompt tokens once for each message.
             if self.first_tok_of_message:
                 self._update_num_prompt_tokens(output)
+                self._update_num_cached_tokens(output)
             # Reset self.first_tok_of_message if needed:
             # if the current token is the last one of the current message
             # (finished=True), then the next token processed will mark the
@@ -191,6 +241,8 @@ class StreamingHarmonyContext(HarmonyContext):
             tok = output.outputs[0].token_ids[0]
             self.parser.process(tok)
             self._update_num_output_tokens(output.outputs[0].token_ids)
+            # Check if the current token is part of reasoning content
+            self._update_num_reasoning_tokens([tok])
             self.last_tok = tok
         else:
             # Handle the case of tool output in direct message format

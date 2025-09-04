@@ -41,13 +41,14 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionTransformer, Qwen2_5_VLImageEmbeddingInputs,
     Qwen2_5_VLImageInputs, Qwen2_5_VLImagePixelInputs,
     Qwen2_5_VLProcessingInfo, Qwen2_5_VLVideoEmbeddingInputs,
     Qwen2_5_VLVideoInputs, Qwen2_5_VLVideoPixelInputs)
 from vllm.model_executor.models.qwen2_audio import (
-    Qwen2AudioInputs, Qwen2AudioProcessingInfo,
+    Qwen2AudioFeatureInputs, Qwen2AudioProcessingInfo,
     _get_feat_extract_output_lengths)
 from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalDataParser
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -66,7 +67,8 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import decode_tokens, encode_tokens
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (MultiModalEmbeddings, SupportsLoRA,
+                         SupportsMultiModal, SupportsPP)
 from .utils import (AutoWeightsLoader, WeightsMapper,
                     init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -534,7 +536,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
             return torch.concat(mm_input, dim=dim)
 
     def _parse_and_validate_audio_input(
-            self, **kwargs: object) -> Optional[Qwen2AudioInputs]:
+            self, **kwargs: object) -> Optional[Qwen2AudioFeatureInputs]:
         input_audio_features = kwargs.pop('input_audio_features', None)
         audio_feature_lengths = kwargs.pop('audio_feature_lengths', None)
         feature_attention_mask = kwargs.pop('feature_attention_mask', None)
@@ -548,9 +550,10 @@ class Qwen2_5OmniConditionalGenerationMixin:
         if not isinstance(input_audio_features, (torch.Tensor, list)):
             raise ValueError("Incorrect type of audio input features. "
                              f"Got type: {type(input_audio_features)}")
-        return Qwen2AudioInputs(input_features=input_audio_features,
-                                audio_feature_lengths=audio_feature_lengths,
-                                feature_attention_mask=feature_attention_mask)
+        return Qwen2AudioFeatureInputs(
+            input_features=input_audio_features,
+            audio_feature_lengths=audio_feature_lengths,
+            feature_attention_mask=feature_attention_mask)
 
     def _parse_and_validate_image_input(
         self,
@@ -630,7 +633,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
 
     def _process_audio_input(
         self,
-        audio_input: Qwen2AudioInputs,
+        audio_input: Qwen2AudioFeatureInputs,
         audio_hashes: list[str] = None,
         cached_audio_features: torch.Tensor = None,
     ) -> torch.Tensor:
@@ -704,7 +707,7 @@ class Qwen2_5OmniConditionalGenerationMixin:
     dummy_inputs=Qwen2_5OmniThinkerDummyInputsBuilder,
 )
 class Qwen2_5OmniThinkerForConditionalGeneration(
-        nn.Module, SupportsMultiModal, SupportsPP,
+        nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA,
         Qwen2_5OmniConditionalGenerationMixin):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -796,6 +799,15 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """Get module prefix for multimodal models to filter LoRA modules."""
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector=[],  # No explicit connector in this model
+            tower_model=["visual",
+                         "audio_tower"],  # Exclude vision and audio towers
+        )
 
     def get_multimodal_embeddings(self,
                                   **kwargs: object) -> MultiModalEmbeddings:
