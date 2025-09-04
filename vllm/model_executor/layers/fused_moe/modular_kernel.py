@@ -864,13 +864,14 @@ class FusedMoEModularKernel(torch.nn.Module):
                 self.fused_experts.quant_config,
             )
 
-            # assert self.shared_experts is not None
             if self.shared_experts is not None:
                 shared_output = self.shared_experts(a1)
 
+            # If DBO is being used, register the hook with the ubatch context
+            # and call it in dbo_maybe_run_recv_hook instead of passing it to
+            # the receiver.
             dbo_register_recv_hook(hook)
             dbo_yield()
-
             if dbo_enabled():
                 hook = None
 

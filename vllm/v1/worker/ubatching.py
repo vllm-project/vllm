@@ -58,6 +58,7 @@ class UBatchContext:
         global _CURRENT_CONTEXTS, _THREAD_ID_TO_CONTEXT
         _CURRENT_CONTEXTS[self.id] = None
         del _THREAD_ID_TO_CONTEXT[threading.get_ident()]
+        self.maybe_run_recv_hook()
         self.cpu_signal_event.set()
         self.cpu_wait_event.clear()
         self.current_stream = self.compute_stream
