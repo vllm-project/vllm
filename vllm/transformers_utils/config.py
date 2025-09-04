@@ -245,14 +245,14 @@ def register_config_parser(config_format: str):
     def _wrapper(config_parser_cls):
         if config_format in _CONFIG_FORMAT_TO_CONFIG_PARSER:
             logger.warning(
-                "Load format `%s` is already registered, and will be "
-                "overwritten by the new loader class `%s`.", config_format,
+                "Config format `%s` is already registered, and will be "
+                "overwritten by the new parser class `%s`.", config_format,
                 config_parser_cls)
         if not issubclass(config_parser_cls, ConfigParserBase):
-            raise ValueError("The model loader must be a subclass of "
-                             "`BaseModelLoader`.")
+            raise ValueError("The config parser must be a subclass of "
+                             "`ConfigParserBase`.")
         _CONFIG_FORMAT_TO_CONFIG_PARSER[config_format] = config_parser_cls
-        logger.info("Registered model loader `%s` with load format `%s`",
+        logger.info("Registered config parser `%s` with config format `%s`",
                     config_parser_cls, config_format)
         return config_parser_cls
 
