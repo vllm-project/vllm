@@ -57,7 +57,7 @@ class EagleProposer:
         assert self.speculative_config is not None
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
-        self.enable_probs = self.speculative_config.enable_draft_probs
+        self.enable_draft_probs = self.speculative_config.enable_draft_probs
 
         self.runner = runner
         self.dtype = vllm_config.model_config.dtype
@@ -733,7 +733,7 @@ class EagleProposer:
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        if not self.enable_probs:
+        if not self.enable_draft_probs:
             return logits.argmax(dim=-1), None
         elif sampling_metadata.all_greedy:
             # For greedy requests, draft_probs is not used in rejection
