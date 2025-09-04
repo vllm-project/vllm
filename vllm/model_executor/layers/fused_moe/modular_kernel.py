@@ -1115,7 +1115,8 @@ class FusedMoEModularKernel(torch.nn.Module):
         global_num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        expert_load_view: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
         of weights, w1 and w2, and top-k gating mechanism.
@@ -1139,6 +1140,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         - apply_router_weight_on_input (bool): When true, the topk weights are
           applied directly on the inputs. This is only applicable when topk is
           1.
+        - expert_load_view (Optional[torch.Tensor]): Optional tensor for tracking
+          expert load statistics. If provided, the kernel will update it using
+          ExpertTokensMetadata.expert_num_tokens for better performance.
 
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
@@ -1153,30 +1157,92 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
-        a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
-            hidden_states,
-            topk_weights,
-            topk_ids,
-            global_num_experts,
-            expert_map,
-            apply_router_weight_on_input,
-        )
+        shared_output: torch.Tensor
 
-        fused_out = self._fused_experts(
-            in_dtype=hidden_states.dtype,
-            a1q=a1q,
-            a1q_scale=a1q_scale,
-            w1=w1,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=activation,
-            global_num_experts=global_num_experts,
-            local_num_experts=local_num_experts,
-            expert_map=expert_map,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            expert_tokens_meta=expert_tokens_meta,
-        )
+        if (not self.prepare_finalize.supports_async()
+                or self.shared_experts is None):
+
+            # Run shared experts serially with dispatch.
+            if self.shared_experts is not None:
+                shared_output = self.shared_experts(a1)
+
+            (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
+             _expert_topk_weights) = self.prepare_finalize.prepare(
+                 a1,
+                 a1_scale,
+                 a2_scale,
+                 topk_weights,
+                 topk_ids,
+                 global_num_experts,
+                 expert_map,
+                 apply_router_weight_on_input,
+                 self.fused_experts.quant_config,
+             )
+        else:
+            # Overlap shared expert compute with all2all dispatch.
+            receiver = self.prepare_finalize.prepare_async(
+                a1,
+                a1_scale,
+                a2_scale,
+                topk_weights,
+                topk_ids,
+                global_num_experts,
+                expert_map,
+                apply_router_weight_on_input,
+                self.fused_experts.quant_config,
+            )
+
+            assert self.shared_experts is not None
+            shared_output = self.shared_experts(a1)
+
+            (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
+             _expert_topk_weights) = receiver()
+
+        # Process expert load statistics if we have the necessary components
+        # This provides a more efficient alternative to scatter_add_ in select_experts
+        if (expert_tokens_meta is not None and expert_load_view is not None and
+            expert_tokens_meta.expert_num_tokens is not None):
+                # Use pre-computed expert token counts from metadata
+                expert_load_view.scatter_add_(dim=0, 
+                                              index=torch.nonzero(expert_map != -1, as_tuple=False).squeeze(),
+                                              src=expert_tokens_meta.expert_num_tokens)
+
+        # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
+        topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
+        topk_weights = (topk_weights if _expert_topk_weights is None else
+                        _expert_topk_weights)
+
+        fused_out = None
+
+        if a1q.numel() == 0:
+            # This happens when none of the tokens from the all2all reach this
+            # EP rank. Also, note that this is only relevant for CUDAGraph
+            # incompatible all2all kernels like the DeepEP high-throughput
+            # kernels. CUDAGraph compatible all2all kernels like the pplx
+            # kernels and the DeepEP low-latency kernels are always batched
+            # and can never run into the tensor.numel() == 0 case.
+            fused_out = torch.empty_like(a1q).to(dtype=a1.dtype)
+        else:
+            fused_out = self._maybe_chunk_fused_experts(
+                a1=a1,
+                a1q=a1q,
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                local_num_experts=local_num_experts,
+                expert_map=expert_map,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                w1_zp=w1_zp,
+                w2_zp=w2_zp,
+                a1q_scale=a1q_scale,
+                a2_scale=a2_scale,
+                expert_tokens_meta=expert_tokens_meta,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
 
         return self._finalize(
             output,

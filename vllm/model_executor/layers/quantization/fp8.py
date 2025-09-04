@@ -1231,17 +1231,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
-            global_num_experts=global_num_experts,
-            zero_expert_num=zero_expert_num,
-            zero_expert_type=zero_expert_type,
-            num_fused_shared_experts=layer.num_fused_shared_experts,
+            fused_experts_method=self.fused_experts
         )
-
-        #
-        # Note: the order of checks is important since self.fused_experts
-        # can override fused_experts or cutlass but not rocm or marlin.
-        #
-        topk_weights, topk_ids, zero_expert_result = select_result
 
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
@@ -1277,43 +1268,39 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 quant_type_id=scalar_types.float8_e4m3fn.id,
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                workspace=layer.workspace,
-            )
-        elif self.fused_experts:
-            result = self.fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                expert_map=expert_map,
-            )
+                expert_map=expert_map)
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert not self.block_quant
-            assert not renormalize and custom_routing_function is not None
-            assert activation == "silu", (
-                f"Expected 'silu' activation but got {activation}"
-            )
-            assert scoring_func == "sigmoid", (
-                f"Expected 'sigmoid' scoring func but got {scoring_func}"
-            )
-
-            result = flashinfer_cutlass_moe_fp8(
-                x,
-                layer,
-                topk_weights,
-                topk_ids,
-                inplace=False,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
+            assert self.block_quant is None
+            assert (not renormalize and custom_routing_function is not None)
+            assert activation == 'silu', (
+                f"Expected 'silu' activation but got {activation}")
+            assert scoring_func == 'sigmoid', (
+                f"Expected 'sigmoid' scoring func but got {scoring_func}")
+            if self.fused_experts is not None:
+                return self.fused_experts(
+                    x,
+                    layer.w13_weight,
+                    layer.w2_weight,
+                    topk_weights,
+                    topk_ids,
+                    inplace=False,
+                    activation=activation,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                )
+            else:
+                return flashinfer_cutlass_moe_fp8(
+                    x,
+                    layer,
+                    topk_weights,
+                    topk_ids,
+                    inplace=False,
+                    activation=activation,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
 
