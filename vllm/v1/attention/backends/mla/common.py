@@ -217,6 +217,37 @@ from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               split_decodes_and_prefills)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+if current_platform.is_rocm():
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE
+    if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
+        from aiter.ops.triton.fused_kv_cache import fused_qk_rope_cat_and_cache_mla
+        
+    VLLM_AITER_TRITON_FP8_BMM = envs.VLLM_ROCM_USE_AITER and envs.VLLM_AITER_TRITON_FP8_BMM
+    VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE = envs.VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE
+    assert VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE > 0, "VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE must be positive integer"
+    if VLLM_AITER_TRITON_FP8_BMM:
+        from aiter.ops.triton.quant import dynamic_per_tensor_quant_fp8_i8
+
+        def dynamic_per_batched_tensor_quant(
+            x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
+        ):  
+            B, M, N = x.shape
+            x = x.contiguous().view(B * M, N)
+            x_quant = torch.empty((B * M, N), dtype = dtype, device = x.device)
+            x_quant_scale = torch.empty((1, ), dtype = torch.float32, device = x.device)
+            dynamic_per_tensor_quant_fp8_i8(x_quant, x, x_quant_scale)
+            x_quant = x_quant.view(B, M, N)
+            return x_quant, x_quant_scale
+
+            DTYPE_MAX = torch.finfo(dtype).max
+            min_val, max_val = x.aminmax()
+            amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-10)
+            scale = DTYPE_MAX / amax
+            x_scl_sat = (x * scale).clamp(min=-DTYPE_MAX, max=DTYPE_MAX)
+            return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
+        
+        from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant
+
 try:
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     is_vllm_fa = True
@@ -761,6 +792,8 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
+        self.is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        self.fp8_dtype = current_platform.fp8_dtype()
 
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
@@ -942,13 +975,20 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             True,  #Indicates actual_seq_lens are on GPU or CPU.
         )
 
-    def _v_up_proj(self, x):
-        # Convert from (B, N, L) to (N, B, L)
-        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-        # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
-        x = torch.bmm(x, self.W_UV)
-        # Convert from (N, B, V) to (B, N * V)
-        return x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+    def _v_up_proj(self, x, output=None):
+        if VLLM_AITER_TRITON_FP8_BMM and output is not None:
+            x = x.view(-1, self.num_heads, self.kv_lora_rank)
+            output = output.view(-1, self.num_heads, self.v_head_dim)
+            batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(x, self.W_V, self.W_V_scale, group_size = 128, YQ = output, transpose_bm = True, transpose_bm_in = True)
+            x = output.view(-1, self.num_heads * self.v_head_dim)
+        else:
+            # Convert from (B, N, L) to (N, B, L)
+            x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+            # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
+            x = torch.bmm(x, self.W_UV)
+            # Convert from (N, B, V) to (B, N * V)
+            x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        return x
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
 
@@ -996,10 +1036,25 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         W_UK, W_UV = kv_b_proj_weight.split(
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
-        # Convert from (L, N, V) to (N, L, V)
-        self.W_UV = W_UV.transpose(0, 1)
-        # Convert from (L, N, P) to (N, P, L)
-        self.W_UK_T = W_UK.permute(1, 2, 0)
+        if VLLM_AITER_TRITON_FP8_BMM:
+            W_K = W_UK.transpose(0, 1)
+            W_V = W_UV.permute(1, 2, 0)
+            self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(W_K, dtype=self.fp8_dtype)
+            self.W_V, self.W_V_scale = dynamic_per_batched_tensor_quant(W_V, dtype=self.fp8_dtype)
+            logger.info(f"[Triton] Compiling FP8 BMM with shape = {self.W_K.shape[0]} [1~{VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE}] {self.W_K.shape[1]} {self.W_K.shape[2]}")
+            logger.info(f"[Triton] Compiling FP8 BMM with shape = {self.W_V.shape[0]} [1~{VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE}] {self.W_V.shape[1]} {self.W_V.shape[2]}")
+            for m in range(1, VLLM_AITER_TRITON_FP8_BMM_MAX_BATCH_SIZE + 1):
+                x = torch.empty((m, self.W_K.shape[0], self.W_K.shape[2]), dtype=torch.bfloat16, device=self.W_K.device)
+                x_out = torch.empty((m, self.W_K.shape[0], self.W_K.shape[1] + self.qk_rope_head_dim), dtype=torch.bfloat16, device=self.W_K.device)[... , :self.W_K.shape[1]]
+                batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(x, self.W_K, self.W_K_scale, group_size = 128, YQ = x_out, transpose_bm = True, transpose_bm_in = True)
+                x = torch.empty((m, self.W_V.shape[0], self.W_V.shape[2]), dtype=torch.bfloat16, device=self.W_V.device)
+                x_out = torch.empty((m, self.W_V.shape[0] * self.W_V.shape[1]), dtype=torch.bfloat16, device=self.W_K.device).view(-1, self.num_heads, self.v_head_dim)
+                batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(x, self.W_V, self.W_V_scale, group_size = 128, YQ = x_out, transpose_bm = True, transpose_bm_in = True)
+        else:
+            # Convert from (L, N, V) to (N, L, V)
+            self.W_UV = W_UV.transpose(0, 1)
+            # Convert from (L, N, P) to (N, P, L)
+            self.W_UK_T = W_UK.permute(1, 2, 0)
 
     def _compute_prefill_context(
         self,
@@ -1139,6 +1194,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         output: Optional[torch.Tensor] = None,
         output_scale: Optional[torch.Tensor] = None,
         output_block_scale: Optional[torch.Tensor] = None,
+        positions: torch.Tensor = None,
+        cos_sin_cache: torch.Tensor = None,
+        is_neox: bool = False,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -1172,25 +1230,51 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        decode_q = q[:num_decode_tokens]
-
-        prefill_q = q[num_decode_tokens:]
-        prefill_k_pe = k_pe[num_decode_tokens:]
-        prefill_k_c_normed = k_c_normed[num_decode_tokens:]
-
         # write the latent and rope to kv cache
+        mla_output_zeros = None
+        decode_q_out = None
         if kv_cache.numel() > 0:
-            ops.concat_and_cache_mla(
-                k_c_normed,
-                k_pe.squeeze(1),
-                kv_cache,
-                attn_metadata.slot_mapping.flatten(),
-                kv_cache_dtype=self.kv_cache_dtype,
-                scale=layer._k_scale,
-            )
-
-        if fp8_attention:
-            kv_cache = kv_cache.view(current_platform.fp8_dtype())
+            if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
+                cos, sin = cos_sin_cache.chunk(2, dim = -1)
+                q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
+                if VLLM_AITER_TRITON_FP8_BMM:
+                    decode_q_out = torch.empty((num_decode_tokens, self.num_heads, self.W_K.shape[1] + self.qk_rope_head_dim), dtype = q.dtype, device=q.device)
+                if self.is_fp8_kv_cache:
+                    kv_cache_og_dtype = kv_cache.dtype
+                    kv_cache = kv_cache.view(self.fp8_dtype)          
+                fused_output = fused_qk_rope_cat_and_cache_mla(
+                    q_nope,
+                    q_pe,
+                    k_c_normed.unsqueeze(1),
+                    k_pe,
+                    kv_cache,
+                    attn_metadata.slot_mapping.flatten(),
+                    positions,
+                    cos,
+                    sin,
+                    layer._k_scale,
+                    is_neox,
+                    num_decode_toks_for_zeros=num_decode_tokens,
+                    apply_scale=(k_pe.dtype != kv_cache.dtype),
+                    q_out=None,
+                    decode_q_pe_out = decode_q_out[... , -self.qk_rope_head_dim:] if VLLM_AITER_TRITON_FP8_BMM else None,
+                    k_pe_out=k_pe,
+                )
+                if num_decode_tokens > 0:
+                    q, _, k_pe, kv_cache, mla_output_zeros = fused_output
+                else:
+                    q, _, k_pe, kv_cache = fused_output
+                if self.is_fp8_kv_cache:
+                    kv_cache = kv_cache.view(kv_cache_og_dtype)
+            else:
+                ops.concat_and_cache_mla(
+                    k_c_normed,
+                    k_pe.squeeze(1),
+                    kv_cache,
+                    attn_metadata.slot_mapping.flatten(),
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=layer._k_scale,
+                )
 
         if has_prefill:
             output[num_decode_tokens:] = self._forward_prefill(
@@ -1201,28 +1285,21 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             assert attn_metadata.decode is not None
             decode_q_nope, decode_q_pe = decode_q.split(
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-            # Convert from (B, N, P) to (N, B, P)
-            decode_q_nope = decode_q_nope.transpose(0, 1)
-            # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-            decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
-            # Convert from (N, B, L) to (B, N, L)
-            decode_ql_nope = decode_ql_nope.transpose(0, 1)
-
-            if fp8_attention:
-                ql_nope_shape = decode_ql_nope.shape
-                decode_ql_nope, _ = ops.scaled_fp8_quant(
-                    decode_ql_nope.reshape([
-                        ql_nope_shape[0], ql_nope_shape[1] * ql_nope_shape[2]
-                    ]), layer._q_scale)
-                decode_ql_nope = decode_ql_nope.reshape(ql_nope_shape)
-                q_pe_shape = decode_q_pe.shape
-                decode_q_pe, _ = ops.scaled_fp8_quant(
-                    decode_q_pe.reshape(
-                        [q_pe_shape[0], q_pe_shape[1] * q_pe_shape[2]]),
-                    layer._q_scale)
-                decode_q_pe = decode_q_pe.reshape(q_pe_shape)
+            
+            if VLLM_AITER_TRITON_FP8_BMM:
+                decode_ql_nope = decode_q_out[... , :self.W_K.shape[1]] if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE else None
+                batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant(decode_q_nope, self.W_K, self.W_K_scale, group_size = 128, YQ = decode_ql_nope, transpose_bm = True, transpose_bm_in = True)
+                self._forward_decode(
+                    decode_ql_nope, decode_q_pe, kv_cache, attn_metadata, mla_output_zeros=mla_output_zeros, decode_q_out=decode_q_out, output=output[:num_decode_tokens])
+            else:
+                # Convert from (B, N, P) to (N, B, P)
+                decode_q_nope = decode_q_nope.transpose(0, 1)
+                # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+                decode_ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
+                # Convert from (N, B, L) to (B, N, L)
+                decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
             output[:num_decode_tokens] = self._forward_decode(
-                decode_ql_nope, decode_q_pe, kv_cache, attn_metadata, layer)
+                decode_ql_nope, decode_q_pe, kv_cache, attn_metadata)
 
         return output_padded

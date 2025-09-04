@@ -61,7 +61,6 @@ from .utils import (PPMissingLayer, is_pp_missing_parameter,
                     maybe_prefix)
 import vllm.envs as envs
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
 
 if current_platform.is_rocm():
     VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_RMSNORM_QUANT
@@ -74,6 +73,9 @@ if current_platform.is_rocm():
     VLLM_ROCM_USE_AITER_TRITON_FUSED_MUL_ADD = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_MUL_ADD
     if VLLM_ROCM_USE_AITER_TRITON_FUSED_MUL_ADD:
         from aiter.ops.triton.fused_mul_add import fused_mul_add
+
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE
+    VLLM_AITER_TRITON_FP8_BMM = envs.VLLM_ROCM_USE_AITER and envs.VLLM_AITER_TRITON_FP8_BMM
 
 class DeepseekV2MLP(nn.Module):
 
@@ -562,16 +564,30 @@ class DeepseekV2MLAAttention(nn.Module):
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim:], k_pe)
-
-        attn_out = self.mla_attn(
-            q,
-            kv_c_normed,
-            k_pe,
-            output_shape=(hidden_states.shape[0],
-                          self.num_local_heads * self.v_head_dim))
+        if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
+            cos_sin_cache = self.rotary_emb.cos_sin_cache
+            is_neox = self.rotary_emb.is_neox_style
+            attn_out = self.mla_attn(
+                q,
+                kv_c_normed,
+                k_pe,
+                output_shape=(hidden_states.shape[0],
+                            self.num_local_heads * self.v_head_dim),
+                positions=positions,
+                cos_sin_cache=cos_sin_cache,
+                is_neox=is_neox)
+        else:
+            q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
+                positions, q[..., self.qk_nope_head_dim:], k_pe)
+            attn_out = self.mla_attn(
+                q,
+                kv_c_normed,
+                k_pe,
+                output_shape=(hidden_states.shape[0],
+                            self.num_local_heads * self.v_head_dim))
+            
         return self.o_proj(attn_out)[0]
+
 
 
 class DeepseekV2DecoderLayer(nn.Module):

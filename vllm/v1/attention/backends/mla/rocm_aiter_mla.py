@@ -223,18 +223,30 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: AiterMLAMetadata,
         layer: AttentionLayer,
+        mla_output_zeros: torch.Tensor = None,
+        decode_q_out: torch.Tensor = None,
+        output: torch.Tensor = None,
     ) -> torch.Tensor:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
         B = q_nope.shape[0]
 
-        q = torch.cat([q_nope, q_pe], dim=-1)
-        o = torch.zeros(B,
-                        self.num_heads,
-                        self.kv_lora_rank,
-                        dtype=q.dtype,
-                        device=q.device)
+        if decode_q_out is not None:
+            q = decode_q_out
+        else:
+            q = torch.cat([q_nope, q_pe], dim=-1)
+        if mla_output_zeros is not None:
+            o = mla_output_zeros
+            assert o.shape[0] == B, f"{o.shape[0]=} {B=}"
+            assert o.shape[1] == self.num_heads, f"{o.shape[1]=} {self.num_heads=}"
+            assert o.shape[2] == self.kv_lora_rank, f"{o.shape[2]=} {self.kv_lora_rank=}"
+        else:
+            o = torch.zeros(B,
+                            self.num_heads,
+                            self.kv_lora_rank,
+                            dtype=q.dtype,
+                            device=q.device)
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
@@ -247,4 +259,4 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                              attn_metadata.decode.paged_kv_indices,
                              attn_metadata.decode.paged_kv_last_page_len)
 
-        return self._v_up_proj(o)
+        return self._v_up_proj(o, output=output)

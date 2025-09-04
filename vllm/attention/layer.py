@@ -295,7 +295,7 @@ class Attention(nn.Module, AttentionLayerBase):
             else:
                 if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
                     torch.ops.vllm.unified_attention_with_output(
-                        query, key, value, output, self.layer_name, None, positions, cos_sin_cache, True)
+                        query, key, value, output, self.layer_name, None, positions, cos_sin_cache, is_neox)
                 else:
                     torch.ops.vllm.unified_attention_with_output(
                         query, key, value, output, self.layer_name)
@@ -530,8 +530,14 @@ def unified_attention_with_output(
 
     if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
         from vllm.v1.attention.backends.triton_attn import TritonAttentionImpl
-        assert isinstance(self.impl, TritonAttentionImpl), f"Expect attention implementation = TritonAttentionImpl for VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE=1 but got {self.impl=}"
-        assert self.impl.kv_sharing_target_layer_name is None, "kv_sharing_target_layer_name error"
+        from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAImpl
+        if isinstance(self.impl, TritonAttentionImpl):
+            assert self.impl.kv_sharing_target_layer_name is None, "kv_sharing_target_layer_name error"
+        elif isinstance(self.impl, AiterMLAImpl):
+            pass
+        else:
+            raise NotImplementedError("VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE=1 only supports Attention with TritonAttentionImpl or AiterMLAImpl")
+
         self.impl.forward(self,
                         query,
                         key,
