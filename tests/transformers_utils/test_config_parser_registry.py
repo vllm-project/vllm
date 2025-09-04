@@ -24,14 +24,14 @@ class CustomConfigParser(ConfigParserBase):
         raise NotImplementedError
 
 
-def test_register_model_loader():
+def test_register_config_parser():
     assert isinstance(get_config_parser("custom_config_parser"),
                       CustomConfigParser)
 
 
-def test_invalid_model_loader():
+def test_invalid_config_parser():
     with pytest.raises(ValueError):
 
         @register_config_parser("invalid_config_parser")
-        class InValidModelLoader:
+        class InvalidConfigParser:
             pass
