@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from math import log2
 from typing import Optional
 
 import torch
@@ -49,6 +50,12 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
     fp8_max = f_info.max
     fp8_min = f_info.min
     use_ue8m0 = is_deep_gemm_e8m0_used()
+
+    # We never want to launch more than Tx number of threads
+    # This computes the clip.
+    num_parallel_tokens = max(
+        1, min(16, 2**int(log2(min(num_parallel_tokens, T)))))
+
     torch.ops._C.silu_mul_fp8_quant_deep_gemm_cuda(y, tokens_per_expert, y_q,
                                                    y_s, group_size, eps,
                                                    fp8_min, fp8_max, use_ue8m0,

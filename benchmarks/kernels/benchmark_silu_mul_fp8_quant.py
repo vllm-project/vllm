@@ -1,8 +1,9 @@
-#!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
@@ -174,17 +175,50 @@ def silu_mul_fp8_quant_deep_gemm_triton(
     return y_q, y_s
 
 
-def benchmark(k, E, T, H, num_parallel_tokens, G=128, runs=100):
+# Parse generation strategies
+strategies = ["uniform", "max_t", "first_t"]
+
+
+def benchmark(
+    k,
+    E,
+    T,
+    H,
+    num_parallel_tokens=16,
+    G=128,
+    runs=100,
+    num_warmups=20,
+    gen_strategy="default",
+):
     current_platform.seed_everything(42)
-    y = torch.randn((E, T, 2 * H), dtype=torch.bfloat16, device="cuda")
-    tokens_per_expert = torch.randint(
-        T // 2, T, size=(E,), dtype=torch.int32, device="cuda"
-    )
+
+    y = torch.rand((E, T, 2 * H), dtype=torch.bfloat16, device="cuda").contiguous()
+    # Different random generation strategies
+    if gen_strategy == "uniform":
+        tokens_per_expert = torch.randint(
+            0, T, size=(E,), dtype=torch.int32, device="cuda"
+        )
+    elif gen_strategy == "max_t":
+        tokens_per_expert = (
+            torch.randint(0, T, size=(E,), dtype=torch.int32, device="cuda") * 0 + T
+        )
+    elif gen_strategy == "first_t":
+        tokens_per_expert = (
+            torch.randint(0, T, size=(E,), dtype=torch.int32, device="cuda") * 0
+        )
+        tokens_per_expert[0] = T
+    elif gen_strategy == "sorted":
+        tokens_per_expert = torch.randint(
+            0, T, size=(E,), dtype=torch.int32, device="cuda"
+        )
+        tokens_per_expert, _ = torch.sort(tokens_per_expert)
+    else:
+        raise ValueError(f"Unknown generation strategy: {gen_strategy}")
 
     # Warmup
-    for _ in range(20):
+    for _ in range(num_warmups):
         k(y, tokens_per_expert, num_parallel_tokens=num_parallel_tokens, group_size=G)
-        torch.cuda.synchronize()
+    torch.cuda.synchronize()
 
     # Benchmark
     torch.cuda.synchronize()
@@ -214,55 +248,156 @@ def benchmark(k, E, T, H, num_parallel_tokens, G=128, runs=100):
     return avg_time, gflops, memory_bw
 
 
-def benchmark_full():
-    configs = [
-        (8, 8, 7168),
-        (8, 16, 7168),
-        (8, 32, 7168),
-        (8, 64, 7168),
-        (8, 128, 7168),
-        (8, 256, 7168),
-        (8, 512, 7168),
-        (8, 1024, 7168),
-        (32, 8, 7168),
-        (32, 16, 7168),
-        (32, 32, 7168),
-        (32, 64, 7168),
-        (32, 128, 7168),
-        (32, 256, 7168),
-        (32, 512, 7168),
-        (32, 1024, 7168),
-        (256, 8, 7168),
-        (256, 16, 7168),
-        (256, 32, 7168),
-        (256, 64, 7168),
-        (256, 128, 7168),
-        (256, 256, 7168),
-        (256, 512, 7168),
-        (256, 1024, 7168),
-    ]
+def create_comparison_plot(
+    cuda_times, baseline_times, config_labels, strategy_name, id
+):
+    """Create a comparison plot for a specific generation strategy"""
+    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
 
-    num_parallel_tokens = 16
+    # Configure x-axis positions
+    x = np.arange(len(config_labels))
+    # Add speedup labels over each bar pair
+    for i in range(len(x)):
+        speedup = baseline_times[i] / cuda_times[i]
+        max_height = max(cuda_times[i], baseline_times[i])
+        ax.text(
+            x[i],
+            max_height + max_height * 0.02,
+            f"{speedup:.1f}x",
+            ha="center",
+            va="bottom",
+            fontweight="bold",
+            fontsize=9,
+        )
 
-    print(f"GPU: {torch.cuda.get_device_name()} CUDA Kernel")
-    print(f"{'Config':<20} {'Time(ms)':<10} {'GFLOPS':<10} {'GB/s':<10}")
-    print("-" * 50)
+    ax.set_xlabel("Configuration")
+    ax.set_ylabel("Time (ms)")
+    ax.set_title(f"Execution Time Comparison - {strategy_name}\n(Lower is Better)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(config_labels, rotation=45, ha="right")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    filename = f"../../silu_bench/silu_benchmark_{id}.png"
+    plt.savefig(filename, dpi=300, bbox_inches="tight")
+    plt.show()
+
+    return filename
+
+
+outer_dim = 7168
+configs = [
+    # DeepSeekV3 Configs
+    (8, 8, 7168),
+    (8, 16, 7168),
+    (8, 32, 7168),
+    (8, 64, 7168),
+    (8, 128, 7168),
+    (8, 256, 7168),
+    (8, 512, 7168),
+    (8, 1024, 7168),
+    # DeepSeekV3 Configs
+    (32, 8, 7168),
+    (32, 16, 7168),
+    (32, 32, 7168),
+    (32, 64, 7168),
+    (32, 128, 7168),
+    (32, 256, 7168),
+    (32, 512, 7168),
+    (32, 1024, 7168),
+    # DeepSeekV3 Configs
+    (256, 8, 7168),
+    (256, 16, 7168),
+    (256, 32, 7168),
+    (256, 64, 7168),
+    (256, 128, 7168),
+    (256, 256, 7168),
+    (256, 512, 7168),
+    (256, 1024, 7168),
+]
+
+runs = 100
+num_warmups = 20
+
+strategy_descriptions = {
+    "uniform": "experts = torch.randint(0, T, size=(E,))",
+    "max_t": "experts[:] = T",
+    "first_t": "experts[0] = T, experts[1:] = 0",
+}
+
+print(f"GPU: {torch.cuda.get_device_name()}")
+print(f"Testing strategies: {', '.join(strategies)}")
+print(f"Configurations: {len(configs)} configs")
+
+generated_plots = []
+
+# Run benchmarks for each strategy
+for id, strategy in enumerate(strategies):
+    print(f"\n{'=' * 60}")
+    print(f"Testing strategy: {strategy_descriptions[strategy]}")
+    print(f"{'=' * 60}")
+
+    # Collect benchmark data for both algorithms
+    cuda_results = []
+    baseline_results = []
+    config_labels = []
 
     for E, T, H in configs:
+        config_label = f"E={E},T={T},H={H}"
+        config_labels.append(config_label)
+
+        # CUDA kernel results
         time_ms, gflops, gbps = benchmark(
-            silu_mul_fp8_quant_deep_gemm_cuda, E, T, H, num_parallel_tokens
+            silu_mul_fp8_quant_deep_gemm_cuda,
+            E,
+            T,
+            H,
+            runs=runs,
+            num_warmups=num_warmups,
+            gen_strategy=strategy,
         )
-        print(f"E={E:3d},T={T:4d},H={H:4d} {time_ms:8.3f} {gflops:8.1f} {gbps:8.1f}")
+        cuda_results.append((time_ms, gflops, gbps))
 
-    print(f"GPU: {torch.cuda.get_device_name()} Baseline")
-    print(f"{'Config':<20} {'Time(ms)':<10} {'GFLOPS':<10} {'GB/s':<10}")
-    print("-" * 50)
-
-    for E, T, H in configs:
+        # Baseline results
         time_ms, gflops, gbps = benchmark(
-            silu_mul_fp8_quant_deep_gemm_triton, E, T, H, num_parallel_tokens
+            silu_mul_fp8_quant_deep_gemm_triton,
+            E,
+            T,
+            H,
+            runs=runs,
+            num_warmups=num_warmups,
+            gen_strategy=strategy,
         )
-        print(f"E={E:3d},T={T:4d},H={H:4d} {time_ms:8.3f} {gflops:8.1f} {gbps:8.1f}")
+        baseline_results.append((time_ms, gflops, gbps))
 
+        print(f"Completed: {config_label}")
 
-benchmark_full()
+    # Extract data for plotting
+    cuda_times = [r[0] for r in cuda_results]
+    baseline_times = [r[0] for r in baseline_results]
+
+    # Create comparison plot for this strategy
+    plot_filename = create_comparison_plot(
+        cuda_times, baseline_times, config_labels, strategy_descriptions[strategy], id
+    )
+    generated_plots.append(plot_filename)
+
+    # Print summary table for this strategy
+    print(f"\nSummary Table - {strategy_descriptions[strategy]}:")
+    print(f"{'Config':<20} {'CUDA Time(ms)':<12} {'Base Time(ms)':<12} {'Speedup':<8}")
+    print("-" * 60)
+
+    for i, (E, T, H) in enumerate(configs):
+        speedup = baseline_times[i] / cuda_times[i]
+        config_label = f"E={E:3d},T={T:4d},H={H:4d}"
+        print(
+            f"{config_label:<20} {cuda_times[i]:8.3f}     "
+            f"{baseline_times[i]:8.3f}     "
+            f"{speedup:6.2f}x"
+        )
+
+print(f"\n{'=' * 60}")
+print("Benchmark Complete!")
+print(f"Generated plots: {', '.join(generated_plots)}")
+print(f"{'=' * 60}")

@@ -226,13 +226,17 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     auto residual = n_tokens - chunk_size * NUM_PARALLEL_TOKENS;
     auto calc_id = [&](Idx_t id) {
       if (id < residual) {
-        return id * (chunk_size + 1);
+        return min(n_tokens, id * (chunk_size + 1));
       } else {
-        return id * chunk_size + residual;
+        return min(n_tokens, id * chunk_size + residual);
       }
     };
     n_tokens_lower = calc_id(blockIdx.y);
     n_tokens_upper = calc_id(blockIdx.y + 1);
+  }
+
+  if (n_tokens_lower >= n_tokens_upper) {
+    return;
   }
 
   // base offsets (element-based)
@@ -250,8 +254,8 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
   auto y_s_ptr =
       _y_s + base_ys + warp_id * stride_ys_g + n_tokens_lower * stride_ys_t;
 
-  auto y_q_ptr = _y_q + base_yq + warp_id * GROUP_SIZE + 2 * lane_id +
-                 stride_yq_t * n_tokens_lower;
+  auto y_q_ptr = _y_q + base_yq + warp_id * GROUP_SIZE +
+                 stride_yq_t * n_tokens_lower + 4 * lane_id;
 
   Idx_t t_load = n_tokens_lower, load_stage_id = 0;
   auto s_buff_gate_load_128 = s_buff_128 + (tid % HALF_THREAD_COUNT);
@@ -282,8 +286,10 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     load_and_advance_y_pred();
   }
 
-  auto s_gate_ptr = s_buff_compute_32 + warp_id * (GROUP_SIZE / 2) + lane_id;
-  auto s_up_ptr = s_gate_ptr + S_NUM_32 / 2;
+  __int64_t* s_gate_ptr = reinterpret_cast<__int64_t*>(
+                              s_buff_compute_32 + warp_id * (GROUP_SIZE / 2)) +
+                          lane_id;
+  __int64_t* s_up_ptr = s_gate_ptr + S_NUM_64 / 2;
 
   Idx_t stage_id{};
   for (Idx_t t = n_tokens_lower; t < n_tokens_upper; ++t) {
@@ -295,24 +301,28 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 
     load_and_advance_y_pred();
 
-    const auto compute_pipeline_offset =
-        ((stage_id++) % NUM_STAGES) * (GROUP_SIZE / 2u) * NUM_WARPS;
-
-    auto s_gate_compute = s_gate_ptr + compute_pipeline_offset;
-    auto s_up_compute = s_up_ptr + compute_pipeline_offset;
+    const auto compute_pipeline_offset_64 =
+        (((stage_id++) % NUM_STAGES) * (GROUP_SIZE / 2u) * NUM_WARPS) / 2u;
+    auto s_gate_compute_64 = s_gate_ptr + compute_pipeline_offset_64;
+    auto s_up_compute_64 = s_up_ptr + compute_pipeline_offset_64;
+    __int64_t gate64 = *s_gate_compute_64;
+    __int64_t up64 = *s_up_compute_64;
+    __nv_bfloat162* s_gate_compute_32 =
+        reinterpret_cast<__nv_bfloat162*>(&gate64);
+    __nv_bfloat162* s_up_compute_32 = reinterpret_cast<__nv_bfloat162*>(&up64);
 
 #pragma unroll
     for (int i = 0; i < 2; i++) {
-      float2 gate = silu2(__bfloat1622float2(*s_gate_compute));
-      float2 upv = __bfloat1622float2(*s_up_compute);
+      float2 gate = silu2(__bfloat1622float2(*s_gate_compute_32));
+      float2 upv = __bfloat1622float2(*s_up_compute_32);
 
       results[2 * i] = gate.x * upv.x;
       results[2 * i + 1] = gate.y * upv.y;
 
       y_max =
           fmaxf(y_max, fmaxf(fabsf(results[2 * i]), fabsf(results[2 * i + 1])));
-      s_gate_compute += WARP_SIZE;
-      s_up_compute += WARP_SIZE;
+      ++s_gate_compute_32;
+      ++s_up_compute_32;
     }
 
     float y_s = warp_max(y_max) / fp8_max;
@@ -326,18 +336,9 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
       results[i] = clip(results[i] / y_s, fp8_min, fp8_max);
     }
 
-    auto local_y_q_ptr = reinterpret_cast<unsigned char*>(y_q_ptr);
-    const auto r4 = reinterpret_cast<const float4*>(results);
+    const float4* r4 = reinterpret_cast<const float4*>(results);
     auto fp8x4 = __nv_fp8x4_e4m3(*r4);
-    auto resultfp8x2 = reinterpret_cast<__nv_fp8x2_e4m3*>(&fp8x4.__x);
-
-#pragma unroll
-    for (Idx_t i = 0; i < 2; ++i) {
-      auto res_u8 = reinterpret_cast<unsigned char*>(&resultfp8x2[i].__x);
-      local_y_q_ptr[0] = res_u8[0];
-      local_y_q_ptr[1] = res_u8[1];
-      local_y_q_ptr += 2 * WARP_SIZE;
-    }
+    *reinterpret_cast<__nv_fp8x4_e4m3*>(y_q_ptr) = fp8x4;
 
     y_q_ptr += stride_yq_t;
 
