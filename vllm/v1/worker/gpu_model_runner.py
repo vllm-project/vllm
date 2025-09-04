@@ -323,9 +323,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device="cpu",
             pin_memory=self.pin_memory)
 
-        # for CP
-        self.num_decodes = 0
-
     def _make_buffer(self, *args, dtype: torch.dtype) -> CpuGpuBuffer:
         return CpuGpuBuffer(*args,
                             dtype=dtype,
@@ -385,7 +382,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.cp_world_size > 1:
                 assert self.reorder_batch_threshold == 1, \
                     "CP not support reorder_batch_threshold > 1 now."
-            _, self.num_decodes = reorder_batch_to_split_decodes_and_prefills(
+            _ = reorder_batch_to_split_decodes_and_prefills(
                 self.input_batch,
                 scheduler_output,
                 decode_threshold=self.reorder_batch_threshold)
@@ -742,14 +739,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             assert self.attn_groups[0][
                 0].backend is FlashMLABackend, "CP only support flashmla now."
         self.input_batch.block_table.compute_slot_mapping(
-            req_indices,
-            positions_np,
-            num_reqs=num_reqs,
-            num_decodes=self.num_decodes,
-            num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu,
-            seq_lens_np=self.seq_lens.np,
-            cp_num_computed_tokens_cpu=self.input_batch.
-            cp_num_computed_tokens_cpu)
+            req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(
             total_num_scheduled_tokens)
 
@@ -857,8 +847,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logits_indices_padded=logits_indices_padded,
                 num_logits_indices=logits_indices.size(0),
                 causal=True,
-                cp_num_computed_tokens_cpu_tensor=self.input_batch.
-                cp_num_computed_tokens_cpu_tensor,
             )
 
             if self.speculative_config and \

@@ -72,10 +72,6 @@ class CommonAttentionMetadata:
     logits_indices_padded: Optional[torch.Tensor] = None
     num_logits_indices: Optional[int] = None
 
-    # Needed by CP
-    cp_num_computed_tokens_cpu_tensor: torch.Tensor = None
-    """The context lengths in the perspective of cp rank0."""
-
 
 @dataclass
 class UbatchSlice:
@@ -692,7 +688,7 @@ def reorder_batch_to_split_decodes_and_prefills(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
     decode_threshold: int = 1,
-) -> tuple[bool, int]:
+) -> bool:
     """
     Reorders the batch to split into prefill and decode requests; places all
     requests with <= decode_threshold tokens at the front of the batch.
@@ -748,7 +744,7 @@ def reorder_batch_to_split_decodes_and_prefills(
         input_batch.swap_states(prefills[i - 1], decode_idx)
         modified_batch = True
 
-    return modified_batch, num_decodes
+    return modified_batch
 
 
 KV_SHARING_FAST_PREFILL_METADATA_FIELDS = [

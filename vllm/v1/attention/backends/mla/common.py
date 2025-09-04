@@ -653,6 +653,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             split_decodes_and_prefills(common_attn_metadata,
                                        decode_threshold=self.reorder_batch_threshold)
 
+        # Note(hc): update seq_lens of decode reqs under CP.
+        if self.cp_world_size > 1:
+            seq_lens[:num_decodes] = seq_lens[:num_decodes] \
+                // self.cp_world_size + \
+                (get_cp_group().rank_in_group <= (seq_lens[:num_decodes] - 1) \
+                % self.cp_world_size)
+
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
@@ -661,14 +668,14 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             reqs_start = num_decodes  # prefill_start
 
             context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
+            # Note(hc): The context lengths in the perspective of cp rank0.
+            cp_context_lens_cpu = torch.ceil(context_lens_cpu.float() /
+                                             self.cp_world_size).int()
             origin_context_lens = context_lens_cpu.tolist()
             max_context_len_cpu = context_lens_cpu.max().item()
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
             prefill_query_start_loc = query_start_loc[
                 reqs_start:] - query_start_loc[reqs_start]
-            if self.cp_world_size > 1:
-                cp_context_lens_cpu = common_attn_metadata.\
-                    cp_num_computed_tokens_cpu_tensor[reqs_start:num_reqs]
 
             chunked_context_metadata = None
             if max_context_len_cpu > 0:

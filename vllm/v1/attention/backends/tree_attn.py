@@ -188,7 +188,7 @@ class TreeAttentionMetadataBuilder(
         return reorder_batch_to_split_decodes_and_prefills(
             input_batch,
             scheduler_output,
-            decode_threshold=self.tree_attn_bias.shape[0])[0]
+            decode_threshold=self.tree_attn_bias.shape[0])
 
     def build(
         self,
