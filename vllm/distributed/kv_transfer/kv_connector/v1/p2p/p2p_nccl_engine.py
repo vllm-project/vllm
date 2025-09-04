@@ -409,10 +409,11 @@ class P2pNcclEngine:
                     # The sender's timeout will handle this.
                     tensor = None
                     logger.warning(
-                        "🔴[PUT] Recv Tensor failed after sending OK, %s👈%s, "
-                        "error:%s. Cleaning up connection.", 
-                        self.zmq_address, remote_address,
-                        str(e))
+                        "🔴[PUT] Recv Tensor failed after sending OK, %s👈%s. "
+                        "Cleaning up connection.",
+                        self.zmq_address,
+                        remote_address,
+                        exc_info=e)
                     # The connection might be broken, clean it up.
                     self._cleanup_connection(remote_address)
 
@@ -448,9 +449,11 @@ class P2pNcclEngine:
                             self.send_store[tensor_id] = tensor
                             self.have_sent_tensor_id(tensor_id)
                     except Exception as e:
-                        logger.error("Failed to send tensor for GET to %s: %s."
-                                     " Cleaning up connection.",
-                                     remote_address, e)
+                        logger.error(
+                            "Failed to send tensor for GET to %s. "
+                            "Cleaning up connection.",
+                            remote_address,
+                            exc_info=e)
                         self._cleanup_connection(remote_address)
                 else:
                     data = {"ret": 1}
@@ -560,9 +563,11 @@ class P2pNcclEngine:
             except (Exception, zmq.ZMQError) as e:
                 logger.error(
                     "💥 Connection error during send_sync to %s "
-                    "(attempt %d/%d): %s. Cleaning up and retrying.",
-                    item.remote_address, attempt + 1, max_retries, e
-                )
+                    "(attempt %d/%d). Cleaning up and retrying.",
+                    item.remote_address,
+                    attempt + 1,
+                    max_retries,
+                    exc_info=e)
                 self._cleanup_connection(item.remote_address)
                 time.sleep(0.1) # Small delay before retry
 
