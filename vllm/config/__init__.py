@@ -1768,14 +1768,11 @@ class ModelConfig:
         # "head" refers to the last Linear layer(s) of an LLM,
         # such as the lm_head in a generation model,
         # or the score or classifier in a classification model.
-        # - using_fp32_head being True means using fp32 head
-        # - using_fp32_head being False means fp32 head is not used
-        # - using_fp32_head being None means choosing
         # the default head_dtype based on runner_type.
         #   - The pooling model defaults to using fp32 head,
-        # you can use using_fp32_head=False to disable it.
+        # you can use head_dtype="" to disable it.
         #   - The generate model defaults to not using fp32 head,
-        # you can use using_fp32_head=True to enable it.
+        # you can use head_dtype=float32 to enable it.
         return self._head_dtype
 
     def get_and_verify_max_len(self, max_model_len: int):
@@ -2920,15 +2917,25 @@ def _get_head_dtype(config: PretrainedConfig, dtype: torch.dtype,
     if torch.float32 not in current_platform.supported_dtypes:
         return dtype
 
-    using_fp32_head: Optional[bool] = getattr(config, "using_fp32_head", None)
-    if using_fp32_head is False:
-        return dtype
-    elif using_fp32_head:
-        return torch.float32
+    head_dtype: Optional[Union[str,
+                               torch.dtype]] = getattr(config, "head_dtype",
+                                                       None)
 
-    if runner_type == "pooling":
-        return torch.float32
-    return dtype
+    if head_dtype == "":
+        return dtype
+    elif isinstance(head_dtype, str):
+        head_dtype = head_dtype.lower()
+        if head_dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
+            raise ValueError(f"Unknown dtype: {head_dtype!r}")
+        return _STR_DTYPE_TO_TORCH_DTYPE[head_dtype]
+    elif isinstance(head_dtype, torch.dtype):
+        return head_dtype
+    elif head_dtype is None:
+        if runner_type == "pooling":
+            return torch.float32
+        return dtype
+    else:
+        raise ValueError(f"Unknown dtype: {head_dtype}")
 
 
 def _get_and_verify_max_len(
