@@ -35,7 +35,6 @@ from starlette.routing import Mount
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from typing_extensions import assert_never
 
-from vllm.entrypoints.openai.serving_tokens import OpenAIServingTokens
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -60,7 +59,8 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DetokenizeResponse,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorInfo,
-                                              ErrorResponse, GenerateResponse,
+                                              ErrorResponse, GenerateRequest,
+                                              GenerateResponse,
                                               IOProcessorResponse,
                                               LoadLoRAAdapterRequest,
                                               PoolingRequest, PoolingResponse,
@@ -91,6 +91,7 @@ from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
+from vllm.entrypoints.openai.serving_tokens import OpenAIServingTokens
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription, OpenAIServingTranslation)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
@@ -348,6 +349,7 @@ def translation(request: Request) -> OpenAIServingTranslation:
 
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
+
 
 def generate_tokens(request: Request) -> Optional[OpenAIServingTokens]:
     return request.app.state.openai_serving_tokens
@@ -1187,7 +1189,7 @@ async def invocations(raw_request: Request):
     return JSONResponse(content=res.model_dump(), status_code=res.error.code)
 
 
-@router.post("/generate",
+@router.post("/v1/generate",
              dependencies=[Depends(validate_json_request)],
              responses={
                  HTTPStatus.OK.value: {
@@ -1207,8 +1209,7 @@ async def invocations(raw_request: Request):
              })
 @with_cancellation
 @load_aware_call
-async def generate(request: ChatCompletionRequest,
-                                 raw_request: Request):
+async def generate(request: GenerateRequest, raw_request: Request):
     handler = generate_tokens(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
@@ -1225,9 +1226,7 @@ async def generate(request: ChatCompletionRequest,
     elif isinstance(generator, GenerateResponse):
         return JSONResponse(content=generator.model_dump())
 
-    # return StreamingResponse(content=generator, media_type="text/event-stream")
-
-
+    return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
