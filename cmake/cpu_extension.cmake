@@ -88,6 +88,7 @@ is_avx512_disabled(AVX512_DISABLED)
 
 if (MACOSX_FOUND AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
     message(STATUS "Apple Silicon Detected")
+    set(APPLE_SILICON_FOUND TRUE)
     set(ENABLE_NUMA OFF)
     check_sysctl(hw.optional.neon ASIMD_FOUND)
     check_sysctl(hw.optional.arm.FEAT_BF16 ARM_BF16_FOUND)
@@ -189,7 +190,7 @@ else()
     set(USE_ACL OFF)
 endif()
 
-if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR ASIMD_FOUND OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
+if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     FetchContent_Declare(
         oneDNN
         GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
