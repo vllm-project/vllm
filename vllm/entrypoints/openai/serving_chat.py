@@ -512,14 +512,13 @@ class OpenAIServingChat(OpenAIServing):
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
-        if tool_choice_auto or self.reasoning_parser:
+        if tool_choice_auto or self.reasoning_parser or \
+                request.tool_choice == "required":
             # These are only required in "auto" tool choice case
             all_previous_token_ids = [[]] * num_choices
             # For reasoning parser and tool call all enabled
             added_content_delta_arr = [False] * num_choices
             reasoning_end_arr = [False] * num_choices
-        elif request.tool_choice == "required":
-            all_previous_token_ids = None
         else:
             all_previous_token_ids = None
 
@@ -681,7 +680,8 @@ class OpenAIServingChat(OpenAIServing):
                     delta_message: Optional[DeltaMessage]
 
                     # just update previous_texts and previous_token_ids
-                    if ((tool_choice_auto or self.reasoning_parser)
+                    if ((tool_choice_auto or self.reasoning_parser
+                         or request.tool_choice == "required")
                             and not self.use_harmony):
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
@@ -764,25 +764,53 @@ class OpenAIServingChat(OpenAIServing):
                         previous_text = previous_texts[i]
                         current_text = previous_text + delta_text
                         fn_name_returned = function_name_returned[i]
+                        output_token_ids = as_list(output.token_ids)
 
-                        if self.reasoning_parser:
-                            _, content = \
-                                reasoning_parser.extract_reasoning_content(
+                        if not reasoning_end_arr[i] and \
+                                res.prompt_token_ids and \
+                                reasoning_parser.is_reasoning_end(res.prompt_token_ids):
+                            reasoning_end_arr[i] = True
+
+                        if self.reasoning_parser and not reasoning_end_arr[i]:
+                            delta_message = (
+                                reasoning_parser.
+                                extract_reasoning_content_streaming(
+                                    previous_text,
                                     current_text,
-                                    request
-                                )
+                                    delta_text,
+                                    previous_token_ids,
+                                    current_token_ids,
+                                    output_token_ids,
+                                ))
+                            if reasoning_parser.is_reasoning_end(
+                                    output_token_ids):
+                                reasoning_end_arr[i] = True
+                                if delta_message and delta_message.content:
+                                    current_text = delta_message.content
+                                    delta_message.content = None
+                                else:
+                                    current_text = ""
                         else:
-                            content = current_text
-                        delta_message, function_name_returned[i] = (
-                            self.extract_tool_call_required_streaming(
-                                previous_text=previous_text,
-                                current_text=content,
-                                delta_text=delta_text,
-                                function_name_returned=fn_name_returned,
-                                tool_call_idx=history_tool_call_cnt))
-                        if (delta_message and delta_message.tool_calls and
-                                delta_message.tool_calls[0].id is not None):
-                            history_tool_call_cnt += 1
+                            if self.reasoning_parser:
+                                _, content = \
+                                    reasoning_parser.extract_reasoning_content(
+                                        current_text,
+                                        request
+                                    )
+                            else:
+                                content = current_text
+
+                            delta_message, function_name_returned[i] = (
+                                self.extract_tool_call_required_streaming(
+                                    previous_text=previous_text,
+                                    current_text=content,
+                                    delta_text=delta_text,
+                                    function_name_returned=fn_name_returned,
+                                    tool_call_idx=history_tool_call_cnt))
+                            if (delta_message and delta_message.tool_calls
+                                    and delta_message.tool_calls[0].id
+                                    is not None):
+                                history_tool_call_cnt += 1
 
                         # update the previous values for the next iteration
                         previous_texts[i] = current_text
@@ -888,7 +916,8 @@ class OpenAIServingChat(OpenAIServing):
                         delta_message = DeltaMessage(content=delta_text)
 
                     # update the previous values for the next iteration
-                    if ((tool_choice_auto or self.reasoning_parser)
+                    if ((tool_choice_auto or self.reasoning_parser
+                         or request.tool_choice == "required")
                             and not self.use_harmony):
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
