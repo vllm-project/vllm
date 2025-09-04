@@ -73,7 +73,6 @@ steps:
 
 - label: Basic Correctness Test # 30min
   mirror_hardwares: [amdexperimental]
-  fast_check: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -90,7 +89,6 @@ steps:
 
 - label: Core Test # 10min
   mirror_hardwares: [amdexperimental]
-  fast_check: true
   source_file_dependencies:
   - vllm/core
   - vllm/distributed
@@ -101,7 +99,6 @@ steps:
 - label: Entrypoints Test (LLM) # 40min
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
-  fast_check: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -117,7 +114,6 @@ steps:
 - label: Entrypoints Test (API Server) # 40min
   mirror_hardwares: [amdexperimental]
   working_dir: "/vllm-workspace/tests"
-  fast_check: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -493,7 +489,6 @@ steps:
 
 - label: OpenAI-Compatible Tool Use # 20 min
   mirror_hardwares: [amdexperimental]
-  fast_check: false
   source_file_dependencies:
     - vllm/
     - tests/tool_use
@@ -506,6 +501,7 @@ steps:
 
 - label: Basic Models Test # 24min
   mirror_hardwares: [amdexperimental]
+  fast_check: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -519,6 +515,7 @@ steps:
 
 - label: Language Models Test (Standard)
   mirror_hardwares: [amdexperimental]
+  fast_check: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -529,6 +526,7 @@ steps:
 
 - label: Language Models Test (Hybrid) # 35 min
   mirror_hardwares: [amdexperimental]
+  fast_check: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
