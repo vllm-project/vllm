@@ -1,71 +1,35 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import io
-import math
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from functools import cached_property
-from typing import Callable, Literal, Optional, TypeVar, Union, cast
+from typing import Optional, Union
 
-from mistral_common.protocol.base import UsageInfo
-import numpy as np
 from fastapi import Request
 
-from vllm.entrypoints.utils import get_max_tokens
-import vllm.envs as envs
+# yapf: disable
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import ErrorResponse, GenerateRequest, GenerateResponse, GenerateResponseChoice, PromptTokenUsageInfo, RequestResponseMetadata
-from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
-from vllm.entrypoints.openai.serving_engine import (OpenAIServing, clamp_prompt_logprobs)
-from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.logger import init_logger
-from vllm.outputs import RequestOutput
-from vllm.sampling_params import SamplingParams
-from vllm.utils import as_list
-
-from typing import Callable, Final, Optional, Union
-
-import jinja2
-import partial_json_parser
-import regex as re
-from fastapi import Request
-from openai_harmony import Message as OpenAIMessage
-from pydantic import TypeAdapter
-
-from vllm.config import ModelConfig
-from vllm.engine.protocol import EngineClient
-
-from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (
-    ChatCompletionLogProb, ChatCompletionLogProbs,
-    ChatCompletionLogProbsContent, ChatCompletionNamedToolChoiceParam,
-    ChatCompletionRequest, ChatCompletionResponse,
-    ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
-    ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, FunctionDefinition,
-    PromptTokenUsageInfo, RequestResponseMetadata, ToolCall, UsageInfo)
+from vllm.entrypoints.openai.protocol import (ChatCompletionLogProb,
+                                              ChatCompletionLogProbs,
+                                              ChatCompletionLogProbsContent,
+                                              ErrorResponse, GenerateRequest,
+                                              GenerateResponse,
+                                              GenerateResponseChoice,
+                                              PromptTokenUsageInfo,
+                                              RequestResponseMetadata,
+                                              UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (OpenAIServing,
                                                     clamp_prompt_logprobs)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
-from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
-from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (
-    MistralToolCall)
-from vllm.entrypoints.utils import get_max_tokens
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
-from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.transformers_utils.tokenizers import (maybe_serialize_tool_calls,
-                                                truncate_tool_call_ids,
-                                                validate_request_params)
-
+from vllm.outputs import RequestOutput
+from vllm.sampling_params import SamplingParams
+from vllm.utils import as_list
 
 logger = init_logger(__name__)
 
@@ -93,9 +57,13 @@ class OpenAIServingTokens(OpenAIServing):
                          log_error_stack=log_error_stack)
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_log_outputs = enable_log_outputs
-    
 
-    async def serve_tokens(self, request: GenerateRequest, raw_request: Optional[Request] = None) -> Union[GenerateResponse, ErrorResponse]:
+    async def serve_tokens(
+        self,
+        request: GenerateRequest,
+        raw_request: Optional[Request] = None
+    ) -> Union[GenerateResponse, ErrorResponse]:
+        print("serve_tokens", request, '\n')
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
@@ -109,9 +77,9 @@ class OpenAIServingTokens(OpenAIServing):
 
         lora_request = None
         # lora_request = self._maybe_eet_adapters(
-            # request, supports_default_mm_loras=True)
+        # request, supports_default_mm_loras=True)
 
-        model_name = self._get_model_name(request.model, lora_request)        
+        model_name = self._get_model_name(request.model, lora_request)
 
         request_id = "generate-tokens-" \
                      f"{self._base_request_id(raw_request, request.request_id)}"
@@ -119,10 +87,12 @@ class OpenAIServingTokens(OpenAIServing):
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
-        
+
+        # TODO Change to EngineCoreRequest once Renderer work progresses
         engine_prompt = EngineTokensPrompt(prompt_token_ids=request.token_ids)
         if request.features is not None:
-            # TODO we need the new asyncllm interface here to support MultiModalFeatureSpec
+            # TODO we need the new asyncllm interface here to support
+            # MultiModalFeatureSpec
             engine_prompt["multi_modal_data"] = request.features
 
         if hasattr(request, "cache_salt") and request.cache_salt is not None:
@@ -134,12 +104,12 @@ class OpenAIServingTokens(OpenAIServing):
             sampling_params: SamplingParams = request.sampling_params
 
             self._log_inputs(request_id,
-                            request.token_ids,
-                            params=sampling_params,
-                            lora_request=lora_request)
+                             request.token_ids,
+                             params=sampling_params,
+                             lora_request=lora_request)
 
             trace_headers = (None if raw_request is None else await
-                                self._get_trace_headers(raw_request.headers))
+                             self._get_trace_headers(raw_request.headers))
 
             result_generator = self.engine_client.generate(
                 engine_prompt,
@@ -153,28 +123,15 @@ class OpenAIServingTokens(OpenAIServing):
         except ValueError as e:
             return self.create_error_response(str(e))
 
-
-        # Streaming response
-        # if request.stream:
-        #     return self.chat_completion_stream_generator(
-        #         request,
-        #         result_generator,
-        #         request_id,
-        #         model_name,
-        #         conversation,
-        #         tokenizer,
-        #         request_metadata,
-        #         enable_force_include_usage=self.enable_force_include_usage)
+        # TODO Streaming response
 
         try:
             return await self.serve_tokens_full_generator(
-                request, result_generator, request_id, model_name, request_metadata)
+                request, result_generator, request_id, model_name,
+                request_metadata)
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
-
-    
     async def serve_tokens_full_generator(
         self,
         request: GenerateRequest,
@@ -194,7 +151,6 @@ class OpenAIServingTokens(OpenAIServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
         assert final_res is not None
@@ -216,14 +172,12 @@ class OpenAIServingTokens(OpenAIServing):
             else:
                 logprobs = None
 
-
-            
             choice_data = GenerateResponseChoice(
                 index=output.index,
                 logprobs=logprobs,
-                finish_reason=output.finish_reason if output.finish_reason else "stop",
-                token_ids=as_list(output.token_ids)
-            )
+                finish_reason=output.finish_reason
+                if output.finish_reason else "stop",
+                token_ids=as_list(output.token_ids))
 
             choices.append(choice_data)
             num_generated_tokens += len(output.token_ids)
@@ -232,7 +186,7 @@ class OpenAIServingTokens(OpenAIServing):
         num_prompt_tokens = len(final_res.prompt_token_ids)
         if final_res.encoder_prompt_token_ids is not None:
             num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
-            
+
         usage = UsageInfo(prompt_tokens=num_prompt_tokens,
                           completion_tokens=num_generated_tokens,
                           total_tokens=num_prompt_tokens +
@@ -266,7 +220,7 @@ class OpenAIServingTokens(OpenAIServing):
                 if output_token_ids:
                     self.request_logger.log_outputs(
                         request_id=request_id,
-                        outputs="", # TODO 
+                        outputs="",  # TODO 
                         output_token_ids=output_token_ids,
                         finish_reason=choice.finish_reason,
                         is_streaming=False,
@@ -274,7 +228,6 @@ class OpenAIServingTokens(OpenAIServing):
                     )
 
         return response
-    
 
     def _create_tokens_logprobs(
         self,
@@ -291,9 +244,7 @@ class OpenAIServingTokens(OpenAIServing):
             if step_top_logprobs is None or step_top_logprobs.get(
                     token_id) is None:
                 logprobs_content.append(
-                    ChatCompletionLogProbsContent(
-                        token=token,
-                    ))
+                    ChatCompletionLogProbsContent(token=token, ))
             else:
                 step_token = step_top_logprobs[token_id]
                 # step_decoded = step_token.decoded_token
@@ -307,8 +258,8 @@ class OpenAIServingTokens(OpenAIServing):
                                 token=token,
                                 logprob=max(p[1].logprob, -9999.0),
                             ) for i, p in enumerate(step_top_logprobs.items())
-                            if num_output_top_logprobs and i < num_output_top_logprobs
-                        ]
-                    ))
+                            if num_output_top_logprobs
+                            and i < num_output_top_logprobs
+                        ]))
 
         return ChatCompletionLogProbs(content=logprobs_content)
