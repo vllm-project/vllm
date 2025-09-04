@@ -316,7 +316,6 @@ class InputBatch:
         # Copy the prompt token ids and output token ids.
         num_prompt_tokens = length_from_prompt_token_ids_or_prompt_embeds(
             request.prompt_token_ids, request.prompt_embeds)
-        # TODO: copy the prompt embeds
         self.num_prompt_tokens[req_index] = num_prompt_tokens
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
