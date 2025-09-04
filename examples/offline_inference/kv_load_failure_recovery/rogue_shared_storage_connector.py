@@ -95,7 +95,7 @@ class RogueSharedStorageConnector(SharedStorageConnector):
 
         return None, None
 
-    def get_block_ids_with_load_errors(self) -> Optional[set[int]]:
+    def get_block_ids_with_load_errors(self) -> set[int]:
         return self._invalid_block_ids
 
     def get_num_new_matched_tokens(

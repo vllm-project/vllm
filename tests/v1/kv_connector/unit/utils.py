@@ -205,7 +205,7 @@ def create_model_runner_output(
         and invalid_block_ids is None) else KVConnectorOutput(
             finished_sending=finished_sending,
             finished_recving=finished_recving,
-            invalid_block_ids=invalid_block_ids,
+            invalid_block_ids=invalid_block_ids or set(),
         )
 
     # Make output data structure.

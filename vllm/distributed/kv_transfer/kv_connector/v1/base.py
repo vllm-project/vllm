@@ -229,15 +229,15 @@ class KVConnectorBase_V1(ABC):
         """
         return None, None
 
-    def get_block_ids_with_load_errors(self) -> Optional[set[int]]:
+    def get_block_ids_with_load_errors(self) -> set[int]:
         """
         Get the set of block IDs that failed to load.
 
         Returns:
-            Optional[set[int]]: A set of block IDs that encountered load errors.
-            Returns None if no errors occurred during load.
+            Set of block IDs that encountered load errors.
+            Empty set if no load errors occurred.
         """
-        return None
+        return set()
 
     def shutdown(self):
         """
