@@ -266,6 +266,7 @@ class LinearBase(CustomOp):
         for param in self.parameters():
             if isinstance(param, BasevLLMParameter):
                 param.tp_rank = self.tp_rank
+                param.tp_size = self.tp_size
 
 
 @CustomOp.register("replicated_linear")

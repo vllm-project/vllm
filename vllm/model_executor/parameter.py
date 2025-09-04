@@ -58,6 +58,7 @@ class BasevLLMParameter(Parameter):
 
         self._weight_loader = weight_loader
         self.tp_rank = get_tensor_model_parallel_rank()
+        self.tp_size = get_tensor_model_parallel_world_size()
 
     @property
     def weight_loader(self):
@@ -415,9 +416,6 @@ class SharedWeightParameter(BasevLLMParameter):
             "output_dim": output_dim,
             "weight_loader": self._fake_weight_loader
         }
-
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
 
         if self.tp_size > 1:
             raise NotImplementedError(f"{self.__class__.__name__} does not "
