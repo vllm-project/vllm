@@ -504,8 +504,7 @@ class P2pNcclEngine:
 
                 # Step 2: Prepare and send PUT command
                 with self.send_stream:
-                    tensor = self.extract_kv_from_layer(item.is_mla, item.tensor,
-                                                        item.slot_mapping)
+                    tensor = item.tensor
                 data = {
                     "cmd": "PUT",
                     "tensor_id": item.tensor_id,
