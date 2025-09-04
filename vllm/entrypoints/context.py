@@ -95,8 +95,10 @@ class HarmonyContext(ConversationContext):
         self.num_cached_tokens = 0
         self.num_reasoning_tokens = 0
         self.num_tool_output_tokens = 0
+        self.this_turn_output_token_count = 0
         self.num_last_turn_input_tokens = 0
         self.num_last_turn_output_tokens = 0
+        self.first_tok_of_message = True
         self.first_turn = True
 
     # TODO(yeq): unify token usage logic with streaming case
@@ -116,13 +118,8 @@ class HarmonyContext(ConversationContext):
         self.num_output_tokens += len(token_ids)
 
     def _update_num_reasoning_tokens(self):
-        # Count tokens that are part of reasoning content (analysis channel
-        # or tool-directed messages like python/browser calls)
-        is_analysis = self.parser.current_channel == "analysis"
-        is_tool_call = (self.parser.current_recipient is not None and
-                        (self.parser.current_recipient.startswith("python") or
-                         self.parser.current_recipient.startswith("browser.")))
-        if is_analysis or is_tool_call:
+        # Count all analysis and commentary channels as reasoning tokens
+        if self.parser.current_channel in {"analysis", "commentary"}:
             self.num_reasoning_tokens += 1
 
     def append_output(self, output) -> None:
@@ -133,14 +130,17 @@ class HarmonyContext(ConversationContext):
                 self.parser.process(token_id)
                 # Check if the current token is part of reasoning content
                 self._update_num_reasoning_tokens()
+            self._update_prefill_token_usage(output)
+            self.this_turn_output_token_count = 0
+            self.num_last_turn_output_tokens = self._update_decode_token_usage(
+                output)
             output_msgs = self.parser.messages
-            self._update_token_usage(output)
         else:
             # Tool output.
             output_msgs = output
         self._messages.extend(output_msgs)
 
-    def _update_token_usage(self, output: RequestOutput) -> None:
+    def _update_prefill_token_usage(self, output: RequestOutput) -> None:
         if output.prompt_token_ids is not None:
             this_turn_input_tokens = len(output.prompt_token_ids)
         else:
@@ -160,17 +160,19 @@ class HarmonyContext(ConversationContext):
             self.num_tool_output_tokens += this_turn_tool_tokens
 
         self.num_prompt_tokens += this_turn_input_tokens
-        self.num_cached_tokens += output.num_cached_tokens
+        if output.num_cached_tokens is not None:
+            self.num_cached_tokens += output.num_cached_tokens
         self.num_last_turn_input_tokens = this_turn_input_tokens
 
+    def _update_decode_token_usage(self, output: RequestOutput) -> int:
+        updated_output_token_count = 0
         if output.outputs:
-            this_turn_output_token_count = 0
             for completion_output in output.outputs:
                 # only keep last round
-                this_turn_output_token_count += len(
-                    completion_output.token_ids)
-            self.num_output_tokens += this_turn_output_token_count
-            self.num_last_turn_output_tokens = this_turn_output_token_count
+                updated_output_token_count += len(completion_output.token_ids)
+            self.num_output_tokens += updated_output_token_count
+            self.this_turn_output_token_count += updated_output_token_count
+        return updated_output_token_count
 
     @property
     def messages(self) -> list:
@@ -265,8 +267,9 @@ class StreamingHarmonyContext(HarmonyContext):
             # append_output is called for each output token in streaming case,
             # so we only want to add the prompt tokens once for each message.
             if self.first_tok_of_message:
-                self._update_num_prompt_tokens(output)
-                self._update_num_cached_tokens(output)
+                self._update_prefill_token_usage(output)
+                self.this_turn_output_token_count = 0
+                self.num_last_turn_output_tokens = 0
             # Reset self.first_tok_of_message if needed:
             # if the current token is the last one of the current message
             # (finished=True), then the next token processed will mark the
@@ -274,7 +277,8 @@ class StreamingHarmonyContext(HarmonyContext):
             self.first_tok_of_message = output.finished
             for tok in output.outputs[0].token_ids:
                 self.parser.process(tok)
-            self._update_num_output_tokens(output.outputs[0].token_ids)
+            self.num_last_turn_output_tokens += self._update_decode_token_usage(
+                output)
             # Check if the current token is part of reasoning content
             self._update_num_reasoning_tokens()
             self.last_tok = tok
