@@ -297,11 +297,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
         compilation_config = vllm_config.compilation_config
 
-        # TODO(tdoublep): remove once prefix caching is enabled
-        cache_config.enable_prefix_caching = False
-        logger.info("Hybrid or mamba-based model detected: disabling prefix "
-                    "caching since it is not yet supported.")
-
         # TODO(tdoublep): remove as full cuda graph support is added
         FCG_NOT_SUPPORTED_MODELS = [
             "Lfm2ForCausalLM", "MiniMaxText01ForCausalLM"

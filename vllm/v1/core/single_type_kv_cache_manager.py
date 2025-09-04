@@ -532,7 +532,7 @@ class MambaManager(SingleTypeKVCacheManager):
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids)))
         if kv_cache_spec.cache_strategy == "disabled":
-            return computed_blocks #return empty list if cache is disabled
+            return computed_blocks  #return empty list if cache is disabled
 
         max_num_blocks = max_length // kv_cache_spec.block_size
         # Search from right to left and early stop when a match is found.
@@ -540,15 +540,15 @@ class MambaManager(SingleTypeKVCacheManager):
             if cached_block := block_pool.get_cached_block(
                     block_hashes[i], kv_cache_group_ids):
                 for computed, cached in zip(computed_blocks, cached_block):
-                    # the hit length logic later assumes: 
-                    #  hit_length = len(hit_blocks_other_attn[0]) 
+                    # the hit length logic later assumes:
+                    #  hit_length = len(hit_blocks_other_attn[0])
                     #               * self.other_block_size
                     # so we insert dummy blocks at the beginning:
                     if i > 0:
                         computed.extend([block_pool.null_block] * i)
                     computed.append(cached)
-                break # we just need the last match - early stopping
-                
+                break  # we just need the last match - early stopping
+
         return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str,
@@ -561,7 +561,7 @@ class MambaManager(SingleTypeKVCacheManager):
                                      num_running_requests: int) -> int:
         if self.kv_cache_spec.cache_strategy == "disabled":
             return 0
-        
+
         # Same as full attention logic:
         blocks = self.req_to_blocks[request_id]
         num_common_blocks = 0
@@ -573,7 +573,7 @@ class MambaManager(SingleTypeKVCacheManager):
         return num_common_blocks
 
     def allocate_new_blocks(self, request_id: str,
-                            num_tokens: int) -> list[KVCacheBlock]:           
+                            num_tokens: int) -> list[KVCacheBlock]:
         if self.kv_cache_spec.cache_strategy == "disabled":
             new_blocks = super().allocate_new_blocks(request_id, num_tokens)
             assert len(self.req_to_blocks[request_id]) == 1, (
@@ -587,14 +587,14 @@ class MambaManager(SingleTypeKVCacheManager):
             return []
         else:
             if num_new_blocks > 2 and self.kv_cache_spec.cache_strategy == "last":
-                # for the last strategy only - allocate 2 blocks: 
+                # for the last strategy only - allocate 2 blocks:
                 #  one for block_size aligned state
                 #  and one for the last temporary state
                 new_blocks = self.block_pool.get_new_blocks(2)
             else:
                 new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
-            return new_blocks        
+            return new_blocks
 
     def get_num_blocks_to_allocate(
             self, request_id: str, num_tokens: int,
@@ -625,53 +625,6 @@ class MambaManager(SingleTypeKVCacheManager):
             for blk in new_computed_blocks)
         return num_new_blocks + num_evictable_computed_blocks
 
-    def cache_blocks(self, request: Request, block_hashes: list[BlockHash],
-                     num_tokens: int) -> None:
-        """
-        Cache the blocks for the request.
-
-        Args:
-            request: The request.
-            block_hashes: The block hashes of the request.
-            num_tokens: The total number of tokens that need to be cached 
-                (including tokens that are already cached).
-        """
-
-        #TODO: Just copied parent class implementation here to verify logic.
-        num_cached_blocks = self.num_cached_block[request.request_id]
-        num_full_blocks = num_tokens // self.block_size
-
-        self.block_pool.cache_full_blocks(
-            request=request,
-            blocks=self.req_to_blocks[request.request_id],
-            block_hashes=block_hashes,
-            num_cached_blocks=num_cached_blocks,
-            num_full_blocks=num_full_blocks,
-            block_size=self.block_size,
-            kv_cache_group_id=self.kv_cache_group_id,
-            hash_fn=self.caching_hash_fn,
-        )
-
-        self.num_cached_block[request.request_id] = num_full_blocks
-
-    def free(self, request_id: str) -> None:
-        """
-        Free the blocks for the request.
-
-        Args:
-            request_id: The request ID.
-        """
-        #TODO: Just copied parent class implementation here to verify logic.
-
-        # Default to [] in case a request is freed (aborted) before alloc.
-        req_blocks = self.req_to_blocks.pop(request_id, [])
-
-        # Free blocks in reverse order so that the tail blocks are
-        # freed first.
-        ordered_blocks = reversed(req_blocks)
-
-        self.block_pool.free_blocks(ordered_blocks)
-        self.num_cached_block.pop(request_id, None)
 
 class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""

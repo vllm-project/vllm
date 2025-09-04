@@ -214,7 +214,7 @@ def selective_state_update(state,
                            dt_softplus=False,
                            state_batch_indices=None,
                            dst_state_batch_indices=None,
-                           pad_slot_id=PAD_SLOT_ID):
+                           pad_slot_id=PAD_SLOT_ID,
                            out=None):
     """
     Argument:
