@@ -4,6 +4,7 @@
 import asyncio
 import copy
 import functools
+import gc
 import importlib
 import json
 import os
@@ -170,6 +171,16 @@ class RemoteOpenAIServer:
         except subprocess.TimeoutExpired:
             # force kill if needed
             self.proc.kill()
+        # GPU memory cleanup
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
+                torch.cuda.synchronize()
+                # Small delay to ensure cleanup completes
+                time.sleep(0.5)
+        except Exception as e:
+            print(f"GPU cleanup warning: {e}")
 
     def _poll(self) -> Optional[int]:
         """Subclasses override this method to customize process polling"""
@@ -265,6 +276,17 @@ class RemoteOpenAIServerCustom(RemoteOpenAIServer):
         if self.proc.is_alive():
             # force kill if needed
             self.proc.kill()
+
+        # GPU memory cleaning
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                gc.collect()
+                torch.cuda.synchronize()
+                # Small delay to ensure cleanup completes
+                time.sleep(0.5)
+        except Exception as e:
+            print(f"GPU cleanup warning: {e}")
 
 
 def _test_completion(
