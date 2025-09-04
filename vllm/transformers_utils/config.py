@@ -211,7 +211,7 @@ _CONFIG_FORMAT_TO_CONFIG_PARSER: dict[str, type[ConfigParserBase]] = {
 def get_config_parser(config_format: str) -> ConfigParserBase:
     """Get the config parser for a given config format."""
     if config_format not in _CONFIG_FORMAT_TO_CONFIG_PARSER:
-        raise ValueError(f"Unknown load format `{config_format}`.")
+        raise ValueError(f"Unknown config format `{config_format}`.")
     return _CONFIG_FORMAT_TO_CONFIG_PARSER[config_format]()
 
 
