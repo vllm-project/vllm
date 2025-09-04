@@ -1,26 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Test quark-quantized mixed precision models. Specifically,
-- mixed precision schemes of {MXFP4, FP8}
-- (private) models include:
-    - amd/Llama-2-70b-chat-hf-Auto-Mixed-Precision-Weight-And-Activation-Mixed-MXFP4-FP8PT-KVFP8
-    - amd/Mixtral-8x7B-Instruct-v0.1-Auto-Mixed-Precision-Weight-And-Activation-Mixed-MXFP4-FP8PT-KVFP8
+"""Test quark-quantized {MXFP4, FP8} mixed precision models.
 
 Run `pytest tests/quantization/test_mixed_precision.py`.
 
 """
 
-from dataclasses import dataclass
-import huggingface_hub
 import importlib
 import importlib.metadata
-import lm_eval
 import os
-from packaging import version
-import pytest
-import torch
-from typing import List
+from dataclasses import dataclass
 
+import huggingface_hub
+import lm_eval
+import pytest
+from packaging import version
 
 QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
     "quark") is not None and version.parse(
@@ -28,7 +22,8 @@ QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
 
 try:
     huggingface_hub.list_repo_refs(
-        "amd/Mixtral-8x7B-Instruct-v0.1-Auto-Mixed-Precision-Weight-And-Activation-Mixed-MXFP4-FP8PT-KVFP8")
+        "amd/Mixtral-8x7B-Instruct-v0.1-Auto-Mixed-Precision-Weight-And-Activation-Mixed-MXFP4-FP8PT-KVFP8"
+    )
     HF_HUB_AMD_ORG_ACCESS = True
 except huggingface_hub.errors.RepositoryNotFoundError:
     HF_HUB_AMD_ORG_ACCESS = False
@@ -40,7 +35,6 @@ def use_v0_only(monkeypatch):
     This module relies on V0 internals, so set VLLM_USE_V1=0.
     """
     monkeypatch.setenv('VLLM_USE_V1', '0')
-
 
 
 @dataclass
@@ -64,10 +58,12 @@ class EvaluationConfig:
 ACCURACY_CONFIGS = [
     # Private model.
     EvaluationConfig(
-        model_name="amd/Llama-2-70b-chat-hf-Auto-Mixed-Precision-Weight-And-Activation-Mixed-MXFP4-FP8PT-KVFP8",
+        model_name=
+        "amd/Llama-2-70b-chat-hf-Auto-Mixed-Precision-Weight-And-Activation-Mixed-MXFP4-FP8PT-KVFP8",
         excepted_value=0.53),
     EvaluationConfig(
-        model_name="amd/Mixtral-8x7B-Instruct-v0.1-Auto-Mixed-Precision-Weight-And-Activation-Mixed-MXFP4-FP8PT-KVFP8",
+        model_name=
+        "amd/Mixtral-8x7B-Instruct-v0.1-Auto-Mixed-Precision-Weight-And-Activation-Mixed-MXFP4-FP8PT-KVFP8",
         excepted_value=0.60),
 ]
 TASKS = ["arc_challenge"]
@@ -81,25 +77,19 @@ TASKS = ["arc_challenge"]
     not HF_HUB_AMD_ORG_ACCESS,
     reason="Read access to huggingface.co/amd is required for this test.")
 def test_mixed_precision_model_accuracies(config: EvaluationConfig, task: str):
+    os.environ["VLLM_QUARK_EMU_MEM_OPT"] = "1"
+
+    results = lm_eval.simple_evaluate(model="vllm",
+                                      model_args=config.get_model_args(),
+                                      tasks=task,
+                                      batch_size="auto")
 
     rtol = 0.05
 
-    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
-    os.environ["VLLM_QUARK_EMU_MEM_OPT"] = "1"
-
-    results = lm_eval.simple_evaluate(
-        model="vllm",
-        model_args=config.get_model_args(),
-        tasks=task,
-        batch_size="auto"
-    )
-
     EXPECTED_VALUE = config.excepted_value
-    measured_value = results["results"][task]["acc"]
+    measured_value = results["results"][task]["acc,none"]
     assert (measured_value - rtol < EXPECTED_VALUE
             and measured_value + rtol > EXPECTED_VALUE
             ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
-    del os.environ["VLLM_USE_TRITON_FLASH_ATTN"]
     del os.environ["VLLM_QUARK_EMU_MEM_OPT"]
-

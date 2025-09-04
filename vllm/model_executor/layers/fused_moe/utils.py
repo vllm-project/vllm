@@ -173,7 +173,8 @@ def _mxfp4_quantize(
     block_shape: Optional[list[int]] = None,
 ) -> tuple[torch.Tensor, None]:
     assert block_shape is None
-    VLLM_QUARK_EMU_MEM_OPT = (os.environ.get("VLLM_QUARK_EMU_MEM_OPT", "0") == "1")
+    VLLM_QUARK_EMU_MEM_OPT = (os.environ.get("VLLM_QUARK_EMU_MEM_OPT",
+                                             "0") == "1")
     if not current_platform.supports_mx() or VLLM_QUARK_EMU_MEM_OPT:
         A = quant_dequant_mxfp4(A)
     else:
