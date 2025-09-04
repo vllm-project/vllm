@@ -1199,6 +1199,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER":
     lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+
 }
 
 # --8<-- [end:env-vars-definition]
