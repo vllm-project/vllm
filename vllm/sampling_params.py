@@ -7,10 +7,12 @@ import warnings
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import Annotated, Any, Optional, Union, get_type_hints
 
 import msgspec
 from pydantic.dataclasses import dataclass
+from pydantic import GetCoreSchemaHandler
+from pydantic_core import core_schema
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
@@ -227,7 +229,8 @@ class SamplingParams(
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
     output_text_buffer_length: int = 0
-    _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
+    _all_stop_token_ids: Optional[set[int]] = msgspec.field(
+        default_factory=set)
 
     # Fields used to construct logits processors
     structured_outputs: StructuredOutputsParams | None = None
@@ -641,6 +644,60 @@ class SamplingParams(
             f"structured_outputs={self.structured_outputs}, "
             f"extra_args={self.extra_args})"
         )
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+            cls, source_type: Any,
+            handler: GetCoreSchemaHandler) -> core_schema.CoreSchema:
+        """
+        Make msgspec.Struct compatible with Pydantic, respecting defaults.
+        Handle JSON=>SamplingParams. Used when exposing SamplingParams to the
+        API as input or in `/docs`. Note this is cached by Pydantic and not
+        called on every validation.
+        """
+        msgspec_fields = {
+            f.name: f
+            for f in msgspec.structs.fields(source_type)
+        }
+        type_hints = get_type_hints(source_type)
+
+        # Build the Pydantic typed_dict_field for each msgspec field
+        fields = {}
+        for name, hint in type_hints.items():
+            msgspec_field = msgspec_fields[name]
+
+            # typed_dict_field using the handler to get the schema
+            field_schema = handler(hint)
+
+            # Add default value to the schema.
+            if msgspec_field.default_factory is not msgspec.NODEFAULT:
+                wrapped_schema = core_schema.with_default_schema(
+                    schema=field_schema,
+                    default_factory=msgspec_field.default_factory,
+                )
+                fields[name] = core_schema.typed_dict_field(wrapped_schema)
+            elif msgspec_field.default is not msgspec.NODEFAULT:
+                wrapped_schema = core_schema.with_default_schema(
+                    schema=field_schema,
+                    default=msgspec_field.default,
+                )
+                fields[name] = core_schema.typed_dict_field(wrapped_schema)
+            else:
+                # No default, so Pydantic will treat it as required
+                fields[name] = core_schema.typed_dict_field(field_schema)
+        return core_schema.no_info_after_validator_function(
+            cls._validate_msgspec,
+            core_schema.typed_dict_schema(fields),
+        )
+
+    @classmethod
+    def _validate_msgspec(cls, value: Any) -> 'SamplingParams':
+        """Validate and convert input to SamplingParams instance."""
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, dict):
+            return cls(**value)
+        return msgspec.convert(value, type=cls)
 
 
 class BeamSearchParams(
