@@ -142,6 +142,8 @@ class Scheduler(SchedulerInterface):
             scheduler_config=vllm_config.scheduler_config,
             mm_registry=mm_registry,
         )
+        logger.info("Encoder compute budget: %s", encoder_compute_budget)
+        logger.info("Encoder cache size: %s", encoder_cache_size)
 
         # NOTE(woosuk): Here, "encoder" includes the vision encoder (and
         # projector if needed) for MM models as well as encoder-decoder
@@ -151,8 +153,7 @@ class Scheduler(SchedulerInterface):
         # the encoder cache will not be initialized because cache size is 0
         # for these models.
         self.encoder_cache_manager = EncoderCacheManager(
-            cache_size=encoder_cache_size,
-            is_encoder_decoder=self.is_encoder_decoder)
+            cache_size=encoder_cache_size)
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
@@ -1048,7 +1049,13 @@ class Scheduler(SchedulerInterface):
             mm_positions = request.mm_positions[input_id]
             start_pos = mm_positions.offset
             num_tokens = mm_positions.length
-            if start_pos + num_tokens <= request.num_computed_tokens:
+            if self.is_encoder_decoder and request.num_computed_tokens > 0:
+                # With Whisper, as soon as we've generated a single token,
+                # we know we're done with the encoder input. Cross Attention
+                # KVs have been calculated and cached already.
+                self.encoder_cache_manager.free_encoder_input(
+                    request, input_id)
+            elif start_pos + num_tokens <= request.num_computed_tokens:
                 # The encoder output is already processed and stored
                 # in the decoder's KV cache.
                 self.encoder_cache_manager.free_encoder_input(

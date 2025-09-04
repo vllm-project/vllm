@@ -3026,7 +3026,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
-        if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
+        if self.supports_mm_inputs:
             if self.model_config.multimodal_config.skip_mm_profiling:
                 logger.info(
                     "Skipping memory profiling for multimodal encoder and "
@@ -3035,7 +3035,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 mm_budget = self.mm_budget
                 assert mm_budget is not None
 
-                # TODO: handle encoder-decoder models once we support them.
                 if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
                     # NOTE: Currently model is profiled with a single non-text
                     # modality with the max possible input tokens even when
