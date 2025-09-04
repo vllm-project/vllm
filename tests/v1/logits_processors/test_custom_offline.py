@@ -81,7 +81,7 @@ def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
             target_token = params.extra_args[DUMMY_LOGITPROC_ARG]
             if not all(x == target_token for x in lp_toks):
                 raise AssertionError(
-                    f"Request {bdx} generated {lp_toks}, shoud all be "
+                    f"Request {bdx} generated {lp_toks}, should all be "
                     f"{target_token}")
         else:
             # This request does not exercise custom logitproc (or custom
