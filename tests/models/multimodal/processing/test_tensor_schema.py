@@ -1,30 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import tempfile
 from collections.abc import Iterable
+from contextlib import contextmanager
 from functools import partial
 from typing import Any, Union
-from unittest.mock import patch
 
 import numpy as np
 import pytest
+import torch.nn as nn
 from mistral_common.protocol.instruct.messages import (ImageChunk, TextChunk,
                                                        UserMessage)
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 
-from vllm.config import ModelConfig
-from vllm.engine.llm_engine import LLMEngine as V0LLMEngine
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.distributed import (cleanup_dist_env_and_memory,
+                              init_distributed_environment,
+                              initialize_model_parallel)
 from vllm.inputs import InputProcessingContext
-from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalKwargs)
+from vllm.model_executor.model_loader.utils import set_default_torch_dtype
+from vllm.multimodal import MULTIMODAL_REGISTRY, BatchedTensorInputs
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
-from vllm.utils import GiB_bytes, is_list_of, set_default_torch_num_threads
-from vllm.v1.core.kv_cache_utils import get_kv_cache_config
-from vllm.v1.engine.core import EngineCore as V1EngineCore
+from vllm.utils import is_list_of
 
-from ....conftest import VllmRunner
 from ...registry import _MULTIMODAL_EXAMPLE_MODELS, HF_EXAMPLE_MODELS
 from ...utils import dummy_hf_overrides
 
@@ -40,9 +41,6 @@ ARCH_NEEDS_EXTRAS = [
 ]
 REPO_ID_TO_SKIP = {
     "nm-testing/pixtral-12b-FP8-dynamic": "duplicated test",
-    # FIXME(Isotr0py): enable GPT-OSS based InternVL3.5 model
-    # after support PP for GPT-OSS
-    "OpenGVLab/InternVL3_5-GPT-OSS-20B-A4B-Preview": "Broken model",
 }
 
 ImageInput = list[Image.Image]
@@ -137,6 +135,27 @@ def create_batched_mm_kwargs(
     return group_mm_kwargs_by_modality(items)
 
 
+@contextmanager
+def initialize_dummy_model(model_cls: nn.Module, model_config: ModelConfig):
+    temp_file = tempfile.mkstemp()[1]
+    init_distributed_environment(
+        world_size=1,
+        rank=0,
+        distributed_init_method=f"file://{temp_file}",
+        local_rank=0,
+        backend="nccl",
+    )
+    initialize_model_parallel(tensor_model_parallel_size=1)
+    vllm_config = VllmConfig(model_config=model_config)
+    with set_current_vllm_config(vllm_config=vllm_config):
+        with set_default_torch_dtype(model_config.dtype):
+            model = model_cls(vllm_config=vllm_config)
+        yield model
+
+    del model
+    cleanup_dist_env_and_memory()
+
+
 def get_model_id_to_test(
         model_arch_list: Iterable[str]) -> list[tuple[str, str]]:
     filtered_results = []
@@ -155,8 +174,7 @@ def get_model_id_to_test(
 @pytest.mark.parametrize(
     "model_arch, model_id",
     get_model_id_to_test(_MULTIMODAL_EXAMPLE_MODELS.keys()))
-def test_model_tensor_schema(model_arch: str, model_id: str,
-                             vllm_runner: type[VllmRunner], monkeypatch):
+def test_model_tensor_schema(model_arch: str, model_id: str):
     if model_arch in ARCH_TO_SKIP:
         pytest.skip(f"Skipping {model_arch} due to {ARCH_TO_SKIP[model_arch]}")
     if model_id in REPO_ID_TO_SKIP:
@@ -177,14 +195,22 @@ def test_model_tensor_schema(model_arch: str, model_id: str,
         tokenizer_mode=model_info.tokenizer_mode,
         revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
-        hf_overrides=model_info.hf_overrides,
-    )
+        hf_overrides=hf_overrides_fn,
+        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        enforce_eager=model_info.enforce_eager,
+        dtype=model_info.dtype)
     model_cls = MULTIMODAL_REGISTRY._get_model_cls(model_config)
     factories = MULTIMODAL_REGISTRY._processor_factories[model_cls]
 
-    if not any(
-            hasattr(model_cls, f"_parse_and_validate_{m}_input")
-            for m in ["image", "video", "audio"]):
+    inputs_parse_methods = []
+    for attr_name in dir(model_cls):
+        attr = getattr(model_cls, attr_name)
+        if hasattr(attr, "__annotations__"):
+            return_type = attr.__annotations__.get("return", None)
+            if return_type is not None and "Input" in str(return_type):
+                inputs_parse_methods.append(attr_name)
+
+    if not any(inputs_parse_methods):
         pytest.skip(f"{model_arch} does not support tensor schema validation.")
 
     ctx = InputProcessingContext(
@@ -197,68 +223,13 @@ def test_model_tensor_schema(model_arch: str, model_id: str,
         modality: 3 if limit is None else limit
         for modality, limit in supported_mm_limits.items()
     }
+    model_config.get_multimodal_config().limit_per_prompt = limit_mm_per_prompt
+    processor = factories.build_processor(ctx, cache=None)
 
-    # Avoid calling model.forward()
-    def _initialize_kv_caches_v0(self) -> None:
-        self.cache_config.num_gpu_blocks = 0
-        self.cache_config.num_cpu_blocks = 0
-
-    def _initialize_kv_caches_v1(self, vllm_config):
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
-        scheduler_kv_cache_config = get_kv_cache_config(
-            vllm_config,
-            kv_cache_specs[0],
-            10 * GiB_bytes,
-        )
-
-        # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
-        return 1, 0, scheduler_kv_cache_config
-
-    with (patch.object(V0LLMEngine, "_initialize_kv_caches",
-                       _initialize_kv_caches_v0),
-          patch.object(V1EngineCore, "_initialize_kv_caches",
-                       _initialize_kv_caches_v1), monkeypatch.context() as m):
-        m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
-        if model_info.v0_only:
-            m.setenv("VLLM_USE_V1", "0")
-
-        # TODO(Isotr0py): Can we avoid initializing engine?
-        with (
-                set_default_torch_num_threads(1),
-                vllm_runner(
-                    model_id,
-                    tokenizer_name=model_info.tokenizer,
-                    tokenizer_mode=model_info.tokenizer_mode,
-                    revision=model_info.revision,
-                    trust_remote_code=model_info.trust_remote_code,
-                    max_model_len=model_info.max_model_len,
-                    load_format="dummy",
-                    hf_overrides=hf_overrides_fn,
-                    limit_mm_per_prompt=limit_mm_per_prompt,
-                    enforce_eager=True,
-                ) as vllm_model,
-        ):
-            model_config = vllm_model.llm.llm_engine.model_config
-            llm_engine = vllm_model.llm.llm_engine
-
-            if hasattr(llm_engine, "processor"):
-                # v1 processor
-                mm_registry = llm_engine.processor.mm_registry
-            else:
-                # v0 input_preprocessor
-                mm_registry = llm_engine.input_preprocessor.mm_registry
-
-            processor = mm_registry.create_processor(model_config)
-
-            def validate_model_input(model, modality: str,
-                                     mm_kwargs: MultiModalKwargs):
-                method_name = f"_parse_and_validate_{modality}_input"
-                if hasattr(model, method_name):
-                    getattr(model, method_name)(**mm_kwargs)
-
-            for modality, _, mm_kwargs in create_batched_mm_kwargs(
-                    model_config, processor):
-                valid_func = partial(validate_model_input,
-                                     modality=modality,
-                                     mm_kwargs=mm_kwargs)
-                vllm_model.apply_model(valid_func)
+    with initialize_dummy_model(model_cls, model_config) as model:
+        for modality, _, mm_kwargs in create_batched_mm_kwargs(
+                model_config, processor):
+            for method_name in inputs_parse_methods:
+                print(f"Testing `{method_name}` with modality={modality} "
+                      f"and mm_kwargs{list(mm_kwargs.keys())}")
+                getattr(model, method_name)(modality=modality, **mm_kwargs)
