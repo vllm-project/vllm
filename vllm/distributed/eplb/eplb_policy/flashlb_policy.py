@@ -2,12 +2,14 @@ import torch
 import logging 
 import numpy as np 
 
+from vllm.logger import init_logger
 from numba import njit 
 from collections import defaultdict, deque, Counter 
 from .policy_abstract import EplbPolicy 
 
 numba_logger = logging.getLogger("numba") 
 numba_logger.setLevel(logging.WARNING) 
+logger = init_logger(__name__)
 
 @njit
 def compute_piece_counts(X, P, stage_weights): 
@@ -173,9 +175,9 @@ def slice_values(X, pieces):
 
 
 @njit 
-def group_based_adaptive_bloating_kernel(X, P, M, simulated_pieces, simulated_deployment, stage_weights): 
+def group_based_adaptive_searching_kernel(X, P, M, simulated_pieces, simulated_deployment, stage_weights): 
     """ 
-    Group-based adaptive bloating kernel function for calculating the optimal expert partitioning strategy. 
+    Group-based adaptive searching kernel function for calculating the optimal expert partitioning strategy. 
     Parameters: 
         X (np.ndarray): Multi-stage expert hotness matrix with shape (n_stage, num_expert),  
         P (int): Total number of expert replicas (number of replicas) 
@@ -401,19 +403,19 @@ class FlashLB(EplbPolicy):
             stage_par[i] = stage_load.max() / stage_load.mean() 
         return stage_par.mean() 
 
-    def group_based_adaptive_bloating(self, X, P, M, stage_weights=None, recorsive=False): 
+    def group_based_adaptive_searching(self, X, P, M, stage_weights=None, recorsive=False): 
         n_stage, N = X.shape 
         if stage_weights is None: 
             stage_weights = np.ones(n_stage, dtype=np.float32) 
         if recorsive: 
-            simulated_deployment, simulated_pieces = self.group_based_adaptive_bloating(X, P, M, stage_weights, 
+            simulated_deployment, simulated_pieces = self.group_based_adaptive_searching(X, P, M, stage_weights, 
                                                                                         recorsive=False) 
         else: 
             simulated_pieces = compute_piece_counts(X, P, stage_weights) 
             simulated_deployment = lpt_placement(X, simulated_pieces, M, stage_weights) 
         if M < 2: 
             return simulated_deployment, simulated_pieces 
-        pieces = group_based_adaptive_bloating_kernel( 
+        pieces = group_based_adaptive_searching_kernel( 
             X.astype(np.float32), 
             P, 
             M, 
@@ -450,7 +452,7 @@ class FlashLB(EplbPolicy):
             return deployment, pieces, current_par, current_par 
 
         stage_weights = self.compute_stage_weight(hotness) 
-        new_deployment, pieces = self.group_based_adaptive_bloating( 
+        new_deployment, pieces = self.group_based_adaptive_searching( 
             hotness, 
             num_replicas, 
             num_rank, 
@@ -521,7 +523,7 @@ class FlashLB(EplbPolicy):
                 hotness = self.compress_by_avg_pooling_fast_nd(hotness, self.max_stage_window) 
             if old_global_expert_indices == None: 
                 stage_weights = self.compute_stage_weight(hotness) 
-                new_deployment[layer], expert_count[layer] = self.group_based_adaptive_bloating( 
+                new_deployment[layer], expert_count[layer] = self.group_based_adaptive_searching( 
                     hotness, 
                     num_replicas, 
                     num_ranks, 
@@ -535,7 +537,19 @@ class FlashLB(EplbPolicy):
                     current_deployment[layer], 
                     hotness, 
                     layer_id=layer 
-                ) 
+                )
+                
+        priority = new_par / current_par 
+        priority_idx = np.argsort(priority) 
+        priority_idx = priority_idx[priority[priority_idx] < 1][:self.buffer_expert_layer_num] 
+        logger.info(f"FlashLB, new par:{new_par.mean()}, current_par:{current_par.mean()}") 
+
+        change = len(priority_idx) > 0
+        if np.all(expert_workload == 1): 
+            for _,layer in enumerate(layers_need_update): 
+                self.hotness_window[layer].pop() 
+            change = False
+        
         if old_global_expert_indices == None: 
             physical_to_logical_map = np.array(new_deployment,dtype=int).reshape((num_layer,num_replicas)) 
             maxlogcnt = int(expert_count.max()) 
@@ -544,18 +558,9 @@ class FlashLB(EplbPolicy):
             logical_to_physical_map = torch.tensor(logical_to_physical_map,dtype=int,device=weight.device) 
             expert_count = torch.tensor(expert_count,dtype=int,device=weight.device) 
             return physical_to_logical_map, logical_to_physical_map, expert_count 
-
-        priority = new_par / current_par 
-        priority_idx = np.argsort(priority) 
-        priority_idx = priority_idx[priority[priority_idx] < 1][:self.buffer_expert_layer_num] 
-        print(f"RTLB, new par:{new_par.mean()}, current_par:{current_par.mean()}") 
-        if np.all(expert_workload == 1): 
-            for _,layer in enumerate(layers_need_update): 
-                self.hotness_window[layer].pop() 
-            return False, np.array([],dtype=int), current_deployment 
-
+        
         deployment = current_deployment.copy() 
-        change = len(priority_idx) > 0 
+         
         if change: 
             for idx in priority_idx: 
                 deployment[idx] = auto_fix_new_placement(current_deployment[idx],new_deployment[idx]) 
