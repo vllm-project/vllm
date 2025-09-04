@@ -2905,12 +2905,16 @@ def _get_head_dtype(config: PretrainedConfig, dtype: torch.dtype,
     if torch.float32 not in current_platform.supported_dtypes:
         return dtype
 
-    fp32_head = getattr(config, "fp32_head", None)
-
+    fp32_head: Optional[bool] = getattr(config, "fp32_head", None)
     if fp32_head is False:
         return dtype
     elif fp32_head:
         return torch.float32
+
+    # fp32_head being True means the use of fp32_head
+    # fp32_head being False means fp32_head is not used
+    # fp32_head being None means choosing
+    # the default head_dtype based on runner_type.
 
     # The pooling model defaults to using fp32 head,
     # you can use VLLM_USING_FP32_HEAD = 0 to disable it.
