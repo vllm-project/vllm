@@ -8,11 +8,9 @@ import torch
 
 from vllm.attention.backends.abstract import AttentionLayer, AttentionType
 from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
-                                         flash_mla_with_kvcache_for_cp,
                                          get_mla_metadata,
                                          is_flashmla_supported)
 from vllm.config import VllmConfig
-from vllm.distributed import get_cp_group
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (MLACommonBackend,
                                                    MLACommonDecodeMetadata,
@@ -171,36 +169,16 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
 
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashMLAMetadata,
         layer: AttentionLayer,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
 
-        q = torch.cat([q_nope, q_pe], dim=-1)\
-            .unsqueeze(1) # Add seqlen dim of 1 (decode)
-        if get_cp_group().world_size > 1:
-            o, _ = flash_mla_with_kvcache_for_cp(
-                q=q,
-                k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
-                block_table=attn_metadata.decode.block_table,
-                cache_seqlens=attn_metadata.decode.seq_lens,
-                head_dim_v=self.kv_lora_rank,
-                tile_scheduler_metadata=attn_metadata.decode.
-                tile_scheduler_metadata,
-                num_splits=attn_metadata.decode.num_splits,
-                softmax_scale=self.scale,
-                causal=True,
-                descale_q=None,
-                descale_k=None,
-            )
-            return self._v_up_proj(o)
-
-        o, _ = flash_mla_with_kvcache(
-            q=q,
+        o, lse = flash_mla_with_kvcache(
+            q=q.unsqueeze(1),  # Add seqlen dim of 1 (decode)
             k_cache=kv_c_and_k_pe_cache.unsqueeze(-2),  # Add head dim of 1
             block_table=attn_metadata.decode.block_table,
             cache_seqlens=attn_metadata.decode.seq_lens,
@@ -214,4 +192,4 @@ class FlashMLAImpl(MLACommonImpl[FlashMLAMetadata]):
             descale_k=layer._k_scale.reshape(1),
         )
 
-        return self._v_up_proj(o)
+        return o, lse

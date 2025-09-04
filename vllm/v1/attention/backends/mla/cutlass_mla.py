@@ -221,18 +221,15 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self._workspace.ensure_size(attn_metadata, self._num_kv_splits)
 
         # Run MLA
-        # Clone q_nope and q_pe to make sure strides computation is correct.
-        # TODO: Check if we really need it
-        q_nope = q_nope.clone()
-        q_pe = q_pe.clone()
-
-        o = self._sm100_cutlass_mla_decode(q_nope, q_pe, kv_c_and_k_pe_cache,
+        o = self._sm100_cutlass_mla_decode(q_nope.contiguoous(),
+                                           q_pe.contiguoous(),
+                                           kv_c_and_k_pe_cache,
                                            attn_metadata.decode.seq_lens,
                                            attn_metadata.decode.block_table,
                                            self._workspace.get_buf(),
                                            self.scale, self._num_kv_splits)
 
-        return self._v_up_proj(o)
+        return o
 
     # TODO: Currently we leave it here only for backup in case something is
     #       wrong with the new SM100 CUTLASS MLA kernel
@@ -257,29 +254,28 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
                         device=q_nope.device)
 
         # Run MLA
-        # Clone q_nope and q_pe to make sure strides computation is correct.
-        q_nope = q_nope.clone()
-        q_pe = q_pe.clone()
-
-        ops.cutlass_mla_decode(o, q_nope, q_pe, kv_c_and_k_pe_cache,
+        ops.cutlass_mla_decode(o, q_nope.contiguoous(), q_pe.contiguoous(),
+                               kv_c_and_k_pe_cache,
                                attn_metadata.decode.seq_lens,
                                attn_metadata.decode.block_table, self.scale)
 
-        return self._v_up_proj(o)
+        return o
 
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: MLACommonMetadata,
         layer: AttentionLayer,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        q_nope, q_pe = torch.split(q,
+                                   [self.kv_lora_rank, self.qk_rope_head_dim],
+                                   dim=-1)
         if self._use_old_cutlass_mla:
             # TODO: Remove the old cutlass MLA kernel after more extensive
             #       testing
             return self._old_forward_decode(q_nope, q_pe, kv_c_and_k_pe_cache,
-                                            attn_metadata)
+                                            attn_metadata), None
 
         return self._sm100_forward_decode(q_nope, q_pe, kv_c_and_k_pe_cache,
-                                          attn_metadata)
+                                          attn_metadata), None

@@ -201,6 +201,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
 from vllm.attention.backends.utils import get_mla_dims
+from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.utils.fa_utils import get_flash_attn_version
 from vllm.config import VllmConfig
@@ -1454,12 +1455,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
     @abstractmethod
     def _forward_decode(
         self,
-        ql_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: M,
         layer: AttentionLayer,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         raise NotImplementedError
 
     def forward(
@@ -1565,6 +1565,23 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     layer._q_scale)
                 decode_q_pe = decode_q_pe.reshape(q_pe_shape)
 
-            output[:num_decode_tokens] = self._forward_decode(
-                decode_ql_nope, decode_q_pe, kv_cache, attn_metadata, layer)
+            # concatenate decode_ql_nope and decode_q_pe -> (B, N, L + P)
+            decode_q = torch.cat([decode_ql_nope, decode_q_pe], dim=-1)
+
+            # Note(hc): decode_q do allgather in head dim.
+            if get_cp_group().world_size > 1:
+                assert not fp8_attention, "CP not support fp8 kvcache now."
+                decode_q = get_cp_group().all_gather(decode_q, dim=1)
+
+            # call decode attn
+            attn_out, lse = self._forward_decode(decode_q, kv_cache,
+                                                 attn_metadata, layer)
+
+            # Note(hc): recorect cp attn_out with lse.
+            if get_cp_group().world_size > 1:
+                assert lse is not None
+                attn_out = cp_lse_ag_out_rs(attn_out, lse, get_cp_group())
+
+            # v_up projection
+            output[:num_decode_tokens] = self._v_up_proj(attn_out)
         return output_padded

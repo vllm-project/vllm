@@ -81,10 +81,8 @@ class CPTritonContext:
             self.inner_kernel[grid](*regular_args)
 
 
-def correct_attn_out(out: torch.Tensor,
-                     lses: torch.Tensor,
-                     cp_rank,
-                     ctx: CPTritonContext = None):
+def correct_attn_out(out: torch.Tensor, lses: torch.Tensor, cp_rank: int,
+                     ctx: CPTritonContext):
     """
     Apply the all-gathered lses to correct each local rank's attention
     output. we still need perform a cross-rank reduction to obtain the
@@ -119,6 +117,10 @@ def cp_lse_ag_out_rs(cp_attn_out: torch.Tensor,
                      cp_attn_lse: torch.Tensor,
                      cp_group: GroupCoordinator,
                      ctx: CPTritonContext = None):
+    """
+    cp_attn_out: [ B, H, D ]
+    cp_attn_lse: [ B, H ]
+    """
     if cp_group.world_size == 1:
         return cp_attn_out
 
