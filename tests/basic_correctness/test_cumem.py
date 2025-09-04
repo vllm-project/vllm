@@ -16,7 +16,8 @@ def test_dummy_failing_test():
     This is a dummy test that always fails for testing the -x flag.
     It will fail on purpose to verify that pytest stops on first failure.
     """
-    assert False, "This test is designed to fail for testing the -x flag"
+    # assert False, "This test is designed to fail for testing the -x flag"
+    raise AssertionError("This test is designed to fail for testing the -x flag")
 
 @create_new_process_for_each_test()
 def test_python_error():
