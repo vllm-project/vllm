@@ -67,7 +67,6 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (AttentionSpec,
                                         ChunkedLocalAttentionSpec,
                                         CrossAttentionSpec,
-                                        EncoderAttentionSpec,
                                         EncoderOnlyAttentionSpec,
                                         FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec, KVCacheSpec,
@@ -986,53 +985,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_common_prefix_blocks = 0
                 causal_arg = False
             elif isinstance(kv_cache_group_spec.kv_cache_spec,
-                            EncoderAttentionSpec):
-                # Encoder layers do not have KV cache, so we need to
-                # create a dummy block table and slot mapping for them.
-                blk_table_tensor, slot_mapping = (
-                    _dummy_blk_table_and_slot_mapping())
-                num_common_prefix_blocks = 0
-                causal_arg = False
-
-                # For ENCODER attention using Whisper (an encoder-decoder
-                # model), we need to look at the encoder inputs (audio), which
-                # are different than the decoder inputs (prompt for
-                # transcription).
-
-                scheduled_encoder_inputs =\
-                    scheduler_output.scheduled_encoder_inputs
-                encoder_seq_lens = []
-                num_encoder_tokens = 0
-
-                for _ in scheduled_encoder_inputs:
-                    # NOTE using the max encoder len is whisper specific
-                    encoder_seq_len = self.max_encoder_len
-                    encoder_seq_lens.append(encoder_seq_len)
-                    num_encoder_tokens += encoder_seq_len
-
-                # Create encoder sequence start locations
-                encoder_seq_start_loc = [0]
-                for seq_len in encoder_seq_lens:
-                    encoder_seq_start_loc.append(encoder_seq_start_loc[-1] +
-                                                 seq_len)
-
-                seq_lens_arg = torch.tensor(encoder_seq_lens,
-                                            dtype=torch.int32,
-                                            device=self.device)
-                seq_lens_cpu_arg = seq_lens_arg.cpu()
-                query_start_loc_arg = torch.tensor(encoder_seq_start_loc,
-                                                   dtype=torch.int32,
-                                                   device=self.device)
-                query_start_loc_cpu_arg = query_start_loc_arg.cpu()
-                num_reqs_arg = len(encoder_seq_lens)
-                num_computed_tokens_cpu_arg = torch.zeros((num_reqs_arg, ),
-                                                          dtype=torch.int32,
-                                                          device="cpu")
-                # NOTE - using max_encoder_len is whisper specific
-                total_num_scheduled_tokens_arg = num_encoder_tokens
-                max_num_scheduled_tokens_arg = self.max_encoder_len
-                max_seq_len_arg = self.max_encoder_len
-            elif isinstance(kv_cache_group_spec.kv_cache_spec,
                             CrossAttentionSpec):
                 causal_arg = False
                 num_common_prefix_blocks = 0
@@ -1042,7 +994,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # directly from the block table like other attention types
                 cross_slot_mapping = []
                 for req_id in scheduler_output.scheduled_encoder_inputs:
-                    encoder_seq_len = self.max_encoder_len
                     cross_slot_mapping.extend(
                         self._get_cross_slot_mapping(req_id,
                                                      self.max_encoder_len))
@@ -3645,11 +3596,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
-        Add encoder-only and encoder layers to the KV cache config.
+        Add encoder-only layers to the KV cache config.
         
         This handles:
         - ENCODER_ONLY layers (standalone encoder models)
-        - ENCODER layers (encoder self-attention in encoder-decoder models)
         """
         block_size = self.vllm_config.cache_config.block_size
         use_mla = self.vllm_config.model_config.use_mla
@@ -3659,15 +3609,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for layer_name, attn_module in attn_layers.items():
             if attn_module.attn_type == AttentionType.ENCODER_ONLY:
                 attn_spec: AttentionSpec = EncoderOnlyAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=attn_module.num_kv_heads,
-                    head_size=attn_module.head_size,
-                    dtype=self.kv_cache_dtype,
-                    use_mla=use_mla)
-                encoder_only_attn_specs[attn_spec].append(layer_name)
-                self.runner_only_attn_layers.add(layer_name)
-            elif attn_module.attn_type == AttentionType.ENCODER:
-                attn_spec = EncoderAttentionSpec(
                     block_size=block_size,
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,

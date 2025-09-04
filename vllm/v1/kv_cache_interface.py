@@ -221,14 +221,6 @@ class EncoderOnlyAttentionSpec(AttentionSpec):
 
 
 @dataclass(frozen=True)
-class EncoderAttentionSpec(AttentionSpec):
-
-    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
-        # Encoder layers do not need KV cache
-        return 0
-
-
-@dataclass(frozen=True)
 class CrossAttentionSpec(AttentionSpec):
     """
     KV cache spec for cross-attention layers in encoder-decoder models.
