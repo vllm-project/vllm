@@ -6,10 +6,8 @@ import json
 import openai
 import pytest
 import pytest_asyncio
-from PIL import Image
 from transformers import AutoProcessor
 
-from tests.conftest import ImageTestAssets
 from vllm.multimodal.utils import encode_image_base64, fetch_image
 
 from ...utils import RemoteOpenAIServer
@@ -440,126 +438,130 @@ async def test_multi_image_input(client: openai.AsyncOpenAI, model_name: str,
         assert message.content is not None and len(message.content) >= 0
 
 
-def pil_image_to_data_url(image: Image.Image) -> str:
-    image_base64 = encode_image_base64(image)
-    return f"data:image/jpeg;base64,{image_base64}"
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize(
+    "image_urls",
+    [TEST_IMAGE_ASSETS[:i] for i in range(2, len(TEST_IMAGE_ASSETS))],
+    indirect=True)
 async def test_completions_with_image(
     client: openai.AsyncOpenAI,
     model_name: str,
-    image_assets: ImageTestAssets,
+    image_urls: list[str],
 ):
-    # Test case: Single image embeds input
-    image = image_assets[0].pil_image
-    chat_completion = await client.chat.completions.create(
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a helpful assistant."
-            },
-            {
-                "role":
-                "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Describe this image.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": pil_image_to_data_url(image),
-                        }
-                    },
-                ],
-            },
-        ],
-        model=model_name,
-    )
-    assert chat_completion.choices[0].message.content is not None
-    assert isinstance(chat_completion.choices[0].message.content, str)
-    assert len(chat_completion.choices[0].message.content) > 0
+    for image_url in image_urls:
+        chat_completion = await client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant."
+                },
+                {
+                    "role":
+                    "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Describe this image.",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url,
+                            }
+                        },
+                    ],
+                },
+            ],
+            model=model_name,
+        )
+        assert chat_completion.choices[0].message.content is not None
+        assert isinstance(chat_completion.choices[0].message.content, str)
+        assert len(chat_completion.choices[0].message.content) > 0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize(
+    "image_urls",
+    [TEST_IMAGE_ASSETS[:i] for i in range(2, len(TEST_IMAGE_ASSETS))],
+    indirect=True)
 async def test_completions_with_image_with_uuid(
     client: openai.AsyncOpenAI,
     model_name: str,
-    image_assets: ImageTestAssets,
+    image_urls: list[str],
 ):
-    # Test case: Single image embeds input
-    image = image_assets[0].pil_image
-    chat_completion = await client.chat.completions.create(
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a helpful assistant."
-            },
-            {
-                "role":
-                "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Describe this image.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": pil_image_to_data_url(image),
+    for image_url in image_urls:
+        chat_completion = await client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant."
+                },
+                {
+                    "role":
+                    "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Describe this image.",
                         },
-                        "uuid": "1234"
-                    },
-                ],
-            },
-        ],
-        model=model_name,
-    )
-    assert chat_completion.choices[0].message.content is not None
-    assert isinstance(chat_completion.choices[0].message.content, str)
-    assert len(chat_completion.choices[0].message.content) > 0
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url,
+                            },
+                            "uuid": image_url
+                        },
+                    ],
+                },
+            ],
+            model=model_name,
+        )
+        assert chat_completion.choices[0].message.content is not None
+        assert isinstance(chat_completion.choices[0].message.content, str)
+        assert len(chat_completion.choices[0].message.content) > 0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize(
+    "image_urls",
+    [TEST_IMAGE_ASSETS[:i] for i in range(2, len(TEST_IMAGE_ASSETS))],
+    indirect=True)
 async def test_completions_with_image_with_incorrect_uuid_format(
     client: openai.AsyncOpenAI,
     model_name: str,
-    image_assets: ImageTestAssets,
+    image_urls: list[str],
 ):
-    # Test case: Single image embeds input
-    image = image_assets[0].pil_image
-    chat_completion = await client.chat.completions.create(
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a helpful assistant."
-            },
-            {
-                "role":
-                "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "Describe this image.",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": pil_image_to_data_url(image),
-                            "incorrect_uuid_key": "1234",
+    for image_url in image_urls:
+        chat_completion = await client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant."
+                },
+                {
+                    "role":
+                    "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Describe this image.",
                         },
-                        "also_incorrect_uuid_key": "1234",
-                    },
-                ],
-            },
-        ],
-        model=model_name,
-    )
-    assert chat_completion.choices[0].message.content is not None
-    assert isinstance(chat_completion.choices[0].message.content, str)
-    assert len(chat_completion.choices[0].message.content) > 0
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url,
+                                "incorrect_uuid_key": image_url,
+                            },
+                            "also_incorrect_uuid_key": image_url,
+                        },
+                    ],
+                },
+            ],
+            model=model_name,
+        )
+        assert chat_completion.choices[0].message.content is not None
+        assert isinstance(chat_completion.choices[0].message.content, str)
+        assert len(chat_completion.choices[0].message.content) > 0
