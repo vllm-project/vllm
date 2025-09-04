@@ -82,8 +82,8 @@ def calculate_gpu_utilization(target_memory_gb=24):
     )  # Convert to GB
     if total_memory < target_memory_gb:
         raise RuntimeError(
-            f"GPU memory ({total_memory:.1f}GB) is less than \
-                required memory ({target_memory_gb}GB)"
+            f"GPU memory ({total_memory:.1f}GB) is less than "
+            f"required memory ({target_memory_gb}GB)"
         )
 
     return target_memory_gb / total_memory
