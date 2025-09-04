@@ -160,7 +160,7 @@ WIKITEXT_ACCURACY_CONFIGS = [
         model_name="fxmarty/qwen1.5_moe_a2.7b_chat_w_fp6_e3m2_a_fp6_e3m2",
         excepted_value=10.6),
     AccuracyTestConfig(model_name="fxmarty/qwen_1.5-moe-a2.7b-mxfp4",
-                       excepted_value=12.4),
+                       excepted_value=12.0),
 ]
 
 
