@@ -114,20 +114,27 @@ class QuarkConfig(QuantizationConfig):
             layer_quant_names = list(layer_quant_config.keys())
             layer_quant_set = set(layer_quant_names)
 
-            if not kv_cache_set.issubset(layer_quant_set):
-                raise ValueError(
-                    "The Quark quantized model has the "
-                    "kv_cache_group parameter setting, "
-                    "but no kv_cache quantization settings "
-                    "were found in the quantization "
-                    "configuration."
-                )
+            if not (kv_cache_set.issubset(layer_quant_set) or \
+                any(fnmatch.fnmatchcase(layer_quant, pat) \
+                    for layer_quant in list(layer_quant_set) \
+                        for pat in list(kv_cache_set))):
+                raise ValueError("The Quark quantized model has the "
+                                 "kv_cache_group parameter setting, "
+                                 "but no kv_cache quantization settings "
+                                 "were found in the quantization "
+                                 "configuration.")
 
             q_configs = [
-                cast(dict[str, Any], layer_quant_config.get(name))
-                for name in kv_cache_group
+                quant_cfg for name, quant_cfg in layer_quant_config.items()
+                if any(
+                    fnmatch.fnmatchcase(name, pattern)
+                    for pattern in kv_cache_group)
             ]
-            if not all(deep_compare(q_config, q_configs[0]) for q_config in q_configs):
+
+            if not all(
+                    deep_compare(q_config["output_tensors"], q_configs[0]
+                                 ["output_tensors"])
+                    for q_config in q_configs):
                 raise ValueError(
                     "The quantization method used for kv_cache should "
                     "be the same, but the quantization method for the "
@@ -310,11 +317,13 @@ class QuarkConfig(QuantizationConfig):
             return shard_configs[0]
         else:
             layer_quant_config = cast(
-                dict[str, Any], self.quant_config.get("layer_quant_config")
-            )
+                dict[str, Any], self.quant_config.get("layer_quant_config"))
+            layer_quant_configs = list()
             for name_pattern in layer_quant_config:
-                if fnmatch.fnmatch(layer_name, name_pattern):
-                    return layer_quant_config[name_pattern]
+                if layer_name in name_pattern:
+                    layer_quant_configs.append(
+                        layer_quant_config[name_pattern])
+                    return layer_quant_configs[0]
 
             layer_type = cast(str, type(module))
             layer_type_quant_config = cast(
@@ -475,5 +484,4 @@ class QuarkKVCacheMethod(BaseKVCacheMethod):
             raise NotImplementedError(
                 "Only support per-tensor scaling factor "
                 "for quark KV cache. "
-                f"Expected qscheme: per_tensor, found qscheme: {qscheme}"
-            )
+                f"Expected qscheme: per_tensor, found qscheme: {qscheme}")
