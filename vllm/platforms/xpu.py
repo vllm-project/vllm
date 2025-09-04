@@ -37,13 +37,37 @@ class XPUPlatform(Platform):
                              dtype: torch.dtype, kv_cache_dtype: Optional[str],
                              block_size: int, use_v1: bool, use_mla: bool,
                              has_sink: bool) -> str:
-        if selected_backend is not None and selected_backend != _Backend.IPEX:
-            logger.info("Cannot use %s backend on XPU.", selected_backend)
         use_v1 = envs.VLLM_USE_V1
         if not use_v1:
             raise ValueError("XPU backend only supports V1.")
+        TRITON_ATTN_VLLM_V1 = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
+        FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
+        if selected_backend == _Backend.TRITON_ATTN_VLLM_V1:
+            logger.info_once("Using Triton backend on V1 engine.")
+            return TRITON_ATTN_VLLM_V1
+        elif selected_backend == _Backend.FLASH_ATTN:
+            logger.info_once("Using Flash Attention backend on V1 engine.")
+            return FLASH_ATTN_V1
+        elif selected_backend:
+            raise ValueError(
+                f"Invalid attention backend for {cls.device_name}, "
+                f"with use_v1: {use_v1} use_mla: {use_mla}")
+
         logger.info("Using Flash Attention backend on V1 engine.")
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+
+    @classmethod
+    def is_kv_cache_dtype_supported(cls, kv_cache_dtype: str,
+                                    model_config: "ModelConfig") -> bool:
+        """
+        Check if the kv_cache_dtype is supported.
+        XPU only support fp8 kv cache with triton backend.
+        """
+        if envs.is_set("VLLM_ATTENTION_BACKEND") and \
+            envs.VLLM_ATTENTION_BACKEND == "TRITON_ATTN_VLLM_V1":
+            return kv_cache_dtype in ["fp8_e4m3", "fp8_e5m2", "fp8"]
+
+        return False
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
