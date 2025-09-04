@@ -239,11 +239,18 @@ class StreamingHarmonyContext(HarmonyContext):
             # beginning of a new message
             self.first_tok_of_message = output.finished
             tok = output.outputs[0].token_ids[0]
-            self.parser.process(tok)
-            self._update_num_output_tokens(output.outputs[0].token_ids)
-            # Check if the current token is part of reasoning content
-            self._update_num_reasoning_tokens([tok])
-            self.last_tok = tok
+            try:
+                self.parser.process(tok)
+                # Only update these if parsing succeeded
+                self._update_num_output_tokens(output.outputs[0].token_ids)
+                # Check if the current token is part of reasoning content
+                self._update_num_reasoning_tokens([tok])
+                self.last_tok = tok
+            except Exception as e:
+                # Log the error but continue processing to avoid breaking stream
+                logger.warning("Parser error processing token %s: %s", tok, e)
+                # Skip this token to avoid parser state corruption
+                # Don't update last_tok or token counts for failed tokens
         else:
             # Handle the case of tool output in direct message format
             assert len(output) == 1, "Tool output should be a single message"
