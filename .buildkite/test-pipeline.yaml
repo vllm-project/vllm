@@ -521,8 +521,17 @@ steps:
     - tests/tool_use
     - tests/mistral_tool_use
   commands:
-    - pytest -v -s tool_use
-    - pytest -v -s mistral_tool_use
+    - pytest -v -s tool_use --ignore=tool_use/test_glm4_moe_tool_parser.py --ignore=tool_use/test_jamba_tool_parser.py --ignore=tool_use/test_kimi_k2_tool_parser.py --ignore=tool_use/test_minimax_tool_parser.py --ignore=tool_use/test_qwen3coder_tool_parser.py --ignore=tool_use/test_seed_oss_tool_parser.py --ignore=tool_use/test_tool_choice_required.py --ignore=tool_use/test_xlam_tool_parser.py --ignore=tool_use/utils.py
+    - pytest -v -s mistral_tool_use --ignore=mistral_tool_use/utils.py
+
+- label: OpenAI-Compatible Tool Use (CPU)
+  source_file_dependencies:
+    - vllm/
+    - tests/tool_use
+    - tests/mistral_tool_use
+  no_gpu: true
+  commands:
+    - pytest -v -s tool_use/test_glm4_moe_tool_parser.py tool_use/test_jamba_tool_parser.py tool_use/test_kimi_k2_tool_parser.py tool_use/test_minimax_tool_parser.py tool_use/test_qwen3coder_tool_parser.py tool_use/test_seed_oss_tool_parser.py tool_use/test_tool_choice_required.py tool_use/test_xlam_tool_parser.py tool_use/utils.py mistral_tool_use/utils.py
 
 #####  models test  #####
 
