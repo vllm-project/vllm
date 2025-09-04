@@ -8,11 +8,15 @@ from typing import Any, Optional, Union
 import regex as re
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               DeltaFunctionCall, DeltaMessage,
                                               DeltaToolCall,
                                               ExtractedToolCallInformation,
-                                              FunctionCall, ToolCall)
+                                              FunctionCall, ResponsesRequest,
+                                              ToolCall)
+# yapf: enable
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser, ToolParserManager)
 from vllm.entrypoints.openai.tool_parsers.utils import (
@@ -144,7 +148,7 @@ class MinimaxToolParser(ToolParser):
     def extract_tool_calls(
         self,
         model_output: str,
-        request: ChatCompletionRequest,
+        request: Union[ChatCompletionRequest, ResponsesRequest],
     ) -> ExtractedToolCallInformation:
         """
         Extract tool calls from model output for non-streaming mode.

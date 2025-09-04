@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
+
 import asyncio
 import json
 from abc import ABC, abstractmethod
@@ -8,8 +10,8 @@ from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Iterable
 from functools import cached_property, lru_cache, partial
 from pathlib import Path
-from typing import (Any, Callable, Generic, Literal, Optional, TypeVar, Union,
-                    cast)
+from typing import (TYPE_CHECKING, Any, Callable, Generic, Literal, Optional,
+                    TypeVar, Union, cast)
 
 import jinja2.nodes
 import transformers.utils.chat_template_utils as hf_chat_utils
@@ -28,7 +30,10 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
                                ChatCompletionToolMessageParam)
 from openai.types.chat.chat_completion_content_part_input_audio_param import (
     InputAudio)
-from openai.types.responses import ResponseInputImageParam
+from openai.types.chat.chat_completion_message_tool_call_param import (
+    Function as FunctionCallTool)
+from openai.types.responses import (ResponseFunctionToolCall,
+                                    ResponseInputImageParam)
 from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
@@ -50,6 +55,9 @@ from vllm.transformers_utils.chat_templates import (
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import random_uuid
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.protocol import ResponseInputOutputItem
 
 logger = init_logger(__name__)
 
@@ -606,7 +614,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         return self.model_cls.get_placeholder_str(modality, num_items)
 
     @abstractmethod
-    def create_parser(self) -> "BaseMultiModalContentParser":
+    def create_parser(self) -> BaseMultiModalContentParser:
         raise NotImplementedError
 
 
@@ -636,7 +644,7 @@ class MultiModalItemTracker(BaseMultiModalItemTracker[object]):
             mm_inputs["video"] = items_by_modality["video"]  # A list of videos
         return mm_inputs
 
-    def create_parser(self) -> "BaseMultiModalContentParser":
+    def create_parser(self) -> BaseMultiModalContentParser:
         return MultiModalContentParser(self)
 
 
@@ -670,7 +678,7 @@ class AsyncMultiModalItemTracker(BaseMultiModalItemTracker[Awaitable[object]]):
             mm_inputs["video"] = items_by_modality["video"]  # A list of videos
         return mm_inputs
 
-    def create_parser(self) -> "BaseMultiModalContentParser":
+    def create_parser(self) -> BaseMultiModalContentParser:
         return AsyncMultiModalContentParser(self)
 
 
@@ -1438,3 +1446,29 @@ def make_tool_call_id(id_type: str = "random", func_name=None, idx=None):
     else:
         # by default return random
         return f"chatcmpl-tool-{random_uuid()}"
+
+
+def parse_chat_tool_call(item: ResponseInputOutputItem) -> ChatCompletionMessageParam:
+    if item.get("type") == "function_call":
+        # Append the function call as a tool call.
+        return ChatCompletionAssistantMessageParam(
+                role="assistant",
+                tool_calls=[
+                    ChatCompletionMessageToolCallParam(
+                        id=item.get("call_id"),
+                        function=FunctionCallTool(
+                            name=item.get("name"),
+                            arguments=item.get("arguments"),
+                        ),
+                        type="function",
+                    )
+                ],
+            )
+    elif item.get("type") == "function_call_output":
+        # Append the function call output as a tool message.
+        return ChatCompletionToolMessageParam(
+                role="tool",
+                content=item.get("output"),
+                tool_call_id=item.get("call_id"),
+            )
+    return item  # type: ignore
