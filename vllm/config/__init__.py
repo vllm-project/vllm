@@ -756,9 +756,6 @@ class ModelConfig:
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
         )
-        self._head_dtype = _get_head_dtype(config=self.hf_config,
-                                           dtype=self.dtype,
-                                           runner_type=self.runner_type)
 
         # Interleaved attention is not supported by some backends in V0
         if (not self.disable_sliding_window
@@ -1768,12 +1765,14 @@ class ModelConfig:
         # "head" refers to the last Linear layer(s) of an LLM,
         # such as the lm_head in a generation model,
         # or the score or classifier in a classification model.
-        # the default head_dtype based on runner_type.
+        # The default head_dtype based on runner_type.
         # - The pooling model defaults to using fp32 head,
         # you can use --hf-overrides '{"head_dtype": "model"}' to disable it.
         # - The generate model defaults to not using fp32 head,
         # you can use --hf-overrides '{"head_dtype": "float32"}' to enable it.
-        return self._head_dtype
+        return _get_head_dtype(config=self.hf_config,
+                               dtype=self.dtype,
+                               runner_type=self.runner_type)
 
     def get_and_verify_max_len(self, max_model_len: int):
         # Consider max_model_len in tokenizer_config only when
@@ -2914,12 +2913,8 @@ def _get_and_verify_dtype(
 
 def _get_head_dtype(config: PretrainedConfig, dtype: torch.dtype,
                     runner_type: str) -> torch.dtype:
-    if torch.float32 not in current_platform.supported_dtypes:
-        return dtype
-
-    head_dtype: Optional[Union[str,
-                               torch.dtype]] = getattr(config, "head_dtype",
-                                                       None)
+    head_dtype: Optional[Union[str, torch.dtype]] = (
+        envs.VLLM_HEAD_DTYPE or getattr(config, "head_dtype", None))
 
     if head_dtype == "model":
         return dtype
@@ -2931,6 +2926,8 @@ def _get_head_dtype(config: PretrainedConfig, dtype: torch.dtype,
     elif isinstance(head_dtype, torch.dtype):
         return head_dtype
     elif head_dtype is None:
+        if torch.float32 not in current_platform.supported_dtypes:
+            return dtype
         if runner_type == "pooling":
             return torch.float32
         return dtype
