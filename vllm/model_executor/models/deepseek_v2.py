@@ -85,7 +85,7 @@ class DeepseekV2MLP(nn.Module):
         # If is_sequence_parallel, the input and output tensors are sharded
         # across the ranks within the tp_group. In this case the weights are
         # replicated and no collective ops are needed.
-        # Otherwise we use standard TP with and allreduce at the end.
+        # Otherwise we use standard TP with an allreduce at the end.
         if is_sequence_parallel:
             self.gate_up_proj = MergedReplicatedLinear(
                 hidden_size, [intermediate_size] * 2,
@@ -123,8 +123,8 @@ class DeepseekV2MLP(nn.Module):
 
 
 # Chunk x along the num_tokens axis for sequence parallelism
-# NOTE: This is wrapped in a torch custom op to work around an issue: The
-# output tensor can have a sequence length 0 at small input sequence lengths
+# NOTE: This is wrapped in a torch custom op to work around the following issue:
+# The output tensor can have a sequence length 0 at small input sequence lengths
 # even though we explicitly pad to avoid this.
 def sequence_parallel_chunk(x: torch.Tensor) -> torch.Tensor:
     tp_size = get_tensor_model_parallel_world_size()
