@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NamedTuple, Optional
 
 import torch
@@ -80,7 +80,7 @@ class KVConnectorOutput:
 
     # IDs of externally computed KV blocks that failed to load.
     # Requests referencing these blocks should be rescheduled to recompute them.
-    invalid_block_ids: Optional[set[int]] = None
+    invalid_block_ids: set[int] = field(default_factory=set)
 
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.

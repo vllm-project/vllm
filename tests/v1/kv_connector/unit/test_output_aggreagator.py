@@ -16,7 +16,7 @@ class DummyModelRunnerOutput(ModelRunnerOutput):
         self.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending,
             finished_recving=finished_recving,
-            invalid_block_ids=invalid_block_ids)
+            invalid_block_ids=invalid_block_ids or set())
 
     def __repr__(self):
         return (
@@ -38,7 +38,7 @@ def test_aggregate_workers_output():
     aggregated = aggregated.kv_connector_output
     assert aggregated.finished_sending is None
     assert aggregated.finished_recving is None
-    assert aggregated.invalid_block_ids is None
+    assert not aggregated.invalid_block_ids
 
     output1 = DummyModelRunnerOutput(finished_sending={'req1'},
                                      finished_recving={'req2'})
@@ -94,7 +94,7 @@ def test_async_aggregate_workers_output():
     aggregated = aggregated.kv_connector_output
     assert aggregated.finished_sending is None
     assert aggregated.finished_recving is None
-    assert aggregated.invalid_block_ids is None
+    assert not aggregated.invalid_block_ids
 
     future1 = Future()
     future2 = Future()
