@@ -12,7 +12,7 @@ from vllm.pooling_params import PoolingParams
 # multimodal data. In this specific case this example will take a geotiff
 # image as input, process it using the multimodal data processor, and
 # perform inference.
-# Reuirement - install plugin at:
+# Requirement - install plugin at:
 #   https://github.com/christian-pinto/prithvi_io_processor_plugin
 
 
@@ -37,6 +37,7 @@ def main():
         # The maximum number depends on the available GPU memory
         max_num_seqs=32,
         io_processor_plugin="prithvi_to_tiff_india",
+        model_impl="terratorch",
     )
 
     pooling_params = PoolingParams(task="encode", softmax=False)

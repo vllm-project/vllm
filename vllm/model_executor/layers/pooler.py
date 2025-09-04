@@ -633,9 +633,14 @@ class ClassifierPooler(Pooler):
     ) -> None:
         super().__init__()
 
+        from vllm.config import get_current_vllm_config
+        vllm_config = get_current_vllm_config()
+
         self.pooling = pooling
         self.classifier = classifier
         self.act_fn = act_fn or PoolerClassify()
+        self.logit_bias: Optional[
+            float] = vllm_config.model_config.pooler_config.logit_bias
 
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"classify", "score"}
@@ -653,6 +658,9 @@ class ClassifierPooler(Pooler):
         if self.classifier is not None:
             pooled_data = self.classifier(pooled_data)
         # pooled_data shape: [batchsize, num_labels]
+
+        if self.logit_bias is not None:
+            pooled_data -= self.logit_bias
 
         pooling_params = get_pooling_params(pooling_metadata)
         flags = [p.activation for p in pooling_params]

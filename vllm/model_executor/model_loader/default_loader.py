@@ -211,7 +211,7 @@ class DefaultModelLoader(BaseModelLoader):
 
             if not USE_TPU_COMMONS:
                 # In PyTorch XLA, we should call `xm.mark_step`
-                # requently so that not too many ops are accumulated
+                # frequently so that not too many ops are accumulated
                 # in the XLA program. import torch_xla.core.xla_model
                 # as xm
                 import torch_xla.core.xla_model as xm
