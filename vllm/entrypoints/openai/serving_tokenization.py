@@ -65,6 +65,7 @@ class OpenAIServingTokenization(OpenAIServing):
             lora_request = self._maybe_get_adapters(request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            renderer = self._get_renderer(tokenizer)
 
             if isinstance(request, TokenizeChatRequest):
                 tool_dicts = (None if request.tools is None else
@@ -87,13 +88,11 @@ class OpenAIServingTokenization(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                (request_prompts,
-                 engine_prompts) = await self._preprocess_completion(
-                     request,
-                     tokenizer,
-                     request.prompt,
-                     add_special_tokens=request.add_special_tokens,
-                 )
+                engine_prompts = await renderer.render_prompt(
+                    prompt_or_prompts=request.prompt,
+                    add_special_tokens=request.add_special_tokens,
+                    cache_salt=getattr(request, 'cache_salt', None),
+                )
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
@@ -101,7 +100,7 @@ class OpenAIServingTokenization(OpenAIServing):
         input_ids: list[int] = []
         for i, engine_prompt in enumerate(engine_prompts):
             self._log_inputs(request_id,
-                             request_prompts[i],
+                             engine_prompt,
                              params=None,
                              lora_request=lora_request)
 
