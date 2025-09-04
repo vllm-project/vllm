@@ -69,9 +69,9 @@ class PostGradPassManager(CustomGraphPass):
     def __call__(self, graph: fx.Graph):
         VllmInductorPass.dump_prefix = 0  # reset dump index
 
-        shape = get_pass_context().runtime_shape
+        compile_range = get_pass_context().compile_range
         for pass_ in self.passes:
-            if pass_.is_applicable(shape):
+            if pass_.is_applicable_for_range(compile_range):
                 pass_(graph)
                 VllmInductorPass.dump_prefix += 1
             else:
