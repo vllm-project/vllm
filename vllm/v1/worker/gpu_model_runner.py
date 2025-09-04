@@ -717,61 +717,59 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
             return
 
-        # Async scheduling case, we need to copy the sampled token ids
-        # from the previous iteration.
+        # Async scheduling case, where some decode requests from the previous
+        # iteration won't have entries in input_ids_cpu and need to be copied
+        # on the GPU from prev_sampled_token_ids.
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
-        current_req_id_to_index = self.input_batch.req_id_to_index
         assert prev_req_id_to_index is not None
-        common_req_ids = set(prev_req_id_to_index.keys()).intersection(
-            set(current_req_id_to_index.keys()))
-
-        if len(common_req_ids) == 0:
-            # No requests in common with the previous iteration
-            # So input_ids_cpu will have all the input ids
-            self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
-            return
-
-        current_common_req_indices = [
-            current_req_id_to_index[req_id] for req_id in common_req_ids
-        ]
-        prev_common_req_indices = [
-            prev_req_id_to_index[req_id] for req_id in common_req_ids
-        ]
-        # We need to compute the flattened input_ids index of the
-        # last token in each common request.
-        flattened_indices = [
-            int(cu_num_tokens[idx]) - 1 for idx in current_common_req_indices
-        ]
-        if len(flattened_indices) < total_num_scheduled_tokens:
+        flattened_indices = []
+        prev_common_req_indices = []
+        indices_match = True
+        max_flattened_index = -1
+        for req_id, cur_index in self.input_batch.req_id_to_index.items():
+            if (prev_index := prev_req_id_to_index.get(req_id)) is not None:
+                prev_common_req_indices.append(prev_index)
+                # We need to compute the flattened input_ids index of the
+                # last token in each common request.
+                flattened_index = cu_num_tokens[cur_index].item() - 1
+                flattened_indices.append(flattened_index)
+                indices_match &= (prev_index == flattened_index)
+                max_flattened_index = max(max_flattened_index, flattened_index)
+        num_commmon_tokens = len(flattened_indices)
+        if num_commmon_tokens < total_num_scheduled_tokens:
             # If not all requests are decodes from the last iteration,
             # We need to copy the input_ids_cpu to the GPU first.
             self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
-        if flattened_indices == prev_common_req_indices and \
-            max(flattened_indices) == (len(flattened_indices) - 1):
+        if num_commmon_tokens == 0:
+            # No requests in common with the previous iteration
+            # So input_ids_cpu will have all the input ids.
+            return
+        if indices_match and max_flattened_index == (num_commmon_tokens - 1):
             # Common-case optimization: the batch is unchanged
             # and no reordering happened.
             # The indices are both the same permutation of 0..N-1 so
             # we can copy directly using a single slice.
-            self.input_ids.gpu[:len(flattened_indices)].copy_(
-                self.input_batch.prev_sampled_token_ids[:len(flattened_indices
-                                                             )].squeeze(1),
+            self.input_ids.gpu[:num_commmon_tokens].copy_(
+                self.input_batch.prev_sampled_token_ids[:num_commmon_tokens,
+                                                        0],
                 non_blocking=True)
-        else:
-            # Upload the index tensors asynchronously
-            # so the scatter can be non-blocking
-            input_ids_index_tensor = torch.tensor(
-                flattened_indices,
-                dtype=torch.int64,
-                pin_memory=self.pin_memory).to(self.device, non_blocking=True)
-            prev_common_req_indices_tensor = torch.tensor(
-                prev_common_req_indices,
-                dtype=torch.int64,
-                pin_memory=self.pin_memory).to(self.device, non_blocking=True)
-            self.input_ids.gpu.scatter_(
-                dim=0,
-                index=input_ids_index_tensor,
-                src=self.input_batch.prev_sampled_token_ids[
-                    prev_common_req_indices_tensor].squeeze(1))
+            return
+        # Upload the index tensors asynchronously
+        # so the scatter can be non-blocking.
+        input_ids_index_tensor = torch.tensor(flattened_indices,
+                                              dtype=torch.int64,
+                                              pin_memory=self.pin_memory).to(
+                                                  self.device,
+                                                  non_blocking=True)
+        prev_common_req_indices_tensor = torch.tensor(
+            prev_common_req_indices,
+            dtype=torch.int64,
+            pin_memory=self.pin_memory).to(self.device, non_blocking=True)
+        self.input_ids.gpu.scatter_(
+            dim=0,
+            index=input_ids_index_tensor,
+            src=self.input_batch.prev_sampled_token_ids[
+                prev_common_req_indices_tensor, 0])
 
     def _prepare_inputs(
         self,
