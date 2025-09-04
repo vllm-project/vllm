@@ -21,6 +21,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class TurnTokens:
+    """Tracks token counts for a single conversation turn."""
+
+    def __init__(self, input_tokens=0, output_tokens=0):
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+
+    def reset(self):
+        """Reset counters for a new turn."""
+        self.input_tokens = 0
+        self.output_tokens = 0
+
+    def copy(self):
+        """Create a copy of this turn's token counts."""
+        return TurnTokens(self.input_tokens, self.output_tokens)
+
+
 class ConversationContext(ABC):
 
     @abstractmethod
@@ -95,11 +112,12 @@ class HarmonyContext(ConversationContext):
         self.num_cached_tokens = 0
         self.num_reasoning_tokens = 0
         self.num_tool_output_tokens = 0
-        self.this_turn_output_token_count = 0
-        self.num_last_turn_input_tokens = 0
-        self.num_last_turn_output_tokens = 0
-        self.first_tok_of_message = True
-        self.first_turn = True
+
+        # Turn tracking - replaces multiple individual tracking variables
+        self.current_turn = TurnTokens()
+        self.previous_turn = TurnTokens()
+        self.is_first_turn = True
+        self.is_first_token_in_message = True  # For streaming support
 
     # TODO(yeq): unify token usage logic with streaming case
     def _update_num_prompt_tokens(self, output: RequestOutput):
@@ -131,9 +149,11 @@ class HarmonyContext(ConversationContext):
                 # Check if the current token is part of reasoning content
                 self._update_num_reasoning_tokens()
             self._update_prefill_token_usage(output)
-            self.this_turn_output_token_count = 0
-            self.num_last_turn_output_tokens = self._update_decode_token_usage(
-                output)
+            # Reset current turn output tokens for this turn
+            self.current_turn.output_tokens = 0
+            self._update_decode_token_usage(output)
+            # Move current turn to previous turn for next turn's calculations
+            self.previous_turn = self.current_turn.copy()
             output_msgs = self.parser.messages
         else:
             # Tool output.
@@ -164,21 +184,25 @@ class HarmonyContext(ConversationContext):
             logger.error(
                 "RequestOutput appended contains no prompt_token_ids.")
 
-        if self.first_turn:
-            self.first_turn = False
+        # Update current turn input tokens
+        self.current_turn.input_tokens = this_turn_input_tokens
+        self.num_prompt_tokens += this_turn_input_tokens
+
+        # Calculate tool tokens (except on first turn)
+        if self.is_first_turn:
+            self.is_first_turn = False
         else:
             # start counting tool after first turn
             # tool tokens = this turn prefill - last turn prefill -
             # last turn decode
-            this_turn_tool_tokens = (this_turn_input_tokens -
-                                     self.num_last_turn_input_tokens -
-                                     self.num_last_turn_output_tokens)
+            this_turn_tool_tokens = (self.current_turn.input_tokens -
+                                     self.previous_turn.input_tokens -
+                                     self.previous_turn.output_tokens)
             self.num_tool_output_tokens += this_turn_tool_tokens
 
-        self.num_prompt_tokens += this_turn_input_tokens
+        # Update cached tokens
         if output.num_cached_tokens is not None:
             self.num_cached_tokens += output.num_cached_tokens
-        self.num_last_turn_input_tokens = this_turn_input_tokens
 
     def _update_decode_token_usage(self, output: RequestOutput) -> int:
         """Update token usage statistics for the decode phase of generation.
@@ -203,7 +227,7 @@ class HarmonyContext(ConversationContext):
                 # only keep last round
                 updated_output_token_count += len(completion_output.token_ids)
             self.num_output_tokens += updated_output_token_count
-            self.this_turn_output_token_count += updated_output_token_count
+            self.current_turn.output_tokens += updated_output_token_count
         return updated_output_token_count
 
     @property
@@ -288,7 +312,7 @@ class StreamingHarmonyContext(HarmonyContext):
         self.parser = get_streamable_parser_for_assistant()
         self.encoding = get_encoding()
         self.last_tok = None
-        self.first_tok_of_message = True
+        self.is_first_token_in_message = True
 
     @property
     def messages(self) -> list:
@@ -298,19 +322,21 @@ class StreamingHarmonyContext(HarmonyContext):
         if isinstance(output, RequestOutput):
             # append_output is called for each output token in streaming case,
             # so we only want to add the prompt tokens once for each message.
-            if self.first_tok_of_message:
+            if self.is_first_token_in_message:
                 self._update_prefill_token_usage(output)
-                self.this_turn_output_token_count = 0
-                self.num_last_turn_output_tokens = 0
-            # Reset self.first_tok_of_message if needed:
+                self.current_turn.output_tokens = 0
+            # Reset self.is_first_token_in_message if needed:
             # if the current token is the last one of the current message
             # (finished=True), then the next token processed will mark the
             # beginning of a new message
             self.first_tok_of_message = output.finished
             for tok in output.outputs[0].token_ids:
                 self.parser.process(tok)
-            self.num_last_turn_output_tokens += self._update_decode_token_usage(
-                output)
+            self._update_decode_token_usage(output)
+
+            # For streaming, update previous turn when message is complete
+            if output.finished:
+                self.previous_turn = self.current_turn.copy()
             # Check if the current token is part of reasoning content
             self._update_num_reasoning_tokens()
             self.last_tok = tok

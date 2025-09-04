@@ -117,9 +117,9 @@ def test_single_turn_token_counting():
     assert context.num_tool_output_tokens == 0  # No tool tokens in first turn
 
     # Verify internal state tracking
-    assert not context.first_turn
-    assert context.num_last_turn_input_tokens == 5
-    assert context.num_last_turn_output_tokens == 3
+    assert not context.is_first_turn
+    assert context.previous_turn.input_tokens == 5
+    assert context.previous_turn.output_tokens == 3
 
 
 @pytest.mark.asyncio
@@ -276,7 +276,7 @@ async def test_single_turn_no_tool_output():
 
     # First turn should never have tool output tokens
     assert context.num_tool_output_tokens == 0
-    assert context.first_turn is False  # Should be updated after first turn
+    assert context.is_first_turn is False  # Should be updated after first turn
 
 
 @pytest.mark.asyncio
@@ -354,7 +354,7 @@ async def test_streaming_multi_turn_token_counting(mock_parser):
     assert context.num_output_tokens == 3  # Three output tokens
     assert context.num_cached_tokens == 0
     assert context.num_tool_output_tokens == 0  # No tool output in first turn
-    assert context.first_tok_of_message is True  # Ready for next message
+    assert context.is_first_token_in_message is True  # Ready for next message
 
     # Second turn: reasoning tokens in analysis channel
     mock_parser.current_channel = "analysis"  # Set to reasoning channel
