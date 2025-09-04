@@ -45,6 +45,9 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
 
+    def output_is_reduced(self) -> bool:
+        return False
+
     def _apply_router_weight_on_input(
         self,
         a1: torch.Tensor,

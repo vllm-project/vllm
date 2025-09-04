@@ -150,6 +150,7 @@ class DeepseekV2MoE(nn.Module):
     def __init__(
         self,
         config: Union[DeepseekV2Config, DeepseekV3Config],
+        model_config: ModelConfig,
         parallel_config: ParallelConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -225,8 +226,7 @@ class DeepseekV2MoE(nn.Module):
                 topk_group=config.topk_group,
                 prefix=f"{prefix}.experts",
                 scoring_func=config.scoring_func,
-                # we do scaling outside, set factor to 1.0 to avoid double mul
-                routed_scaling_factor=1.0,
+                routed_scaling_factor=self.routed_scaling_factor,
                 e_score_correction_bias=self.gate.e_score_correction_bias,
                 enable_eplb=self.enable_eplb,
                 num_redundant_experts=self.n_redundant_experts,
@@ -247,10 +247,20 @@ class DeepseekV2MoE(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
+            # Fix FP16 overflow
+            # See DeepseekV2DecoderLayer for more details.
+            if model_config.dtype != torch.float16:
+                fused_output_scaling_factor = self.routed_scaling_factor
+                shared_output_scaling_factor = 1.0
+            else:
+                fused_output_scaling_factor = 1.0
+                shared_output_scaling_factor = (1. /
+                                                self.routed_scaling_factor)
+
             self.experts = SharedFusedMoE(
-                use_overlapped=False,  # For test
                 shared_experts=self.shared_experts,
-                shared_fused_combine=lambda shared, fused: self.sum_shared_fused(shared, fused),
+                fused_output_scaling_factor=fused_output_scaling_factor,
+                shared_output_scaling_factor=shared_output_scaling_factor,
                 num_experts=config.n_routed_experts,
                 top_k=config.num_experts_per_tok,
                 hidden_size=config.hidden_size,
@@ -279,39 +289,12 @@ class DeepseekV2MoE(nn.Module):
         # This avoids duplicate computation in self.experts.
         # TODO: We can replace the all_reduce at the end of attn with a
         # reduce_scatter instead of chunking here.
+        hidden_states = hidden_states.view(-1, hidden_dim)
+
         if self.is_sequence_parallel:
             hidden_states = torch.ops.vllm.sequence_parallel_chunk(
                 hidden_states)
 
-        # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
-
-        fused_moe_out = self.experts(hidden_states=hidden_states,
-                                     router_logits=router_logits)
-
-        if self.shared_experts is not None:
-            shared_output, final_hidden_states = fused_moe_out
-        else:
-            shared_output = None
-            final_hidden_states = fused_moe_out
-
-        # Fix FP16 overflow
-        # See DeepseekV2DecoderLayer for more details.
-        if fused_output.dtype != torch.float16:
-            fused_output *= self.routed_scaling_factor
-        elif self.shared_experts is not None:
-            assert shared_output is not None
-            shared_output *= (1. / self.routed_scaling_factor)
-
-        if self.shared_experts is not None:
-            assert shared_output is not None
-            fused_output += shared_output
-
-        return fused_output
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        num_tokens, hidden_dim = hidden_states.shape
-        hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
@@ -327,7 +310,9 @@ class DeepseekV2MoE(nn.Module):
                 self.experts.maybe_all_reduce_tensor_model_parallel(
                     final_hidden_states))
 
-        return final_hidden_states.view(num_tokens, hidden_dim)
+        assert final_hidden_states.shape == (num_tokens, hidden_dim)
+
+        return final_hidden_states
 
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
@@ -672,6 +657,7 @@ class DeepseekV2DecoderLayer(nn.Module):
                 and layer_idx % config.moe_layer_freq == 0):
             self.mlp = DeepseekV2MoE(
                 config=config,
+                model_config=model_config,
                 parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",

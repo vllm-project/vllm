@@ -27,6 +27,9 @@ class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
     def num_dispatchers(self) -> int:
         return 1
 
+    def output_is_reduced(self) -> bool:
+        return False
+
     def prepare(
         self,
         a1: torch.Tensor,
