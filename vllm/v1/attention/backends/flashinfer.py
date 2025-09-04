@@ -48,7 +48,6 @@ FP4_DTYPE = torch.uint8
 logger = init_logger(__name__)
 
 
-
 @triton.jit
 def _trtllm_prefill_attn_kvfp8_dequant(
     kv_cache_ptr,
