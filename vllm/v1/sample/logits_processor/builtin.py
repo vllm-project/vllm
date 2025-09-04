@@ -302,6 +302,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         return {
             "in_think": in_think,  # Currently in thinking mode
             "in_end": False,  # Currently forcing end tokens
+            "check_count_down": thinking_token_budget,
             "think_count": think_count,  # Number of tokens in thinking section
             "end_count": 0,  # Number of end tokens forced so far
             "prompt_tok_ids": prompt_tok_ids,
@@ -313,6 +314,11 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
 
     def _update_think_state(self, state: dict[str, Any]):
         """Updates the state based on newly generated output tokens."""
+        if not state.get("in_end", False) and state.get("check_count_down",
+                                                        0) > 0:
+            state["check_count_down"] -= 1
+            return
+
         output = state.get("output_tok_ids", [])
         if not output:
             return
@@ -344,43 +350,52 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             recent_tokens, self.think_end_token_ids)
 
         # Update state based on recent sequences
-        if recent_start_pos >= 0 and recent_end_pos >= 0:
-            if recent_start_pos > recent_end_pos:
-                # Case: ...<end>...<start>...
+        if not state["in_end"]:
+            if recent_start_pos >= 0 and recent_end_pos >= 0:
+                if recent_start_pos > recent_end_pos:
+                    # Case: ...<end>...<start>...
+                    absolute_start_pos = check_start_idx + recent_start_pos
+                    state["in_think"] = True
+                    state["think_count"] = current_length - (
+                        absolute_start_pos + start_len)
+                    state["check_count_down"] = state[
+                        "thinking_token_budget"] - state["think_count"]
+                else:
+                    # Case: ...<start>...<end>...
+                    state["in_think"] = False
+                    state["think_count"] = 0
+            elif recent_start_pos >= 0:
+                # Found think start in recent tokens
                 absolute_start_pos = check_start_idx + recent_start_pos
                 state["in_think"] = True
                 state["think_count"] = current_length - (absolute_start_pos +
                                                          start_len)
-            else:
-                # Case: ...<start>...<end>...
+                state["check_count_down"] = state[
+                    "thinking_token_budget"] - state["think_count"]
+            elif recent_end_pos >= 0:
+                # Found think end in recent tokens
                 state["in_think"] = False
                 state["think_count"] = 0
-        elif recent_start_pos >= 0:
-            # Found think start in recent tokens
-            absolute_start_pos = check_start_idx + recent_start_pos
-            state["in_think"] = True
-            state["think_count"] = current_length - (absolute_start_pos +
-                                                     start_len)
-        elif recent_end_pos >= 0:
-            # Found think end in recent tokens
-            state["in_think"] = False
-            state["think_count"] = 0
-        elif state["in_think"]:
-            # Continue thinking mode, increment count by new tokens
-            state["think_count"] += len(new_tokens)
+                state["check_count_down"] = state["thinking_token_budget"]
+            elif state["in_think"]:
+                # Continue thinking mode, increment count by new tokens
+                state["think_count"] += len(new_tokens)
 
-        # Transition into end mode if thinking token limit exceeded
-        if state["in_end"]:
-            state["end_count"] += 1
-            if state["end_count"] >= len(self.think_end_token_ids):
-                state.update({"in_end": False, "end_count": 0})
-        else:
             if state["in_think"] and state["think_count"] \
                     >= state["thinking_token_budget"]:
                 state.update({
                     "in_think": False,
                     "in_end": True,
-                    "end_count": 0
+                    "end_count": 0,
+                    "check_count_down": state["thinking_token_budget"]
+                })
+        else:
+            state["end_count"] += 1
+            if state["end_count"] >= len(self.think_end_token_ids):
+                state.update({
+                    "in_end": False,
+                    "end_count": 0,
+                    "check_count_down": state["thinking_token_budget"]
                 })
 
     def is_argmax_invariant(self) -> bool:
