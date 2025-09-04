@@ -175,7 +175,10 @@ def setup_per_rank_logger(rank) -> None:
     log_file = f"{base_str}_rank_{rank}.log"
 
     log_config = copy.deepcopy(DEFAULT_LOGGING_CONFIG)
-    log_config["handlers"]["vllm_log_file"]["filename"] = log_file
+    if log_config["handlers"].get("vllm_log_file") is not None:
+        log_config["handlers"]["vllm_log_file"]["filename"] = log_file
+    else:
+        raise ValueError("vllm_log_file handler is not configured.")
     dictConfig(log_config)
 
 
