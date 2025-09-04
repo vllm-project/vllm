@@ -3,7 +3,6 @@
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING, Optional, Union
 
@@ -118,22 +117,6 @@ class HarmonyContext(ConversationContext):
         self.previous_turn = TurnTokens()
         self.is_first_turn = True
         self.is_first_token_in_message = True  # For streaming support
-
-    # TODO(yeq): unify token usage logic with streaming case
-    def _update_num_prompt_tokens(self, output: RequestOutput):
-        if output.prompt_token_ids and len(output.prompt_token_ids) > 0:
-            # NOTE: with built-in tools, there might be multiple rounds in
-            # the conversation, with the full conversation being resent
-            # as new prompt each time. Hence the sum.
-            self.num_prompt_tokens += len(output.prompt_token_ids)
-
-    def _update_num_cached_tokens(self, output: RequestOutput):
-        if output.num_cached_tokens is not None:
-            #Similar to num_prompt_tokens
-            self.num_cached_tokens += output.num_cached_tokens
-
-    def _update_num_output_tokens(self, token_ids: Sequence[int]):
-        self.num_output_tokens += len(token_ids)
 
     def _update_num_reasoning_tokens(self):
         # Count all analysis and commentary channels as reasoning tokens
