@@ -217,6 +217,31 @@ def get_config_parser(config_format: str) -> ConfigParserBase:
 
 def register_config_parser(config_format: str):
 
+    """Register a customized vllm config parser.
+    When a config format is not supported by vllm, you can register a customized
+   config parser to support it.
+    Args:
+        config_format (str): The config parser format name.
+    Examples:
+
+        >>> from vllm.transformers_utils.config import (get_config_parser,
+                                                        register_config_parser)
+        >>> from vllm.transformers_utils.config_parser_base import ConfigParserBase
+        >>>
+        >>> @register_config_parser("custom_config_parser")
+        ... class CustomConfigParser(ConfigParserBase):
+        ...     def parse(self,
+        ...            model: Union[str, Path],
+        ...            trust_remote_code: bool,
+        ...            revision: Optional[str] = None,
+        ...            code_revision: Optional[str] = None,
+        ...           **kwargs) -> tuple[dict, PretrainedConfig]:
+        ...        raise NotImplementedError
+        >>>
+        >>> type(get_config_parser("custom_config_parser"))
+        <class 'CustomConfigParser'>
+    """  # noqa: E501
+
     def _wrapper(config_parser_cls):
         if config_format in _CONFIG_FORMAT_TO_CONFIG_PARSER:
             logger.warning(
@@ -490,7 +515,7 @@ def get_config(
     if is_gguf:
         kwargs["gguf_file"] = Path(model).name
         model = Path(model).parent
-    print("lxy here")
+
     if config_format == ConfigFormat.AUTO:
         try:
             if is_gguf or file_or_path_exists(
@@ -503,8 +528,10 @@ def get_config(
             else:
                 raise ValueError(
                     "Could not detect config format for no config file found. "
-                    "Ensure your model has either config.json (HF format) "
-                    "or params.json (Mistral format).")
+                    "With ConfigFormat.AUTO, ensure your model has either"
+                    "config.json (HF format) or params.json (Mistral format)."
+                    "Otherwise please specify your_custom_config_format"
+                    "in engine args for customized config parser")
 
         except Exception as e:
             error_message = (
@@ -523,7 +550,6 @@ def get_config(
 
             raise ValueError(error_message) from e
     else:
-        # out-of-tree plugin must use string config_format
         config_format_str = config_format.value if isinstance(
             config_format, ConfigFormat) else config_format
 
@@ -535,93 +561,6 @@ def get_config(
         code_revision=code_revision,
         **kwargs,
     )
-    """
-    if config_format == ConfigFormat.HF:
-        kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
-        config_dict, _ = PretrainedConfig.get_config_dict(
-            model,
-            revision=revision,
-            code_revision=code_revision,
-            token=_get_hf_token(),
-            **kwargs,
-        )
-        # Use custom model class if it's in our registry
-        model_type = config_dict.get("model_type")
-        if model_type is None:
-            model_type = "speculators" if config_dict.get(
-                "speculators_config") is not None else model_type
-
-        if model_type in _CONFIG_REGISTRY:
-            config_class = _CONFIG_REGISTRY[model_type]
-            config = config_class.from_pretrained(
-                model,
-                revision=revision,
-                code_revision=code_revision,
-                token=_get_hf_token(),
-                **kwargs,
-            )
-        else:
-            try:
-                kwargs = _maybe_update_auto_config_kwargs(
-                    kwargs, model_type=model_type)
-                config = AutoConfig.from_pretrained(
-                    model,
-                    trust_remote_code=trust_remote_code,
-                    revision=revision,
-                    code_revision=code_revision,
-                    token=_get_hf_token(),
-                    **kwargs,
-                )
-            except ValueError as e:
-                if (not trust_remote_code
-                        and "requires you to execute the configuration file"
-                        in str(e)):
-                    err_msg = (
-                        "Failed to load the model config. If the model "
-                        "is a custom model not yet available in the "
-                        "HuggingFace transformers library, consider setting "
-                        "`trust_remote_code=True` in LLM or using the "
-                        "`--trust-remote-code` flag in the CLI.")
-                    raise RuntimeError(err_msg) from e
-                else:
-                    raise e
-        config = _maybe_remap_hf_config_attrs(config)
-
-    elif config_format == ConfigFormat.MISTRAL:
-        # This function loads a params.json config which
-        # should be used when loading models in mistral format
-        config_dict = _download_mistral_config_file(model, revision)
-        if (max_position_embeddings :=
-                config_dict.get("max_position_embeddings")) is None:
-            max_position_embeddings = _maybe_retrieve_max_pos_from_hf(
-                model, revision, **kwargs)
-            config_dict["max_position_embeddings"] = max_position_embeddings
-
-        from vllm.transformers_utils.configs.mistral import adapt_config_dict
-
-        config = adapt_config_dict(config_dict)
-
-        # Mistral configs may define sliding_window as list[int]. Convert it
-        # to int and add the layer_types list[str] to make it HF compatible
-        if ((sliding_window := getattr(config, "sliding_window", None))
-                and isinstance(sliding_window, list)):
-            pattern_repeats = config.num_hidden_layers // len(sliding_window)
-            layer_types = sliding_window * pattern_repeats
-            config.layer_types = [
-                "full_attention" if layer_type is None else "sliding_attention"
-                for layer_type in layer_types
-            ]
-            config.sliding_window = next(filter(None, sliding_window), None)
-    else:
-        supported_formats = [
-            fmt.value for fmt in ConfigFormat if fmt != ConfigFormat.AUTO
-        ]
-        raise ValueError(
-            f"Unsupported config format: {config_format}. "
-            f"Supported formats are: {', '.join(supported_formats)}. "
-            f"Ensure your model uses one of these configuration formats "
-            f"or specify the correct format explicitly.")
-    """
     # Special architecture mapping check for GGUF models
     if is_gguf:
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
