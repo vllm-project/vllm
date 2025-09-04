@@ -295,25 +295,6 @@ def parse_remaining_state(
             status=None,
         )
         return [reasoning_item]
-    elif parser.current_channel == "commentary":
-        # For commentary channel, handle similar to analysis channel
-        # but be more conservative about content validation
-        if parser.current_content:
-            # Check if content looks like it might contain message markers
-            content_stripped = parser.current_content.strip()
-            if (content_stripped and not content_stripped.startswith('<|')
-                    and '<|' not in content_stripped):
-                reasoning_item = ResponseReasoningItem(
-                    id=f"rs_{random_uuid()}",
-                    summary=[],
-                    type="reasoning",
-                    content=[
-                        ResponseReasoningTextContent(
-                            text=parser.current_content, type="reasoning_text")
-                    ],
-                    status=None,
-                )
-        return [reasoning_item]
     elif parser.current_channel == "final":
         output_text = ResponseOutputText(
             text=parser.current_content,
