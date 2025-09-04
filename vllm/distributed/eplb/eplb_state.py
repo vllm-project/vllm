@@ -43,7 +43,7 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .rebalance_execute import rearrange_expert_weights_inplace
 from .eplb_policy.policy_factory import PolicyFactory
-from .eplb_policy.policy_abstract import EplbPolicy
+from .eplb_policy.abstract_policy import EplbPolicy
 
 logger = init_logger(__name__)
 

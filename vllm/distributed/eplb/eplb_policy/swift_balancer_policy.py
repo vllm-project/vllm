@@ -1085,12 +1085,14 @@ class SwiftBalancer(EplbPolicy):
         # Processing and analyzing data
         info = DynamicTable()
         info.workload_table = weight.numpy()
+        if info.workload_table is None:
+            raise ValueError(" workload_table cannot be None.")
         layer_num = info.workload_table.shape[0]
         info.placement_table = old_global_expert_indices.numpy().reshape(
             layer_num, num_ranks, -1
             )
-        if info.workload_table is None or info.placement_table is None:
-            raise ValueError(" workload_table or placement_table cannot be None.")
+        if info.placement_table is None:
+            raise ValueError(" placement_table cannot be None.")
         expert_ids, counts = np.unique(info.placement_table[0],
                                        return_counts=True)
         num_redundancy_expert = self.get_redundant_num(counts)
