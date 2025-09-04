@@ -344,6 +344,7 @@ class InductorAdaptor(CompilerInterface):
                 inductor_compiled_graph = output
                 if inductor_compiled_graph is not None:
                     nonlocal file_path
+                    breakpoint()
                     compiled_fn = inductor_compiled_graph.current_callable
                     file_path = compiled_fn.__code__.co_filename  # noqa
                     if not file_path.startswith(self.base_cache_dir):
