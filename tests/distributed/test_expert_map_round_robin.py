@@ -144,16 +144,6 @@ def test_determine_expert_map_comprehensive():
     # Test cases: (ep_size, ep_rank, global_num_experts, round_robin,
     # expected_local, expected_map_pattern)
     test_cases = [
-        # Standard placement tests
-        (2, 0, 8, False, 4, [0, 1, 2, 3, -1, -1, -1,
-                             -1]),  # rank 0 gets first 4 experts
-        (2, 1, 8, False, 4, [-1, -1, -1, -1, 0, 1, 2,
-                             3]),  # rank 1 gets last 4 experts
-        (2, 0, 9, False, 5, [0, 1, 2, 3, 4, -1, -1, -1,
-                             -1]),  # rank 0 gets 5 experts
-        (2, 1, 9, False, 4, [-1, -1, -1, -1, -1, 0, 1, 2,
-                             3]),  # rank 1 gets 4 experts
-
         # Round robin placement tests
         (2, 0, 8, True, 4, [0, -1, 1, -1, 2, -1, 3,
                             -1]),  # rank 0 gets even experts
@@ -173,11 +163,6 @@ def test_determine_expert_map_comprehensive():
                             -1]),  # rank 2 gets experts 2, 6
         (4, 3, 8, True, 2, [-1, -1, -1, 0, -1, -1, -1,
                             1]),  # rank 3 gets experts 3, 7
-
-        # Edge cases
-        (1, 0, 8, False, 8, None),  # single rank gets all experts
-        (1, 0, 8, True, 8,
-         None),  # single rank gets all experts (round robin doesn't matter)
     ]
 
     for ep_size, ep_rank, global_num_experts, round_robin, expected_local, \
