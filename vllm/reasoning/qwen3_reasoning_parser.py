@@ -149,3 +149,26 @@ class Qwen3ReasoningParser(ReasoningParser):
 
         final_content = content or None
         return reasoning_content, final_content
+
+    def count_reasoning_tokens(self, input_ids: list[int]) -> int:
+        """
+        Count the number of reasoning tokens in the input_ids.
+
+        The reasoning tokens are the tokens between the <think> and </think>
+        tokens in the input_ids.
+
+        Parameters:
+        input_ids: list[int]
+            The input_ids of the model output.
+
+        Returns:
+        int
+            The number of reasoning tokens in the input_ids.
+        """
+        if self.think_start_token_id not in input_ids:
+            return 0
+        if self.think_end_token_id not in input_ids:
+            return len(input_ids) - input_ids.index(self.think_start_token_id)
+        else:
+            return (input_ids.index(self.think_end_token_id) -
+                    input_ids.index(self.think_start_token_id) - 1)
