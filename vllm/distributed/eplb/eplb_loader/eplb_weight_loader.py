@@ -339,6 +339,7 @@ class EplbWeightLoader(BaseLoader):
         self.layer_id = layer_id
         self.comm_op_list = []
         self.prepare_send(expert_send_info, layer_id)
+        self.prepare_recv(expert_recv_info, layer_id)
 
 
 
