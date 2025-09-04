@@ -69,6 +69,9 @@ def run_test(
         vllm_runner_kwargs_["tokenizer_mode"] = model_info.tokenizer_mode
     if model_info.hf_overrides:
         vllm_runner_kwargs_["hf_overrides"] = model_info.hf_overrides
+    if model_info.skip_tokenizer_init:
+        vllm_runner_kwargs_[
+            "skip_tokenizer_init"] = model_info.skip_tokenizer_init
 
     if vllm_runner_kwargs:
         vllm_runner_kwargs_.update(vllm_runner_kwargs)
