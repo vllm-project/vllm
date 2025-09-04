@@ -629,6 +629,9 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         """
         Add a multi-modal item to the current prompt and returns the
         placeholder string to use, if any.
+
+        An optional uuid can be added which serves as a unique identifier of the
+        media. 
         """
         input_modality = modality.replace("_embeds", "")
         num_items = len(self._items_by_modality[modality]) + 1
@@ -1258,31 +1261,33 @@ def _parse_chat_message_content_part(
     # For media items, if a user has provided one, use it. Otherwise, insert
     # a placeholder empty uuid.
     uuid = part.get("uuid", None)
+    if uuid is not None:
+        uuid = str(uuid)
 
     modality = None
     if part_type == "image_pil":
         image_content = cast(Image.Image, content)
-        mm_parser.parse_image_pil(image_content, str(uuid) if uuid else None)
+        mm_parser.parse_image_pil(image_content, uuid)
         modality = "image"
     elif part_type in ("image_url", "input_image"):
         str_content = cast(str, content)
-        mm_parser.parse_image(str_content, str(uuid) if uuid else None)
+        mm_parser.parse_image(str_content, uuid)
         modality = "image"
     elif part_type == "image_embeds":
         content = cast(Union[str, dict[str, str]], content)
-        mm_parser.parse_image_embeds(content, str(uuid) if uuid else None)
+        mm_parser.parse_image_embeds(content, uuid)
         modality = "image"
     elif part_type == "audio_url":
         str_content = cast(str, content)
-        mm_parser.parse_audio(str_content, str(uuid) if uuid else None)
+        mm_parser.parse_audio(str_content, uuid)
         modality = "audio"
     elif part_type == "input_audio":
         dict_content = cast(InputAudio, content)
-        mm_parser.parse_input_audio(dict_content, str(uuid) if uuid else None)
+        mm_parser.parse_input_audio(dict_content, uuid)
         modality = "audio"
     elif part_type == "video_url":
         str_content = cast(str, content)
-        mm_parser.parse_video(str_content, str(uuid) if uuid else None)
+        mm_parser.parse_video(str_content, uuid)
         modality = "video"
     else:
         raise NotImplementedError(f"Unknown part type: {part_type}")
