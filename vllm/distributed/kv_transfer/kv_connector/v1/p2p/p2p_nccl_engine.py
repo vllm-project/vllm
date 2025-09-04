@@ -187,7 +187,7 @@ class P2pNcclEngine:
                 sock.setsockopt(zmq.LINGER, 0)
                 sock.close()
             except Exception as e:
-                logger.debug("Error closing stale ZMQ socket: %s", e)
+                logger.exception("Error closing stale ZMQ socket: %s", e)
 
 
     def create_connect(self, remote_address: typing.Optional[str] = None):
@@ -408,7 +408,7 @@ class P2pNcclEngine:
                     # we might not be able to reply.
                     # The sender's timeout will handle this.
                     tensor = None
-                    logger.warning(
+                    logger.error(
                         "🔴[PUT] Recv Tensor failed after sending OK, %s👈%s. "
                         "Cleaning up connection.",
                         self.zmq_address,
