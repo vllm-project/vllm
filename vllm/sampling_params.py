@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
 
@@ -94,6 +95,7 @@ class RequestOutputKind(Enum):
 
 
 class SamplingParams(
+        PydanticMsgspecMixin,
         msgspec.Struct,
         omit_defaults=True,  # type: ignore[call-arg]
         # required for @cached_property.
@@ -192,7 +194,8 @@ class SamplingParams(
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
     output_text_buffer_length: int = 0
-    _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
+    _all_stop_token_ids: Optional[set[int]] = msgspec.field(
+        default_factory=set)
 
     # Fields used to construct logits processors
     guided_decoding: Optional[GuidedDecodingParams] = None
