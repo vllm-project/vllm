@@ -82,7 +82,7 @@ class KVConnectorModelRunnerMixin:
             scheduler_output) if has_kv_transfer_group() else nullcontext()
 
     # This context manager must be used within an active forward context.
-    # It encapsulates the entire KV conector lifecycle within execute_model
+    # It encapsulates the entire KV connector lifecycle within execute_model
     @staticmethod
     @contextmanager
     def _get_kv_connector_output(
