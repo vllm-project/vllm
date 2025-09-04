@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Optional, Union
 
+import vllm.envs as envs
 from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
 from vllm.logger import init_logger
@@ -12,7 +13,8 @@ logger = init_logger(__name__)
 
 class CudagraphDispatcher:
     """
-    Runtime cudagraph dispatcher to dispach keys for multiple set of cudagraphs.
+    Runtime cudagraph dispatcher to dispatch keys for multiple set of
+    cudagraphs.
 
     The dispatcher stores two sets of dispatch keys, one for PIECEWISE and one
     for FULL cudagraph runtime mode. The keys are initialized depending on 
@@ -22,7 +24,7 @@ class CudagraphDispatcher:
 
     At runtime, the dispatch method generates the runtime cudagraph mode (FULL, 
     PIECEWISE, or NONE for no cudagraph) and the valid key (batch descriptor)
-    based on the input key. After dispatching (commuicate via forward context), 
+    based on the input key. After dispatching (communicate via forward context),
     the cudagraph wrappers will trust the dispatch key to do either capturing
     or replaying (if mode matched), or pass through to the underlying runnable 
     without cudagraph (if mode no match or mode is NONE).
@@ -202,7 +204,8 @@ class CudagraphDispatcher:
 
         # Compute padded tokens
         cudagraph_padded = False
-        if self.cudagraph_mode != CUDAGraphMode.NONE:
+        if self.cudagraph_mode != CUDAGraphMode.NONE and\
+            not envs.VLLM_DISABLE_PAD_FOR_CUDAGRAPH:
             num_input_tokens, cudagraph_padded = self.padded_num_tokens(
                 num_scheduled_tokens, uniform_decode, uniform_query_len)
         else:

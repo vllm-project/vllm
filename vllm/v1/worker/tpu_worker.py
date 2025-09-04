@@ -250,7 +250,7 @@ class TPUWorker:
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
         output = self.model_runner.execute_model(scheduler_output)
-        # every worker's output is needed when kv_transfer_group is setup
+        # every worker's output is needed when kv_transfer_group is set up
         return output if self.is_driver_worker or has_kv_transfer_group(
         ) else None
 
