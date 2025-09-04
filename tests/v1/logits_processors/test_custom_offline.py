@@ -66,7 +66,8 @@ def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
     llm_ref = LLM(model=MODEL_NAME, gpu_memory_utilization=0.1)
 
     # Run inference with logitproc loaded
-    outputs_logitproc = llm_logitproc.generate(prompts, sampling_params_list)
+    outputs_logitproc = llm_logitproc.generate(
+        prompts, sampling_params_list + sampling_params_list)
 
     # Reference run
     outputs_ref = llm_ref.generate(prompts, sampling_params_list)

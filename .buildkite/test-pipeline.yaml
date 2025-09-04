@@ -507,11 +507,11 @@ steps:
   - vllm/
   - tests/models
   commands:
-    - pytest -v -s models/test_transformers.py
-    - pytest -v -s models/test_registry.py
-    - pytest -v -s models/test_utils.py
-    - pytest -v -s models/test_vision.py
-    - pytest -v -s models/test_initialization.py
+    - pytest -v -s --durations=100 models/test_transformers.py
+    - pytest -v -s --durations=100 models/test_registry.py
+    - pytest -v -s --durations=100 models/test_utils.py
+    - pytest -v -s --durations=100 models/test_vision.py
+    - pytest -v -s --durations=100 models/test_initialization.py
 
 - label: Language Models Test (Standard)
   mirror_hardwares: [amdexperimental]
@@ -522,7 +522,7 @@ steps:
   - tests/models/language
   commands:
     - pip freeze | grep -E 'torch'
-    - pytest -v -s models/language -m core_model
+    - pytest -v -s --durations=100 models/language -m core_model
 
 - label: Language Models Test (Hybrid) # 35 min
   mirror_hardwares: [amdexperimental]
@@ -536,7 +536,7 @@ steps:
     # Note: also needed to run plamo2 model in vLLM
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.2.5'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
-    - pytest -v -s models/language/generation -m hybrid_model
+    - pytest -v -s --durations=100 models/language/generation -m hybrid_model
 
 - label: Language Models Test (Extended Generation) # 1hr20min
   mirror_hardwares: [amdexperimental]
