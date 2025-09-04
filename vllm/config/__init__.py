@@ -753,7 +753,9 @@ class ModelConfig:
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
         )
-        self.head_dtype: torch.dtype = self._get_head_dtype()
+        self.head_dtype = _get_head_dtype(config=self.hf_config,
+                                          dtype=self.dtype,
+                                          runner_type=self.runner_type)
 
         # Interleaved attention is not supported by some backends in V0
         if (not self.disable_sliding_window
@@ -1778,28 +1780,6 @@ class ModelConfig:
             encoder_config=self.encoder_config)
         logger.info("Using max model len %s", max_model_len)
         return max_model_len
-
-    def _get_head_dtype(self) -> torch.dtype:
-        if torch.float32 not in current_platform.supported_dtypes:
-            return self.dtype
-
-        if envs.VLLM_USING_FP32_HEAD:
-            return torch.float32
-
-        if envs.VLLM_USING_FP32_HEAD is False:
-            return self.dtype
-
-        if getattr(self.hf_config, "fp32_head", False):
-            return torch.float32
-
-        # The pooling model defaults to using fp32 head,
-        # you can use VLLM_USING_FP32_HEAD = 0 to disable it.
-        if self.runner_type == "pooling":
-            return torch.float32
-
-        # The generate model defaults to not using fp32 head,
-        # you can use  VLLM_USING_FP32_HEAD = 1 to enable it.
-        return self.dtype
 
 
 @config
@@ -2915,6 +2895,33 @@ def _get_and_verify_dtype(
             logger.warning("Casting %s to %s.", config_dtype, torch_dtype)
 
     return torch_dtype
+
+
+def _get_head_dtype(
+        config: PretrainedConfig,
+        dtype: torch.dtype,
+    runner_type: str
+) -> torch.dtype:
+    if torch.float32 not in current_platform.supported_dtypes:
+        return dtype
+
+    if envs.VLLM_USING_FP32_HEAD:
+        return torch.float32
+
+    if envs.VLLM_USING_FP32_HEAD is False:
+        return dtype
+
+    if getattr(config, "fp32_head", False):
+        return torch.float32
+
+    # The pooling model defaults to using fp32 head,
+    # you can use VLLM_USING_FP32_HEAD = 0 to disable it.
+    if runner_type == "pooling":
+        return torch.float32
+
+    # The generate model defaults to not using fp32 head,
+    # you can use  VLLM_USING_FP32_HEAD = 1 to enable it.
+    return dtype
 
 
 def _get_and_verify_max_len(

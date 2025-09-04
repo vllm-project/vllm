@@ -362,8 +362,7 @@ class PoolerIdentity(PoolerActivation):
 class PoolerNormalize(PoolerActivation):
 
     def forward_chunk(self, pooled_data: torch.Tensor) -> torch.Tensor:
-        x = F.normalize(pooled_data, p=2, dim=-1)
-        return x
+        return F.normalize(pooled_data, p=2, dim=-1)
 
 
 class PoolerMultiLabelClassify(PoolerActivation):
