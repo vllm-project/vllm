@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for v1 attention backends without GPUModelRunner dependency."""
-
+from typing import Optional
 import pytest
 import torch
 
@@ -204,7 +204,8 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
                           common_attn_metadata: CommonAttentionMetadata,
                           query: torch.Tensor, key: torch.Tensor,
                           value: torch.Tensor,
-                          kv_cache: torch.Tensor) -> torch.Tensor:
+                          kv_cache: torch.Tensor,
+                          sliding_window: Optional[int] = None,) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
     # Handle special case for FLEX_ATTENTION_SLOW
@@ -268,7 +269,7 @@ def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
         scale=scale,
         num_kv_heads=num_kv_heads,
         alibi_slopes=None,
-        sliding_window=None,
+        sliding_window=sliding_window,
         kv_cache_dtype="auto",
     )
 
@@ -476,3 +477,198 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         assert all_close, (
             f"[{backend_name}] output differs from SDPA baseline. "
             f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})")
+
+
+SLIDING_WINDOW_BACKENDS_TO_TEST = [
+    _Backend.FLASH_ATTN_VLLM_V1,
+    _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN_VLLM_V1,
+    "FLEX_ATTENTION_SLOW"]
+
+
+@pytest.mark.parametrize("batch_spec_name", ["small_decode", "small_prefill"])
+@pytest.mark.parametrize("model", ["microsoft/Phi-tiny-MoE-instruct"])
+def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
+    """
+    Test that all backends produce similar outputs to a reference implementation
+    using torch.nn.functional.scaled_dot_product_attention.
+
+    This test works by:
+    1. Generating a batch of sequences with specified context and query lengths.
+    2. Computing a ground-truth attention output using torch.sdpa on
+       contiguous Q, K, and V tensors.
+    3. Simulating vLLM's paged KV cache: It takes the context portion of the
+       K/V tensors and manually places them into a paged buffer according to
+       the test's (randomly generated) block table.
+    4. Running each vLLM attention backend with the new queries and the
+       simulated paged KV cache.
+    5. Comparing the vLLM backend's output to the ground-truth SDPA output.
+    """
+    batch_spec = BATCH_SPECS[batch_spec_name]
+    vllm_config = create_vllm_config(model_name=model,
+                                     max_model_len=max(batch_spec.seq_lens),
+                                     num_gpu_blocks=8192)
+    device = torch.device("cuda:0")
+
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+
+    # 1. Setup
+    batch_size = batch_spec.batch_size
+    seq_lens = batch_spec.seq_lens
+    query_lens = batch_spec.query_lens
+    num_q_heads = vllm_config.model_config.get_num_attention_heads(
+        vllm_config.parallel_config)
+    num_kv_heads = vllm_config.model_config.get_num_kv_heads(
+        vllm_config.parallel_config)
+    head_size = vllm_config.model_config.get_head_size()
+    sliding_window = vllm_config.model_config.get_sliding_window()
+    dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
+    block_size = vllm_config.cache_config.block_size
+    scale = 1.0 / (head_size**0.5)
+
+    # 2. Generate data and compute SDPA reference output
+    all_q_vllm, all_k_vllm, all_v_vllm = [], [], []
+    all_sdpa_outputs = []
+    k_contexts, v_contexts = [], []
+
+    for i in range(batch_size):
+        s_len = seq_lens[i]
+        q_len = query_lens[i]
+        context_len = s_len - q_len
+
+        # Generate Q, K, V for the whole sequence to be used in SDPA
+        q = torch.randn(q_len,
+                        num_q_heads,
+                        head_size,
+                        dtype=dtype,
+                        device=device)
+        k_full = torch.randn(s_len,
+                             num_kv_heads,
+                             head_size,
+                             dtype=dtype,
+                             device=device)
+        v_full = torch.randn(s_len,
+                             num_kv_heads,
+                             head_size,
+                             dtype=dtype,
+                             device=device)
+
+        # SDPA expects (N, H, L, D), so unsqueeze batch and permute
+        q_sdpa_in = q.unsqueeze(0).transpose(1, 2)
+        k_sdpa_in = k_full.unsqueeze(0).transpose(1, 2)
+        v_sdpa_in = v_full.unsqueeze(0).transpose(1, 2)
+
+        if num_q_heads != num_kv_heads:
+            assert num_q_heads % num_kv_heads == 0, (
+                f"num_q_heads ({num_q_heads}) must be divisible by "
+                f"num_kv_heads ({num_kv_heads})")
+            repeats = num_q_heads // num_kv_heads
+            k_sdpa_in = k_sdpa_in.repeat_interleave(repeats, dim=1)
+            v_sdpa_in = v_sdpa_in.repeat_interleave(repeats, dim=1)
+
+        # Create sliding window mask: query token i attends to positions 0 to
+        #  (context_len + i)
+        kv_len = s_len
+        empty_mask = torch.ones(q_len, kv_len, device=device)
+        attn_mask = torch.triu(empty_mask, diagonal=kv_len - q_len + 1).bool()
+        if sliding_window is not None:
+            sliding_window_mask = torch.triu(empty_mask,
+                                             diagonal=kv_len -
+                                             (q_len + sliding_window) +
+                                             1).bool().logical_not()
+            attn_mask |= sliding_window_mask
+
+        sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
+            q_sdpa_in,
+            k_sdpa_in,
+            v_sdpa_in,
+            attn_mask=attn_mask,
+            scale=scale,
+            enable_gqa=True)
+
+        # Convert back to (L, H, D)
+        all_sdpa_outputs.append(sdpa_out_i.transpose(1, 2).squeeze(0))
+
+        # Inputs for vLLM backends are just the new tokens
+        all_q_vllm.append(q)
+        all_k_vllm.append(k_full[context_len:])
+        all_v_vllm.append(v_full[context_len:])
+
+        # Contextual K/V data used to populate the paged cache
+        k_contexts.append(k_full[:context_len])
+        v_contexts.append(v_full[:context_len])
+
+    query_vllm = torch.cat(all_q_vllm, dim=0)
+    key_vllm = torch.cat(all_k_vllm, dim=0)
+    value_vllm = torch.cat(all_v_vllm, dim=0)
+    sdpa_output = torch.cat(all_sdpa_outputs, dim=0)
+
+    common_attn_metadata = create_common_attn_metadata(
+        batch_spec, vllm_config.cache_config.block_size, device)
+
+    # 3. Simulate Paged KV Cache and a realistic slot_mapping
+    kv_cache = create_and_prepopulate_kv_cache(
+        k_contexts=k_contexts,
+        v_contexts=v_contexts,
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        device=device,
+        num_blocks=vllm_config.cache_config.num_gpu_blocks or 1000,
+        common_attn_metadata=common_attn_metadata,
+        randomize_blocks=True)
+
+    # 4. Run vLLM backends and compare
+    # Note: flex_attention has known Triton kernel compatibility issues
+    # with test infrastructures
+    for backend_name in SLIDING_WINDOW_BACKENDS_TO_TEST:
+        # FlashAttentionm + FlexAttention:
+        #   [2, num_blocks, block_size, num_kv_heads, head_size]
+        # FlashInfer:
+        #   [num_blocks, 2, block_size, num_kv_heads, head_size]
+        # Select the appropriate KV cache format for each backend
+        kv_cache_for_backend = kv_cache
+        if backend_name == _Backend.FLASHINFER_VLLM_V1:
+            kv_cache_for_backend = kv_cache.transpose(0, 1)
+
+            # For FlashInfer default to HND layout and
+            kv_cache_for_backend = kv_cache_for_backend.transpose(
+                2, 3).contiguous().transpose(2, 3)
+            set_kv_cache_layout("HND")
+
+        backend_output = run_attention_backend(backend_name, kv_cache_spec,
+                                               ["placeholder"], vllm_config,
+                                               device, common_attn_metadata,
+                                               query_vllm, key_vllm,
+                                               value_vllm,
+                                               kv_cache_for_backend,
+                                               sliding_window=sliding_window)
+
+        # Check shape and dtype consistency
+        assert backend_output.shape == sdpa_output.shape, (
+            f"[{backend_name}] shape {backend_output.shape} != "
+            f"SDPA shape {sdpa_output.shape}")
+        assert backend_output.dtype == sdpa_output.dtype, (
+            f"[{backend_name}] dtype {backend_output.dtype} != "
+            f"SDPA dtype {sdpa_output.dtype}")
+
+        assert torch.isfinite(backend_output).all(), (
+            f"[{backend_name}] produced non-finite values")
+
+        # Check numerical similarity
+        rtol = 1e-2
+        atol = 5e-3
+
+        # max_diff = torch.max(torch.abs(backend_output - sdpa_output)).item()
+        # max_rel_diff = torch.max(
+        #     torch.abs(backend_output - sdpa_output) /
+        #     torch.abs(sdpa_output)).item()
+        print(backend_output, sdpa_output)
+        torch.testing.assert_close(backend_output,
+                                   sdpa_output,
+                                   rtol=rtol,
+                                   atol=atol)
+
+        # assert all_close, (
+        #     f"[{backend_name}] output differs from SDPA baseline. "
+        #     f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})")
