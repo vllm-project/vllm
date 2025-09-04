@@ -92,13 +92,13 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
     """
 
     def __init__(self, quant_config: PTPCFp8Config):
+        assert current_platform.is_rocm(), \
+            "PTPCFp8LinearMethod is only supported on ROCm."
         super().__init__(quant_config=quant_config)
         # Force weight quantization
         self.quant_config.is_checkpoint_fp8_serialized = False
         self.fp8_linear = Fp8LinearOp(
-            act_quant_static=False,
-            act_quant_group_shape=GroupShape.PER_TOKEN,
-            force_fp8_e4m3fnuz=True)
+            act_quant_static=False, act_quant_group_shape=GroupShape.PER_TOKEN)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data,
