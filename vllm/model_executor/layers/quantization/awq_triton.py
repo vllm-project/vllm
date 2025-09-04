@@ -19,7 +19,7 @@ def awq_dequantize_kernel(
         num_rows,  # input num rows in qweight
         BLOCK_SIZE_X: tl.constexpr,
         BLOCK_SIZE_Y: tl.constexpr):
-    # Setup the pids.
+    # Set up the pids.
     pid_x = tl.program_id(axis=0)
     pid_y = tl.program_id(axis=1)
 

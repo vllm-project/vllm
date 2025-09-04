@@ -822,7 +822,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[T], Generic[T]):
             and context_lens_tensor is not None \
             and context_lens_tensor[:self.num_prefills].max() > 0:
 
-            # NOTE: it is recommend you read the `Chunked Prefill` section in
+            # NOTE: it is recommended you read the `Chunked Prefill` section in
             # the comment at the top of the file before trying to understand
             # the following code
 
