@@ -3032,6 +3032,8 @@ class GenerateRequest(BaseModel):
     """The token ids to generate text from."""
 
     # features: MultiModalFeatureSpec
+    # TODO: waiting on Renderer to be implemented and have a better idea of the
+    # ser overhead here
     features: Optional[str] = None
     """The processed MM inputs for the model."""
 
