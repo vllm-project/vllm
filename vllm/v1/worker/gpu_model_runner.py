@@ -1582,16 +1582,26 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **self._init_model_kwargs(num_scheduled_tokens),
                 **self._extract_mm_kwargs(scheduler_output),
             }
-        elif (self.enable_prompt_embeds
-              and self.is_inputs_embeds.gpu[:num_scheduled_tokens].any()
-              and get_pp_group().is_first_rank):
+        elif (self.enable_prompt_embeds and get_pp_group().is_first_rank):
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.
+            # TODO(qthequartermasterman): Since even when prompt embeds are
+            # enabled, (a) not all requests will use prompt embeds, and (b)
+            # after the initial prompt is processed, the rest of the generated
+            # tokens will be token ids, it is not desirable to have the
+            # embedding layer outside of the CUDA graph all the time. The v0
+            # engine avoids this by "double compiling" the CUDA graph, once
+            # with input_ids and again with inputs_embeds, for all num_tokens.
+            # If a batch only has token ids, then including the embedding layer
+            # in the CUDA graph will be more performant (like in the else case
+            # below).
             token_ids_idx = self.is_inputs_embeds.gpu[:num_scheduled_tokens] \
                 .logical_not() \
                 .nonzero(as_tuple=False) \
                 .squeeze(1)
             # Some tokens ids may need to become embeds
+            # We use index_select/index_copy_ instead of slicing to make sure
+            # the copy happens in place.
             if token_ids_idx.numel() > 0:
                 token_ids = self.input_ids.gpu.index_select(0, token_ids_idx)
                 tokens_to_embeds = self.model.get_input_embeddings(
@@ -2400,6 +2410,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     **self._init_model_kwargs(num_tokens),
                     **self._dummy_mm_kwargs(num_reqs),
                 }
+            elif self.enable_prompt_embeds:
+                input_ids = None
+                inputs_embeds = self.inputs_embeds.gpu[:num_tokens]
+                model_kwargs = self._init_model_kwargs(num_tokens)
             else:
                 input_ids = self.input_ids.gpu[:num_tokens]
                 inputs_embeds = None
