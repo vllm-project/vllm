@@ -618,7 +618,7 @@ class FlexAttentionMetadataBuilder(
 
 
 class FlexAttentionImpl(AttentionImpl):
-    sliding_window: Optional[tuple[int, int]]
+    sliding_window: Optional[int]
     alibi_slopes: Optional[torch.Tensor]
     logits_soft_cap: Optional[float]
 

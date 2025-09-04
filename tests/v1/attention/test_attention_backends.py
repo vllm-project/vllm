@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for v1 attention backends without GPUModelRunner dependency."""
+from functools import partial
 from typing import Optional
+
 import pytest
 import torch
-from torch.nn.attention.flex_attention import flex_attention, create_block_mask
+from torch.nn.attention.flex_attention import create_block_mask, flex_attention
 
 from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata,
@@ -18,9 +20,8 @@ from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
-    _Backend.FLASH_ATTN_VLLM_V1,
-    _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN_VLLM_V1, _Backend.TREE_ATTN,
-    "FLEX_ATTENTION_SLOW"
+    _Backend.FLASH_ATTN_VLLM_V1, _Backend.FLEX_ATTENTION,
+    _Backend.TRITON_ATTN_VLLM_V1, _Backend.TREE_ATTN, "FLEX_ATTENTION_SLOW"
 ]
 
 # Remove flashinfer from the list if it's not available
@@ -200,14 +201,19 @@ class MockAttentionLayer:
         self._v_scale_float = 1.0
 
 
-def run_attention_backend(backend: _Backend, kv_cache_spec: FullAttentionSpec,
-                          layer_names: list[str], vllm_config,
-                          device: torch.device,
-                          common_attn_metadata: CommonAttentionMetadata,
-                          query: torch.Tensor, key: torch.Tensor,
-                          value: torch.Tensor,
-                          kv_cache: torch.Tensor,
-                          sliding_window: Optional[int] = None,) -> torch.Tensor:
+def run_attention_backend(
+    backend: _Backend,
+    kv_cache_spec: FullAttentionSpec,
+    layer_names: list[str],
+    vllm_config,
+    device: torch.device,
+    common_attn_metadata: CommonAttentionMetadata,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache: torch.Tensor,
+    sliding_window: Optional[int] = None,
+) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
 
     # Handle special case for FLEX_ATTENTION_SLOW
@@ -385,8 +391,17 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         def causal(b, h, q_idx, kv_idx):
             return (q_idx + offset) >= kv_idx
 
-        block_mask = create_block_mask(causal, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len)
-        sdpa_out_i = flex_attention(q_sdpa_in, k_sdpa_in, v_sdpa_in, block_mask=block_mask, scale=scale, enable_gqa=True)
+        block_mask = create_block_mask(causal,
+                                       B=None,
+                                       H=None,
+                                       Q_LEN=q_len,
+                                       KV_LEN=kv_len)
+        sdpa_out_i = flex_attention(q_sdpa_in,
+                                    k_sdpa_in,
+                                    v_sdpa_in,
+                                    block_mask=block_mask,
+                                    scale=scale,
+                                    enable_gqa=True)
 
         all_sdpa_outputs.append(sdpa_out_i.transpose(1, 2).squeeze(0))
 
@@ -460,7 +475,7 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         rtol = 1e-2
         atol = 1e-2
 
-        def error_msg(msg: str):
+        def error_msg(msg: str, backend_name: str):
             return (f"[{backend_name}] output differs from SDPA baseline. "
                     f"{msg}")
 
@@ -468,16 +483,19 @@ def test_backend_correctness(batch_spec_name: str, model: str):
                                    sdpa_output,
                                    rtol=rtol,
                                    atol=atol,
-                                   msg=error_msg)
+                                   msg=partial(error_msg,
+                                               backend_name=backend_name))
 
 
 SLIDING_WINDOW_BACKENDS_TO_TEST = [
-    _Backend.FLASH_ATTN_VLLM_V1,
-    _Backend.FLEX_ATTENTION, _Backend.TRITON_ATTN_VLLM_V1,
-    "FLEX_ATTENTION_SLOW"]
+    _Backend.FLASH_ATTN_VLLM_V1, _Backend.FLEX_ATTENTION,
+    _Backend.TRITON_ATTN_VLLM_V1, "FLEX_ATTENTION_SLOW"
+]
 
 
-@pytest.mark.parametrize("batch_spec_name", ["large_decode", "large_prefill"])
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    ["small_decode", "small_prefill", "large_decode", "large_prefill"])
 @pytest.mark.parametrize("model", ["microsoft/Phi-tiny-MoE-instruct"])
 def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
     """
@@ -561,13 +579,24 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
         # Create sliding window mask: query token i attends to positions 0 to
         #  (context_len + i)
         kv_len = s_len
+        offset = context_len
+
         def sliding_window_causal(b, h, q_idx, kv_idx):
-            causal_mask = q_idx >= kv_idx
-            window_mask = q_idx - kv_idx <= sliding_window
+            causal_mask = q_idx + offset >= kv_idx
+            window_mask = q_idx + offset - kv_idx <= sliding_window
             return causal_mask & window_mask
 
-        block_mask = create_block_mask(sliding_window_causal, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len)
-        sdpa_out_i = flex_attention(q_sdpa_in, k_sdpa_in, v_sdpa_in, block_mask=block_mask, scale=scale, enable_gqa=True)
+        block_mask = create_block_mask(sliding_window_causal,
+                                       B=None,
+                                       H=None,
+                                       Q_LEN=q_len,
+                                       KV_LEN=kv_len)
+        sdpa_out_i = flex_attention(q_sdpa_in,
+                                    k_sdpa_in,
+                                    v_sdpa_in,
+                                    block_mask=block_mask,
+                                    scale=scale,
+                                    enable_gqa=True)
 
         # Convert back to (L, H, D)
         all_sdpa_outputs.append(sdpa_out_i.transpose(1, 2).squeeze(0))
@@ -620,10 +649,13 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
                 2, 3).contiguous().transpose(2, 3)
             set_kv_cache_layout("HND")
 
-        backend_output = run_attention_backend(backend_name, kv_cache_spec,
-                                               ["placeholder"], vllm_config,
-                                               device, common_attn_metadata,
-                                               query_vllm, key_vllm,
+        backend_output = run_attention_backend(backend_name,
+                                               kv_cache_spec, ["placeholder"],
+                                               vllm_config,
+                                               device,
+                                               common_attn_metadata,
+                                               query_vllm,
+                                               key_vllm,
                                                value_vllm,
                                                kv_cache_for_backend,
                                                sliding_window=sliding_window)
@@ -640,10 +672,10 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
             f"[{backend_name}] produced non-finite values")
 
         # Check numerical similarity
-        rtol = 1e-1
-        atol = 5e-2
+        rtol = 1e-2
+        atol = 2.5e-2
 
-        def error_msg(msg: str):
+        def error_msg(msg: str, backend_name: str):
             return (f"[{backend_name}] output differs from SDPA baseline. "
                     f"{msg}")
 
@@ -651,4 +683,5 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
                                    sdpa_output,
                                    rtol=rtol,
                                    atol=atol,
-                                   msg=error_msg)
+                                   msg=partial(error_msg,
+                                               backend_name=backend_name))
