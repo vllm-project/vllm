@@ -2905,24 +2905,27 @@ def _get_head_dtype(config: PretrainedConfig, dtype: torch.dtype,
     if torch.float32 not in current_platform.supported_dtypes:
         return dtype
 
-    fp32_head: Optional[bool] = getattr(config, "fp32_head", None)
-    if fp32_head is False:
+    using_fp32_head: Optional[bool] = getattr(config, "using_fp32_head", None)
+    if using_fp32_head is False:
         return dtype
-    elif fp32_head:
+    elif using_fp32_head:
         return torch.float32
 
-    # fp32_head being True means using fp32_head
-    # fp32_head being False means fp32_head is not used
-    # fp32_head being None means choosing
+    # "head" refers to the last Linear layer(s) of an LLM,
+    # such as the lm_head in a generation model,
+    # or the score or classifier in a classification model.
+    # - using_fp32_head being True means using fp32 head
+    # - using_fp32_head being False means fp32 head is not used
+    # - using_fp32_head being None means choosing
     # the default head_dtype based on runner_type.
 
     # The pooling model defaults to using fp32 head,
-    # you can use fp32_head=False to disable it.
+    # you can use using_fp32_head=False to disable it.
     if runner_type == "pooling":
         return torch.float32
 
     # The generate model defaults to not using fp32 head,
-    # you can use fp32_head=True to enable it.
+    # you can use using_fp32_head=True to enable it.
     return dtype
 
 
