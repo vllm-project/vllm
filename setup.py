@@ -6,14 +6,10 @@ import importlib.util
 import json
 import logging
 import os
-import pprint
 import re
 import shutil
 import subprocess
 import sys
-import tempfile
-import traceback
-from dataclasses import fields
 from pathlib import Path
 from shutil import which
 
@@ -21,27 +17,8 @@ import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
-from setuptools.command.build_py import build_py
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
-
-MODEL_INFO_HEADER = [
-    "# SPDX-License-Identifier: Apache-2.0",
-    "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project",
-    "# Copyright 2023-2025 vLLM Team",
-    "# Licensed under the Apache License, Version 2.0 (the 'License');",
-    "# You may not use this file except in compliance with the License.",
-    "# You may obtain a copy of the License at http://www.apache.org/licenses/LICENSE-2.0",
-    "#",
-    "# This file was automatically generated during build",
-    "# It should not be changed manually.",
-    "",
-    "# yapf: disable",
-    "# ruff: noqa",
-    "",
-    "_MODEL_INFO = \\",
-    "",
-]
 
 
 def load_module_from_path(module_name, path):
@@ -54,67 +31,6 @@ def load_module_from_path(module_name, path):
 
 ROOT_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
-
-
-def generate_modelinfo_file(build_lib):
-    with tempfile.TemporaryDirectory() as tmpdir:
-        root_path = os.path.abspath(os.path.dirname(__file__))
-        shutil.copytree(root_path, tmpdir, dirs_exist_ok=True)
-        build_lib = os.path.join(root_path, build_lib)
-        shutil.copytree(build_lib, tmpdir, dirs_exist_ok=True)
-
-        # add local vLLM source and binaries to sys path
-        sys.path.insert(0, tmpdir)
-        try:
-            model_info_path = os.path.join(build_lib,
-                                           "vllm/model_executor/models")
-            os.makedirs(model_info_path, exist_ok=True)
-            model_info_path = os.path.join(model_info_path, "_model_info.py")
-            logger.info("Generating model info file at %s", model_info_path)
-            logger.info("Build Libraries path at %s", build_lib)
-            module_name = "vllm.model_executor.models.registry"
-            logger.info("Importing module: %s", module_name)
-            registry = importlib.import_module(module_name)
-            model_info_dict = {}
-            modules = {}
-            errors = []
-            for _, (mod_relname, cls_name) in registry._VLLM_MODELS.items():
-                try:
-                    module_name = f"vllm.model_executor.models.{mod_relname}"
-                    if module_name not in modules:
-                        logger.info("Importing module: %s", module_name)
-                        modules[module_name] = importlib.import_module(
-                            module_name)
-
-                    mod = modules[module_name]
-                    modelinfo = registry._ModelInfo.from_model_cls(
-                        getattr(mod, cls_name))
-                    mi_dict = {}
-                    for field in fields(modelinfo):
-                        mi_dict[field.name] = getattr(modelinfo, field.name)
-
-                    model_info_dict[cls_name] = {
-                        "module": mod_relname,
-                        "modelinfo": mi_dict,
-                    }
-                except Exception:
-                    errors.append(traceback.format_exc())
-
-            if len(errors) > 0:
-                raise Exception("\n--------------------\n".join(errors))
-
-            content = "\n".join(MODEL_INFO_HEADER)
-            content += pprint.pformat(model_info_dict, sort_dicts=False)
-            with open(model_info_path, "w", encoding="utf-8") as f:
-                f.write(content)
-            logger.info("Generated model info file at: %s", model_info_path)
-        except Exception:
-            logger.exception("Error building Model info dictionary")
-            raise
-        finally:
-            # restore sys.path
-            sys.path.remove(tmpdir)
-
 
 # cannot import envs directly because it depends on vllm,
 #  which is not installed yet
@@ -364,17 +280,6 @@ class cmake_build_ext(build_ext):
             os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             self.copy_file(file, dst_file)
 
-        logger.info("Generate model info after building extensions")
-        generate_modelinfo_file(self.build_lib)
-
-        # copy vllm/model_executor/models/_model_info.py from self.build_lib
-        # to current directory so that it can be included in
-        # the editable build
-        model_info_path = os.path.join(
-            self.build_lib, "vllm/model_executor/models/_model_info.py")
-        self.copy_file(model_info_path,
-                       "vllm/model_executor/models/_model_info.py")
-
 
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
@@ -386,22 +291,6 @@ class precompiled_build_ext(build_ext):
     def build_extensions(self) -> None:
         print("Skipping build_ext: using precompiled extensions.")
         return
-
-
-class GenerateModelInfoBuildPy(build_py):
-
-    def run(self):
-        super().run()
-        logger.info("Generate model info after building python")
-        generate_modelinfo_file(self.build_lib)
-
-        # copy vllm/model_executor/models/_model_info.py from self.build_lib
-        # to current directory so that it can be included in
-        # the editable build
-        model_info_path = os.path.join(
-            self.build_lib, "vllm/model_executor/models/_model_info.py")
-        self.copy_file(model_info_path,
-                       "vllm/model_executor/models/_model_info.py")
 
 
 class precompiled_wheel_utils:
@@ -749,15 +638,12 @@ if _no_device():
     ext_modules = []
 
 if not ext_modules:
-    cmdclass = {"build_py": GenerateModelInfoBuildPy}
+    cmdclass = {}
 else:
-    if envs.VLLM_USE_PRECOMPILED:
-        cmdclass = {
-            "build_py": GenerateModelInfoBuildPy,
-            "build_ext": precompiled_build_ext,
-        }
-    else:
-        cmdclass = {"build_ext": cmake_build_ext}
+    cmdclass = {
+        "build_ext":
+        precompiled_build_ext if envs.VLLM_USE_PRECOMPILED else cmake_build_ext
+    }
 
 setup(
     # static metadata should rather go in pyproject.toml

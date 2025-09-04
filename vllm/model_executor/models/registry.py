@@ -4,8 +4,11 @@
 Whenever you add an architecture to this page, please also update
 `tests/models/registry.py` with example HuggingFace models for it.
 """
+import hashlib
 import importlib
+import json
 import os
+import pathlib
 import pickle
 import subprocess
 import sys
@@ -13,13 +16,14 @@ import tempfile
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Set
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from functools import lru_cache
 from typing import Callable, Optional, TypeVar, Union
 
 import torch.nn as nn
 import transformers
 
+from vllm import envs
 from vllm.config import (ModelConfig, iter_architecture_defaults,
                          try_match_architecture_defaults)
 from vllm.logger import init_logger
@@ -423,30 +427,60 @@ class _LazyRegisteredModel(_BaseRegisteredModel):
     class_name: str
 
     def inspect_model_cls(self) -> _ModelInfo:
-        try:
-            from vllm.model_executor.models._model_info import _MODEL_INFO
-        except Exception:
-            _MODEL_INFO = {}
-            logger.exception(
-                "Error loading _ModelInfo properties, load model instead.")
+        from vllm.model_executor.model_loader.weight_utils import get_lock
 
         start_time = time.perf_counter()
-        model_info_dict = _MODEL_INFO.get(self.class_name)
-        if model_info_dict is not None:
-            mi = _ModelInfo(**model_info_dict["modelinfo"])
-            elapsed_time = time.perf_counter() - start_time
-            logger.debug(
-                "Retrieving model info properties for class %s took %.7f secs",
-                self.class_name, elapsed_time)
-            return mi
+        model_path = pathlib.Path(__file__).parent.joinpath(
+            f"{self.module_name.split('.')[-1]}.py")
+        with open(model_path, "rb") as f:
+            current_hash = hashlib.md5(f.read()).hexdigest()
 
-        # Performed in another process to avoid initializing CUDA
-        mi = _run_in_subprocess(
-            lambda: _ModelInfo.from_model_cls(self.load_model_cls()))
-        elapsed_time = time.perf_counter() - start_time
-        logger.debug("Loading model info for class %s took %.7f secs",
-                     self.class_name, elapsed_time)
-        return mi
+        cache_dir = pathlib.Path(envs.VLLM_CACHE_ROOT).joinpath("modelinfos")
+        full_class_name = f"{self.module_name}-{self.class_name}".replace(
+            ".", "-")
+        with get_lock(full_class_name, cache_dir):
+            modelinfo_path = cache_dir.joinpath(f"{full_class_name}.json")
+            try:
+                if modelinfo_path.exists():
+                    with open(modelinfo_path, encoding="utf-8") as file:
+                        mi_dict = json.load(file)
+
+                    hash = mi_dict["hash"]
+
+                    # file not changed, use saved _ModelInfo properties
+                    if hash == current_hash:
+                        mi = _ModelInfo(**mi_dict["modelinfo"])
+                        elapsed_time = time.perf_counter() - start_time
+                        logger.debug(("Retrieving model info properties "
+                                      "for class %s took %.7f secs"),
+                                     self.class_name, elapsed_time)
+                        return mi
+            except Exception:
+                logger.exception(
+                    "Error loading _ModelInfo properties, load model instead.")
+
+            # Performed in another process to avoid initializing CUDA
+            mi = _run_in_subprocess(
+                lambda: _ModelInfo.from_model_cls(self.load_model_cls()))
+
+            # save dictionary file
+            try:
+                mi_dict = {}
+                for field in fields(mi):
+                    mi_dict[field.name] = getattr(mi, field.name)
+                modelinfo_dict = {
+                    "hash": current_hash,
+                    "modelinfo": mi_dict,
+                }
+                with open(modelinfo_path, "w", encoding="utf-8") as f:
+                    json.dump(modelinfo_dict, f, indent=4)
+            except Exception:
+                logger.exception("Error saving _ModelInfo properties.")
+
+            elapsed_time = time.perf_counter() - start_time
+            logger.debug("Loading model info for class %s took %.7f secs",
+                         self.class_name, elapsed_time)
+            return mi
 
     def load_model_cls(self) -> type[nn.Module]:
         mod = importlib.import_module(self.module_name)
