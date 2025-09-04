@@ -6,7 +6,6 @@ import hashlib
 import json
 import pathlib
 from collections.abc import Mapping, Sequence, Set
-from contextlib import suppress
 from dataclasses import fields
 from typing import TYPE_CHECKING, TypeVar
 
@@ -29,8 +28,8 @@ def config(cls: ConfigT) -> ConfigT:
     A decorator that ensures all fields in a dataclass have default values
     and that each field has a docstring.
 
-    If a `ConfigT` is used as a CLI argument itself, the `type` keyword argument
-    provided by `get_kwargs` will be
+    If a `ConfigT` is used as a CLI argument itself, the `type`
+    keyword argument provided by `get_kwargs` will be
     `pydantic.TypeAdapter(ConfigT).validate_json(cli_arg)` which treats the
     `cli_arg` as a JSON string which gets validated by `pydantic`.
 
@@ -50,26 +49,38 @@ def normalize_value(x):
     if x is None or isinstance(x, (bool, int, float, str)):
         return x
 
-    # Enums by value
+    # Enums by value (normalize underlying value recursively)
     if isinstance(x, enum.Enum):
-        return x.value
+        return normalize_value(x.value)
 
-    # Callable by qualified name
+    # Callables: classes, functions (incl. lambdas/nested), callable instances
     try:
         if callable(x):
-            module = getattr(x, "__module__", "")
-            qual = getattr(x, "__qualname__", repr(x))
-            return f"{module}.{qual}" if module else qual
+            fn = getattr(x, "__func__", x)  # bound methods -> function
+            code = getattr(fn, "__code__", None)
+            base = ".".join(
+                filter(None, [
+                    getattr(fn, "__module__", ""),
+                    getattr(fn, "__qualname__", getattr(fn, "__name__", "")),
+                ])) or repr(fn)
+            if code:
+                fname = pathlib.Path(code.co_filename).name
+                return f"{base}@{fname}:{code.co_firstlineno}"
+            # classes or callable instances (no __code__)
+            t = x if isinstance(x, type) else type(x)
+            return ".".join(
+                filter(None, [
+                    getattr(t, "__module__", ""),
+                    getattr(t, "__qualname__", getattr(t, "__name__", "")),
+                ])) or repr(t)
     except Exception:
         pass
 
-    # Torch dtype without hard dependency
-    try:
-        import torch
-        if isinstance(x, torch.dtype):
-            return str(x)
-    except Exception:
-        pass
+    # Torch dtype without import (identify by type module/name)
+    t = type(x)
+    if getattr(t, "__module__", "") == "torch" and getattr(t, "__name__",
+                                                           "") == "dtype":
+        return str(x)
 
     # Bytes
     if isinstance(x, (bytes, bytearray)):
@@ -99,11 +110,9 @@ def normalize_value(x):
     if hasattr(x, "to_json_string") and callable(x.to_json_string):
         return x.to_json_string()
 
-    # Unsupported type
-    with suppress(Exception):
-        logger.debug("normalize_value: unsupported type '%s'",
-                     type(x).__name__)
-    raise TypeError
+    # Unsupported type: e.g., modules, generators, open files, or objects
+    # without stable JSON/UUID; caller may ignore or provide a serializer.
+    raise TypeError(f"normalize_value: unsupported type '{type(x).__name__}'")
 
 
 def get_hash_factors(config: ConfigT,
@@ -121,16 +130,10 @@ def get_hash_factors(config: ConfigT,
         value = getattr(config, factor, None)
         try:
             factors[factor] = normalize_value(value)
-        except TypeError:
-            # Warn once per key to surface potential under-hashing. If this is
-            # expected, add the key to `ignored_factors` explicitly.
-            with suppress(Exception):
-                logger.warning(
-                    "Hash skip: unsupported type for key '%s' — add to "
-                    "ignored_factors to silence",
-                    factor,
-                )
-            continue
+        except TypeError as e:
+            raise TypeError(
+                f"get_hash_factors: unsupported type for key '{factor}' "
+                f"({type(value).__name__})") from e
     return factors
 
 
