@@ -294,7 +294,8 @@ class DeepseekV2MoE(nn.Module):
         # TODO: We can replace the all_reduce at the end of attn with a
         # reduce_scatter instead of chunking here.
         if self.is_sequence_parallel:
-            hidden_states = torch.ops.vllm.sequence_parallel_op(hidden_states)
+            hidden_states = torch.ops.vllm.sequence_parallel_chunk(
+                hidden_states)
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
