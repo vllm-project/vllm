@@ -172,7 +172,6 @@ def make_ubatch_contexts(
     comm_stream: torch.cuda.Stream,
     forward_contexts: list[ForwardContext],
     ready_barrier: threading.Barrier,
-    device: Optional[torch.device] = None,
     schedule: str = "default",
 ) -> list[UBatchContext]:
     assert num_micro_batches == 2, "only been tested with 2 micro-batches"
@@ -186,8 +185,6 @@ def make_ubatch_contexts(
     gpu_compute_done_events = [
         torch.cuda.Event() for _ in range(num_micro_batches)
     ]
-    device = device or torch.cuda.current_device()
-    # comm_stream = torch.cuda.Stream(device)
 
     assert len(forward_contexts) == 2
 

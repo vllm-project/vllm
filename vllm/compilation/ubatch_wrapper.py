@@ -44,8 +44,7 @@ class UBatchWrapper:
         self.runnable = runnable
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
-        self.comm_stream = torch.cuda.Stream()
-        self.device = device
+        self.comm_stream = torch.cuda.Stream(device=device)
         self.ready_barrier = threading.Barrier(3)
 
         self.cudagraphs: dict[int, CUDAGraphMetaData] = {}
@@ -204,8 +203,7 @@ class UBatchWrapper:
             comm_stream=self.comm_stream,
             compute_stream=compute_stream,
             forward_contexts=forward_contexts,
-            ready_barrier=self.ready_barrier,
-            device=self.device)
+            ready_barrier=self.ready_barrier)
 
         ubatch_metadata: list[UbatchMetadata] = []
         for i, ubatch_slice in enumerate(ubatch_slices):
