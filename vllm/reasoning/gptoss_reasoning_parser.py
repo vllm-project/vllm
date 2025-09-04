@@ -57,8 +57,9 @@ class GptOssReasoningParser(ReasoningParser):
             "function should not be called.")
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+        self, model_output: str, model_output_tokens: Sequence[int],
+        request: ChatCompletionRequest
+    ) -> tuple[Optional[str], Optional[list[int]], Optional[str]]:
         raise RuntimeError(
             "GptOss model uses harmony to extract reasoning content. This "
             "function should not be called.")

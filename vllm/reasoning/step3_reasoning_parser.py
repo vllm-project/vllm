@@ -26,6 +26,7 @@ class Step3ReasoningParser(ReasoningParser):
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
+        self.think_start_token = "<think>"
         self.think_end_token = "</think>"
 
         self.reasoning_regex = re.compile(rf"(.*?){self.think_end_token}",
@@ -36,6 +37,7 @@ class Step3ReasoningParser(ReasoningParser):
                 "The model tokenizer must be passed to the ReasoningParser "
                 "constructor during construction.")
 
+        self.think_start_token_id = self.vocab.get(self.think_start_token)
         self.think_end_token_id = self.vocab.get(self.think_end_token)
         if self.think_end_token_id is None:
             raise RuntimeError(
@@ -79,13 +81,14 @@ class Step3ReasoningParser(ReasoningParser):
             return DeltaMessage(reasoning_content=delta_text)
 
     def extract_reasoning_content(
-            self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+        self, model_output: str, model_output_tokens: Sequence[int],
+        request: ChatCompletionRequest
+    ) -> tuple[Optional[str], Optional[list[int]], Optional[str]]:
 
         # Check if the model output contains the </think> token
         if self.think_end_token not in model_output:
             # If no </think> token, everything is reasoning content
-            return model_output, None
+            return model_output, None, None
         else:
             # Find the first occurrence of </think>
             end_index = model_output.find(self.think_end_token)
@@ -97,7 +100,22 @@ class Step3ReasoningParser(ReasoningParser):
             if len(content) == 0:
                 content = None
 
-            return reasoning_content, content
+            reasoning_content_tokens = None
+            if model_output_tokens:
+                try:
+                    start_idx = model_output_tokens.index(
+                        self.think_start_token_id)
+                    end_idx = model_output_tokens.index(
+                        self.think_end_token_id)
+
+                    # Check if both start and end tokens are found
+                    if start_idx != -1 and end_idx != -1:
+                        reasoning_content_tokens = \
+                            model_output_tokens[start_idx+1:end_idx]
+                except ValueError:
+                    pass
+
+            return reasoning_content, reasoning_content_tokens, content
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         return self.think_end_token_id in input_ids
