@@ -560,15 +560,6 @@ class ModelConfig:
                     "affect the random state of the Python process that "
                     "launched vLLM.", self.seed)
 
-        if self.runner != "draft":
-            # If we're not running the draft model, check for speculators config
-            # If speculators config, set model / tokenizer to be target model
-            self.model, self.tokenizer = maybe_override_with_speculators_target_model(  # noqa: E501
-                model=self.model,
-                tokenizer=self.tokenizer,
-                revision=self.revision,
-                trust_remote_code=self.trust_remote_code)
-
         # Keep set served_model_name before maybe_model_redirect(self.model)
         self.served_model_name = get_served_model_name(self.model,
                                                        self.served_model_name)
@@ -608,6 +599,15 @@ class ModelConfig:
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.maybe_pull_model_tokenizer_for_s3(self.model, self.tokenizer)
+
+        if self.runner != "draft":
+            # If we're not running the draft model, check for speculators config
+            # If speculators config, set model / tokenizer to be target model
+            self.model, self.tokenizer = maybe_override_with_speculators_target_model(  # noqa: E501
+                model=self.model,
+                tokenizer=self.tokenizer,
+                revision=self.revision,
+                trust_remote_code=self.trust_remote_code)
 
         if (backend := envs.VLLM_ATTENTION_BACKEND
             ) and backend == "FLASHINFER" and find_spec("flashinfer") is None:
