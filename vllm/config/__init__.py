@@ -171,6 +171,7 @@ class ModelImpl(str, enum.Enum):
     AUTO = "auto"
     VLLM = "vllm"
     TRANSFORMERS = "transformers"
+    TERRATORCH = "terratorch"
 
 
 def get_attr_docs(cls: type[Any]) -> dict[str, str]:
@@ -496,7 +497,9 @@ class ModelConfig:
     back to the Transformers implementation if no vLLM implementation is
     available.\n
     - "vllm" will use the vLLM model implementation.\n
-    - "transformers" will use the Transformers model implementation."""
+    - "transformers" will use the Transformers model implementation.\n
+    - "terratorch" will use the TerraTorch model implementation.
+    """
     override_attention_dtype: Optional[str] = None
     """Override dtype for attention"""
     logits_processors: Optional[list[Union[str, type[LogitsProcessor]]]] = None
@@ -3247,7 +3250,7 @@ class KVTransferConfig:
 
     kv_parallel_size: int = 1
     """The number of parallel instances for KV cache transfer. For
-    PyNcclConnector, this should be 2."""
+    P2pNcclConnector, this should be 2."""
 
     kv_ip: str = "127.0.0.1"
     """The KV connector ip, used to build distributed connection."""
