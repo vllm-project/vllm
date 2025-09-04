@@ -208,7 +208,7 @@ class EplbState:
     """
     EplbState of each expert parallel model. Key is the model config hash.
     """
-    policy : Optional[EplbPolicy] = None
+    policy: Optional[EplbPolicy] = None
     """
     Selected instance of the EPLB algorithm class
     """

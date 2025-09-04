@@ -1,7 +1,12 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from typing import Any
+
 import numpy as np
 import torch
-from typing import Any
-from .abstract_policy import EplbPolicy
+
+from .abstract import AbstractEplbPolicy
 
 
 class DynamicTable:
@@ -11,7 +16,7 @@ class DynamicTable:
     placement_table = None
 
 
-class SwiftBalancer(EplbPolicy):
+class SwiftBalancerPolicy(AbstractEplbPolicy):
 
     @staticmethod
     def safe_divide(a, b):
@@ -36,8 +41,7 @@ class SwiftBalancer(EplbPolicy):
         redundant_num_each_rank = np.sum(counts - 1)
         return redundant_num_each_rank
 
-    def calculate_initial_imbalance(self,
-                                    global_deployment,
+    def calculate_initial_imbalance(self, global_deployment,
                                     new_layer_workloads):
 
         device_num = global_deployment.shape[1]
@@ -57,8 +61,7 @@ class SwiftBalancer(EplbPolicy):
                 for expert_id in box:
                     update_workload = self.safe_divide(
                         new_layer_workloads[layer_id][expert_id],
-                        expert_num[layer_id][expert_id]
-                    )
+                        expert_num[layer_id][expert_id])
                     box_workload += update_workload
                     total_workload += update_workload
                 if cur_layer_max_workload < box_workload:
@@ -67,23 +70,15 @@ class SwiftBalancer(EplbPolicy):
 
             cur_layer_imbalance = self.safe_divide(
                 cur_layer_max_workload,
-                self.safe_divide(
-                    total_workload,
-                    device_num
-                )
-            )
+                self.safe_divide(total_workload, device_num))
             layer_imbalance.append(cur_layer_imbalance)
 
         return layer_imbalance, max_heat_per_layer
 
-    def compute_redundant_assignments(self,
-                                      weights: np.ndarray,
-                                      num_redundant_experts: int,
-                                      num_experts: int,
-                                      node_id: int,
-                                      per_node_route_expert_num: int
-                                      ) -> tuple[np.ndarray, dict]:
-
+    def compute_redundant_assignments(
+            self, weights: np.ndarray, num_redundant_experts: int,
+            num_experts: int, node_id: int,
+            per_node_route_expert_num: int) -> tuple[np.ndarray, dict]:
         """
         Each time, select the expert with the highest load,
         generate a redundant expert, and then update the load.
@@ -122,17 +117,11 @@ class SwiftBalancer(EplbPolicy):
 
         return redundancy_counts, weight_dict
 
-    def repeat_compute_redundant_assignments(self,
-                                             layer_workloads: np.ndarray,
-                                             rendun_pos: list,
-                                             num_experts: int,
-                                             num_exist_expert: list,
-                                             device_assignments: list,
-                                             device_counts: list,
-                                             expert_from_device: np.ndarray,
-                                             com_between_devices: list[
-                                                 dict[int, int]]
-                                             ):
+    def repeat_compute_redundant_assignments(
+            self, layer_workloads: np.ndarray, rendun_pos: list,
+            num_experts: int, num_exist_expert: list, device_assignments: list,
+            device_counts: list, expert_from_device: np.ndarray,
+            com_between_devices: list[dict[int, int]]):
         """
         Each time, select the hottest expert and redundantly place
         them on a card with available space, then update the data.
@@ -159,14 +148,12 @@ class SwiftBalancer(EplbPolicy):
             com_between_devices: Communication status between devices
         """
 
-        current_weights = np.zeros((num_experts,), dtype='object')
+        current_weights = np.zeros((num_experts, ), dtype='object')
         for expert_id, workload_weight in enumerate(layer_workloads):
             current_weights[expert_id] = (expert_id, workload_weight)
 
-        sorted_indices = np.argsort(
-            [w for _, w in current_weights],
-            kind='stable'
-        )[::-1]
+        sorted_indices = np.argsort([w for _, w in current_weights],
+                                    kind='stable')[::-1]
         sorted_weights = [current_weights[i] for i in sorted_indices]
 
         devices_with_slots = []
@@ -175,10 +162,8 @@ class SwiftBalancer(EplbPolicy):
                 devices_with_slots.append(device_id)
 
         while devices_with_slots:
-            sorted_indices = np.argsort(
-                [w for _, w in current_weights],
-                kind='stable'
-            )[::-1]
+            sorted_indices = np.argsort([w for _, w in current_weights],
+                                        kind='stable')[::-1]
             sorted_weights = [current_weights[i] for i in sorted_indices]
 
             for index, target_weight in enumerate(sorted_weights):
@@ -186,8 +171,7 @@ class SwiftBalancer(EplbPolicy):
 
                 if original_weight == -1:
                     raise RuntimeError(
-                        "Error:Redundant expert failure re-occurred"
-                        )
+                        "Error:Redundant expert failure re-occurred")
 
                 redundancy_successful = False
                 for cur_device_id in devices_with_slots:
@@ -197,7 +181,8 @@ class SwiftBalancer(EplbPolicy):
                         if len(rendun_pos[cur_device_id]) == 0:
                             devices_with_slots = [
                                 device_id for device_id in devices_with_slots
-                                if device_id != cur_device_id]
+                                if device_id != cur_device_id
+                            ]
 
                         device_assignments[cur_device_id][pos] = expert_id
                         device_counts[cur_device_id] += 1
@@ -206,8 +191,7 @@ class SwiftBalancer(EplbPolicy):
                             expert_id)
                         new_weight = self.safe_divide(
                             (original_weight * num_exist_expert[expert_id]),
-                            (num_exist_expert[expert_id] + 1)
-                        )
+                            (num_exist_expert[expert_id] + 1))
                         sorted_weights[index] = (expert_id, new_weight)
                         num_exist_expert[expert_id] += 1
                         redundancy_successful = True
@@ -217,24 +201,16 @@ class SwiftBalancer(EplbPolicy):
                     break
 
         sorted_indices = np.argsort(
-            [weight_id for weight_id, _ in sorted_weights],
-            kind='stable'
-        )
+            [weight_id for weight_id, _ in sorted_weights], kind='stable')
         sorted_weights = [sorted_weights[i][1] for i in sorted_indices]
 
-        return (
-            sorted_weights,
-            device_assignments,
-            device_counts,
-            com_between_devices
-        )
+        return (sorted_weights, device_assignments, device_counts,
+                com_between_devices)
 
     @staticmethod
     def prepare_expert_list(updated_weights: dict[int, float],
                             redundancy_counts: np.ndarray,
-                            num_redundant_experts: int
-                            ) -> list:
-
+                            num_redundant_experts: int) -> list:
         """
         Statistically selected redundant expert information
 
@@ -258,16 +234,14 @@ class SwiftBalancer(EplbPolicy):
                 redundant_expert_list[index] = (expert_id,
                                                 updated_weights[expert_id])
                 index += 1
-        sorted_indices = np.argsort(
-            [w for _, w in redundant_expert_list],
-            kind='stable')[::-1]
+        sorted_indices = np.argsort([w for _, w in redundant_expert_list],
+                                    kind='stable')[::-1]
         return [redundant_expert_list[i] for i in sorted_indices]
 
     @staticmethod
-    def non_redundant_expert_information(origin_deployment: np.ndarray,
-                                         updated_weights: dict[int, float],
-                                         rendun_pos: list
-                                         ) -> tuple[list, list, list, list]:
+    def non_redundant_expert_information(
+            origin_deployment: np.ndarray, updated_weights: dict[int, float],
+            rendun_pos: list) -> tuple[list, list, list, list]:
         """
         Collect information on non-experts under new load conditions
 
@@ -318,7 +292,6 @@ class SwiftBalancer(EplbPolicy):
         return device_assignments, device_weights, device_loads, device_counts
 
     def recomputing_initial_weight(self, layer_workloads, device_assignments):
-
         """
         Recalculate the load based on
         the current expert on the card.
@@ -343,25 +316,17 @@ class SwiftBalancer(EplbPolicy):
             if num_all_experts[expert_id] == 0:
                 cur_layer_workload.append(-1)
             else:
-                cur_layer_workload.append(self.safe_divide(
-                    weight,
-                    num_all_experts[expert_id])
-                )
+                cur_layer_workload.append(
+                    self.safe_divide(weight, num_all_experts[expert_id]))
 
         return cur_layer_workload, num_all_experts
 
-    def distribute_redun_experts(self,
-                                 layer_workloads: np.ndarray,
-                                 device_assignments: list,
-                                 device_weights: list,
-                                 device_loads: list,
-                                 device_counts: list,
-                                 redundant_expert_list: list,
-                                 expert_from_device: np.ndarray,
-                                 num_experts: int,
-                                 rendun_pos: list
-                                 ) -> tuple[list, list, list, list,
-                                            list[dict[int, int]]]:
+    def distribute_redun_experts(
+        self, layer_workloads: np.ndarray, device_assignments: list,
+        device_weights: list, device_loads: list, device_counts: list,
+        redundant_expert_list: list, expert_from_device: np.ndarray,
+        num_experts: int, rendun_pos: list
+    ) -> tuple[list, list, list, list, list[dict[int, int]]]:
         """
         The position of the redundant expert before
         placing the redundant expert on the card.
@@ -397,8 +362,8 @@ class SwiftBalancer(EplbPolicy):
         """
 
         num_devices = len(device_assignments)
-        com_between_devices: list[dict[int, int]] = [
-            {} for _ in range(num_devices)]
+        com_between_devices: list[dict[int,
+                                       int]] = [{} for _ in range(num_devices)]
 
         for expert_id, weight in redundant_expert_list:
             candidate = -1
@@ -423,26 +388,14 @@ class SwiftBalancer(EplbPolicy):
         if any(sublist for sublist in rendun_pos):
 
             cur_layer_workload, num_exist_expert = (
-                self.recomputing_initial_weight(
-                    layer_workloads,
-                    device_assignments)
-            )
+                self.recomputing_initial_weight(layer_workloads,
+                                                device_assignments))
 
-            (
-                update_workload,
-                device_assignments,
-                device_counts,
-                com_between_devices
-            ) = self.repeat_compute_redundant_assignments(
-                cur_layer_workload,
-                rendun_pos,
-                num_experts,
-                num_exist_expert,
-                device_assignments,
-                device_counts,
-                expert_from_device,
-                com_between_devices
-            )
+            (update_workload, device_assignments, device_counts,
+             com_between_devices) = self.repeat_compute_redundant_assignments(
+                 cur_layer_workload, rendun_pos, num_experts, num_exist_expert,
+                 device_assignments, device_counts, expert_from_device,
+                 com_between_devices)
 
             device_loads = [0] * len(device_counts)
             for device_id, device in enumerate(device_assignments):
@@ -451,24 +404,19 @@ class SwiftBalancer(EplbPolicy):
                         update_workload[expert_id])
                     device_loads[device_id] += update_workload[expert_id]
 
-        return (
-            device_assignments,
-            device_weights,
-            device_loads,
-            device_counts,
-            com_between_devices
-        )
+        return (device_assignments, device_weights, device_loads,
+                device_counts, com_between_devices)
 
-    def redundancy_again(self,
-                         layer_workloads: np.ndarray,
-                         origin_weights: np.ndarray,
-                         origin_deployment: np.ndarray,
-                         expert_from_device: np.ndarray,
-                         rendun_pos: list,
-                         node_id: int = 0,
-                         per_node_route_expert_num: int = 0
-                         ) -> tuple[list, list, list, list,
-                                    list[dict[int, int]]]:
+    def redundancy_again(
+        self,
+        layer_workloads: np.ndarray,
+        origin_weights: np.ndarray,
+        origin_deployment: np.ndarray,
+        expert_from_device: np.ndarray,
+        rendun_pos: list,
+        node_id: int = 0,
+        per_node_route_expert_num: int = 0
+    ) -> tuple[list, list, list, list, list[dict[int, int]]]:
         """
         Calculate the appropriate redundant expert
         based on the current load and assign them
@@ -503,58 +451,26 @@ class SwiftBalancer(EplbPolicy):
         for rank_empty_pos in rendun_pos:
             num_redundant_experts += len(rank_empty_pos)
 
-        (
-            redundancy_counts,
-            updated_weights
-        ) = self.compute_redundant_assignments(
-            origin_weights,
-            num_redundant_experts,
-            num_experts,
-            node_id,
-            per_node_route_expert_num
-        )
+        (redundancy_counts,
+         updated_weights) = self.compute_redundant_assignments(
+             origin_weights, num_redundant_experts, num_experts, node_id,
+             per_node_route_expert_num)
 
-        redundant_expert_list = self.prepare_expert_list(updated_weights,
-                                                         redundancy_counts,
-                                                         num_redundant_experts
-                                                         )
+        redundant_expert_list = self.prepare_expert_list(
+            updated_weights, redundancy_counts, num_redundant_experts)
 
-        (
-            device_assignments,
-            device_weights,
-            device_loads,
-            device_counts
-        ) = self.non_redundant_expert_information(
-            origin_deployment,
-            updated_weights,
-            rendun_pos
-        )
+        (device_assignments, device_weights, device_loads,
+         device_counts) = self.non_redundant_expert_information(
+             origin_deployment, updated_weights, rendun_pos)
 
-        (
-            device_assignments,
-            device_weights,
-            device_loads,
-            device_counts,
-            com_between_devices
-        ) = self.distribute_redun_experts(
-            layer_workloads,
-            device_assignments,
-            device_weights,
-            device_loads,
-            device_counts,
-            redundant_expert_list,
-            expert_from_device,
-            num_experts,
-            rendun_pos
-        )
+        (device_assignments, device_weights, device_loads, device_counts,
+         com_between_devices) = self.distribute_redun_experts(
+             layer_workloads, device_assignments, device_weights, device_loads,
+             device_counts, redundant_expert_list, expert_from_device,
+             num_experts, rendun_pos)
 
-        return (
-            device_assignments,
-            device_weights,
-            device_loads,
-            device_counts,
-            com_between_devices
-        )
+        return (device_assignments, device_weights, device_loads,
+                device_counts, com_between_devices)
 
     @staticmethod
     def generate_allocation_report(device_assignments, device_weights,
@@ -578,16 +494,13 @@ class SwiftBalancer(EplbPolicy):
         return report, max_load
 
     @staticmethod
-    def exchange_expert(cur_exchange_index, next_exchange_index,
-                        cur_device_id, next_device_id,
-                        cur_layer_result, com_between_devices):
+    def exchange_expert(cur_exchange_index, next_exchange_index, cur_device_id,
+                        next_device_id, cur_layer_result, com_between_devices):
 
         cur_device_deployment = cur_layer_result[cur_device_id][
-            'assigned_experts'
-            ]
+            'assigned_experts']
         next_device_deployment = cur_layer_result[next_device_id][
-            'assigned_experts'
-            ]
+            'assigned_experts']
 
         cur_device_weight = cur_layer_result[cur_device_id]['expert_weights']
         next_device_weight = cur_layer_result[next_device_id]['expert_weights']
@@ -602,26 +515,19 @@ class SwiftBalancer(EplbPolicy):
         cur_device_weight[cur_exchange_index] = next_expert_weight
         next_device_weight[next_exchange_index] = cur_expert_weight
 
-        cur_layer_result[cur_device_id]['total_load'] += (
-            next_expert_weight - cur_expert_weight
-            )
-        cur_layer_result[next_device_id]['total_load'] += (
-            cur_expert_weight - next_expert_weight
-            )
+        cur_layer_result[cur_device_id]['total_load'] += (next_expert_weight -
+                                                          cur_expert_weight)
+        cur_layer_result[next_device_id]['total_load'] += (cur_expert_weight -
+                                                           next_expert_weight)
 
         com_between_devices[cur_device_id][next_device_id] = next_expert_id
         com_between_devices[next_device_id][cur_device_id] = cur_expert_id
 
-    def redundant_expert_deployment(self,
-                                    layer_workloads: np.ndarray,
-                                    original_deployment: np.ndarray,
-                                    expert_from_device: np.ndarray,
-                                    nodes_num: int,
-                                    is_node_redundant: bool,
-                                    rendun_pos: list
-                                    ) -> tuple[list[dict[str, Any]], int,
-                                               list[dict[int, int]]]:
-
+    def redundant_expert_deployment(
+        self, layer_workloads: np.ndarray, original_deployment: np.ndarray,
+        expert_from_device: np.ndarray, nodes_num: int,
+        is_node_redundant: bool, rendun_pos: list
+    ) -> tuple[list[dict[str, Any]], int, list[dict[int, int]]]:
         """
         Choose different methods based on whether
         it is node internal redundancy.
@@ -647,8 +553,7 @@ class SwiftBalancer(EplbPolicy):
         route_expert_num = layer_workloads.shape[0]
         per_node_device_num = self.safe_exact_divide(device_num, nodes_num)
         per_node_route_expert_num = self.safe_exact_divide(
-            route_expert_num, nodes_num
-            )
+            route_expert_num, nodes_num)
 
         if is_node_redundant:
 
@@ -660,31 +565,24 @@ class SwiftBalancer(EplbPolicy):
 
             for node_id in range(nodes_num):
 
-                cur_node_weights = np.array(layer_workloads[
-                    node_id * per_node_route_expert_num:
-                    (node_id + 1) * per_node_route_expert_num])
+                cur_node_weights = np.array(
+                    layer_workloads[node_id *
+                                    per_node_route_expert_num:(node_id + 1) *
+                                    per_node_route_expert_num])
                 cur_original_deployment = original_deployment[
-                    node_id * per_node_device_num:
-                    (node_id + 1) * per_node_device_num]
-                cur_node_rendun_pos = rendun_pos[
-                    node_id * per_node_device_num:
-                    (node_id + 1) * per_node_device_num]
+                    node_id * per_node_device_num:(node_id + 1) *
+                    per_node_device_num]
+                cur_node_rendun_pos = rendun_pos[node_id *
+                                                 per_node_device_num:(node_id +
+                                                                      1) *
+                                                 per_node_device_num]
 
-                (
-                    cur_device_assignments,
-                    cur_device_weights,
-                    cur_device_loads,
-                    cur_device_counts,
-                    cur_com_between_devices
-                ) = self.redundancy_again(
-                    layer_workloads,
-                    cur_node_weights,
-                    cur_original_deployment,
-                    expert_from_device,
-                    cur_node_rendun_pos,
-                    node_id,
-                    per_node_route_expert_num
-                )
+                (cur_device_assignments, cur_device_weights, cur_device_loads,
+                 cur_device_counts,
+                 cur_com_between_devices) = self.redundancy_again(
+                     layer_workloads, cur_node_weights,
+                     cur_original_deployment, expert_from_device,
+                     cur_node_rendun_pos, node_id, per_node_route_expert_num)
 
                 device_assignments += cur_device_assignments
                 device_weights += cur_device_weights
@@ -694,24 +592,16 @@ class SwiftBalancer(EplbPolicy):
 
         else:
             cur_weights = np.array(layer_workloads)
-            (
-                device_assignments,
-                device_weights,
-                device_loads,
-                device_counts,
-                com_between_devices
-            ) = self.redundancy_again(
-                layer_workloads,
-                cur_weights,
-                original_deployment,
-                expert_from_device,
-                rendun_pos
-            )
+            (device_assignments, device_weights, device_loads, device_counts,
+             com_between_devices) = self.redundancy_again(
+                 layer_workloads, cur_weights, original_deployment,
+                 expert_from_device, rendun_pos)
 
-        report, max_load = self.generate_allocation_report(device_assignments,
-                                                           device_weights,
-                                                           device_loads,
-                                                           device_counts)
+        report, max_load = self.generate_allocation_report(
+            device_assignments, device_weights, device_loads, device_counts)
+
+        report, max_load = self.generate_allocation_report(
+            device_assignments, device_weights, device_loads, device_counts)
 
         return report, max_load, com_between_devices
 
@@ -720,8 +610,7 @@ class SwiftBalancer(EplbPolicy):
                                     exchange_device_result: dict[str, Any],
                                     cur_exchanged_expert_id: list,
                                     next_exchanged_expert_id: list,
-                                    ave_workload: float,
-                                    increment: float):
+                                    ave_workload: float, increment: float):
         """
         Experts from both devices attempted to conduct an exchange.
 
@@ -762,17 +651,16 @@ class SwiftBalancer(EplbPolicy):
         best_next_index = -1
         best_max_weight = max_weight
 
-        for cur_idx, (cur_weight, cur_expert) in enumerate(zip(
-                                                cur_weights, cur_expert_ids
-                                                )):
+        for cur_idx, (cur_weight,
+                      cur_expert) in enumerate(zip(cur_weights,
+                                                   cur_expert_ids)):
             if cur_expert in cur_exchanged_set:
                 continue
-            for next_idx, (next_weight, next_expert) in enumerate(zip(
-                                                next_weights, next_expert_ids
-                                                )):
-                if (next_expert in next_exchanged_set or
-                        cur_expert in next_expert_set or
-                        next_expert in cur_expert_set):
+            for next_idx, (next_weight, next_expert) in enumerate(
+                    zip(next_weights, next_expert_ids)):
+                if (next_expert in next_exchanged_set
+                        or cur_expert in next_expert_set
+                        or next_expert in cur_expert_set):
                     continue
                 new_cur_load = cur_total - cur_weight + next_weight
                 new_next_load = next_total - next_weight + cur_weight
@@ -791,8 +679,8 @@ class SwiftBalancer(EplbPolicy):
                                         ave_workload: float,
                                         increment: float,
                                         cur_layer_result: list[dict[str, Any]],
-                                        com_between_devices: list[
-                                            dict[int, int]],
+                                        com_between_devices: list[dict[int,
+                                                                       int]],
                                         node_idx: int = 0,
                                         per_node_device_num: int = 0,
                                         is_node_redundant: bool = False):
@@ -823,9 +711,10 @@ class SwiftBalancer(EplbPolicy):
         """
 
         if is_node_redundant:
-            cur_devices_result = cur_layer_result[
-                node_idx * per_node_device_num:
-                (node_idx + 1) * per_node_device_num]
+            cur_devices_result = cur_layer_result[node_idx *
+                                                  per_node_device_num:
+                                                  (node_idx + 1) *
+                                                  per_node_device_num]
         else:
             cur_devices_result = cur_layer_result
 
@@ -845,11 +734,9 @@ class SwiftBalancer(EplbPolicy):
                 if min_device_id not in com_between_devices[max_device_id]:
 
                     cur_exchange_ids = list(
-                        com_between_devices[max_device_id].values()
-                        )
+                        com_between_devices[max_device_id].values())
                     next_exchange_ids = list(
-                        com_between_devices[min_device_id].values()
-                        )
+                        com_between_devices[min_device_id].values())
 
                     cur_idx, next_idx = self.two_device_exchange_experts(
                         cur_layer_result[max_device_id],
@@ -861,18 +748,14 @@ class SwiftBalancer(EplbPolicy):
                     )
 
                     if cur_idx != -1:
-                        self.exchange_expert(
-                            cur_idx, next_idx,
-                            max_device_id, min_device_id,
-                            cur_layer_result, com_between_devices
-                        )
+                        self.exchange_expert(cur_idx, next_idx, max_device_id,
+                                             min_device_id, cur_layer_result,
+                                             com_between_devices)
 
                         new_max_load = cur_layer_result[max_device_id][
-                            'total_load'
-                            ]
+                            'total_load']
                         new_min_load = cur_layer_result[min_device_id][
-                            'total_load'
-                            ]
+                            'total_load']
 
                         # Update Load Sorting
                         del sorted_weights[-1]
@@ -885,8 +768,8 @@ class SwiftBalancer(EplbPolicy):
                                 hi = mid
                             else:
                                 lo = mid + 1
-                        sorted_weights.insert(lo, (new_min_load,
-                                                   min_device_id))
+                        sorted_weights.insert(lo,
+                                              (new_min_load, min_device_id))
 
                         lo, hi = 0, len(sorted_weights)
                         while lo < hi:
@@ -895,8 +778,8 @@ class SwiftBalancer(EplbPolicy):
                                 hi = mid
                             else:
                                 lo = mid + 1
-                        sorted_weights.insert(lo, (new_max_load,
-                                                   max_device_id))
+                        sorted_weights.insert(lo,
+                                              (new_max_load, max_device_id))
 
                         exchange_occurred = True
                         break
@@ -904,13 +787,10 @@ class SwiftBalancer(EplbPolicy):
             if not exchange_occurred:
                 break
 
-    def exchange_experts(self,
-                         layer_result: list[dict[str, Any]],
+    def exchange_experts(self, layer_result: list[dict[str, Any]],
                          layer_com_between_devices: list[dict[int, int]],
-                         num_nodes: int,
-                         num_devices: int,
-                         is_node_redundant: bool,
-                         ave_workload: float,
+                         num_nodes: int, num_devices: int,
+                         is_node_redundant: bool, ave_workload: float,
                          increment: float):
         """
         Select the corresponding switching expert
@@ -934,19 +814,15 @@ class SwiftBalancer(EplbPolicy):
         global_deployment = []
 
         if is_node_redundant:
-            per_node_device_num = self.safe_exact_divide(num_devices,
-                                                         num_nodes)
+            per_node_device_num = self.safe_exact_divide(
+                num_devices, num_nodes)
             for node_idx in range(num_nodes):
-                self.expert_exchange_between_devices(ave_workload,
-                                                     increment,
-                                                     layer_result,
-                                                     layer_com_between_devices,
-                                                     node_idx,
-                                                     per_node_device_num,
-                                                     is_node_redundant)
+                self.expert_exchange_between_devices(
+                    ave_workload, increment, layer_result,
+                    layer_com_between_devices, node_idx, per_node_device_num,
+                    is_node_redundant)
         else:
-            self.expert_exchange_between_devices(ave_workload,
-                                                 increment,
+            self.expert_exchange_between_devices(ave_workload, increment,
                                                  layer_result,
                                                  layer_com_between_devices)
 
@@ -970,16 +846,16 @@ class SwiftBalancer(EplbPolicy):
         return count
 
     @staticmethod
-    def constraint_expert_local_exchange(current_expert_table: np.ndarray,
-                                         global_deployment: np.ndarray
-                                         ) -> np.ndarray:
+    def constraint_expert_local_exchange(
+            current_expert_table: np.ndarray,
+            global_deployment: np.ndarray) -> np.ndarray:
         for layer_id in range(global_deployment.shape[0]):
             for card_id in range(global_deployment.shape[1]):
                 current_list = [
                     int(x) for x in current_expert_table[layer_id][card_id]
                 ]
                 new_list = [
-                    int(x)for x in global_deployment[layer_id][card_id]
+                    int(x) for x in global_deployment[layer_id][card_id]
                 ]
                 num = len(new_list)
 
@@ -1010,8 +886,7 @@ class SwiftBalancer(EplbPolicy):
         return global_deployment
 
     @staticmethod
-    def gen_result(new_global_deployment: np.ndarray,
-                   layer_num: int,
+    def gen_result(new_global_deployment: np.ndarray, layer_num: int,
                    local_expert_num: int):
 
         logical_replica_count = torch.zeros((layer_num, local_expert_num),
@@ -1023,7 +898,8 @@ class SwiftBalancer(EplbPolicy):
 
         max_expert_num = logical_replica_count.max()
         logical_to_physical_map = torch.full(
-            (layer_num, local_expert_num, max_expert_num), -1,
+            (layer_num, local_expert_num, max_expert_num),
+            -1,
             dtype=torch.int32)
 
         new_global_deployment = new_global_deployment.reshape(layer_num, -1)
@@ -1036,24 +912,21 @@ class SwiftBalancer(EplbPolicy):
 
         physical_to_logical_map = torch.from_numpy(new_global_deployment)
 
-        return (
-            physical_to_logical_map,
-            logical_to_physical_map,
-            logical_replica_count
-        )
+        return (physical_to_logical_map, logical_to_physical_map,
+                logical_replica_count)
 
-    def rebalance_experts(self,
-                          weight: torch.Tensor,
-                          num_replicas: int,
-                          num_groups: int,
-                          num_nodes: int,
-                          num_ranks: int,
-                          old_global_expert_indices: torch.Tensor,
-                          is_node_redundant: bool = False,
-                          increment: float = 0.01,
-                          imbalance_threshold: float = 1.01,
-                          ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
+    def rebalance_experts(
+        self,
+        weight: torch.Tensor,
+        num_replicas: int,
+        num_groups: int,
+        num_nodes: int,
+        num_ranks: int,
+        old_global_expert_indices: torch.Tensor,
+        is_node_redundant: bool = False,
+        increment: float = 0.01,
+        imbalance_threshold: float = 1.01,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Entry point for expert-parallelism load balancer.
 
@@ -1089,8 +962,7 @@ class SwiftBalancer(EplbPolicy):
             raise ValueError(" workload_table cannot be None.")
         layer_num = info.workload_table.shape[0]
         info.placement_table = old_global_expert_indices.numpy().reshape(
-            layer_num, num_ranks, -1
-            )
+            layer_num, num_ranks, -1)
         if info.placement_table is None:
             raise ValueError(" placement_table cannot be None.")
         expert_ids, counts = np.unique(info.placement_table[0],
@@ -1118,13 +990,9 @@ class SwiftBalancer(EplbPolicy):
 
         global_deployment = np.zeros_like(info.placement_table)
 
-        (
-            layer_initial_imbalance,
-            max_heat_per_layer_before
-        ) = self.calculate_initial_imbalance(
-            info.placement_table,
-            layer_workloads
-        )
+        (layer_initial_imbalance,
+         max_heat_per_layer_before) = self.calculate_initial_imbalance(
+             info.placement_table, layer_workloads)
 
         max_heat_per_layer_after = np.zeros([layer_num])
         sum_num = 0
@@ -1135,8 +1003,8 @@ class SwiftBalancer(EplbPolicy):
                 global_deployment[layer] = info.placement_table[layer]
                 continue
 
-            ave_workload = self.safe_divide(
-                np.sum(layer_workloads[layer]), num_ranks)
+            ave_workload = self.safe_divide(np.sum(layer_workloads[layer]),
+                                            num_ranks)
 
             # The position of the statistical logic expert
             # on the card and the location of the redundancy
@@ -1151,62 +1019,44 @@ class SwiftBalancer(EplbPolicy):
                     else:
                         rendun_pos[device_id].append(index)
 
-            (
-                result,
-                max_workload,
-                com_between_devices
-            ) = self.redundant_expert_deployment(
-                layer_workloads[layer],
-                info.placement_table[layer],
-                expert_from_device[layer],
-                num_nodes,
-                is_node_redundant,
-                rendun_pos
-                )
+            (result, max_workload,
+             com_between_devices) = self.redundant_expert_deployment(
+                 layer_workloads[layer], info.placement_table[layer],
+                 expert_from_device[layer], num_nodes, is_node_redundant,
+                 rendun_pos)
 
-            (
-                global_deployment[layer],
-                new_max_workload
-            ) = self.exchange_experts(
-                result,
-                com_between_devices,
-                num_nodes,
-                num_ranks,
-                is_node_redundant,
-                ave_workload,
-                increment
-                )
+            (global_deployment[layer],
+             new_max_workload) = self.exchange_experts(result,
+                                                       com_between_devices,
+                                                       num_nodes, num_ranks,
+                                                       is_node_redundant,
+                                                       ave_workload, increment)
 
             for device_id in range(num_ranks):
                 com_between_devices[device_id] = {
-                    key: value for key, value in
-                    com_between_devices[device_id].items()}
+                    key: value
+                    for key, value in com_between_devices[device_id].items()
+                }
                 sum_num += self.count_elements(com_between_devices[device_id])
             max_heat_per_layer_after[layer] = max(
                 result, key=lambda x: x['total_load'])['total_load']
 
         layer_changed_ratio = []
         for layer_idx in range(layer_num):
-            layer_changed_ratio.append(self.safe_divide(
-                max_heat_per_layer_after[layer_idx],
-                max_heat_per_layer_before[layer_idx]))
+            layer_changed_ratio.append(
+                self.safe_divide(max_heat_per_layer_after[layer_idx],
+                                 max_heat_per_layer_before[layer_idx]))
 
         # New deployment and old deployment aligned at
         # the same expert position on the same device.
         new_global_deployment = self.constraint_expert_local_exchange(
-            info.placement_table, global_deployment
-            )
+            info.placement_table, global_deployment)
 
         # Construct the output based on the
         # newly generated deployment.
-        (
-            physical_to_logical_map,
-            logical_to_physical_map,
-            logical_replica_count
-        ) = self.gen_result(new_global_deployment, layer_num, expert_num)
+        (physical_to_logical_map, logical_to_physical_map,
+         logical_replica_count) = self.gen_result(new_global_deployment,
+                                                  layer_num, expert_num)
 
-        return (
-            physical_to_logical_map,
-            logical_to_physical_map,
-            logical_replica_count
-        )
+        return (physical_to_logical_map, logical_to_physical_map,
+                logical_replica_count)
