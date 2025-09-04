@@ -526,7 +526,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             if supports_mrope(self.runner.model):
                 inter_data.mrope_input_positions[
-                    seq_idx] = self.runner.model.get_next_input_positions(
+                    seq_idx] = self.runner.model.get_mrope_input_positions(
                         seq_data.mrope_position_delta,
                         context_len,
                         seq_len,
@@ -681,7 +681,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
                 if supports_mrope(self.runner.model):
                     mrope_input_positions, mrope_position_delta = \
-                        self.runner.model.get_input_positions(
+                        self.runner.model.get_mrope_input_positions(
                             token_ids,
                             hf_config=hf_config,
                             image_grid_thw=image_grid_thw,

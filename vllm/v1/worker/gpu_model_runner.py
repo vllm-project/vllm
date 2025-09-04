@@ -593,7 +593,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if supports_mrope(self.model):
             req_state.mrope_positions, req_state.mrope_position_delta = \
-                self.model.get_input_positions_tensor(
+                self.model.get_mrope_input_positions(
                     req_state.prompt_token_ids,
                     hf_config=self.model_config.hf_config,
                     image_grid_thw=image_grid_thw,
@@ -1016,7 +1016,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 dst_start = mrope_pos_ptr
                 dst_end = mrope_pos_ptr + completion_part_len
                 if supports_mrope(self.model):
-                    self.model.get_input_positions_tensor(
+                    self.model.get_mrope_input_positions(
                         out=self.mrope_positions.np,
                         out_offset=dst_start,
                         mrope_position_delta=req.mrope_position_delta,
