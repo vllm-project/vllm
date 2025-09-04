@@ -176,7 +176,8 @@ def setup_per_rank_logger(rank) -> None:
 
     log_config = copy.deepcopy(DEFAULT_LOGGING_CONFIG)
     try:
-        log_config["handlers"]["vllm_log_file"]["filename"] = log_file
+        log_config["handlers"]["vllm_log_file"][
+            "filename"] = log_file  # type: ignore[index]
     except KeyError as err:
         raise ValueError(
             "vllm_log_file handler is not configured correctly.") from err
