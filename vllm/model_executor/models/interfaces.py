@@ -839,6 +839,30 @@ class SupportsEagle3(Protocol):
 
 
 @overload
+
+class SupportsTokenformer(Protocol):
+    """
+    A Protocol that indicates it supports tokenformer checkpoint loading
+    """
+    
+    supports_tokenformer: ClassVar[Literal[True]] = True
+    
+    def load_tokenformer_weights(
+        self,
+        weights: Dict[str, Any],
+        weight_names: Iterable[str],
+        loaded_weight_map: Optional[Dict] = None
+    ) -> Set[str]:
+        """
+        Loads the Tokenformer checkpoint weights
+        """
+        ...
+
+def supports_tokenformer(model: type[object]) -> TypeIs[type[SupportsTokenformer]]:
+    """Check if a model supports tokenformer"""
+    return getattr(model, "supports_tokenformer", False)
+
+
 def supports_eagle3(model: type[object]) -> TypeIs[type[SupportsEagle3]]:
     ...
 
@@ -852,3 +876,33 @@ def supports_eagle3(
     model: Union[type[object], object],
 ) -> Union[TypeIs[type[SupportsEagle3]], TypeIs[SupportsEagle3]]:
     return isinstance(model, SupportsEagle3)
+
+
+@runtime_checkable
+class SupportsTokenformer(Protocol):
+    """The interface required for all models that support Tokenformer."""
+
+    supports_tokenformer: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model supports Tokenformer.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+
+@overload
+def supports_tokenformer(model: type[object]) -> TypeIs[type[SupportsTokenformer]]:
+    ...
+
+
+@overload
+def supports_tokenformer(model: object) -> TypeIs[SupportsTokenformer]:
+    ...
+
+
+def supports_tokenformer(
+    model: Union[type[object], object],
+) -> Union[TypeIs[type[SupportsTokenformer]], TypeIs[SupportsTokenformer]]:
+    return isinstance(model, SupportsTokenformer)

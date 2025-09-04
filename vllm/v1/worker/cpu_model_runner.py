@@ -90,9 +90,13 @@ class CPUModelRunner(GPUModelRunner):
         self.model = get_model(vllm_config=self.vllm_config)
 
         if self.lora_config:
+            logger.info("Loading LoRA model %s...", self.model_config.model)
             self.model = self.load_lora_model(self.model, self.model_config,
                                               self.scheduler_config,
                                               self.lora_config, self.device)
+        else:
+            logger.info("No LoRA model to load for %s.",
+                        self.model_config.model)
 
     def get_model(self) -> nn.Module:
         return self.model

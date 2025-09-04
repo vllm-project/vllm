@@ -216,6 +216,10 @@ class VocabParallelEmbedding(CustomOp):
                  prefix: str = ""):
         super().__init__()
 
+        # Make sure no embeddings are added for LoRA
+        if org_num_embeddings is not None:
+            num_embeddings = org_num_embeddings
+
         # Keep the input dimensions.
         tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -311,7 +315,7 @@ class VocabParallelEmbedding(CustomOp):
     def get_sharded_to_full_mapping(self) -> Optional[list[int]]:
         """Get a mapping that can be used to reindex the gathered
         logits for sampling.
-        
+
         During sampling, we gather logits from all ranks. The relationship
         of index->token_id will follow the same format as outlined in the class
         docstring. However, after the gather, we want to reindex the final
