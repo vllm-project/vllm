@@ -18,7 +18,7 @@ In each engine step, the vLLM engine will (1) update each logits processor's int
 
 ### Updating Logits Processor Internal State
 
-At the beginning of each engine step, the persistent batch adds, discards and reorders requests in response to the scheduler output. After the persistent batch has reorganized, the vLLM engine invokes each logits processor's `update_state()` method. This is necessary to ensure that logits processors' internal states are reorganized to match the new persistent batch state at the beginning of the engine step.
+At the beginning of each engine step, the persistent batch may add, discard and/or reorder requests in response to the scheduler output. After the persistent batch has reorganized, the vLLM engine invokes each logits processor's `update_state()` method. This is necessary to ensure that logits processors' internal states are reorganized to match the new persistent batch state at the beginning of the engine step.
 
 The pseudocode below shows the process by which the vLLM persistent batch notifies each logits processor of changes in batch state:
 
@@ -76,8 +76,8 @@ The pseudocode below shows the process by which the vLLM persistent batch notifi
         batch_size: int
 
         removed: Sequence[RemovedRequest]
-        moved: Sequence[MovedRequest]
         added: Sequence[AddedRequest]
+        moved: Sequence[MovedRequest]
     
     ```
 
