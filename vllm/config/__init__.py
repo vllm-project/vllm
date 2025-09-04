@@ -649,20 +649,12 @@ class ModelConfig:
         if (self.runner == "draft" and hasattr(self.hf_config, 'architectures')
                 and self.hf_config.architectures):
 
-            def normalize_eagle_arch(arch):
-                # Convert suffix Eagle to prefix Eagle for consistency
-                if arch.endswith("Eagle"):
-                    base_arch = arch[:-5]  # Remove "Eagle" suffix
-                    return f"Eagle{base_arch}"
-                elif arch.startswith("Eagle"):
-                    return arch  # Already has Eagle prefix
-                else:
-                    return arch  # Not an Eagle architecture
+            from vllm.model_executor.models.utils import normalize_eagle_architecture
 
             # Apply normalization to all architectures
             original_archs = self.hf_config.architectures.copy()
             normalized_archs = [
-                normalize_eagle_arch(arch) for arch in original_archs
+                normalize_eagle_architecture(arch) for arch in original_archs
             ]
 
             # Only update if there were changes
