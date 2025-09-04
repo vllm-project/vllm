@@ -304,7 +304,7 @@ class EplbState:
             dtype=torch.int32,
             device=device,
         )
-        expert_load_window_size = parallel_config.eplb_config.eplb_window_size
+        expert_load_window_size = parallel_config.eplb_config.window_size
         expert_load_window = torch.zeros(
             (expert_load_window_size, model.num_moe_layers,
              model.num_physical_experts),
@@ -313,7 +313,7 @@ class EplbState:
         )
 
         # Set the initial progress of rearrangement to 3/4
-        eplb_step_interval = parallel_config.eplb_config.eplb_step_interval
+        eplb_step_interval = parallel_config.eplb_config.step_interval
         expert_rearrangement_step = max(
             0, eplb_step_interval - eplb_step_interval // 4)
         if global_expert_load is not None:
@@ -665,7 +665,10 @@ class EplbState:
                     self.expert_buffer = [
                         torch.empty_like(w) for w in model.expert_weights[0]
                         ]                   
-                    await transfer_layer(
+                    (
+                    self.is_unchanged,
+                    self.is_received_locally, 
+                    self.experts_recv_loc)=await transfer_layer(
                         old_global_expert_indices=self.physical_to_logical_map,
                         new_global_expert_indices=self.
                         new_physical_to_logical_map,

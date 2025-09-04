@@ -339,7 +339,9 @@ async def transfer_layer(old_global_expert_indices: torch.Tensor,
     )
     # NOTE(bowen): We need this synchronize to run, but I don't know why.
     # If you figure out the reason, please let me know -- thank you!
+    return is_unchanged, is_received_locally, experts_recv_loc
     
+
 def rearrange_expert_weights_inplace(
     old_global_expert_indices: torch.Tensor,
     new_global_expert_indices: torch.Tensor,
