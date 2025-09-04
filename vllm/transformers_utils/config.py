@@ -938,6 +938,9 @@ def get_model_path(model: Union[str, Path], revision: Optional[str] = None):
     if os.path.exists(model):
         return model
     assert huggingface_hub.constants.HF_HUB_OFFLINE
+    if isinstance(model, str) and is_s3(model):
+        logger.warning("When from s3 load model, cannot use HF_HUB_OFFLINE")
+        return model
     common_kwargs = {
         "local_files_only": huggingface_hub.constants.HF_HUB_OFFLINE,
         "revision": revision,

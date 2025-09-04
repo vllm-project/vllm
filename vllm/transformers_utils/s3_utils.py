@@ -175,7 +175,8 @@ class S3Model:
         os.makedirs(local_dir, exist_ok=True)
         if os.path.exists(destination_file):
             return destination_file
-        self.s3.download_file(bucket_name, file_name, destination_file)
+        self.s3.download_file(bucket_name, os.path.join(base_dir, file_name),
+                              destination_file)
         return destination_file
 
     def get_model_path(self, repo_id: str):

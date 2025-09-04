@@ -854,10 +854,7 @@ class ModelConfig:
         if is_s3(model):
             s3_model = get_s3()
             s3_model.pull_files(model,
-                                allow_pattern=[
-                                    "*.model", "*.py", "*.json", "*.pt",
-                                    "*.safetensors", "*.bin", "*.tensors"
-                                ])
+                                allow_pattern=["*.model", "*.py", "*.json"])
             self.model_weights = model
             self.model = s3_model.get_model_path(model)
 
