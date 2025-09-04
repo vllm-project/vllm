@@ -274,6 +274,15 @@ class LinearBase(CustomOp):
                                                               prefix=prefix)
         self.return_bias = return_bias
         self.disable_tp = disable_tp
+        self.tp_rank = (get_tensor_model_parallel_rank()
+                        if not disable_tp else 0)
+        self.tp_size = (get_tensor_model_parallel_world_size()
+                        if not disable_tp else 1)
+
+    def __post_init__(self):
+        for param in self.parameters():
+            if isinstance(param, BasevLLMParameter):
+                param.tp_rank = self.tp_rank
 
 
 @CustomOp.register("replicated_linear")
@@ -514,8 +523,7 @@ class ColumnParallelLinear(LinearBase):
         if len(loaded_weight.shape) == 0:
             assert loaded_weight.numel() == 1
             loaded_weight = loaded_weight.reshape(1)
-        param.load_column_parallel_weight(loaded_weight=loaded_weight,
-                                          tp_rank=self.tp_rank)
+        param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(
         self, input_
@@ -525,7 +533,7 @@ class ColumnParallelLinear(LinearBase):
         # Matrix multiply.
         assert self.quant_method is not None
         output_parallel = self.quant_method.apply(self, input_, bias)
-        if self.gather_output:
+        if self.gather_output and self.tp_size > 1:
             # All-gather across the partitions.
             output = tensor_model_parallel_all_gather(output_parallel)
         else:
@@ -1305,8 +1313,7 @@ class RowParallelLinear(LinearBase):
             assert loaded_weight.numel() == 1
             loaded_weight = loaded_weight.reshape(1)
 
-        param.load_row_parallel_weight(loaded_weight=loaded_weight,
-                                       tp_rank=self.tp_rank)
+        param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(
         self, input_
