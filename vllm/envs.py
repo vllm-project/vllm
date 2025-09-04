@@ -123,7 +123,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
-    VLLM_RAY_DP_PACK_STRATEGY: str = None
+    VLLM_RAY_DP_PACK_STRATEGY: str = "fill"
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MXFP4_USE_MARLIN: Optional[bool] = None
     VLLM_V0_USE_OUTLINES_CACHE: bool = False

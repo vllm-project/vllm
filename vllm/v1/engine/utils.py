@@ -374,8 +374,9 @@ class CoreEngineActorManager:
                 if dp_size_available < dp_size_local:
                     if node_ip == dp_master_ip:
                         raise ValueError(
-                            "Not enough resources to allocate DP ranks "
-                            f"on DP master node {dp_master_ip}")
+                            "Not enough resources to allocate %s DP ranks "
+                            "on DP master node %s, possible to fit %s DP ranks",
+                            dp_size_local, dp_master_ip, dp_size_available)
                     else:
                         logger.info(
                             "Skipping node %s as %s DP ranks could not fit, "
