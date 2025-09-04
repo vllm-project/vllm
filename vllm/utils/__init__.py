@@ -1472,8 +1472,7 @@ def current_stream() -> torch.cuda.Stream:
         # is hurting performance. Therefore creating a dedicated stream
         # per process
         if current_platform.is_rocm():
-            _current_stream_tls.value = torch.cuda.Stream()
-            torch.cuda.set_stream(_current_stream_tls.value)
+            torch.cuda.set_stream(torch.cuda.Stream())
         elif current_platform.is_cpu():
             _current_stream_tls.value = _StreamPlaceholder()
         else:
