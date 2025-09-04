@@ -27,6 +27,7 @@ import collections.abc
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Callable, Optional, TypedDict, Union, cast
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torchaudio.transforms as audio_transforms
@@ -481,6 +482,9 @@ class MiDashengLMProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
         return {"audio": None}
 
+    def get_min_audio_len(self):
+        return 3200
+
     def get_max_audio_len(self):
         return 160000
 
@@ -525,8 +529,18 @@ class MiDashengLMMultiModalProcessor(
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         audios = mm_data.pop("audios", [])
-        if audios:
-            mm_data["audio"] = audios
+
+        # + Padding
+        min_audio_len = self.info.get_min_audio_len()
+        processed_audios = [
+            np.pad(audio, (0, min_audio_len - audio.shape[-1]),
+                   mode='constant',
+                   constant_values=0) if isinstance(audio, np.ndarray)
+            and audio.shape[-1] < min_audio_len else audio for audio in audios
+        ]
+
+        if processed_audios:
+            mm_data["audio"] = processed_audios
 
         if not mm_data.get("audio", []):
             prompt_ids = self.info.get_tokenizer().encode(prompt)
@@ -563,7 +577,14 @@ class MiDashengLMMultiModalProcessor(
         vocab = tokenizer.get_vocab()
 
         audio_token = getattr(processor, "audio_token", "<|AUDIO|>")
+        audio_bos_token = getattr(processor, "audio_bos_token",
+                                  "<|audio_bos|>")
+        audio_eos_token = getattr(processor, "audio_eos_token",
+                                  "<|audio_eos|>")
+
         audio_token_id = vocab[audio_token]
+        audio_bos_id = vocab[audio_bos_token]
+        audio_eos_id = vocab[audio_eos_token]
 
         out_mm_data = out_mm_kwargs.get_data()
         audio_length = out_mm_data.get("audio_length")
@@ -583,7 +604,7 @@ class MiDashengLMMultiModalProcessor(
             audio_tokens = [audio_token_id] * num_features
 
             return PromptUpdateDetails.select_token_id(
-                audio_tokens,
+                [audio_bos_id] + audio_tokens + [audio_eos_id],
                 embed_token_id=audio_token_id,
             )
 
