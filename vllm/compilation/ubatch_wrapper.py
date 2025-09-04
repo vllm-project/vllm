@@ -19,6 +19,7 @@ from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)
 
+
 @dataclasses.dataclass
 class UbatchMetadata:
     context: UBatchContext
@@ -47,7 +48,7 @@ class UBatchWrapper:
         self.device = device
         self.ready_barrier = threading.Barrier(3)
 
-        self.cudagraphs = {}
+        self.cudagraphs: dict[int, CUDAGraphMetaData] = {}
 
         self.cudagraph_wrapper = None
         self.graph_pool = None
@@ -184,15 +185,12 @@ class UBatchWrapper:
 
     def _make_ubatch_metadata(self, ubatch_slices, attn_metadata, input_ids,
                               positions, inputs_embeds, intermediate_tensors,
-                              compute_stream, dp_metadata,
-                              batch_descriptor,
+                              compute_stream, dp_metadata, batch_descriptor,
                               cudagraph_runtime_mode) -> list[UbatchMetadata]:
 
         # Create one forward context per ubatch
         forward_contexts = []
         for i, ubatch_slice in enumerate(ubatch_slices):
-            num_tokens = (ubatch_slice.token_slice.stop -
-                          ubatch_slice.token_slice.start)
             forward_contexts.append(
                 create_forward_context(
                     attn_metadata[i] if attn_metadata is not None else None,
@@ -252,7 +250,8 @@ class UBatchWrapper:
 
         # If there's no ubatching, just run the runnable object
         if ubatch_slices is None:
-            if cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
+            if cudagraph_runtime_mode in (CUDAGraphMode.NONE,
+                                          CUDAGraphMode.PIECEWISE):
                 return self.runnable(*args, **kwargs)
             else:
                 assert self.cudagraph_wrapper is not None
