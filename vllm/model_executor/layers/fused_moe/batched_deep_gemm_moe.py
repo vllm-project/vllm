@@ -51,10 +51,19 @@ def silu_mul_fp8_quant_deep_gemm_cuda(
     fp8_min = f_info.min
     use_ue8m0 = is_deep_gemm_e8m0_used()
 
+    if E <= 16:
+        max_empirical_parallelism = 64
+    elif E <= 32:
+        max_empirical_parallelism = 32
+    else:
+        max_empirical_parallelism = 8
+
     # We never want to launch more than Tx number of threads
     # This computes the clip.
     num_parallel_tokens = max(
-        1, min(16, 2**int(log2(min(num_parallel_tokens, T)))))
+        1,
+        min(max_empirical_parallelism, 2**int(log2(min(num_parallel_tokens,
+                                                       T)))))
 
     torch.ops._C.silu_mul_fp8_quant_deep_gemm_cuda(y, tokens_per_expert, y_q,
                                                    y_s, group_size, eps,

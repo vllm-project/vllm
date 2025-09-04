@@ -316,10 +316,10 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
 #pragma unroll
     for (int i = 0; i < 2; i++) {
       float2 gate = silu2(__bfloat1622float2(*s_gate_compute_32));
-      float2 upv = __bfloat1622float2(*s_up_compute_32);
+      __nv_bfloat162 gate_bf162 = __float22bfloat162_rn(gate);
+      __nv_bfloat162 upv = *s_up_compute_32;
 
-      results_bf162[i] = make_bfloat162(__float2bfloat16(gate.x * upv.x),
-                                        __float2bfloat16(gate.y * upv.y));
+      results_bf162[i] = __hmul2(gate_bf162, upv);
 
       ++s_gate_compute_32;
       ++s_up_compute_32;
@@ -333,15 +333,17 @@ __global__ void silu_mul_fp8_quant_deep_gemm_kernel(
     __nv_bfloat16 y_s = warp_max(y_max_bf16) / fp8_max;
 
     if constexpr (USE_UE8M0) {
-      // y_s = exp2f(ceilf(__log2f(y_s)));
+      y_s = hexp2(hceil(hlog2(y_s)));
     }
 
-    auto y_s2 = make_bfloat162(y_s, y_s);
+    auto inv_y = __float2bfloat16_rn(1.f) / y_s;
+
+    auto y_s2 = make_bfloat162(inv_y, inv_y);
 
 #pragma unroll
     for (Idx_t i = 0; i < 2; ++i) {
       results_bf162[i] =
-          clip(__h2div(results_bf162[i], y_s2), __bfloat162bfloat162(fp8_min),
+          clip(__hmul2(results_bf162[i], y_s2), __bfloat162bfloat162(fp8_min),
                __bfloat162bfloat162(fp8_max));
     }
 
