@@ -38,7 +38,8 @@ except ImportError:
     librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
 
 SpeechToTextResponse = Union[TranscriptionResponse, TranslationResponse,
-                             TranscriptionResponseVerbose, TranslationResponseVerbose]
+                             TranscriptionResponseVerbose,
+                             TranslationResponseVerbose]
 SpeechToTextSegment = Union[TranscriptionSegment, TranslationSegment]
 T = TypeVar("T", bound=SpeechToTextResponse)
 S = TypeVar("S", bound=SpeechToTextSegment)
@@ -124,82 +125,81 @@ class OpenAISpeechToText(OpenAIServing):
                 to_language=to_language,
             )
             if request.response_format == "verbose_json":
-                prompt["decoder_prompt"] = (
-                    prompt["decoder_prompt"].replace('<|notimestamps|>', '<|0.00|>')
-                )
+                prompt["decoder_prompt"] = (prompt["decoder_prompt"].replace(
+                    '<|notimestamps|>', '<|0.00|>'))
             prompts.append(prompt)
         return prompts, duration
 
-    def _get_verbose_segments(self, tokens : tuple, 
-            segment_class : type[T], start_time : float = 0) -> list[S]:
-            
-            timestamp_init_token = self.tokenizer.convert_tokens_to_ids('<|0.00|>')
-            if (
-                tokens[-1] == 
-                self.tokenizer.convert_tokens_to_ids(self.tokenizer.eos_token)
-            ):
-                tokens = tokens[:-1]
-            tokens_with_start = (timestamp_init_token, ) + tokens
-            tokens_is_timestamps = list(map(lambda x : x >= timestamp_init_token , tokens_with_start))
-            end_right = tokens_is_timestamps[-2:] == [False, True]
-            
-            tokens_consecutive = []
-            segments = []
-            for idx, token in enumerate(tokens_is_timestamps):
-                if (
-                    token and
-                    idx != len(tokens_is_timestamps) - 1 and
-                    tokens_is_timestamps[idx + 1]
-                ):
-                    tokens_consecutive.append(idx + 1)
-                    
-            if len(tokens_consecutive) > 0:
-                if end_right:
-                    tokens_consecutive.append(len(tokens_is_timestamps))
-                start = 0
-                for tokenIdx in tokens_consecutive:
-                    
-                    sliced_tokens = tokens_with_start[start: tokenIdx]
-                    start_timestamp = sliced_tokens[0] - timestamp_init_token
-                    end_timestamp = sliced_tokens[-1] - timestamp_init_token
-                    start = tokenIdx
-                    casting_segment = cast(T, 
-                        segment_class(
-                            id = idx,
-                            avg_logprob = -1.0,
-                            compression_ratio = -1.0,
-                            end=start_time + 0.02 * end_timestamp,
-                            no_speech_prob =-1.0,
-                            seek = start_time,
-                            start = start_time + 0.02 * start_timestamp,
-                            temperature = -1.0,
-                            text = self.tokenizer.decode(sliced_tokens[1:-1]),
-                            tokens = sliced_tokens[1: -1]
-                        )
-                    )
-                    segments.append(casting_segment)
-            else:
-                
-                sliced_tokens = [idx for idx, data in enumerate(tokens_with_start) if data > 0]
-                end_timestamp = sliced_tokens[-1] - timestamp_init_token
-                
-                casting_segment = cast(T, 
-                    segment_class(
-                        id = idx,
-                        avg_logprob = -1.0,
-                        compression_ratio = -1.0,
-                        end=start_time + 0.02 * end_timestamp,
-                        no_speech_prob =-1.0,
-                        seek = start_time,
-                        start = start_time,
-                        temperature = -1.0,
-                        text = self.tokenizer.decode(tokens_with_start[1: sliced_tokens[-1]]),
-                        tokens = tokens_with_start[1: sliced_tokens[-1]]
-                    )
-                )
+    def _get_verbose_segments(self,
+                              tokens: tuple,
+                              segment_class: type[T],
+                              start_time: float = 0) -> list[S]:
+
+        init_token = self.tokenizer.convert_tokens_to_ids('<|0.00|>')
+        if (tokens[-1] == self.tokenizer.convert_tokens_to_ids(
+                self.tokenizer.eos_token)):
+            tokens = tokens[:-1]
+
+        tokens_with_start = (init_token, ) + tokens
+        tokens_is_timestamps = list(
+            map(lambda x: x >= init_token, tokens_with_start))
+
+        end_right = tokens_is_timestamps[-2:] == [False, True]
+
+        tokens_consecutive = []
+        segments = []
+        for idx, token in enumerate(tokens_is_timestamps):
+            if (token and idx != len(tokens_is_timestamps) - 1
+                    and tokens_is_timestamps[idx + 1]):
+                tokens_consecutive.append(idx + 1)
+
+        if len(tokens_consecutive) > 0:
+            if end_right:
+                tokens_consecutive.append(len(tokens_is_timestamps))
+            start = 0
+            for tokenIdx in tokens_consecutive:
+
+                sliced_tokens = tokens_with_start[start:tokenIdx]
+                start_timestamp = sliced_tokens[0] - init_token
+                end_timestamp = sliced_tokens[-1] - init_token
+                start = tokenIdx
+                casting_segment = cast(
+                    T,
+                    segment_class(id=idx,
+                                  avg_logprob=-1.0,
+                                  compression_ratio=-1.0,
+                                  end=start_time + 0.02 * end_timestamp,
+                                  no_speech_prob=-1.0,
+                                  seek=start_time,
+                                  start=start_time + 0.02 * start_timestamp,
+                                  temperature=-1.0,
+                                  text=self.tokenizer.decode(
+                                      sliced_tokens[1:-1]),
+                                  tokens=sliced_tokens[1:-1]))
                 segments.append(casting_segment)
-            return segments
-        
+        else:
+
+            sliced_tokens = [
+                idx for idx, data in enumerate(tokens_with_start) if data > 0
+            ]
+            end_timestamp = sliced_tokens[-1] - init_token
+
+            casting_segment = cast(
+                T,
+                segment_class(id=idx,
+                              avg_logprob=-1.0,
+                              compression_ratio=-1.0,
+                              end=start_time + 0.02 * end_timestamp,
+                              no_speech_prob=-1.0,
+                              seek=start_time,
+                              start=start_time,
+                              temperature=-1.0,
+                              text=self.tokenizer.decode(
+                                  tokens_with_start[1:sliced_tokens[-1]]),
+                              tokens=tokens_with_start[1:sliced_tokens[-1]]))
+            segments.append(casting_segment)
+        return segments
+
     async def _create_speech_to_text(
         self,
         audio_data: bytes,
@@ -222,7 +222,8 @@ class OpenAISpeechToText(OpenAIServing):
 
         if request.response_format not in ['text', 'json', 'verbose_json']:
             return self.create_error_response(
-                "Currently only support response_format `text`, `json` or `verbose_json`")
+                ("Currently only support response_format") +
+                ("`text`, `json` or `verbose_json`"))
 
         request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 
@@ -288,10 +289,9 @@ class OpenAISpeechToText(OpenAIServing):
                 async for op in result_generator:
                     if request.response_format == 'verbose_json':
                         segments = self._get_verbose_segments(
-                            op.outputs[0].token_ids, idx * 30
-                        )
+                            op.outputs[0].token_ids, idx * 30)
                         total_segments.extend(segments)
-                        text += "".join(map(lambda x : x.text, segments))
+                        text += "".join(map(lambda x: x.text, segments))
                     else:
                         text += op.outputs[0].text
 
@@ -303,10 +303,12 @@ class OpenAISpeechToText(OpenAIServing):
                     "seconds": int(math.ceil(duration_s)),
                 }
                 if request.response_format != 'verbose_json':
-                    final_response = cast(T, response_class(text=text,
-                                                            usage=usage))
+                    final_response = cast(
+                        T, response_class(text=text, usage=usage))
                 else:
-                    final_response = cast(T, response_class(text=text,
+                    final_response = cast(
+                        T,
+                        response_class(text=text,
                                        language=request.language,
                                        duration=str(duration_s),
                                        segments=total_segments))
@@ -316,7 +318,9 @@ class OpenAISpeechToText(OpenAIServing):
                     final_response = cast(
                         T, response_class(text=text))  # type: ignore[call-arg]
                 else:
-                    final_response = cast(T, response_class(text=text,
+                    final_response = cast(
+                        T,
+                        response_class(text=text,
                                        language=request.language,
                                        duration=str(duration_s),
                                        segments=total_segments))

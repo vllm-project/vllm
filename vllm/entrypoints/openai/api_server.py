@@ -920,12 +920,10 @@ async def create_transcriptions(raw_request: Request,
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
 
-    elif isinstance(generator, TranscriptionResponse):
+    elif isinstance(generator,
+                    TranscriptionResponse | TranscriptionResponseVerbose):
         return JSONResponse(content=generator.model_dump())
-    
-    elif isinstance(generator, TranscriptionResponseVerbose):
-        return JSONResponse(content=generator.model_dump())
-    
+
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
@@ -968,9 +966,8 @@ async def create_translations(request: Annotated[TranslationRequest,
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.error.code)
 
-    elif isinstance(generator, TranslationResponse):
-        return JSONResponse(content=generator.model_dump())
-    elif isinstance(generator, TranslationResponseVerbose):
+    elif isinstance(generator,
+                    TranslationResponse | TranslationResponseVerbose):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
