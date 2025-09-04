@@ -53,48 +53,52 @@ class Mxfp4Backend(Enum):
 
 def get_mxfp4_backend():
     # Backend Selection
-    if current_platform.is_device_capability(90) and has_flashinfer():
-        logger.info_once("Using FlashInfer MXFP4 BF16 backend for SM90")
-        return Mxfp4Backend.SM90_FI_MXFP4_BF16
-    elif (current_platform.is_device_capability(100) and has_flashinfer()
-          and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS):
-        logger.info_once(
-            "Using FlashInfer MXFP4 MXFP8 CUTLASS backend for SM100")
-        return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-    elif (current_platform.is_device_capability(100) and has_flashinfer()
-          and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8):
-        logger.info_once(
-            "Using FlashInfer MXFP4 MXFP8 TRTLLM backend for SM100, "
-            "for high concurrency throughput workloads consider setting "
-            "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS=1 for better "
-            "performance")
-        return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-    elif current_platform.is_device_capability(100) and has_flashinfer():
-        logger.info_once(
-            "Using FlashInfer MXFP4 BF16 backend for SM100, "
-            "For faster performance on SM100, consider setting "
-            "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1, though this may impact "
-            "accuracy.")
-        return Mxfp4Backend.SM100_FI_MXFP4_BF16
-    elif ((current_platform.is_device_capability(100)
-           or current_platform.is_device_capability(90))
-          and not has_flashinfer()):
-        logger.warning_once(
-            "MXFP4 MoE is enabled on Blackwell and Hopper but FlashInfer "
-            "is not available. This may result in degraded performance. "
-            "Please `pip install vllm[flashinfer]` for best results.")
+    if current_platform.is_cuda():
+        if (current_platform.is_device_capability(90) and has_flashinfer()
+                and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
+            logger.info_once("Using FlashInfer MXFP4 BF16 backend for SM90")
+            return Mxfp4Backend.SM90_FI_MXFP4_BF16
+        elif (current_platform.is_device_capability(100) and has_flashinfer()
+              and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS):
+            logger.info_once(
+                "Using FlashInfer MXFP4 MXFP8 CUTLASS backend for SM100")
+            return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
+        elif (current_platform.is_device_capability(100) and has_flashinfer()
+              and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8):
+            logger.info_once(
+                "Using FlashInfer MXFP4 MXFP8 TRTLLM backend for SM100, "
+                "for high concurrency throughput workloads consider setting "
+                "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS=1 for better "
+                "performance")
+            return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+        elif current_platform.is_device_capability(100) and has_flashinfer():
+            logger.info_once(
+                "Using FlashInfer MXFP4 BF16 backend for SM100, "
+                "For faster performance on SM100, consider setting "
+                "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1, though this may impact "
+                "accuracy.")
+            return Mxfp4Backend.SM100_FI_MXFP4_BF16
+        elif ((current_platform.is_device_capability(100)
+               or current_platform.is_device_capability(90))
+              and not has_flashinfer()):
+            logger.warning_once(
+                "MXFP4 MoE is enabled on Blackwell and Hopper but FlashInfer "
+                "is not available. This may result in degraded performance. "
+                "Please `pip install vllm[flashinfer]` for best results.")
 
-    # If FlashInfer is not available, try either Marlin or Triton
-    if current_platform.is_cuda() and current_platform.get_device_capability(
-    )[0] < 9:
-        logger.info_once("Using Marlin backend")
-        return Mxfp4Backend.MARLIN
-    elif has_triton_kernels():
+        # If FlashInfer is not available, try either Marlin or Triton
+        if current_platform.get_device_capability()[0] < 9:
+            logger.info_once("Using Marlin backend")
+            return Mxfp4Backend.MARLIN
+        elif has_triton_kernels():
+            logger.info_once("Using Triton backend")
+            return Mxfp4Backend.TRITON
+        elif not is_torch_equal_or_newer("2.8.0"):
+            logger.info_once("Using Marlin backend")
+            return Mxfp4Backend.MARLIN
+    elif current_platform.is_rocm() and has_triton_kernels():
         logger.info_once("Using Triton backend")
         return Mxfp4Backend.TRITON
-    elif not is_torch_equal_or_newer("2.8.0"):
-        logger.info_once("Using Marlin backend")
-        return Mxfp4Backend.MARLIN
 
     return Mxfp4Backend.NONE
 
