@@ -13,6 +13,7 @@ from vllm.utils import PlaceholderModule
 
 try:
     import boto3
+    from botocore.config import Config
 except ImportError:
     boto3 = PlaceholderModule("boto3")  # type: ignore[assignment]
 
@@ -107,8 +108,20 @@ class S3Model:
         pull_files(): Pull model from S3 to the temporary directory.
     """
 
-    def __init__(self) -> None:
-        self.s3 = boto3.client('s3')
+    def __init__(self, access_key_id:str = '', 
+                 secret_access_key:str = '',
+                 endpoint_url:str = '', 
+                 config: Config = None) -> None:
+        if access_key_id and secret_access_key and endpoint_url:
+            self.s3 = boto3.client(
+                's3',
+                aws_access_key_id=access_key_id,
+                aws_secret_access_key=secret_access_key,
+                endpoint_url=endpoint_url,
+                config=config
+            )
+        else:
+            self.s3 = boto3.client('s3')
         for sig in (signal.SIGINT, signal.SIGTERM):
             existing_handler = signal.getsignal(sig)
             signal.signal(sig, self._close_by_signal(existing_handler))
