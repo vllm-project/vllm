@@ -768,3 +768,21 @@ def get_model_hidden_size(hf_config: PretrainedConfig) -> int:
         return hf_config.hidden_size
     text_config = hf_config.get_text_config()
     return text_config.hidden_size
+
+def normalize_eagle_architecture(arch: str) -> str:
+    """Normalize EAGLE architecture names to consistent format.
+
+    # LlamaForCausalLM      ->  EagleLlamaForCausalLM
+    # Qwen2ForCausalLM      ->  EagleQwen2ForCausalLM
+    # Qwen2ForCausalLMEagle ->  EagleQwen2ForCausalLM
+    # EagleQwen2ForCausalLM ->  EagleQwen2ForCausalLM
+    
+    """
+    # Remove Eagle suffix if present, then add Eagle prefix
+    if arch.endswith("Eagle"):
+        base_arch = arch[:-5]  # Remove "Eagle" suffix
+    elif arch.startswith("Eagle"):
+        return arch  # Already has Eagle prefix
+    else:
+        base_arch = arch
+    return f"Eagle{base_arch}"
