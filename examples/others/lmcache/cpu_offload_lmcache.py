@@ -2,151 +2,200 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This file demonstrates the example usage of cpu offloading
-with LMCache in vLLM v1 or v0.
+with LMCache in vLLM v1.
 
-Usage:
+Note that lmcache needs to be installed to run this example.
+Learn more about LMCache in https://github.com/LMCache/LMCache.
 
-    Specify vLLM version
-
-    -v v0 : Use LMCacheConnector
-            model = mistralai/Mistral-7B-Instruct-v0.2
-            (Includes enable_chunked_prefill = True)
-
-    -v v1 : Use LMCacheConnectorV1 (default)
-            model = meta-llama/Meta-Llama-3.1-8B-Instruct
-            (Without enable_chunked_prefill)
-
-Note that `lmcache` is needed to run this example.
-Requirements:
-https://docs.lmcache.ai/getting_started/installation.html#prerequisites
-Learn more about LMCache environment setup, please refer to:
-https://docs.lmcache.ai/getting_started/installation.html
+For more details about CPU offloading with LMCache, please refer to
+https://docs.lmcache.ai/getting_started/quickstart/offload_kv_cache.html
 """
 
 import argparse
-import contextlib
 import os
 import time
-from dataclasses import asdict
 
+import torch
 from lmcache.integration.vllm.utils import ENGINE_NAME
 from lmcache.v1.cache_engine import LMCacheEngineBuilder
 
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
-from vllm.engine.arg_utils import EngineArgs
 
 
-def setup_environment_variables(vllm_version: str):
-    # LMCache-related environment variables
-    # Use experimental features in LMCache
-    os.environ["LMCACHE_USE_EXPERIMENTAL"] = "True"
-    # LMCache is set to use 256 tokens per chunk
-    os.environ["LMCACHE_CHUNK_SIZE"] = "256"
-    # Enable local CPU backend in LMCache
-    os.environ["LMCACHE_LOCAL_CPU"] = "True"
-    # Set local CPU memory limit to 5.0 GB
-    os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "5.0"
-    if vllm_version == "v0":
-        os.environ["VLLM_USE_V1"] = "0"
-
-
-@contextlib.contextmanager
-def build_llm_with_lmcache(lmcache_connector: str, model: str, vllm_version: str):
-    ktc = KVTransferConfig(
-        kv_connector=lmcache_connector,
-        kv_role="kv_both",
-    )
-    # Set GPU memory utilization to 0.8 for an A40 GPU with 40GB
-    # memory. Reduce the value if your GPU has less memory.
-    # Note: LMCache supports chunked prefill (see vLLM#14505, LMCache#392).
-    if vllm_version == "v0":
-        llm_args = EngineArgs(
-            model=model,
-            kv_transfer_config=ktc,
-            max_model_len=8000,
-            gpu_memory_utilization=0.8,
-            enable_chunked_prefill=True,  # Only in v0
-        )
-    else:
-        llm_args = EngineArgs(
-            model=model,
-            kv_transfer_config=ktc,
-            max_model_len=8000,
-            gpu_memory_utilization=0.8,
-        )
-
-    llm = LLM(**asdict(llm_args))
-    try:
-        yield llm
-    finally:
-        # Clean up lmcache backend
-        LMCacheEngineBuilder.destroy(ENGINE_NAME)
-
-
-def print_output(
-    llm: LLM,
-    prompt: list[str],
-    sampling_params: SamplingParams,
-    req_str: str,
-):
-    # Should be able to see logs like the following:
-    # `LMCache INFO: Storing KV cache for 6006 out of 6006 tokens for request 0`
-    # This indicates that the KV cache has been stored in LMCache.
-    start = time.time()
-    outputs = llm.generate(prompt, sampling_params)
-    print("-" * 50)
-    for output in outputs:
-        generated_text = output.outputs[0].text
-        print(f"Generated text: {generated_text!r}")
-    print(f"Generation took {time.time() - start:.2f} seconds, {req_str} request done.")
-    print("-" * 50)
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description="CPU offloading example with LMCache")
     parser.add_argument(
-        "-v",
-        "--version",
-        choices=["v0", "v1"],
-        default="v1",
-        help="Specify vLLM version (default: v1)",
+        "--num-prompts",
+        type=int,
+        default=10,
+        help="Number of prompts to generate (default: 10)",
+    )
+    parser.add_argument(
+        "--num-tokens",
+        type=int,
+        default=10000,
+        help="Number of tokens per prompt (default: 10000)",
+    )
+    parser.add_argument(
+        "--enable-lmcache",
+        action="store_true",
+        help="Enable LMCache for CPU offloading (default: True)",
     )
     return parser.parse_args()
 
 
+def setup_lmcache_environment(num_prompts, num_tokens):
+    """
+    Configure LMCache environment variables.
+    Args:
+        num_prompts: Number of prompts to process
+        num_tokens: Number of tokens per prompt
+    """
+    cpu_size = num_prompts * num_tokens * 1.5 / 10000  # 1.5GB per 10000 tokens
+
+    env_vars = {
+        "LMCACHE_CHUNK_SIZE": "256",  # Set tokens per chunk
+        "LMCACHE_LOCAL_CPU": "True",  # Enable local CPU backend
+        "LMCACHE_MAX_LOCAL_CPU_SIZE": str(cpu_size),  # Dynamic CPU memory limit (GB)
+    }
+    for key, value in env_vars.items():
+        os.environ[key] = value
+
+
+def calculate_gpu_utilization(target_memory_gb=24):
+    """
+    Calculate GPU memory utilization to use exactly target_memory_gb of GPU memory.
+    Args:
+        target_memory_gb: Target GPU memory usage in gigabytes
+    Returns:
+        float: GPU memory utilization ratio (0.0 to 1.0)
+    Raises:
+        RuntimeError: If GPU memory is less than target_memory_gb
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError("No GPU available")
+
+    total_memory = torch.cuda.get_device_properties(0).total_memory / (
+        1024**3
+    )  # Convert to GB
+    if total_memory < target_memory_gb:
+        raise RuntimeError(
+            f"GPU memory ({total_memory:.1f}GB) is less than \
+                required memory ({target_memory_gb}GB)"
+        )
+
+    return target_memory_gb / total_memory
+
+
+def create_test_prompts(num_prompts=10, num_tokens=1000):
+    """
+    Create test prompts with index prefix and dummy body.
+    Args:
+        num_prompts: Number of prompts to generate
+        num_tokens: Approximate number of tokens per prompt (using 'Hi ' as token unit)
+    Returns:
+        list: List of prompts with format '[index] Hi Hi Hi...'
+    """
+    prompts = []
+    dummy_text = "Hi " * num_tokens
+
+    for i in range(num_prompts):
+        prompt = f"[Prompt {i}] {dummy_text} how are you?"
+        prompts.append(prompt)
+
+    return prompts
+
+
+def initialize_llm(
+    model_name="meta-llama/Meta-Llama-3.1-8B-Instruct",
+    max_len=16384,
+    enable_lmcache=True,
+):
+    """
+    Initialize the LLM with appropriate configurations.
+    Args:
+        model_name: Name of the model to load
+        max_len: Maximum sequence length
+    Returns:
+        LLM: Configured LLM instance
+    """
+    ktc = (
+        KVTransferConfig(
+            kv_connector="LMCacheConnectorV1",
+            kv_role="kv_both",
+        )
+        if enable_lmcache
+        else None
+    )
+
+    return LLM(
+        model=model_name,
+        kv_transfer_config=ktc,
+        max_model_len=max_len,
+        enable_prefix_caching=False,
+        gpu_memory_utilization=calculate_gpu_utilization(),
+    )
+
+
+def generate_and_print_output(llm, prompts, sampling_params):
+    """
+    Generate text and print the results.
+    Args:
+        llm: LLM instance
+        prompts: List of input prompts
+        sampling_params: Configured sampling parameters
+    Returns:
+        float: Time taken for generation in seconds
+    """
+    start_time = time.time()
+    outputs = llm.generate(prompts, sampling_params)
+    end_time = time.time()
+
+    for output in outputs:
+        generated_text = output.outputs[0].text
+        print(f"Generated text: {generated_text!r}")
+
+    return end_time - start_time
+
+
 def main():
-    args = parse_args()
+    """Main execution function."""
+    # Parse command line arguments
+    args = parse_arguments()
 
-    if args.version == "v0":
-        lmcache_connector = "LMCacheConnector"
-        model = "mistralai/Mistral-7B-Instruct-v0.2"
-    else:
-        lmcache_connector = "LMCacheConnectorV1"
-        model = "meta-llama/Meta-Llama-3.1-8B-Instruct"
+    # Setup environment if LMCache is enabled
+    if args.enable_lmcache:
+        setup_lmcache_environment(args.num_prompts, args.num_tokens)
 
-    setup_environment_variables(args.version)
+    # Create prompts and sampling parameters
+    prompts = create_test_prompts(
+        num_prompts=args.num_prompts, num_tokens=args.num_tokens
+    )
+    sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
-    with build_llm_with_lmcache(lmcache_connector, model, args.version) as llm:
-        # This example script runs two requests with a shared prefix.
-        # Define the shared prompt and specific prompts
-        shared_prompt = "Hello, how are you?" * 1000
-        first_prompt = [
-            shared_prompt + "Hello, my name is",
-        ]
-        second_prompt = [
-            shared_prompt + "Tell me a very long story",
-        ]
+    # Initialize model
+    llm = initialize_llm(enable_lmcache=args.enable_lmcache)
 
-        sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
+    # First run
+    print("\nFirst run:")
+    first_run_time = generate_and_print_output(llm, prompts, sampling_params)
+    print(f"First run time: {first_run_time:.2f} seconds")
 
-        # Print the first output
-        print_output(llm, first_prompt, sampling_params, "first")
+    # Second run
+    print("\nSecond run:")
+    second_run_time = generate_and_print_output(llm, prompts, sampling_params)
+    print(f"Second run time: {second_run_time:.2f} seconds")
 
-        time.sleep(1)
+    # Print speedup
+    if first_run_time > 0:
+        speedup = first_run_time / second_run_time
+        print(f"\nSpeedup (first run / second run): {speedup:.2f}x")
 
-        # print the second output
-        print_output(llm, second_prompt, sampling_params, "second")
+    # Cleanup if LMCache was enabled
+    if args.enable_lmcache:
+        LMCacheEngineBuilder.destroy(ENGINE_NAME)
 
 
 if __name__ == "__main__":
