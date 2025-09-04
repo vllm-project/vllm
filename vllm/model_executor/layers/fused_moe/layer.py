@@ -839,7 +839,7 @@ class FusedMoE(CustomOp):
             # multiple expert groups and no redundant experts.
             enable_round_robin = (
                 self.ep_size > 1 and num_redundant_experts == 0 and \
-                self.num_expert_group is not None and self.num_expert_group > 1)
+                num_expert_group is not None and num_expert_group > 1)
             self.local_num_experts, self.expert_map = determine_expert_map(
                 ep_size=self.ep_size,
                 ep_rank=self.ep_rank,
