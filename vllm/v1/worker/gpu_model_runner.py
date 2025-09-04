@@ -23,8 +23,8 @@ from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
-from vllm.compilation.ubatch_utils import UbatchSlice, UBatchSlices
-from vllm.compilation.ubatch_wrapper import UBatchWrapper
+from vllm.v1.worker.ubatch_utils import UbatchSlice, UBatchSlices
+from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.config import (CompilationLevel, CUDAGraphMode, VllmConfig,
                          get_layers_from_vllm_config, update_config)
 from vllm.distributed.eplb.eplb_state import EplbState

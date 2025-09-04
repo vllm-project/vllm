@@ -13,7 +13,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.compilation.ubatch_utils import (UbatchSlice, UBatchSlices)
+from vllm.v1.worker.ubatch_utils import (UbatchSlice, UBatchSlices)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
