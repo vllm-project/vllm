@@ -665,7 +665,9 @@ class Scheduler(SchedulerInterface):
             iterations_exceeded()
 
         if graduate:
-            self.waiting.extend(self.queued)  # type: ignore
+            for request in self.queued:
+                request.status = RequestStatus.WAITING
+                self.waiting.add_request(request)
             self.queued.clear()  # type: ignore
 
     def _update_after_schedule(
@@ -1126,6 +1128,8 @@ class Scheduler(SchedulerInterface):
             return len(self.running), len(self.queued)
 
     def add_request(self, request: Request) -> None:
+        if self.delayed_batching_enabled():
+            request.status = RequestStatus.QUEUED
         self.queued.add_request(request)
         self.requests[request.request_id] = request
         if self.log_stats:
@@ -1149,6 +1153,7 @@ class Scheduler(SchedulerInterface):
 
         running_requests_to_remove = set()
         waiting_requests_to_remove = []
+        queued_requests_to_remove = []
         valid_requests = []
 
         # First pass: collect requests to remove from queues
@@ -1161,14 +1166,18 @@ class Scheduler(SchedulerInterface):
             valid_requests.append(request)
             if request.status == RequestStatus.RUNNING:
                 running_requests_to_remove.add(request)
+            elif request.status == RequestStatus.QUEUED:
+                queued_requests_to_remove.append(request)
             else:
                 waiting_requests_to_remove.append(request)
 
         # Remove all requests from queues at once for better efficiency
         if running_requests_to_remove:
             self.running = remove_all(self.running, running_requests_to_remove)
+        if queued_requests_to_remove:
+            self.queued.remove_requests(queued_requests_to_remove)
         if waiting_requests_to_remove:
-            self.queued.remove_requests(waiting_requests_to_remove)
+            self.waiting.remove_requests(waiting_requests_to_remove)
 
         # Second pass: set status and free requests
         for request in valid_requests:

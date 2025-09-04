@@ -219,6 +219,7 @@ class RequestStatus(enum.IntEnum):
     WAITING_FOR_REMOTE_KVS = enum.auto()
     RUNNING = enum.auto()
     PREEMPTED = enum.auto()
+    QUEUED = enum.auto()
     # Note: anything after PREEMPTED will be considered
     # as a finished status.
     FINISHED_STOPPED = enum.auto()
