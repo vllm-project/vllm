@@ -140,7 +140,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             model_config.is_multimodal_raw_input_only_model)
 
         self.max_model_len = model_config.max_model_len
-        self.block_size = cache_config.block_size
         self.cp_world_size = self.parallel_config.context_parallel_size
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
@@ -382,7 +381,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.cp_world_size > 1:
                 assert self.reorder_batch_threshold == 1, \
                     "CP not support reorder_batch_threshold > 1 now."
-            _ = reorder_batch_to_split_decodes_and_prefills(
+            reorder_batch_to_split_decodes_and_prefills(
                 self.input_batch,
                 scheduler_output,
                 decode_threshold=self.reorder_batch_threshold)
@@ -721,6 +720,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                            torch.from_numpy(token_indices),
                            out=self.input_ids.cpu[:total_num_scheduled_tokens])
 
+        self.input_batch.block_table.compute_slot_mapping(
+            req_indices, positions_np)
+        self.input_batch.block_table.commit_slot_mapping(
+            total_num_scheduled_tokens)
+
         # Prepare the attention metadata.
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1:num_reqs + 1] = cu_num_tokens
@@ -733,17 +737,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
-
-        # Calculate the slot mapping for each KV cache group.
-        if self.cp_world_size > 1:
-            assert self.attn_groups[0][
-                0].backend is FlashMLABackend, "CP only support flashmla now."
-        self.input_batch.block_table.compute_slot_mapping(
-            req_indices, positions_np)
-        self.input_batch.block_table.commit_slot_mapping(
-            total_num_scheduled_tokens)
-
-        # Copy the tensors to the GPU.
         # Fill unused with 0 for full cuda graph mode.
         self.seq_lens.np[num_reqs:].fill(0)
         self.seq_lens.copy_to_gpu()
@@ -3151,6 +3144,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
+
+        if self.cp_world_size > 1:
+            assert self.attn_groups[0][
+                0].backend is FlashMLABackend, "CP only support flashmla now."
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """

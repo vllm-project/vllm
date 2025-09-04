@@ -1115,7 +1115,8 @@ def initialize_model_parallel(
     assert _CP is None, ("context model parallel group is already initialized")
     # Note(hc): In the current implementation of decode context parallel,
     # cp_size must not exceed tp_size, because the world size does not
-    # change by cp, it simply reuse the GPUs of TP group.
+    # change by cp, it simply reuse the GPUs of TP group, and split one
+    # TP group into tp_size//cp_size CP groups.
     group_ranks = all_ranks.reshape(-1, context_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _CP = init_model_parallel_group(group_ranks,
