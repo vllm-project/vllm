@@ -184,13 +184,8 @@ class NixlConnector(KVConnectorBase_V1):
         request: "Request",
         blocks: tuple[list[int], ...],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
-        if len(blocks) > 1:
-            raise NotImplementedError(
-                "NixlConnector does not support hybrid allocator for now."
-                "Please set `--disable-hybrid-kv-cache-manager`.")
-        block_ids = blocks[0]
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.request_finished(request, block_ids)
+        return self.connector_scheduler.request_finished(request, blocks)
 
     ############################################################
     # Worker Side Methods
