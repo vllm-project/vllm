@@ -49,7 +49,7 @@ def can_initialize(model_arch: str, monkeypatch: pytest.MonkeyPatch,
             vllm_config,
             kv_cache_specs,
             [10 * GiB_bytes],
-        )
+        )[0]
 
         # gpu_blocks (> 0), cpu_blocks, scheduler_kv_cache_config
         return 1, 0, scheduler_kv_cache_config
