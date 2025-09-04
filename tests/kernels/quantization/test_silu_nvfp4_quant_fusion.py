@@ -8,8 +8,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
-if not (current_platform.has_device_capability(100)
-        and hasattr(torch.ops._C, "silu_and_mul_nvfp4_quant")):
+if not current_platform.has_device_capability(100):
     pytest.skip(reason="Nvfp4 Requires compute capability of 10 or above.",
                 allow_module_level=True)
 
