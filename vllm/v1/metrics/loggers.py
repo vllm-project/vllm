@@ -170,8 +170,7 @@ class PrometheusStatLogger(StatLoggerBase):
         max_model_len = vllm_config.model_config.max_model_len
 
         spec_decode_labelvalues: dict[int, list[str]] = {
-            idx: [vllm_config.model_config.served_model_name,
-                  str(idx)]
+            idx: [model_name, str(idx)]
             for idx in engine_indexes
         }
 

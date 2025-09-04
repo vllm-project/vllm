@@ -127,33 +127,32 @@ class SpecDecodingProm:
         self,
         speculative_config: Optional[SpeculativeConfig],
         labelnames: list[str],
-        labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[str]],
     ):
         self.spec_decoding_enabled = speculative_config is not None
         if not self.spec_decoding_enabled:
             return
 
-        # Create base counters
         counter_drafts = self._counter_cls(
             name="vllm:spec_decode_num_drafts",
             documentation="Number of spec decoding drafts.",
             labelnames=labelnames)
-        self.counter_spec_decode_num_drafts = make_for_each_labelvalue(
-            counter_drafts, labelvalues)
+        self.counter_spec_decode_num_drafts = make_per_engine(
+            counter_drafts, per_engine_labelvalues)
 
         counter_draft_tokens = self._counter_cls(
             name="vllm:spec_decode_num_draft_tokens",
             documentation="Number of draft tokens.",
             labelnames=labelnames)
-        self.counter_spec_decode_num_draft_tokens = make_for_each_labelvalue(
-            counter_draft_tokens, labelvalues)
+        self.counter_spec_decode_num_draft_tokens = make_per_engine(
+            counter_draft_tokens, per_engine_labelvalues)
 
         counter_accepted_tokens = self._counter_cls(
             name="vllm:spec_decode_num_accepted_tokens",
             documentation="Number of accepted tokens.",
             labelnames=labelnames)
-        self.counter_spec_decode_num_accepted_tokens = make_for_each_labelvalue(
-            counter_accepted_tokens, labelvalues)
+        self.counter_spec_decode_num_accepted_tokens = make_per_engine(
+            counter_accepted_tokens, per_engine_labelvalues)
 
         assert speculative_config is not None
         num_spec_tokens = (speculative_config.num_speculative_tokens
@@ -170,7 +169,7 @@ class SpecDecodingProm:
                     base_counter.labels(*lv, str(pos))
                     for pos in range(num_spec_tokens)
                 ]
-                for idx, lv in labelvalues.items()
+                for idx, lv in per_engine_labelvalues.items()
             }
 
     def observe(self,
@@ -190,9 +189,10 @@ class SpecDecodingProm:
             counter.inc(spec_decoding_stats.num_accepted_tokens_per_pos[pos])
 
 
-def make_for_each_labelvalue(counter, labelvalues):
+def make_per_engine(counter: prometheus_client.Counter,
+                    per_engine_labelvalues: dict[int, list[str]]):
     """Create a counter for each label value."""
     return {
-        idx: counter.labels(*labelvalue)
-        for idx, labelvalue in labelvalues.items()
+        idx: counter.labels(*labelvalues)
+        for idx, labelvalues in per_engine_labelvalues.items()
     }
