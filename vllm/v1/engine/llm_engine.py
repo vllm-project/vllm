@@ -70,8 +70,10 @@ class LLMEngine:
 
         self.log_stats = log_stats
         self.stat_logger: Optional[StatLoggerBase] = None
+        self.prefill_tps_history: Optional[Deque] = None
         if self.log_stats:
             self.stat_logger = PrometheusStatLogger(vllm_config)
+            self.prefill_tps_history = deque(maxlen=IterationStats.MAX_HISTORY_LEN)
 
         # important: init dp group before init the engine_core
         # In the decoupled engine case this is handled in EngineCoreProc.
@@ -241,7 +243,7 @@ class LLMEngine:
         outputs = self.engine_core.get_output()
 
         # 2) Process EngineCoreOutputs.
-        iteration_stats = IterationStats() if self.log_stats else None
+        iteration_stats = IterationStats(self.prefill_tps_history) if self.log_stats else None
         processed_outputs = self.output_processor.process_outputs(
             outputs.outputs,
             engine_core_timestamp=outputs.timestamp,

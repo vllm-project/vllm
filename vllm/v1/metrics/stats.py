@@ -3,7 +3,7 @@
 
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Deque
 
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -87,7 +87,11 @@ class FinishedRequestStats:
 class IterationStats:
     """Stats associated with a single set of EngineCoreOutputs."""
 
-    def __init__(self):
+    MIN_HISTORY_LEN: int = 10
+
+    MAX_HISTORY_LEN: int = 100
+
+    def __init__(self, prefill_tps_history: Optional[Deque] = None):
         self.iteration_timestamp = time.time()
         self.num_generation_tokens = 0
         self.num_prompt_tokens = 0
@@ -99,6 +103,7 @@ class IterationStats:
         self.time_per_output_tokens_iter: list[float] = []
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
+        self.prefill_tps_history = prefill_tps_history
 
     def _time_since(self, start: float) -> float:
         """Calculate an interval relative to this iteration's timestamp."""
@@ -153,6 +158,7 @@ class IterationStats:
 
     def update_from_finished_request(self, finish_reason: "FinishReason",
                                      num_prompt_tokens: int,
+                                     num_cached_tokens: int,
                                      max_tokens_param: Optional[int],
                                      req_stats: RequestStateStats):
         e2e_latency = self._time_since(req_stats.arrival_time)
@@ -172,6 +178,11 @@ class IterationStats:
         # Any preemptions during prefill or decode are included
         inference_time = req_stats.last_token_ts - req_stats.scheduled_ts
 
+        computed_prefill_tokens = num_prompt_tokens - num_cached_tokens
+        if (self.prefill_tps_history is not None and
+                prefill_time > 0 and computed_prefill_tokens > 0):
+            self.prefill_tps_history.append(computed_prefill_tokens / prefill_time)
+
         finished_req = \
             FinishedRequestStats(finish_reason=finish_reason,
                                  e2e_latency=e2e_latency,
@@ -184,6 +195,11 @@ class IterationStats:
                                  decode_time=decode_time)
         self.finished_requests.append(finished_req)
 
+    def get_avg_prefill_tps(self):
+        if (not self.prefill_tps_history or
+                len(self.prefill_tps_history) < self.MIN_HISTORY_LEN):
+            return -1.0
+        return sum(self.prefill_tps_history) / len(self.prefill_tps_history)
 
 class LoRARequestStates:
     """Per-LoRA request state stats."""
