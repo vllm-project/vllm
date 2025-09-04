@@ -306,6 +306,37 @@ def parse_remaining_state(
             status=None,
         )
         return [reasoning_item]
+    elif parser.current_channel == "commentary":
+        # Handle commentary channel with potential None recipient
+        if (current_recipient is not None
+                and current_recipient.startswith("functions.")):
+            # This is a function call, but we can't complete it without
+            # full message
+            # Return as reasoning content for now
+            reasoning_item = ResponseReasoningItem(
+                id=f"rs_{random_uuid()}",
+                summary=[],
+                type="reasoning",
+                content=[
+                    ResponseReasoningTextContent(text=parser.current_content,
+                                                 type="reasoning_text")
+                ],
+                status=None,
+            )
+            return [reasoning_item]
+        else:
+            # For None recipient or other cases, treat as reasoning content
+            reasoning_item = ResponseReasoningItem(
+                id=f"rs_{random_uuid()}",
+                summary=[],
+                type="reasoning",
+                content=[
+                    ResponseReasoningTextContent(text=parser.current_content,
+                                                 type="reasoning_text")
+                ],
+                status=None,
+            )
+            return [reasoning_item]
     elif parser.current_channel == "final":
         output_text = ResponseOutputText(
             text=parser.current_content,
