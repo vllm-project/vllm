@@ -517,6 +517,26 @@ steps:
     - pytest -v -s models/test_vision.py
     - pytest -v -s models/test_initialization.py
 
+- label: Language Models Test (Common) (Standard)
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/generation/test_common.py
+  commands:
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language/generation/test_common.py -m core_model
+
+- label: Language Models Test (Embedding) (Standard)
+  mirror_hardwares: [amdexperimental]
+  torch_nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/pooling/test_embedding.py
+  commands:
+    - pip freeze | grep -E 'torch'
+    - pytest -v -s models/language/pooling/test_embedding.py -m core_model
+
 - label: Language Models Test (Standard)
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
