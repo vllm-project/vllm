@@ -48,7 +48,7 @@ EngineIdentity = bytes
 
 class EngineCoreClient(ABC):
     """
-    EngineCoreClient: subclasses handle different methods for pushing 
+    EngineCoreClient: subclasses handle different methods for pushing
         and pulling from the EngineCore for asyncio / multiprocessing.
 
     Subclasses:
@@ -233,7 +233,7 @@ class EngineCoreClient(ABC):
 
 class InprocClient(EngineCoreClient):
     """
-    InprocClient: client for in-process EngineCore. Intended 
+    InprocClient: client for in-process EngineCore. Intended
     for use in LLMEngine for V0-style add_request() and step()
         EngineCore setup in this process (no busy loop).
 
@@ -402,7 +402,7 @@ class MPClient(EngineCoreClient):
 
         * pushes EngineCoreRequests via input_socket
         * pulls EngineCoreOutputs via output_socket
-    
+
         * AsyncMPClient subclass for AsyncLLM usage
         * SyncMPClient subclass for LLM usage
     """
@@ -938,6 +938,14 @@ class AsyncMPClient(MPClient):
 
     async def pin_lora_async(self, lora_id: int) -> bool:
         return await self.call_utility_async("pin_lora", lora_id)
+
+    async def get_free_kv_cache_tokens_async(self) -> int:
+        """Get the number of free KV cache tokens available."""
+        return await self.call_utility_async("get_free_kv_cache_tokens")
+
+    async def get_total_kv_cache_tokens_async(self) -> int:
+        """Get the number of total KV cache tokens available."""
+        return await self.call_utility_async("get_total_kv_cache_tokens")
 
     async def save_sharded_state_async(self,
                                        path: str,
