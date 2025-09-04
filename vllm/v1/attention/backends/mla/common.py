@@ -578,11 +578,13 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         prefill.prefill_main = self._fi_prefill_main
         prefill.prefill_chunks = self._fi_prefill_chunks
 
-    def _build_decode(self, block_table_tensor: torch.Tensor,
-                      seq_lens: torch.Tensor):
+    def _build_decode(
+            self, block_table_tensor: torch.Tensor, seq_lens_cpu: torch.Tensor,
+            seq_lens_device: torch.Tensor, query_start_loc_cpu: torch.Tensor,
+            query_start_loc_device: torch.Tensor) -> MLACommonDecodeMetadata:
         return MLACommonDecodeMetadata(
             block_table=block_table_tensor,
-            seq_lens=seq_lens,
+            seq_lens=seq_lens_device,
         )
 
     def build_for_cudagraph_capture(
@@ -618,6 +620,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         seq_lens = common_attn_metadata.seq_lens
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
@@ -625,7 +628,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                                    query_seq_lens_cpu)
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
-            split_decodes_and_prefills(common_attn_metadata)
+            split_decodes_and_prefills(common_attn_metadata,
+                                       decode_threshold=self.reorder_batch_threshold)
 
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
@@ -725,7 +729,10 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         if num_decodes > 0:
             decode_metadata = self._build_decode(
                 block_table_tensor=block_table_tensor[:num_decodes, ...],
-                seq_lens=seq_lens[:num_decodes],
+                seq_lens_cpu=seq_lens_cpu[:num_decodes],
+                seq_lens_device=seq_lens[:num_decodes],
+                query_start_loc_cpu=query_start_loc_cpu[:num_decodes + 1],
+                query_start_loc_device=query_start_loc[:num_decodes + 1],
             )
 
         attn_metadata = self.metadata_cls(
