@@ -109,7 +109,7 @@ class HarmonyContext(ConversationContext):
 
     def _update_num_cached_tokens(self, output: RequestOutput):
         if output.num_cached_tokens is not None:
-            # Similar to num_prompt_tokens
+            #Similar to num_prompt_tokens
             self.num_cached_tokens += output.num_cached_tokens
 
     def _update_num_output_tokens(self, token_ids: Sequence[int]):
@@ -119,9 +119,9 @@ class HarmonyContext(ConversationContext):
         # Count tokens that are part of reasoning content (analysis channel
         # or tool-directed messages like python/browser calls)
         is_analysis = self.parser.current_channel == "analysis"
-        is_tool_call = self.parser.current_recipient is not None and (
-            self.parser.current_recipient.startswith("python")
-            or self.parser.current_recipient.startswith("browser."))
+        is_tool_call = (self.parser.current_recipient is not None and
+                        (self.parser.current_recipient.startswith("python") or
+                         self.parser.current_recipient.startswith("browser.")))
         if is_analysis or is_tool_call:
             self.num_reasoning_tokens += 1
 
@@ -229,12 +229,10 @@ class HarmonyContext(ConversationContext):
         author = Author(role=Role.TOOL, name="python")
 
         return [
-            Message(
-                author=author,
-                content=[content],
-                channel=last_msg.channel,
-                recipient=Role.ASSISTANT,
-            )
+            Message(author=author,
+                    content=[content],
+                    channel=last_msg.channel,
+                    recipient=Role.ASSISTANT)
         ]
 
     async def init_tool_sessions(self, tool_server: Optional[ToolServer],
@@ -242,9 +240,9 @@ class HarmonyContext(ConversationContext):
         if tool_server:
             for tool_name in self.available_tools:
                 if tool_name not in self._tool_sessions:
-                    self._tool_sessions[tool_name] = (
-                        await exit_stack.enter_async_context(
-                            tool_server.new_session(tool_name)))
+                    self._tool_sessions[
+                        tool_name] = await exit_stack.enter_async_context(
+                            tool_server.new_session(tool_name))
 
 
 class StreamingHarmonyContext(HarmonyContext):
