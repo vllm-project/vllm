@@ -154,14 +154,17 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
 
     def _forward_decode(
         self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
         attn_metadata: FlashAttnMLAMetadata,
         layer: AttentionLayer,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         assert kv_c_and_k_pe_cache.numel() > 0
         assert attn_metadata.decode is not None
+
+        q_nope, q_pe = torch.split(q,
+                                   [self.kv_lora_rank, self.qk_rope_head_dim],
+                                   dim=-1)
 
         if self.kv_cache_dtype.startswith("fp8"):
             raise NotImplementedError(
@@ -171,10 +174,10 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
         k_pe_cache = kv_c_and_k_pe_cache[..., self.kv_lora_rank:]
 
         o = flash_attn_varlen_func(
-            q=q_pe,
+            q=q_pe.contiguous(),
             k=k_pe_cache.unsqueeze(-2),  # Add head dim of 1
             v=kv_c_cache.unsqueeze(-2),  # Add head dim of 1
-            q_v=q_nope,
+            q_v=q_nope.contiguous(),
             max_seqlen_q=attn_metadata.decode.max_query_len,
             cu_seqlens_q=attn_metadata.decode.query_start_loc,
             max_seqlen_k=attn_metadata.decode.max_seq_len,
