@@ -74,15 +74,6 @@ class SingleTypeKVCacheManager(ABC):
             The number of blocks.
         """
 
-        # Here we implement the behavior of full attention
-        # The reason is that full attention layer requires
-        # allocating more blocks than other attention mechanisms
-        # as all prefix blocks are necessary for computation, which is
-        # not true for other attention mechanisms.
-        # As a result, the return value serves as one of the UPPER BOUND
-        # of the number of blocks needed to be allocated by all attention
-        # mechanisms.
-
         num_required_blocks = cdiv(
             # For full attention, both new tokens to be computed and
             # extra tokens from connector needs to be allocated
