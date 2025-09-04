@@ -1,4 +1,5 @@
 import torch
+from contextlib import contextmanager
 from torch import nn
 from safetensors.torch import safe_open
 from pathlib import Path
@@ -7,78 +8,22 @@ from collections import OrderedDict
 import copy
 from vllm.tokenformer.tokenformer_surgeon import (
     TokenformerSurgeon,
-    TokenformerAttentionAdapter,
 )
 from vllm.model_executor.models import SupportsLoRA, supports_tokenformer
-from vllm.lora.models import get_lora_id
-from vllm.lora.utils import get_adapter_absolute_path
+from vllm.lora.utils import get_adapter_absolute_path, get_lora_id
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
-from vllm.adapter_commons.models import AdapterModel, AdapterModelManager
-from vllm.attention import AttentionMetadata, AttentionType
 import os
-
-from vllm.adapter_commons.utils import (
-    get_adapter,
-    list_adapters,
-    remove_adapter,
-    deactivate_adapter,
-)
 
 logger = init_logger(__name__)
 
 
-class vLLMTokenformerAttentionAdapter(TokenformerAttentionAdapter):
-    def __init__(self, layer, hidden_size, device):
-        super().__init__(layer, hidden_size, device)
-
-    def forward(
-        self,
-        query,
-        key,
-        value,
-        kv_cache: Optional[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        attn_type: AttentionType = AttentionType.DECODER,
-    ) -> torch.Tensor:
-
-        base_layer_results = self.layer(
-            query=query,
-            key=key,
-            value=value,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-            attn_type=attn_type,
-        )
-
-        seq_len = query.shape[0]
-        new_shape = [-1, self.layer.num_heads, seq_len, self.layer.head_dim]
-        reshaped_query = torch.reshape(query, new_shape)
-        reshaped_base_layer_results = torch.reshape(base_layer_results, new_shape)
-        result = super().forward(reshaped_query, reshaped_base_layer_results)
-        return torch.reshape(result, [-1, self.layer.num_heads * self.layer.head_dim])
-
-
-class vLLMTokenformerSurgeon(TokenformerSurgeon):
-
-    def __init__(
-        self,
-        model: nn.Module,
-        device: torch.device,
-    ):
-        super().__init__(model, device)
-
-    def update_attn(self, name, layer):
-        """Try to wrap the layer with a TokenformerAttentionAdaptor."""
-        if not self._is_attn_layer(name):
-            return
-
-
-class TokenformerModel(AdapterModel):
+class TokenformerModel:
     """A tokenformer pre-trained model."""
 
     def __init__(self, tokenformers: Dict[str, torch.Tensor]) -> None:
-        super().__init__(get_lora_id())
+        self.id = get_lora_id()
         self.tokenformers = tokenformers
 
     @classmethod
@@ -97,14 +42,12 @@ class TokenformerModel(AdapterModel):
         state_dict = torch.load(checkpoint_file, map_location=device)
         module_state_dict = state_dict['model_state_dict']
         for module, tensor in module_state_dict.items():
-            if any(key in module for key in ("tokenformer", "lm_head")):
-                logger.info(f"Loading {module} from {checkpoint_file}")
-                tokenformers[module] = tensor.to(device)
+            logger.info(f"Loading {module} from {checkpoint_file}")
+            tokenformers[module] = tensor.to(device)
 
         return cls(tokenformers)
 
-
-class TokenformerModelManager(AdapterModelManager):
+class TokenformerModelManager:
     """A manager that manages tokenformer models."""
 
     def __init__(
@@ -113,21 +56,16 @@ class TokenformerModelManager(AdapterModelManager):
         device: torch.device,
     ):
         if supports_tokenformer(model):
-            self.model = vLLMTokenformerSurgeon(model, device).insert_adapter_modules()
+            self.model = TokenformerSurgeon(model, device).insert_adapter_modules()
         else:
             self.model = model
+
         self._registered_adapters: Dict[int, Any] = {}
         self._active_adapter: Any = None
         self.tokenformer_model_cls = TokenformerModel
         self.dtype = next(self.model.parameters()).dtype
         self.device = device
-        self.orig_lm_head = copy.deepcopy(
-            {
-                k: v.to(self.dtype)
-                for k, v in self.model.state_dict().items()
-                if "lm_head" in k
-            }
-        )
+        self.original_tensors = {}
         self._lru_adaptor_ids = []
 
     def activate_adapter(self, adapter_id: int) -> bool:
@@ -141,25 +79,27 @@ class TokenformerModelManager(AdapterModelManager):
 
         logger.info(f"Activating Tokenformer - {adapter_id}")
 
-        logger.info(f"Model is {self.model}")
-
         model_state_dict = self.model.state_dict()
+
         tokenformers = self._registered_adapters[adapter_id].tokenformers
 
-        for key, value in self.orig_lm_head.items():
-            logger.info(f"Loading original lm head {key} from adapter {adapter_id}")
+        # Save original tensors if not already saved
+        for key in tokenformers:
+            if key not in self.original_tensors:
+                logger.info(f"Saving original tensor {key} before loading adapter {adapter_id}")
+                if key in model_state_dict:
+                    self.original_tensors[key] = copy.deepcopy(model_state_dict[key])
+
+        for key, value in self.original_tensors.items():
+            logger.info(f"Loading original tensor {key} from adapter {adapter_id}")
             model_state_dict[key] = value
 
         for key, value in tokenformers.items():
             logger.info(f"Loading {key} from adapter {adapter_id}")
             model_state_dict[key] = value
 
-        load_result = self.model.load_state_dict(model_state_dict, strict=False)
-
-        if len(load_result.unexpected_keys) > 0:
-            logger.warning(
-                f"Unexpected keys in state dict: {load_result.unexpected_keys}"
-            )
+        self.model.load_weights(model_state_dict.items())
+        process_weights_after_loading(self.model, self.model.model_config, self.device)
 
         self._active_adapter = adapter_id
 
@@ -181,8 +121,8 @@ class TokenformerModelManager(AdapterModelManager):
         for key in tokenformers:
             if "tokenformer_p" in key:
                 nn.init.zeros_(model_state_dict[key])
-            elif "lm_head" in key:
-                model_state_dict[key] = self.orig_lm_head[key]
+            elif key in self.original_tensors:
+                model_state_dict[key] = self.original_tensors[key]
 
         self.model.load_state_dict(model_state_dict, strict=False)
 
@@ -257,3 +197,48 @@ class TokenformerModelManager(AdapterModelManager):
     @property
     def adapter_slots(self) -> int:
         pass
+
+    @contextmanager
+    def dummy_lora_cache(self):
+        """Context manager for dummy LoRA cache during warmup."""
+        # Simple pass-through context manager since tokenformer doesn't need special cache handling
+        yield
+
+    def add_dummy_lora(self, lora_request, rank: int = 8):
+        """Add a dummy LoRA for warmup purposes.
+
+        Args:
+            lora_request: The LoRA request object
+            rank: The rank for the dummy LoRA (default 8)
+        """
+        # Tokenformer doesn't need to actually add dummy LoRAs, just accept the call
+        logger.debug(f"Adding dummy LoRA {lora_request.lora_name} with rank {rank} (no-op for tokenformer)")
+        pass
+
+def add_adapter(adapter: Any, registered_adapters: dict[int, Any],
+                capacity: int, add_func: callable) -> bool:
+    if adapter.id not in registered_adapters:
+        if len(registered_adapters) >= capacity:
+            raise RuntimeError('No free adapter slots.')
+        add_func(adapter)
+        registered_adapters[adapter.id] = adapter
+        return True
+    return False
+
+def deactivate_adapter(adapter_id: int, active_adapters: dict[int, None],
+                       deactivate_func: callable) -> bool:
+    if adapter_id in active_adapters:
+        deactivate_func(adapter_id)
+        active_adapters.pop(adapter_id)
+        return True
+    return False
+
+
+def remove_adapter(adapter_id: int, registered_adapters: dict[int, Any],
+                   deactivate_func: callable) -> bool:
+    deactivate_func(adapter_id)
+    return bool(registered_adapters.pop(adapter_id, None))
+
+
+def list_adapters(registered_adapters: dict[int, Any]) -> dict[int, Any]:
+    return dict(registered_adapters)

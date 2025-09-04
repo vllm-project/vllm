@@ -18,6 +18,35 @@ from .index import prepare_chunk_indices
 from .op import make_tensor_descriptor
 from .utils import input_guard, is_amd, is_tma_supported
 
+# Force set allocator - Triton 3.6.0 compatible (proper class)
+import sys
+print(f"[SOLVE_TRIL] Module loaded in process {os.getpid()}", file=sys.stderr, flush=True)
+try:
+    if torch.cuda.is_available():
+        import triton as triton_actual
+        from triton.runtime import _allocation
+        
+        print(f"[SOLVE_TRIL] Triton version: {triton_actual.__version__}", file=sys.stderr, flush=True)
+        print(f"[SOLVE_TRIL] Current allocator: {_allocation._allocator}", file=sys.stderr, flush=True)
+        
+        # Create proper allocator class for Triton 3.x
+        class TorchAllocator:
+            def get(self):
+                """Return the actual allocation function."""
+                def torch_alloc_fn(size, alignment, stream):
+                    return torch.cuda.caching_allocator_alloc(size, stream)
+                return torch_alloc_fn
+        
+        # Set the global allocator
+        _allocation._allocator = TorchAllocator()
+        
+        print(f"[SOLVE_TRIL] Set allocator to: {_allocation._allocator}", file=sys.stderr, flush=True)
+        print(f"[SOLVE_TRIL] Allocator setup complete", file=sys.stderr, flush=True)
+except Exception as e:
+    print(f"[SOLVE_TRIL] ERROR setting Triton allocator: {e}", file=sys.stderr, flush=True)
+    import traceback
+    traceback.print_exc()
+
 FLA_TRIL_PRECISION = os.environ.get("FLA_TRIL_PRECISION", "ieee")
 ALLOWED_TRIL_PRECISIONS = ["ieee", "tf32"] if is_amd else ["ieee", "tf32", "tf32x3"]
 assert FLA_TRIL_PRECISION in ALLOWED_TRIL_PRECISIONS, (

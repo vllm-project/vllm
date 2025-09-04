@@ -290,13 +290,13 @@ class EngineCore:
             return 0
 
         kv_manager = self.scheduler.kv_cache_manager
-        if not hasattr(kv_manager, 'block_pool') or not hasattr(kv_manager, 'block_size'):
+        if not hasattr(kv_manager, 'block_pool') or not hasattr(kv_manager, 'kv_cache_config'):
             logger.warning("get_free_kv_cache_tokens() no block_pool on kv_manager.")
             return 0
 
         # Get free blocks and convert to tokens
         free_blocks = kv_manager.block_pool.get_num_free_blocks()
-        block_size = kv_manager.block_size
+        block_size = kv_manager.kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
 
         if block_size is None:
             return 0
@@ -317,13 +317,13 @@ class EngineCore:
             return 0
 
         kv_manager = self.scheduler.kv_cache_manager
-        if not hasattr(kv_manager, 'block_pool') or not hasattr(kv_manager, 'block_size'):
+        if not hasattr(kv_manager, 'block_pool') or not hasattr(kv_manager, 'kv_cache_config'):
             logger.warning("get_total_kv_cache_tokens() no block_pool on kv_manager.")
             return 0
 
         # Get total blocks and convert to tokens
         total_blocks = kv_manager.block_pool.num_gpu_blocks
-        block_size = kv_manager.block_size
+        block_size = kv_manager.kv_cache_config.kv_cache_groups[0].kv_cache_spec.block_size
 
         if block_size is None:
             return 0
