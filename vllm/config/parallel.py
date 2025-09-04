@@ -6,7 +6,7 @@ from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import torch
-from pydantic import TypeAdapter, model_validator
+from pydantic import model_validator
 from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
@@ -56,13 +56,6 @@ class EPLBConfig:
     This is turned off by default since it will cause communication overhead.
     """
 
-    @classmethod
-    def from_cli(cls, cli_value: str) -> "EPLBConfig":
-        """Parse the CLI value for the compilation config.
-        -O1, -O2, -O3, etc. is handled in FlexibleArgumentParser.
-        """
-        return TypeAdapter(EPLBConfig).validate_json(cli_value)
-
 
 @config
 @dataclass
@@ -94,7 +87,7 @@ class ParallelConfig:
     data_parallel_external_lb: bool = False
     """Whether to use "external" DP LB mode. Applies only to online serving
     and when data_parallel_size > 0. This is useful for a "one-pod-per-rank"
-    wide-EP setup in Kuberentes. Set implicitly when --data-parallel-rank
+    wide-EP setup in Kubernetes. Set implicitly when --data-parallel-rank
     is provided explicitly to vllm serve."""
     data_parallel_hybrid_lb: bool = False
     """Whether to use "hybrid" DP LB mode. Applies only to online serving

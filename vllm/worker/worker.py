@@ -3,6 +3,7 @@
 """A GPU worker class."""
 import gc
 import os
+from contextlib import nullcontext
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
@@ -29,7 +30,6 @@ from vllm.utils import (GiB_bytes, MemorySnapshot, bind_kv_cache,
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
-from vllm.worker.pooling_model_runner import PoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
@@ -82,9 +82,7 @@ class Worker(LocalOrDistributedWorkerBase):
                     else {"return_hidden_states": True}
 
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
-        if model_config.runner_type == "pooling":
-            ModelRunnerClass = PoolingModelRunner
-        elif self.model_config.is_encoder_decoder:
+        if self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
         self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
             vllm_config=self.vllm_config,
@@ -98,7 +96,6 @@ class Worker(LocalOrDistributedWorkerBase):
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CacheEngine]
-        # Initialize gpu_cache as pooling models don't initialize kv_caches
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
         self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
 
@@ -131,8 +128,10 @@ class Worker(LocalOrDistributedWorkerBase):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         self.profiler.stop()
-        print(
-            self.profiler.key_averages().table(sort_by="self_cuda_time_total"))
+        # only print profiler results on rank 0
+        if self.local_rank == 0:
+            print(self.profiler.key_averages().table(
+                sort_by="self_cuda_time_total"))
 
     def sleep(self, level: int = 1) -> None:
         free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
@@ -206,7 +205,6 @@ class Worker(LocalOrDistributedWorkerBase):
                 "used for one instance per process.")
             context = allocator.use_memory_pool(tag="weights")
         else:
-            from contextlib import nullcontext
             context = nullcontext()
         with context:
             self.model_runner.load_model()
@@ -236,7 +234,7 @@ class Worker(LocalOrDistributedWorkerBase):
         KV blocks may be allocated without OOMs.
 
         The engine will first conduct a profiling of the existing memory usage.
-        Then, it calculate the maximum possible number of GPU and CPU blocks
+        Then, it calculates the maximum possible number of GPU and CPU blocks
         that can be allocated with the remaining free memory.
 
         Tip:
@@ -330,7 +328,6 @@ class Worker(LocalOrDistributedWorkerBase):
             allocator = CuMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
         else:
-            from contextlib import nullcontext
             context = nullcontext()
         with context:
             self._init_cache_engine()
