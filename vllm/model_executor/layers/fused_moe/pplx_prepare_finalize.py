@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 import pplx_kernels as pplx
 import torch
@@ -283,7 +283,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
         return receiver()
 
-    def finalize(
+    def finalize_async(
         self,
         output: torch.Tensor,
         fused_expert_output: torch.Tensor,
@@ -291,7 +291,7 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
+    ) -> Callable:
         assert isinstance(
             weight_and_reduce_impl, TopKWeightAndReduceDelegate
         ), ("Weight application and reduction happens in the combine kernel.")
@@ -314,8 +314,39 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
+        topk_ids_u32 = topk_ids.view(dtype=torch.uint32)
+
         self.a2a.combine(out_tokens=output,
-                         indices=topk_ids.view(dtype=torch.uint32),
+                         indices=topk_ids_u32,
                          weights=topk_weights,
                          expert_y=fused_expert_output,
-                         bound_m=bound_m)
+                         bound_m=bound_m,
+                         do_send=True,
+                         do_recv=False)
+
+        return lambda: self.a2a.combine(out_tokens=output,
+                                        indices=topk_ids_u32,
+                                        weights=topk_weights,
+                                        expert_y=fused_expert_output,
+                                        bound_m=bound_m,
+                                        do_send=False,
+                                        do_recv=True)
+
+    def finalize(
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+    ) -> None:
+        receiver = self.finalize_async(
+            output,
+            fused_expert_output,
+            topk_weights,
+            topk_ids,
+            apply_router_weight_on_input,
+            weight_and_reduce_impl,
+        )
+        receiver()

@@ -211,7 +211,8 @@ class FusedMoEPrepareAndFinalize(ABC):
 
     def supports_async(self) -> bool:
         """
-        Indicates whether or not this class implements prepare_async.
+        Indicates whether or not this class implements prepare_async and
+        finalize_async.
         """
         return False
 
@@ -276,6 +277,43 @@ class FusedMoEPrepareAndFinalize(ABC):
           fused_expert_output.
         - weight_and_reduce_impl: An optional TopKWeightAndReduce
           implementation.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def finalize_async(
+        self,
+        output: torch.Tensor,
+        fused_expert_output: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        apply_router_weight_on_input: bool,
+        weight_and_reduce_impl: TopKWeightAndReduce,
+    ) -> Callable:
+        """
+        Perform any combine plus apply weights and perform a reduction on the
+        fused experts output but do not wait for results from other workers.
+        - output: The output tensor, written in place.  Must be (M, K) shape.
+        - fused_expert_output: The unweighted, unreduced output of the fused
+          experts, it will have (M, topk, K) shape.
+        - topk_weights: The weights to be applied to the fused_experts_output.
+        - topk_ids: The topk_ids.
+        - apply_router_weight_on_input: When False, apply the weights to
+          fused_expert_output.
+        - weight_and_reduce_impl: An optional TopKWeightAndReduce
+          implementation.
+
+        Returns a callback that when invoked waits for results from other
+        workers and has the same return signature as `finalize`, e.g.
+
+        receiver = obj.finalize_async(output, ...)
+        ... output not valid yet ...
+        receiver()
+        ... output valid here ...
+
+        is equivalent to:
+
+        obj.finalize(output, ...)
         """
         raise NotImplementedError
 
@@ -453,7 +491,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         - w1 (torch.Tensor): The first set of expert weights.
         - w2 (torch.Tensor): The second set of expert weights.
         - topk_weights: A map of row to expert weights. Some implementations
-          choose to do weight application. 
+          choose to do weight application.
         - topk_ids (torch.Tensor): A map of row to expert id.
         - activation (str): The activation function to apply after the first
           MoE layer.
@@ -799,46 +837,18 @@ class FusedMoEModularKernel(torch.nn.Module):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
-        shared_output: torch.Tensor
-
-        if (not self.prepare_finalize.supports_async()
-                or self.shared_experts is None):
-
-            # Run shared experts serially with dispatch.
-            if self.shared_experts is not None:
-                shared_output = self.shared_experts(a1)
-
-            (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
-             _expert_topk_weights) = self.prepare_finalize.prepare(
-                 a1,
-                 a1_scale,
-                 a2_scale,
-                 topk_weights,
-                 topk_ids,
-                 global_num_experts,
-                 expert_map,
-                 apply_router_weight_on_input,
-                 self.fused_experts.quant_config,
-             )
-        else:
-            # Overlap shared expert compute with all2all dispatch.
-            receiver = self.prepare_finalize.prepare_async(
-                a1,
-                a1_scale,
-                a2_scale,
-                topk_weights,
-                topk_ids,
-                global_num_experts,
-                expert_map,
-                apply_router_weight_on_input,
-                self.fused_experts.quant_config,
-            )
-
-            assert self.shared_experts is not None
-            shared_output = self.shared_experts(a1)
-
-            (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
-             _expert_topk_weights) = receiver()
+        (a1q, a1q_scale, expert_tokens_meta, _expert_topk_ids,
+         _expert_topk_weights) = self.prepare_finalize.prepare(
+             a1,
+             a1_scale,
+             a2_scale,
+             topk_weights,
+             topk_ids,
+             global_num_experts,
+             expert_map,
+             apply_router_weight_on_input,
+             self.fused_experts.quant_config,
+         )
 
         # Maybe prepare gathered topk_ids and topk_weights from other EP ranks.
         topk_ids = topk_ids if _expert_topk_ids is None else _expert_topk_ids
@@ -877,16 +887,35 @@ class FusedMoEModularKernel(torch.nn.Module):
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
 
-        self.prepare_finalize.finalize(
-            output,
-            fused_out,
-            topk_weights,
-            topk_ids,
-            apply_router_weight_on_input,
-            self.fused_experts.finalize_weight_and_reduce_impl(),
-        )
+        shared_output: Optional[torch.Tensor] = None
+
+        if (not self.prepare_finalize.supports_async()
+                or self.shared_experts is None):
+            self.prepare_finalize.finalize(
+                output,
+                fused_out,
+                topk_weights,
+                topk_ids,
+                apply_router_weight_on_input,
+                self.fused_experts.finalize_weight_and_reduce_impl(),
+            )
+            if self.shared_experts is not None:
+                shared_output = self.shared_experts(a1)
+        else:
+            receiver = self.prepare_finalize.finalize_async(
+                output,
+                fused_out,
+                topk_weights,
+                topk_ids,
+                apply_router_weight_on_input,
+                self.fused_experts.finalize_weight_and_reduce_impl(),
+            )
+            assert self.shared_experts is not None
+            shared_output = self.shared_experts(a1)
+            receiver()
 
         if self.shared_experts is None:
             return output
         else:
+            assert shared_output is not None
             return shared_output, output
