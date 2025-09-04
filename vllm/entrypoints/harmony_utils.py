@@ -230,22 +230,11 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
                     id=f"ft_{random_id}",
                 )
                 output_items.append(response_item)
-        elif recipient is not None and (recipient.startswith("python")
-                                        or recipient.startswith("browser")):
-            for content in message.content:
-                reasoning_item = ResponseReasoningItem(
-                    id=f"rs_{random_uuid()}",
-                    summary=[],
-                    type="reasoning",
-                    content=[
-                        ResponseReasoningTextContent(text=content.text,
-                                                     type="reasoning_text")
-                    ],
-                    status=None,
-                )
-                output_items.append(reasoning_item)
-        elif recipient is None:
-            # When recipient is None, treat as regular assistant message
+        elif (recipient is None or (recipient is not None and
+                                    (recipient.startswith("python")
+                                     or recipient.startswith("browser")))):
+            # When recipient is None, or starts with "python"/"browser",
+            # treat as reasoning content
             for content in message.content:
                 reasoning_item = ResponseReasoningItem(
                     id=f"rs_{random_uuid()}",
@@ -307,36 +296,19 @@ def parse_remaining_state(
         )
         return [reasoning_item]
     elif parser.current_channel == "commentary":
-        # Handle commentary channel with potential None recipient
-        if (current_recipient is not None
-                and current_recipient.startswith("functions.")):
-            # This is a function call, but we can't complete it without
-            # full message
-            # Return as reasoning content for now
-            reasoning_item = ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(text=parser.current_content,
-                                                 type="reasoning_text")
-                ],
-                status=None,
-            )
-            return [reasoning_item]
-        else:
-            # For None recipient or other cases, treat as reasoning content
-            reasoning_item = ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(text=parser.current_content,
-                                                 type="reasoning_text")
-                ],
-                status=None,
-            )
-            return [reasoning_item]
+        # For the commentary channel, we cannot form a complete message from
+        # the remaining state. Return the content as a reasoning item.
+        reasoning_item = ResponseReasoningItem(
+            id=f"rs_{random_uuid()}",
+            summary=[],
+            type="reasoning",
+            content=[
+                ResponseReasoningTextContent(text=parser.current_content,
+                                             type="reasoning_text")
+            ],
+            status=None,
+        )
+        return [reasoning_item]
     elif parser.current_channel == "final":
         output_text = ResponseOutputText(
             text=parser.current_content,
