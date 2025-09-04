@@ -30,7 +30,7 @@ from flash_attn.modules.mha import (
 from dataclasses import dataclass
 
 @dataclass
-class HAMP_Params:
+class TKNP_Params:
     batch_size: int
     local_batch_size: int
     seqlen: int
@@ -690,10 +690,10 @@ class ParallelMHA(nn.Module):
         out = self.out_proj(context)
         return out
 
-class HAMP_Attention(nn.Module):
-    """Multi-head self-attention and cross-attention with HAMP
-    
-    HAMP: 
+class TKNP_Attention(nn.Module):
+    """Multi-head self-attention and cross-attention with TKNP
+
+    TKNP:
         - only root rank has the full qkv, out proj
         - scatter qkv to dp_group
         - gather context from dp_group
@@ -707,8 +707,8 @@ class HAMP_Attention(nn.Module):
         embed_dim,
         num_heads,
         process_group,
-        dp_group,   # new added: data parallel group for HAMP
-        dp_ranks,    # new added: data parallel ranks for HAMP
+        dp_group,   # new added: data parallel group for TKNP
+        dp_ranks,    # new added: data parallel ranks for TKNP
         num_heads_kv=None,
         qkv_proj_bias=True,
         out_proj_bias=True,
@@ -761,7 +761,7 @@ class HAMP_Attention(nn.Module):
         qkv_dim = self.head_dim * (self.num_heads + 2 * self.num_heads_kv)
         self.qkv_dim_per_rank = qkv_dim // self.world_size  # tensor parallel qkv dim per rank
 
-        # HAMP logic: 
+        # TKNP logic: 
         self.root_rank = dp_ranks[0]
         self.self_rank = dist.get_rank()
 
@@ -789,7 +789,7 @@ class HAMP_Attention(nn.Module):
                 device=device,
             )
 
-        # HAMP: only root rank has the full qkv, out proj
+        # TKNP: only root rank has the full qkv, out proj
         if self.self_rank == self.root_rank:
             if ColumnParallelLinear is None or RowParallelLinear is None:
                 raise ImportError("fused_dense is not installed")
@@ -922,7 +922,7 @@ class HAMP_Attention(nn.Module):
             )
             return context
 
-    def forward(self, x, hamp_params: HAMP_Params, seqlen=None, inference_params=None, **kwargs):
+    def forward(self, x, tknp_params: TKNP_Params, seqlen=None, inference_params=None, **kwargs):
         """
         Arguments:
             x: (batch, seqlen, hidden_dim) (where hidden_dim = num heads * head dim) if seqlen=None.
@@ -930,7 +930,7 @@ class HAMP_Attention(nn.Module):
                 split x during sequence parallel, we split the batch * seqlen dimension
                 (in case batch is small).
 
-            hamp_params: 
+            tknp_params: TKNP_Params
                 batch_size: int
                 local_batch_size: int
                 seqlen: int
@@ -942,14 +942,14 @@ class HAMP_Attention(nn.Module):
 
         if self.self_rank == self.root_rank and self.Wqkv is not None:
             global_qkv = self.Wqkv(x)
-            qkv_chunks = list(torch.chunk(global_qkv, hamp_params.dp_world_size, dim=0))
-            qkv = torch.zeros(hamp_params.local_batch_size, 1, self.qkv_dim_per_rank, device=self.device, dtype=self.dtype)
+            qkv_chunks = list(torch.chunk(global_qkv, tknp_params.dp_world_size, dim=0))
+            qkv = torch.zeros(tknp_params.local_batch_size, 1, self.qkv_dim_per_rank, device=self.device, dtype=self.dtype)
         else:
             global_qkv = None
             qkv_chunks = None
-            qkv = torch.zeros(hamp_params.local_batch_size, 1, self.qkv_dim_per_rank, device=self.device, dtype=self.dtype)
+            qkv = torch.zeros(tknp_params.local_batch_size, 1, self.qkv_dim_per_rank, device=self.device, dtype=self.dtype)
 
-        # HAMP: scatter qkv to dp_group
+        # TKNP: scatter qkv to dp_group
         dist.scatter(qkv, scatter_list=qkv_chunks, src=self.root_rank, group=self.dp_group)
 
         if seqlen is not None:
@@ -1025,13 +1025,13 @@ class HAMP_Attention(nn.Module):
         context = rearrange(context, "b s h d -> b s (h d)")
         if seqlen is not None:
             context = rearrange(context, "b s d -> (b s) d")
-        
-        # HAMP: gather context from dp_group
-        gather_list = [torch.empty_like(context) for _ in range(hamp_params.dp_world_size)] if self.self_rank == self.root_rank else None
+
+        # TKNP: gather context from dp_group
+        gather_list = [torch.empty_like(context) for _ in range(tknp_params.dp_world_size)] if self.self_rank == self.root_rank else None
         dist.gather(context, gather_list=gather_list, dst=self.root_rank, group=self.dp_group)
 
-        # HAMP: project context to output
-        if self.self_rank == self.root_rank and self.out_proj is not None:  
+        # TKNP: project context to output
+        if self.self_rank == self.root_rank and self.out_proj is not None:
             global_context = torch.cat(gather_list, dim=0)
             out = self.out_proj(global_context)
         else:

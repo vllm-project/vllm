@@ -269,5 +269,13 @@ if __name__ == "__main__":
             total_num_kv_heads=8,
             bias=False,
         )
+        
+        tknp_row_linear = create_token_parallel_row_linear(
+            input_size=8192,
+            output_size=8192,
+            bias=True,
+            reduce_results=True,
+        )
 
         print(f"Rank {dist.get_rank()}, TokenParallelQKVLinear: {tknp_qkv_linear}")
+        print(f"Rank {dist.get_rank()}, TokenParallelRowLinear: {tknp_row_linear}")
