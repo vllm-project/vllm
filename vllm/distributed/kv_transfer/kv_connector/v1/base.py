@@ -299,7 +299,7 @@ class KVConnectorBase_V1(ABC):
     def request_finished(
         self,
         request: "Request",
-        blocks: "KVCacheBlocks",
+        blocks: tuple[list[int], ...],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Called when a request has finished, before its blocks are freed.

@@ -182,13 +182,14 @@ class NixlConnector(KVConnectorBase_V1):
     def request_finished(
         self,
         request: "Request",
-        blocks: "KVCacheBlocks",
+        blocks: tuple[list[int], ...],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
+        if len(blocks) > 1:
+            raise NotImplementedError(
+                "NixlConnector does not support hybrid allocator for now."
+                "Please set `--disable-hybrid-kv-cache-manager`.")
+        block_ids = blocks[0]
         assert self.connector_scheduler is not None
-        logger.warning_once(
-            "Converting blocks to list of ints in `request_finished`. "
-            "This won't work for hybrid allocator.")
-        block_ids = blocks.get_block_ids()[0]
         return self.connector_scheduler.request_finished(request, block_ids)
 
     ############################################################
@@ -373,12 +374,18 @@ class NixlConnectorScheduler:
     def request_finished(
         self,
         request: "Request",
-        blocks: "KVCacheBlocks",
+        blocks: tuple[list[int], ...],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
         """
+
+        if len(blocks) > 1:
+            raise NotImplementedError(
+                "NixlConnector does not support hybrid allocator for now."
+                "Please set `--disable-hybrid-kv-cache-manager`.")
+        block_ids = blocks[0]
 
         params = request.kv_transfer_params
         logger.debug(
@@ -407,7 +414,6 @@ class NixlConnectorScheduler:
         logger.warning_once(
             "Converting blocks to list of ints in `request_finished`. "
             "This won't work for hybrid allocator.")
-        block_ids = blocks.get_block_ids()[0]
         delay_free_blocks = len(block_ids) > 0
 
         if delay_free_blocks:
