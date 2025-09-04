@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for v1 attention backends without GPUModelRunner dependency."""
 from functools import partial
-from typing import Optional
+from typing import Optional, Union
 
 import pytest
 import torch
@@ -13,6 +13,7 @@ from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_standard_kv_cache_spec,
                                       create_vllm_config,
                                       get_attention_backend)
+from vllm.config import ModelConfig
 from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
@@ -299,13 +300,7 @@ def run_attention_backend(
     return output
 
 
-@pytest.mark.parametrize("batch_spec_name", [
-    "small_decode", "small_prefill", "mixed_small", "medium_decode",
-    "medium_prefill", "mixed_medium", "large_decode", "large_prefill",
-    "single_decode", "single_prefill"
-])
-@pytest.mark.parametrize("model", ["unsloth/Meta-Llama-3.1-8B"])
-def test_backend_correctness(batch_spec_name: str, model: str):
+def _test_backend_correctness(batch_spec: BatchSpec, model: str, backend_to_test: list[Union[_Backend, str]], mask_mod, *, atol: float = 1e-2, rtol: float = 1e-2,):
     """
     Test that all backends produce similar outputs to a reference implementation
     using torch.nn.functional.scaled_dot_product_attention.
@@ -322,7 +317,6 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
     """
     current_platform.seed_everything(42)
-    batch_spec = BATCH_SPECS[batch_spec_name]
     vllm_config = create_vllm_config(model_name=model,
                                      max_model_len=max(batch_spec.seq_lens),
                                      num_gpu_blocks=8192)
@@ -386,16 +380,14 @@ def test_backend_correctness(batch_spec_name: str, model: str):
         # Create causal mask: query token i attends to positions 0 to
         #  (context_len + i)
         kv_len = s_len
-        offset = context_len
 
-        def causal(b, h, q_idx, kv_idx):
-            return (q_idx + offset) >= kv_idx
-
-        block_mask = create_block_mask(causal,
+        mask_mod = partial(mask_mod, context_len=context_len)
+        block_mask = create_block_mask(mask_mod=mask_mod,
                                        B=None,
                                        H=None,
                                        Q_LEN=q_len,
-                                       KV_LEN=kv_len)
+                                       KV_LEN=kv_len,
+                                       device=device)
         sdpa_out_i = flex_attention(q_sdpa_in,
                                     k_sdpa_in,
                                     v_sdpa_in,
@@ -438,7 +430,7 @@ def test_backend_correctness(batch_spec_name: str, model: str):
     # 4. Run vLLM backends and compare
     # Note: flex_attention has known Triton kernel compatibility issues
     # with test infrastructures
-    for backend_name in BACKENDS_TO_TEST:
+    for backend_name in backend_to_test:
         # FlashAttentionm + FlexAttention:
         #   [2, num_blocks, block_size, num_kv_heads, head_size]
         # FlashInfer:
@@ -472,9 +464,6 @@ def test_backend_correctness(batch_spec_name: str, model: str):
             f"[{backend_name}] produced non-finite values")
 
         # Check numerical similarity
-        rtol = 1e-2
-        atol = 1e-2
-
         def error_msg(msg: str, backend_name: str):
             return (f"[{backend_name}] output differs from SDPA baseline. "
                     f"{msg}")
@@ -485,6 +474,23 @@ def test_backend_correctness(batch_spec_name: str, model: str):
                                    atol=atol,
                                    msg=partial(error_msg,
                                                backend_name=backend_name))
+
+
+@pytest.mark.parametrize("batch_spec_name", [
+    "small_decode", "small_prefill", "mixed_small", "medium_decode",
+    "medium_prefill", "mixed_medium", "large_decode", "large_prefill",
+    "single_decode", "single_prefill"
+])
+@pytest.mark.parametrize("model", ["unsloth/Meta-Llama-3.1-8B"])
+def test_causal_backend_correctness(batch_spec_name: str, model: str):
+    """Test backend's correctness with causal attention."""
+
+    def causal_mask_mod(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor,
+               kv_idx: torch.Tensor, *, context_len: int):
+        return (q_idx + context_len) >= kv_idx
+
+    batch_spec = BATCH_SPECS[batch_spec_name]
+    _test_backend_correctness(batch_spec, model, BACKENDS_TO_TEST, causal_mask_mod)
 
 
 SLIDING_WINDOW_BACKENDS_TO_TEST = [
@@ -498,20 +504,22 @@ SLIDING_WINDOW_BACKENDS_TO_TEST = [
     ["small_decode", "small_prefill", "large_decode", "large_prefill"])
 @pytest.mark.parametrize("model", ["microsoft/Phi-tiny-MoE-instruct"])
 def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
-    """
-    Test that all backends produce similar outputs to a reference implementation
-    using torch.nn.functional.scaled_dot_product_attention.
+    """Test backend's correctness with sliding window attention."""
 
-    This test works by:
-    1. Generating a batch of sequences with specified context and query lengths.
-    2. Computing a ground-truth attention output using torch.sdpa on
-       contiguous Q, K, and V tensors.
-    3. Simulating vLLM's paged KV cache: It takes the context portion of the
-       K/V tensors and manually places them into a paged buffer according to
-       the test's (randomly generated) block table.
-    4. Running each vLLM attention backend with the new queries and the
-       simulated paged KV cache.
-    5. Comparing the vLLM backend's output to the ground-truth SDPA output.
+    def sliding_window_mask_mod(b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor,
+               kv_idx: torch.Tensor, *, context_len: int, sliding_window: int):
+        causal_mask = q_idx + context_len >= kv_idx
+        window_mask = q_idx + context_len - kv_idx <= sliding_window
+        return causal_mask & window_mask
+
+    batch_spec = BATCH_SPECS[batch_spec_name]
+    max_model_len=max(batch_spec.seq_lens)
+    model_config = ModelConfig(model=model, max_model_len=max_model_len)
+    sliding_window = model_config.get_sliding_window()
+    sliding_window_mask_mod_fn = partial(sliding_window_mask_mod, sliding_window=sliding_window)
+
+    _test_backend_correctness(batch_spec, model, SLIDING_WINDOW_BACKENDS_TO_TEST, sliding_window_mask_mod_fn, rtol= 1e-2, atol=2.5e-2)
+
     """
     current_platform.seed_everything(42)
     batch_spec = BATCH_SPECS[batch_spec_name]
@@ -685,3 +693,4 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
                                    atol=atol,
                                    msg=partial(error_msg,
                                                backend_name=backend_name))
+    """
