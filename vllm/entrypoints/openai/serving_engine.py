@@ -62,8 +62,10 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TranslationRequest)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser
+from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer
 # yapf: enable
 from vllm.inputs.data import EmbedsPrompt as EngineEmbedsPrompt
+from vllm.inputs.data import PromptType
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
@@ -242,6 +244,16 @@ class OpenAIServing:
         self._async_tokenizer_pool: dict[AnyTokenizer,
                                          AsyncMicrobatchTokenizer] = {}
         self.log_error_stack = log_error_stack
+
+    def _get_renderer(self, tokenizer: Optional[AnyTokenizer]) -> BaseRenderer:
+        """
+        Get a Renderer instance with the provided tokenizer.
+        Uses shared async tokenizer pool for efficiency.
+        """
+        return CompletionRenderer(
+            model_config=self.model_config,
+            tokenizer=tokenizer,
+            async_tokenizer_pool=self._async_tokenizer_pool)
 
     def _get_async_tokenizer(self, tokenizer) -> AsyncMicrobatchTokenizer:
         """
@@ -1098,7 +1110,7 @@ class OpenAIServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: RequestPrompt,
+        inputs: Union[RequestPrompt, PromptType],
         params: Optional[Union[SamplingParams, PoolingParams,
                                BeamSearchParams]],
         lora_request: Optional[LoRARequest],
@@ -1110,11 +1122,9 @@ class OpenAIServing:
             prompt = inputs
         elif isinstance(inputs, list):
             prompt_token_ids = inputs
-        elif "prompt_embeds" in inputs:
-            prompt_embeds = inputs.get("prompt_embeds")
         else:
-            prompt = inputs["prompt"]
-            prompt_token_ids = inputs["prompt_token_ids"]
+            prompt = getattr(inputs, 'prompt', None)
+            prompt_token_ids = getattr(inputs, 'prompt_token_ids', None)
 
         self.request_logger.log_inputs(
             request_id,
