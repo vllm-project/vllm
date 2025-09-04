@@ -95,9 +95,8 @@ if __name__ == "__main__":
         "--dtype", type=str, choices=["half", "bfloat16", "float"], default="half"
     )
     args = parser.parse_args()
-    print(CustomOp.op_registry)
-    if args:
-        FUNC_NAME = args.func_name
-        DTYPE = args.dtype
+    assert args
+    FUNC_NAME = args.func_name
+    DTYPE = args.dtype
 
     benchmark_activation.run(print_data=True)
