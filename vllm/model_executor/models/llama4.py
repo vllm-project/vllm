@@ -100,18 +100,10 @@ class Llama4MoE(nn.Module):
 
     def forward(self, hidden_states):
         router_logits, _ = self.router(hidden_states)
-
-        shared_out, routed_out = self.experts(
+        return self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
-        experts_out = routed_out + shared_out
-
-        if self.tp_size > 1:
-            experts_out = self.experts.maybe_all_reduce_tensor_model_parallel(
-                experts_out)
-
-        return experts_out
 
 
 class Llama4Attention(nn.Module):

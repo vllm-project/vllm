@@ -7,8 +7,6 @@ import torch
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
-def post_process(shared: Optional[torch.Tensor], fused: torch.Tensor) -> torch.Tensor:
-    return shared + fused if shared is not None else fused
 
 class SharedFusedMoE(FusedMoE):
     """
@@ -17,17 +15,36 @@ class SharedFusedMoE(FusedMoE):
     can be interleaved with the fused all2all dispatch communication step.
     """
 
+    def post_process(
+        self,
+        shared_output: Optional[torch.Tensor],
+        fused_output: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.fused_output_scaling_factor != 1.0:
+            fused_output *= self.fused_output_scaling_factor
+
+        if shared_output is not None:
+            if self.shared_output_scaling_factor != 1.0:
+                shared_output *= self.shared_output_scaling_factor
+
+            fused_output += shared_output
+
+        return fused_output
+
     def __init__(
         self,
         shared_experts: torch.nn.Module,
-        shared_fused_combine: Optional[Callable] = None,
         use_overlapped: bool = True,
+        fused_output_scaling_factor: float = 1.0,
+        shared_output_scaling_factor: float = 1.0,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._shared_experts = shared_experts
-        self._shared_fused_combine = shared_fused_combine if shared_fused_combine is not None else post_process
+        self._shared_fused_combine = lambda a, b: self.post_process(a, b)
         self.use_overlapped = use_overlapped
+        self.fused_output_scaling_factor = fused_output_scaling_factor
+        self.shared_output_scaling_factor = shared_output_scaling_factor
 
     @property
     def shared_experts(self) -> Optional[torch.nn.Module]:
@@ -58,13 +75,13 @@ class SharedFusedMoE(FusedMoE):
             )
 
             output = self._shared_fused_combine(shared_out, fused_out)
-
-            if self.tp_size > 1 and self.must_reduce_shared_expert_outputs():
-                tensor_model_parallel_all_reduce(output)
-
-            return output
         else:
-            return super().forward(
+            output = super().forward(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
             )
+
+        if self.tp_size > 1 and not self.must_reduce_shared_expert_outputs():
+            output = tensor_model_parallel_all_reduce(output)
+
+        return output
