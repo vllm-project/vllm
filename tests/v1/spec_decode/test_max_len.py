@@ -39,7 +39,6 @@ def test_eagle_max_len(monkeypatch: pytest.MonkeyPatch,
                        num_speculative_tokens: int, attn_backend: str):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
-
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
 
         if (attn_backend == "TRITON_ATTN_VLLM_V1"

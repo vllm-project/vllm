@@ -211,3 +211,48 @@ async def test_activation(server: RemoteOpenAIServer, model_name: str):
     assert torch.allclose(
         F.softmax(wo_activation, dim=-1), w_activation, atol=1e-2
     ), "w_activation should be close to activation(wo_activation)."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_pooling(server: RemoteOpenAIServer, model_name: str):
+    # pooling api uses ALL pooling, which does not support chunked prefill.
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "input": "test",
+            "encoding_format": "float"
+        },
+    )
+    assert response.json()["error"]["type"] == "BadRequestError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_score(server: RemoteOpenAIServer, model_name: str):
+    # score api is only enabled for num_labels == 1.
+    response = requests.post(
+        server.url_for("score"),
+        json={
+            "model": model_name,
+            "text_1": "ping",
+            "text_2": "pong",
+        },
+    )
+    assert response.json()["error"]["type"] == "BadRequestError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_rerank(server: RemoteOpenAIServer, model_name: str):
+    # rerank api is only enabled for num_labels == 1.
+    response = requests.post(
+        server.url_for("rerank"),
+        json={
+            "model": model_name,
+            "query": "ping",
+            "documents": ["pong"],
+        },
+    )
+    assert response.json()["error"]["type"] == "BadRequestError"

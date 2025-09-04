@@ -38,7 +38,7 @@ class NemotronHConfig(PretrainedConfig):
             passed when calling [`NemotronHModel`]
         tie_word_embeddings (`bool`, *optional*, defaults to `False`):
             Whether the model's input and output word embeddings should be
-            tied. Note that this is only relevant if the model has a output
+            tied. Note that this is only relevant if the model has an output
             word embedding layer.
         hidden_size (`int`, *optional*, defaults to 4096):
             Dimension of the hidden representations.
@@ -151,7 +151,7 @@ class NemotronHConfig(PretrainedConfig):
         num_hidden_layers=52,
         hybrid_override_pattern="M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M*-M-M-M-M-M-",
         num_attention_heads=32,
-        attention_head_dim=128,
+        head_dim=128,
         num_key_value_heads=8,  # nemo: num_query_groups
         mlp_hidden_act="relu2",
         attention_bias=False,
@@ -194,7 +194,7 @@ class NemotronHConfig(PretrainedConfig):
         self.num_hidden_layers = num_hidden_layers
         self.hybrid_override_pattern = hybrid_override_pattern
         self.num_attention_heads = num_attention_heads
-        self.attention_head_dim = attention_head_dim
+        self.head_dim = head_dim
         self.sliding_window = sliding_window
         self.max_position_embeddings = max_position_embeddings
         self.attention_dropout = attention_dropout

@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
+from itertools import islice
 from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
+from transformers import DbrxConfig
 
 from vllm.attention import Attention
 from vllm.config import CacheConfig, VllmConfig
@@ -39,7 +40,7 @@ class DbrxRouter(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: DbrxConfig,
         params_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
@@ -63,7 +64,7 @@ class DbrxExperts(FusedMoE):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: DbrxConfig,
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: Optional[torch.dtype] = None,
         prefix: str = "",
@@ -138,7 +139,7 @@ class DbrxMoE(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: DbrxConfig,
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: Optional[torch.dtype] = None,
         prefix: str = "",
@@ -169,7 +170,7 @@ class DbrxAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -249,7 +250,7 @@ class DbrxFusedNormAttention(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -284,7 +285,7 @@ class DbrxBlock(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -359,7 +360,7 @@ class DbrxModel(nn.Module):
         else:
             assert intermediate_tensors
             hidden_states = intermediate_tensors["hidden_states"]
-        for block in self.blocks[self.start_layer:self.end_layer]:
+        for block in islice(self.blocks, self.start_layer, self.end_layer):
             hidden_states = block(position_ids, hidden_states)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
