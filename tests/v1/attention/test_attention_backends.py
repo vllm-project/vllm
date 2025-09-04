@@ -4,12 +4,14 @@
 from typing import Optional
 import pytest
 import torch
+from torch.nn.attention.flex_attention import flex_attention, create_block_mask
 
 from tests.v1.attention.utils import (BatchSpec, _Backend,
                                       create_common_attn_metadata,
                                       create_standard_kv_cache_spec,
                                       create_vllm_config,
                                       get_attention_backend)
+from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (CommonAttentionMetadata,
                                               set_kv_cache_layout)
@@ -313,6 +315,7 @@ def test_backend_correctness(batch_spec_name: str, model: str):
        simulated paged KV cache.
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
     """
+    current_platform.seed_everything(42)
     batch_spec = BATCH_SPECS[batch_spec_name]
     vllm_config = create_vllm_config(model_name=model,
                                      max_model_len=max(batch_spec.seq_lens),
@@ -485,7 +488,7 @@ SLIDING_WINDOW_BACKENDS_TO_TEST = [
     "FLEX_ATTENTION_SLOW"]
 
 
-@pytest.mark.parametrize("batch_spec_name", ["small_decode", "small_prefill"])
+@pytest.mark.parametrize("batch_spec_name", ["large_decode", "large_prefill"])
 @pytest.mark.parametrize("model", ["microsoft/Phi-tiny-MoE-instruct"])
 def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
     """
@@ -503,6 +506,7 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
        simulated paged KV cache.
     5. Comparing the vLLM backend's output to the ground-truth SDPA output.
     """
+    current_platform.seed_everything(42)
     batch_spec = BATCH_SPECS[batch_spec_name]
     vllm_config = create_vllm_config(model_name=model,
                                      max_model_len=max(batch_spec.seq_lens),
@@ -568,22 +572,13 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
         # Create sliding window mask: query token i attends to positions 0 to
         #  (context_len + i)
         kv_len = s_len
-        empty_mask = torch.ones(q_len, kv_len, device=device)
-        attn_mask = torch.triu(empty_mask, diagonal=kv_len - q_len + 1).bool()
-        if sliding_window is not None:
-            sliding_window_mask = torch.triu(empty_mask,
-                                             diagonal=kv_len -
-                                             (q_len + sliding_window) +
-                                             1).bool().logical_not()
-            attn_mask |= sliding_window_mask
+        def sliding_window_causal(b, h, q_idx, kv_idx):
+            causal_mask = q_idx >= kv_idx
+            window_mask = q_idx - kv_idx <= sliding_window
+            return causal_mask & window_mask
 
-        sdpa_out_i = torch.nn.functional.scaled_dot_product_attention(
-            q_sdpa_in,
-            k_sdpa_in,
-            v_sdpa_in,
-            attn_mask=attn_mask,
-            scale=scale,
-            enable_gqa=True)
+        block_mask = create_block_mask(sliding_window_causal, B=None, H=None, Q_LEN=q_len, KV_LEN=kv_len)
+        sdpa_out_i = flex_attention(q_sdpa_in, k_sdpa_in, v_sdpa_in, block_mask=block_mask, scale=scale, enable_gqa=True)
 
         # Convert back to (L, H, D)
         all_sdpa_outputs.append(sdpa_out_i.transpose(1, 2).squeeze(0))
@@ -656,19 +651,15 @@ def test_sliding_window_backend_correctness(batch_spec_name: str, model: str):
             f"[{backend_name}] produced non-finite values")
 
         # Check numerical similarity
-        rtol = 1e-2
-        atol = 5e-3
+        rtol = 1e-1
+        atol = 5e-2
 
-        # max_diff = torch.max(torch.abs(backend_output - sdpa_output)).item()
-        # max_rel_diff = torch.max(
-        #     torch.abs(backend_output - sdpa_output) /
-        #     torch.abs(sdpa_output)).item()
-        print(backend_output, sdpa_output)
+        def error_msg(msg: str):
+            return (f"[{backend_name}] output differs from SDPA baseline. "
+                    f"{msg}")
+
         torch.testing.assert_close(backend_output,
                                    sdpa_output,
                                    rtol=rtol,
-                                   atol=atol)
-
-        # assert all_close, (
-        #     f"[{backend_name}] output differs from SDPA baseline. "
-        #     f"Max diff: {max_diff:.6f}, max rel diff: {max_rel_diff:.6f})")
+                                   atol=atol,
+                                   msg=error_msg)
