@@ -175,7 +175,8 @@ class P2pNcclEngine:
             remote_address
         )
         if remote_address in self.comms:
-            # Note: ncclCommDestroy is ideally called, but the peer process is likely gone.
+            # Note: ncclCommDestroy is ideally called, 
+            # but the peer process is likely gone.
             # Simply removing the handle is the primary step.
             del self.comms[remote_address]
         
@@ -372,7 +373,7 @@ class P2pNcclEngine:
                         "Requesting re-initialization.",
                         remote_address
                     )
-                    # Respond with code '2' to signal the sender to re-initialize.
+                    # Respond with code '2' to tell the sender to re-init.
                     self.router_socket.send_multipart([
                         remote_address_bytes, b"2"])
                     continue
