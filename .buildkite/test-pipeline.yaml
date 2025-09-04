@@ -59,9 +59,16 @@ steps:
   - pytest -v -s async_engine # AsyncLLMEngine
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
-  - pytest -v -s multimodal
+  - pytest -v -s multimodal --ignore=multimodal/test_cache.py --ignore=multimodal/test_hasher.py --ignore=multimodal/test_image.py --ignore=multimodal/test_inputs.py --ignore=multimodal/test_processing.py --ignore=multimodal/test_registry.py --ignore=multimodal/test_video.py --ignore=multimodal/utils.py
   - pytest -v -s utils_ # Utils
   - pytest -v -s worker # Worker
+
+- label: Multimodal Test (CPU)
+  source_file_dependencies:
+  - tests/multimodal
+  no_gpu: true
+  commands:
+  - pytest -v -s multimodal/test_cache.py multimodal/test_hasher.py multimodal/test_image.py multimodal/test_inputs.py multimodal/test_processing.py multimodal/test_registry.py multimodal/test_video.py multimodal/utils.py
 
 - label: Python-only Installation Test
   mirror_hardwares: [amdexperimental]
