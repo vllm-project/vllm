@@ -391,17 +391,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
             sym_shape_indices = [
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
-            global compilation_start_time
-            compiled_graph_for_dynamic_shape = (
-                self.vllm_backend.compiler_manager.compile(
-                    submod,
-                    args,
-                    self.compilation_config.inductor_compile_config,
-                    self.compilation_config,
-                    graph_index=index,
-                    num_graphs=len(self.compile_submod_names),
-                    compile_range=None,
-                ))
+
             # Lazy import here to avoid circular import
             from .piecewise_backend import PiecewiseBackend
 
@@ -411,7 +401,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 index,
                 len(self.compile_submod_names),
                 sym_shape_indices,
-                compiled_graph_for_dynamic_shape,
+                # compiled_graph_for_dynamic_shape,
                 self.vllm_backend,
             )
 

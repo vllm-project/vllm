@@ -946,4 +946,6 @@ class CompilationConfig:
                 compile_ranges.append((split_points[i - 1], s))
             if s in compile_sizes and s != 1:
                 compile_ranges.append((s, s))
+        assert compile_ranges[-1][1] == max_split_point, \
+            "Last compile range end should be max_split_point"
         return sorted(compile_ranges)

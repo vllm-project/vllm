@@ -63,15 +63,12 @@ class PiecewiseBackend:
 
         self.first_run_finished = False
 
-        self.compiled_graph_for_general_shape = compiled_graph_for_general_shape  # noqa
-
         self.sym_shape_indices = sym_shape_indices
 
         # the entries for different shapes that we need to compile
         # self.concrete_size_entries: dict[int, RangeEntry] = {}
 
         # the entries for ranges that we need to either
-        # TODO: we should merge with concrete_size_entries
         self.range_entries: dict[tuple[int, int], RangeEntry] = {}
 
         # to_be_compiled_ranges tracks the remaining ranges to compile,
@@ -81,10 +78,7 @@ class PiecewiseBackend:
 
         # We only keep compilation management inside this class directly.
         for range in self.compile_ranges:
-            self.range_entries[range] = RangeEntry(
-                compile_range=range,
-                runnable=self.compiled_graph_for_general_shape,
-            )
+            self.range_entries[range] = RangeEntry(compile_range=range, )
 
     def check_for_ending_compilation(self):
         if (self.is_last_graph and not self.to_be_compiled_ranges):
@@ -93,24 +87,8 @@ class PiecewiseBackend:
             self.vllm_backend.compiler_manager.save_to_file()
             end_monitoring_torch_compile(self.vllm_config)
 
-    def __call__(self, *args) -> Any:
-        if not self.first_run_finished:
-            self.first_run_finished = True
-            self.check_for_ending_compilation()
-            return self.compiled_graph_for_general_shape(*args)
-
-        runtime_shape = args[self.sym_shape_indices[0]]
-
-        range_entry = None
-        for range in self.compile_ranges:
-            if self.is_in_range(runtime_shape, range):
-                range_entry = self.range_entries[range]
-                break
-
-        if (range_entry is None):
-            # we don't need to do anything for this shape
-            return self.compiled_graph_for_general_shape(*args)
-
+    def _maybe_compile_for_range_entry(self, range_entry: RangeEntry,
+                                       args) -> Any:
         if not range_entry.compiled:
             range_entry.compiled = True
             self.to_be_compiled_ranges.remove(range_entry.compile_range)
@@ -126,7 +104,28 @@ class PiecewiseBackend:
                 compile_range=range_entry.compile_range)
 
             # finished compilations for all required shapes
-            if (self.is_last_graph and not self.to_be_compiled_ranges):
-                self.check_for_ending_compilation()
+            self.check_for_ending_compilation()
+
+    def __call__(self, *args) -> Any:
+        if not self.first_run_finished:
+            self.first_run_finished = True
+
+            # Role of the general is taken by the last range
+            range_entry = self.range_entries[self.compile_ranges[-1]]
+            self._maybe_compile_for_range_entry(range_entry, args)
+            return range_entry.runnable(*args)
+
+        runtime_shape = args[self.sym_shape_indices[0]]
+
+        range_entry = None
+        for range in self.compile_ranges:
+            if self.is_in_range(runtime_shape, range):
+                range_entry = self.range_entries[range]
+                break
+        assert range_entry is not None, \
+        f"Shape out of considered range: {runtime_shape} " \
+        "[1, max_num_batched_tokens]"
+
+        self._maybe_compile_for_range_entry(range_entry, args)
 
         return range_entry.runnable(*args)
