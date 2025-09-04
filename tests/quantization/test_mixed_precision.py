@@ -22,8 +22,7 @@ QUARK_MXFP4_AVAILABLE = importlib.util.find_spec(
 
 try:
     huggingface_hub.list_repo_refs(
-        "amd/Mixtral-8x7B-Instruct-v0.1-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8"
-    )
+        "amd/Mixtral-8x7B-Instruct-v0.1-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8")
     HF_HUB_AMD_ORG_ACCESS = True
 except huggingface_hub.errors.RepositoryNotFoundError:
     HF_HUB_AMD_ORG_ACCESS = False
@@ -62,8 +61,7 @@ ACCURACY_CONFIGS = [
         "amd/Mixtral-8x7B-Instruct-v0.1-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8",
         excepted_value=0.53),
     EvaluationConfig(
-        model_name=
-        "amd/Llama-2-70b-chat-hf-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8",
+        model_name="amd/Llama-2-70b-chat-hf-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8",
         excepted_value=0.60),
 ]
 TASKS = ["arc_challenge"]
