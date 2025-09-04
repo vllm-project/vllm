@@ -103,7 +103,16 @@ steps:
   - vllm/distributed
   - tests/core
   commands:
-  - pytest -v -s core
+  - pytest -v -s core --ignore=core/block/test_block_manager.py --ignore=core/block/test_block_table.py --ignore=core/block/test_common.py --ignore=core/block/test_cpu_gpu_block_allocator.py --ignore=core/block/test_naive_block.py --ignore=core/block/test_prefix_caching_block.py --ignore=core/test_scheduler_encoder_decoder.py --ignore=core/test_scheduler.py --ignore=core/test_serialization.py --ignore=core/utils.py
+
+- label: Core Test (CPU)
+  source_file_dependencies:
+  - vllm/core
+  - vllm/distributed
+  - tests/core
+  no_gpu: true
+  commands:
+  - pytest -v -s core/block/test_block_manager.py core/block/test_block_table.py core/block/test_common.py core/block/test_cpu_gpu_block_allocator.py core/block/test_naive_block.py core/block/test_prefix_caching_block.py core/test_scheduler_encoder_decoder.py core/test_scheduler.py core/test_serialization.py core/utils.py
 
 - label: Entrypoints Test (LLM) # 40min
   mirror_hardwares: [amdexperimental]
@@ -133,7 +142,7 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/test_collective_rpc.py # PYTHONPATH is needed to import custom Worker extension
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_template.py --ignore=entrypoints/openai/test_cli_args.py --ignore=entrypoints/openai/test_lora_resolvers.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_serving_chat.py --ignore=entrypoints/openai/test_serving_models.py --ignore=entrypoints/openai/tool_parsers/test_pythonic_tool_parser.py --ignore=entrypoints/openai/tool_parsers/utils.py --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_template.py --ignore=entrypoints/openai/test_cli_args.py --ignore=entrypoints/openai/test_lora_resolvers.py --ignore=entrypoints/openai/test_serving_chat.py --ignore=entrypoints/openai/test_serving_models.py --ignore=entrypoints/openai/tool_parsers/test_pythonic_tool_parser.py --ignore=entrypoints/openai/tool_parsers/utils.py --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Test (API Server CPU)
@@ -142,7 +151,7 @@ steps:
   - tests/entrypoints/openai
   no_gpu: true
   commands:
-  - pytest -v -s entrypoints/openai/test_chat_template.py entrypoints/openai/test_cli_args.py entrypoints/openai/test_lora_resolvers.py entrypoints/openai/test_oot_registration.py entrypoints/openai/test_serving_chat.py entrypoints/openai/test_serving_models.py entrypoints/openai/tool_parsers/test_pythonic_tool_parser.py entrypoints/openai/tool_parsers/utils.py entrypoints/test_api_server_process_manager.py entrypoints/test_ssl_cert_refresher.py
+  - pytest -v -s entrypoints/openai/test_chat_template.py entrypoints/openai/test_cli_args.py entrypoints/openai/test_lora_resolvers.py entrypoints/openai/test_serving_chat.py entrypoints/openai/test_serving_models.py entrypoints/openai/tool_parsers/test_pythonic_tool_parser.py entrypoints/openai/tool_parsers/utils.py entrypoints/test_ssl_cert_refresher.py
 
 - label: Distributed Tests (4 GPUs) # 10min
   mirror_hardwares: [amdexperimental]
